@@ -747,9 +747,13 @@ func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID st
 func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, chatID string) {
 	newHistory := agent.Sessions.GetHistory(sessionKey)
 	tokenEstimate := al.estimateTokens(newHistory)
-	threshold := agent.ContextWindow * 75 / 100
+	threshold := agent.ContextWindow * agent.SummarizationThresholdPercent / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	// Message count check: 0 means disabled (no message count limit)
+	msgLimitExceeded := agent.MaxHistoryMessages > 0 && len(newHistory) > agent.MaxHistoryMessages
+	tokenLimitExceeded := tokenEstimate > threshold
+
+	if msgLimitExceeded || tokenLimitExceeded {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := al.summarizing.LoadOrStore(summarizeKey, true); !loading {
 			go func() {
@@ -907,12 +911,16 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 	history := agent.Sessions.GetHistory(sessionKey)
 	summary := agent.Sessions.GetSummary(sessionKey)
 
-	// Keep last 4 messages for continuity
-	if len(history) <= 4 {
+	// Keep last N messages for continuity (configurable, default 6)
+	keepLast := agent.KeepLastMessages
+	if keepLast <= 0 {
+		keepLast = 6
+	}
+	if len(history) <= keepLast {
 		return
 	}
 
-	toSummarize := history[:len(history)-4]
+	toSummarize := history[:len(history)-keepLast]
 
 	// Oversized Message Guard
 	maxMessageTokens := agent.ContextWindow / 2
@@ -975,7 +983,7 @@ func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string) {
 
 	if finalSummary != "" {
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
-		agent.Sessions.TruncateHistory(sessionKey, 4)
+		agent.Sessions.TruncateHistory(sessionKey, keepLast)
 		agent.Sessions.Save(sessionKey)
 	}
 }

@@ -174,9 +174,17 @@ type AgentDefaults struct {
 	ModelFallbacks      []string `json:"model_fallbacks,omitempty"`
 	ImageModel          string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks []string `json:"image_model_fallbacks,omitempty"`
-	MaxTokens           int      `json:"max_tokens"                      env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
-	Temperature         *float64 `json:"temperature,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
-	MaxToolIterations   int      `json:"max_tool_iterations"             env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	MaxTokens                     int      `json:"max_tokens"                                env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
+	Temperature                   *float64 `json:"temperature,omitempty"                      env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
+	MaxToolIterations             int      `json:"max_tool_iterations"                        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+
+	// Memory management: controls when summarization triggers and how much history to keep.
+	// MaxHistoryMessages: max messages before summarization triggers (0 = disabled, only token threshold used).
+	MaxHistoryMessages            int      `json:"max_history_messages,omitempty"              env:"PICOCLAW_AGENTS_DEFAULTS_MAX_HISTORY_MESSAGES"`
+	// SummarizationThresholdPercent: percentage of ContextWindow that triggers summarization (default 90).
+	SummarizationThresholdPercent int      `json:"summarization_threshold_percent,omitempty"   env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZATION_THRESHOLD_PERCENT"`
+	// KeepLastMessages: number of recent messages to keep after summarization (default 6).
+	KeepLastMessages              int      `json:"keep_last_messages,omitempty"                env:"PICOCLAW_AGENTS_DEFAULTS_KEEP_LAST_MESSAGES"`
 }
 
 type ChannelsConfig struct {

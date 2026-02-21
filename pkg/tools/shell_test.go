@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,4 +272,90 @@ func TestShellTool_RestrictToWorkspace(t *testing.T) {
 			result.ForUser,
 		)
 	}
+}
+
+// TestShellTool_DeniedCommandLogging verifies deny-pattern denial is logged with the matched regex
+func TestShellTool_DeniedCommandLogging(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewExecTool(workspace, false)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"command": "rm -rf /",
+	})
+	if !result.IsError {
+		t.Fatalf("expected command to be blocked")
+	}
+
+	logFile := filepath.Join(workspace, "state", "denied_commands.jsonl")
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("expected log file to exist: %v", err)
+	}
+
+	var entry deniedCommandEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
+		t.Fatalf("failed to parse log entry: %v", err)
+	}
+
+	if entry.Command != "rm -rf /" {
+		t.Errorf("expected command 'rm -rf /', got %q", entry.Command)
+	}
+	if !strings.Contains(entry.Reason, "dangerous pattern") {
+		t.Errorf("expected reason to mention 'dangerous pattern', got %q", entry.Reason)
+	}
+	if entry.MatchedPattern == "" {
+		t.Errorf("expected matched_pattern to be set")
+	}
+	if entry.Timestamp == "" {
+		t.Errorf("expected timestamp to be set")
+	}
+}
+
+// TestShellTool_DeniedCommandLogging_WorkspaceRestriction verifies workspace restriction denial is logged
+func TestShellTool_DeniedCommandLogging_WorkspaceRestriction(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewExecTool(workspace, true)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"command": "cat ../../etc/passwd",
+	})
+	if !result.IsError {
+		t.Fatalf("expected command to be blocked")
+	}
+
+	logFile := filepath.Join(workspace, "state", "denied_commands.jsonl")
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("expected log file to exist: %v", err)
+	}
+
+	var entry deniedCommandEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
+		t.Fatalf("failed to parse log entry: %v", err)
+	}
+
+	if entry.Command != "cat ../../etc/passwd" {
+		t.Errorf("expected command 'cat ../../etc/passwd', got %q", entry.Command)
+	}
+	if !strings.Contains(entry.Reason, "blocked") {
+		t.Errorf("expected reason to contain 'blocked', got %q", entry.Reason)
+	}
+	if entry.MatchedPattern != "" {
+		t.Errorf("expected empty matched_pattern for workspace restriction, got %q", entry.MatchedPattern)
+	}
+}
+
+// TestShellTool_DeniedCommandLogging_NoWorkspace verifies no panic/crash when workingDir is empty
+func TestShellTool_DeniedCommandLogging_NoWorkspace(t *testing.T) {
+	tool := NewExecTool("", false)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"command": "rm -rf /",
+	})
+	if !result.IsError {
+		t.Fatalf("expected command to be blocked")
+	}
+
+	// Should not panic and no log file should be created anywhere.
+	// The test passes if we reach this point without a panic.
 }

@@ -17,6 +17,9 @@ func DefaultConfig() *Config {
 				MaxTokens:           8192,
 				Temperature:         nil, // nil means use provider default
 				MaxToolIterations:   20,
+				MaxHistoryMessages:            0,  // 0 = disabled, only token threshold triggers summarization
+				SummarizationThresholdPercent: 90, // summarize at 90% of context window
+				KeepLastMessages:              6,  // keep last 6 messages after summarization
 			},
 		},
 		Bindings: []AgentBinding{},

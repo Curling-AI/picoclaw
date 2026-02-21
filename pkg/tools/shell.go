@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -62,8 +63,7 @@ var defaultDenyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bdnf\s+(install|remove)\b`),
 	regexp.MustCompile(`\bdocker\s+run\b`),
 	regexp.MustCompile(`\bdocker\s+exec\b`),
-	regexp.MustCompile(`\bgit\s+push\b`),
-	regexp.MustCompile(`\bgit\s+force\b`),
+	regexp.MustCompile(`\bgit\s+.*force\b`),
 	regexp.MustCompile(`\bssh\b.*@`),
 	regexp.MustCompile(`\beval\b`),
 	regexp.MustCompile(`\bsource\s+.*\.sh\b`),
@@ -147,7 +147,9 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 		if t.restrictToWorkspace && t.workingDir != "" {
 			resolvedWD, err := validatePath(wd, t.workingDir, true)
 			if err != nil {
-				return ErrorResult("Command blocked by safety guard (" + err.Error() + ")")
+				reason := "Command blocked by safety guard (" + err.Error() + ")"
+				t.logDeniedCommand(command, reason, "", wd)
+				return ErrorResult(reason)
 			}
 			cwd = resolvedWD
 		} else {
@@ -162,7 +164,8 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 		}
 	}
 
-	if guardError := t.guardCommand(command, cwd); guardError != "" {
+	if guardError, matchedPattern := t.guardCommand(command, cwd); guardError != "" {
+		t.logDeniedCommand(command, guardError, matchedPattern, cwd)
 		return ErrorResult(guardError)
 	}
 
@@ -257,13 +260,13 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	}
 }
 
-func (t *ExecTool) guardCommand(command, cwd string) string {
+func (t *ExecTool) guardCommand(command, cwd string) (string, string) {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
 
 	for _, pattern := range t.denyPatterns {
 		if pattern.MatchString(lower) {
-			return "Command blocked by safety guard (dangerous pattern detected)"
+			return "Command blocked by safety guard (dangerous pattern detected)", pattern.String()
 		}
 	}
 
@@ -276,18 +279,18 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 		}
 		if !allowed {
-			return "Command blocked by safety guard (not in allowlist)"
+			return "Command blocked by safety guard (not in allowlist)", "(allowlist mode)"
 		}
 	}
 
 	if t.restrictToWorkspace {
 		if strings.Contains(cmd, "..\\") || strings.Contains(cmd, "../") {
-			return "Command blocked by safety guard (path traversal detected)"
+			return "Command blocked by safety guard (path traversal detected)", ""
 		}
 
 		cwdPath, err := filepath.Abs(cwd)
 		if err != nil {
-			return ""
+			return "", ""
 		}
 
 		pathPattern := regexp.MustCompile(`[A-Za-z]:\\[^\\\"']+|/[^\s\"']+`)
@@ -305,12 +308,12 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 
 			if strings.HasPrefix(rel, "..") {
-				return "Command blocked by safety guard (path outside working dir)"
+				return "Command blocked by safety guard (path outside working dir)", ""
 			}
 		}
 	}
 
-	return ""
+	return "", ""
 }
 
 func (t *ExecTool) SetTimeout(timeout time.Duration) {
@@ -331,4 +334,45 @@ func (t *ExecTool) SetAllowPatterns(patterns []string) error {
 		t.allowPatterns = append(t.allowPatterns, re)
 	}
 	return nil
+}
+
+type deniedCommandEntry struct {
+	Timestamp      string `json:"timestamp"`
+	Command        string `json:"command"`
+	Reason         string `json:"reason"`
+	MatchedPattern string `json:"matched_pattern,omitempty"`
+	WorkingDir     string `json:"working_dir,omitempty"`
+}
+
+func (t *ExecTool) logDeniedCommand(command, reason, matchedPattern, workDir string) {
+	if t.workingDir == "" {
+		return
+	}
+
+	entry := deniedCommandEntry{
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Command:        command,
+		Reason:         reason,
+		MatchedPattern: matchedPattern,
+		WorkingDir:     workDir,
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+
+	stateDir := filepath.Join(t.workingDir, "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(filepath.Join(stateDir, "denied_commands.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	_, _ = f.Write(data)
 }

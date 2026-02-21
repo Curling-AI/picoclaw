@@ -1,9 +1,12 @@
 package skills
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSkillsInfoValidate(t *testing.T) {
@@ -133,6 +136,52 @@ func TestExtractFrontmatter(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestListSkills_FollowsSymlinks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a real skill directory (the symlink target)
+	realSkillDir := filepath.Join(tmpDir, "real-skills", "my-skill")
+	require.NoError(t, os.MkdirAll(realSkillDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(realSkillDir, "SKILL.md"),
+		[]byte("---\nname: my-skill\ndescription: A test skill via symlink\n---\n# Content"),
+		0644,
+	))
+
+	// Create the global skills dir with a symlink to the real skill
+	globalSkillsDir := filepath.Join(tmpDir, "global-skills")
+	require.NoError(t, os.MkdirAll(globalSkillsDir, 0755))
+	require.NoError(t, os.Symlink(realSkillDir, filepath.Join(globalSkillsDir, "my-skill")))
+
+	loader := NewSkillsLoader(filepath.Join(tmpDir, "workspace"), globalSkillsDir, "")
+	skills := loader.ListSkills()
+
+	require.Len(t, skills, 1, "should discover skill via symlink")
+	assert.Equal(t, "my-skill", skills[0].Name)
+	assert.Equal(t, "global", skills[0].Source)
+	assert.Equal(t, "A test skill via symlink", skills[0].Description)
+}
+
+func TestListSkills_FallsBackToDirNameForInvalidMetadataName(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a skill with a name containing spaces in the metadata
+	skillDir := filepath.Join(tmpDir, "skills", "skill-development")
+	require.NoError(t, os.MkdirAll(skillDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: Skill Development\ndescription: A skill with spaces in name\n---\n# Content"),
+		0644,
+	))
+
+	loader := NewSkillsLoader(filepath.Join(tmpDir, "workspace"), filepath.Join(tmpDir, "skills"), "")
+	skills := loader.ListSkills()
+
+	require.Len(t, skills, 1, "should discover skill with invalid metadata name")
+	assert.Equal(t, "skill-development", skills[0].Name, "should fall back to directory name")
+	assert.Equal(t, "A skill with spaces in name", skills[0].Description)
 }
 
 func TestStripFrontmatter(t *testing.T) {

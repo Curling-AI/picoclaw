@@ -24,6 +24,12 @@ type AgentInstance struct {
 	MaxTokens      int
 	Temperature    float64
 	ContextWindow  int
+
+	// Memory management thresholds
+	MaxHistoryMessages            int // 0 = disabled (no message count trigger)
+	SummarizationThresholdPercent int // percentage of ContextWindow (default 90)
+	KeepLastMessages              int // messages to keep after summarization (default 6)
+
 	Provider       providers.LLMProvider
 	Sessions       *session.SessionManager
 	ContextBuilder *ContextBuilder
@@ -88,6 +94,16 @@ func NewAgentInstance(
 		temperature = *defaults.Temperature
 	}
 
+	// Memory management defaults
+	summarizationPct := defaults.SummarizationThresholdPercent
+	if summarizationPct <= 0 {
+		summarizationPct = 90
+	}
+	keepLast := defaults.KeepLastMessages
+	if keepLast <= 0 {
+		keepLast = 6
+	}
+
 	// Resolve fallback candidates
 	modelCfg := providers.ModelConfig{
 		Primary:   model,
@@ -105,6 +121,9 @@ func NewAgentInstance(
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
 		ContextWindow:  maxTokens,
+		MaxHistoryMessages:            defaults.MaxHistoryMessages,
+		SummarizationThresholdPercent: summarizationPct,
+		KeepLastMessages:              keepLast,
 		Provider:       provider,
 		Sessions:       sessionsManager,
 		ContextBuilder: contextBuilder,

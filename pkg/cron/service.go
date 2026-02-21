@@ -91,8 +91,10 @@ func (cs *CronService) Start() error {
 	}
 
 	cs.recomputeNextRuns()
-	if err := cs.saveStoreUnsafe(); err != nil {
-		return fmt.Errorf("failed to save store: %w", err)
+	if len(cs.store.Jobs) > 0 {
+		if err := cs.saveStoreUnsafe(); err != nil {
+			return fmt.Errorf("failed to save store: %w", err)
+		}
 	}
 
 	cs.stopChan = make(chan struct{})

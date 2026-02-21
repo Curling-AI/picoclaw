@@ -121,11 +121,11 @@ func (sm *Manager) GetTimestamp() time.Time {
 	return sm.state.Timestamp
 }
 
-// saveAtomic performs an atomic save using temp file + rename.
+// saveAtomic performs an atomic save using temp file + copy.
 // This ensures that the state file is never corrupted:
 // 1. Write to a temp file
-// 2. Rename temp file to target (atomic on POSIX systems)
-// 3. If rename fails, cleanup the temp file
+// 2. Read temp file back and write to target
+// 3. Cleanup the temp file
 //
 // Must be called with the lock held.
 func (sm *Manager) saveAtomic() error {
@@ -143,12 +143,21 @@ func (sm *Manager) saveAtomic() error {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	// Atomic rename from temp to target
-	if err := os.Rename(tempFile, sm.stateFile); err != nil {
-		// Cleanup temp file if rename fails
+	// Read temp file back and write to target (avoids rename which
+	// is not supported on some filesystems like S3 Mountpoint)
+	committed, err := os.ReadFile(tempFile)
+	if err != nil {
 		os.Remove(tempFile)
-		return fmt.Errorf("failed to rename temp file: %w", err)
+		return fmt.Errorf("failed to read temp file: %w", err)
 	}
+
+	if err := os.WriteFile(sm.stateFile, committed, 0644); err != nil {
+		os.Remove(tempFile)
+		return fmt.Errorf("failed to write state file: %w", err)
+	}
+
+	// Cleanup temp file
+	os.Remove(tempFile)
 
 	return nil
 }

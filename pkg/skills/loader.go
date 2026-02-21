@@ -60,6 +60,20 @@ type SkillsLoader struct {
 	builtinSkills   string // 内置 skills
 }
 
+// isDirEntry returns true if the entry is a directory, following symlinks.
+// os.DirEntry.IsDir() returns false for symlinks even if the target is a
+// directory, so we fall back to os.Stat which follows symlinks.
+func isDirEntry(basePath string, entry os.DirEntry) bool {
+	if entry.IsDir() {
+		return true
+	}
+	if entry.Type()&os.ModeSymlink != 0 {
+		info, err := os.Stat(filepath.Join(basePath, entry.Name()))
+		return err == nil && info.IsDir()
+	}
+	return false
+}
+
 func NewSkillsLoader(workspace string, globalSkills string, builtinSkills string) *SkillsLoader {
 	return &SkillsLoader{
 		workspace:       workspace,
@@ -75,7 +89,7 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 	if sl.workspaceSkills != "" {
 		if dirs, err := os.ReadDir(sl.workspaceSkills); err == nil {
 			for _, dir := range dirs {
-				if dir.IsDir() {
+				if isDirEntry(sl.workspaceSkills, dir) {
 					skillFile := filepath.Join(sl.workspaceSkills, dir.Name(), "SKILL.md")
 					if _, err := os.Stat(skillFile); err == nil {
 						info := SkillInfo{
@@ -86,7 +100,9 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 						metadata := sl.getSkillMetadata(skillFile)
 						if metadata != nil {
 							info.Description = metadata.Description
-							info.Name = metadata.Name
+							if namePattern.MatchString(metadata.Name) {
+								info.Name = metadata.Name
+							}
 						}
 						if err := info.validate(); err != nil {
 							slog.Warn("invalid skill from workspace", "name", info.Name, "error", err)
@@ -103,7 +119,7 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 	if sl.globalSkills != "" {
 		if dirs, err := os.ReadDir(sl.globalSkills); err == nil {
 			for _, dir := range dirs {
-				if dir.IsDir() {
+				if isDirEntry(sl.globalSkills, dir) {
 					skillFile := filepath.Join(sl.globalSkills, dir.Name(), "SKILL.md")
 					if _, err := os.Stat(skillFile); err == nil {
 						// 检查是否已被 workspace skills 覆盖
@@ -126,7 +142,9 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 						metadata := sl.getSkillMetadata(skillFile)
 						if metadata != nil {
 							info.Description = metadata.Description
-							info.Name = metadata.Name
+							if namePattern.MatchString(metadata.Name) {
+								info.Name = metadata.Name
+							}
 						}
 						if err := info.validate(); err != nil {
 							slog.Warn("invalid skill from global", "name", info.Name, "error", err)
@@ -142,7 +160,7 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 	if sl.builtinSkills != "" {
 		if dirs, err := os.ReadDir(sl.builtinSkills); err == nil {
 			for _, dir := range dirs {
-				if dir.IsDir() {
+				if isDirEntry(sl.builtinSkills, dir) {
 					skillFile := filepath.Join(sl.builtinSkills, dir.Name(), "SKILL.md")
 					if _, err := os.Stat(skillFile); err == nil {
 						// 检查是否已被 workspace 或 global skills 覆盖
@@ -165,7 +183,9 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 						metadata := sl.getSkillMetadata(skillFile)
 						if metadata != nil {
 							info.Description = metadata.Description
-							info.Name = metadata.Name
+							if namePattern.MatchString(metadata.Name) {
+								info.Name = metadata.Name
+							}
 						}
 						if err := info.validate(); err != nil {
 							slog.Warn("invalid skill from builtin", "name", info.Name, "error", err)
