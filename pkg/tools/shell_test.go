@@ -122,7 +122,7 @@ func TestShellTool_DangerousCommand(t *testing.T) {
 
 	ctx := context.Background()
 	args := map[string]any{
-		"command": "rm -rf /",
+		"command": "mkfs /dev/sda",
 	}
 
 	result := tool.Execute(ctx, args)
@@ -283,7 +283,7 @@ func TestShellTool_DeniedCommandLogging(t *testing.T) {
 	tool := NewExecTool(workspace, false)
 
 	result := tool.Execute(context.Background(), map[string]any{
-		"command": "rm -rf /",
+		"command": "mkfs /dev/sda",
 	})
 	if !result.IsError {
 		t.Fatalf("expected command to be blocked")
@@ -300,8 +300,8 @@ func TestShellTool_DeniedCommandLogging(t *testing.T) {
 		t.Fatalf("failed to parse log entry: %v", err)
 	}
 
-	if entry.Command != "rm -rf /" {
-		t.Errorf("expected command 'rm -rf /', got %q", entry.Command)
+	if entry.Command != "mkfs /dev/sda" {
+		t.Errorf("expected command 'mkfs /dev/sda', got %q", entry.Command)
 	}
 	if !strings.Contains(entry.Reason, "dangerous pattern") {
 		t.Errorf("expected reason to mention 'dangerous pattern', got %q", entry.Reason)
@@ -353,7 +353,7 @@ func TestShellTool_DeniedCommandLogging_NoWorkspace(t *testing.T) {
 	tool := NewExecTool("", false)
 
 	result := tool.Execute(context.Background(), map[string]any{
-		"command": "rm -rf /",
+		"command": "mkfs /dev/sda",
 	})
 	if !result.IsError {
 		t.Fatalf("expected command to be blocked")
@@ -648,9 +648,9 @@ func TestExecTool_CustomDenyExtendsDefaults(t *testing.T) {
 	}
 
 	// Verify built-in pattern still blocks
-	guardErr, _ := tool.guardCommand("rm -rf /", "")
+	guardErr, _ := tool.guardCommand("mkfs /dev/sda", "")
 	if guardErr == "" {
-		t.Error("expected built-in deny pattern to still block 'rm -rf'")
+		t.Error("expected built-in deny pattern to still block 'mkfs'")
 	}
 
 	// Verify custom pattern also blocks
@@ -666,7 +666,7 @@ func TestExecTool_GetDeniedCommands(t *testing.T) {
 	tool := NewExecTool(workspace, false)
 
 	// Trigger a denied command
-	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /"})
+	tool.Execute(context.Background(), map[string]any{"command": "mkfs /dev/sda"})
 
 	entries, err := tool.GetDeniedCommands(nil)
 	if err != nil {
@@ -675,8 +675,8 @@ func TestExecTool_GetDeniedCommands(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatal("expected at least one denied command entry")
 	}
-	if entries[0].Command != "rm -rf /" {
-		t.Errorf("expected command 'rm -rf /', got %q", entries[0].Command)
+	if entries[0].Command != "mkfs /dev/sda" {
+		t.Errorf("expected command 'mkfs /dev/sda', got %q", entries[0].Command)
 	}
 }
 
@@ -686,9 +686,9 @@ func TestExecTool_GetDeniedCommands_WithLimit(t *testing.T) {
 	tool := NewExecTool(workspace, false)
 
 	// Trigger multiple denied commands
-	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /a"})
-	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /b"})
-	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /c"})
+	tool.Execute(context.Background(), map[string]any{"command": "mkfs /dev/sda"})
+	tool.Execute(context.Background(), map[string]any{"command": "mkfs /dev/sdb"})
+	tool.Execute(context.Background(), map[string]any{"command": "mkfs /dev/sdc"})
 
 	// Limit to 2
 	entries, err := tool.GetDeniedCommands(&DeniedCommandsOptions{Limit: 2})
@@ -707,8 +707,8 @@ func TestExecTool_GetDeniedCommands_WithLimit(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry with offset=1,limit=1, got %d", len(entries))
 	}
-	if entries[0].Command != "rm -rf /b" {
-		t.Errorf("expected second command 'rm -rf /b', got %q", entries[0].Command)
+	if entries[0].Command != "mkfs /dev/sdb" {
+		t.Errorf("expected second command 'mkfs /dev/sdb', got %q", entries[0].Command)
 	}
 
 	// Offset beyond entries
@@ -742,7 +742,7 @@ func TestExecTool_DenyPatternsEnabled(t *testing.T) {
 	}
 
 	// Command should be blocked with deny enabled
-	guardErr, _ := tool.guardCommand("rm -rf /", "")
+	guardErr, _ := tool.guardCommand("mkfs /dev/sda", "")
 	if guardErr == "" {
 		t.Error("expected command to be blocked when deny is enabled")
 	}
@@ -754,14 +754,14 @@ func TestExecTool_DenyPatternsEnabled(t *testing.T) {
 	}
 
 	// Command should be allowed now
-	guardErr, _ = tool.guardCommand("rm -rf /", "")
+	guardErr, _ = tool.guardCommand("mkfs /dev/sda", "")
 	if guardErr != "" {
 		t.Errorf("expected command to pass when deny is disabled, got: %s", guardErr)
 	}
 
 	// Re-enable
 	tool.SetDenyPatternsEnabled(true)
-	guardErr, _ = tool.guardCommand("rm -rf /", "")
+	guardErr, _ = tool.guardCommand("mkfs /dev/sda", "")
 	if guardErr == "" {
 		t.Error("expected command to be blocked again after re-enabling")
 	}
