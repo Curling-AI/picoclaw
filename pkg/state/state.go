@@ -64,9 +64,7 @@ func NewManager(workspace string) *Manager {
 	return sm
 }
 
-// SetLastChannel atomically updates the last channel and saves the state.
-// This method uses a temp file + rename pattern for atomic writes,
-// ensuring that the state file is never corrupted even if the process crashes.
+// SetLastChannel updates the last channel and saves the state.
 func (sm *Manager) SetLastChannel(channel string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -75,7 +73,7 @@ func (sm *Manager) SetLastChannel(channel string) error {
 	sm.state.LastChannel = channel
 	sm.state.Timestamp = time.Now()
 
-	// Atomic save using temp file + rename
+	// Save state
 	if err := sm.saveAtomic(); err != nil {
 		return fmt.Errorf("failed to save state atomically: %w", err)
 	}
@@ -92,7 +90,7 @@ func (sm *Manager) SetLastChatID(chatID string) error {
 	sm.state.LastChatID = chatID
 	sm.state.Timestamp = time.Now()
 
-	// Atomic save using temp file + rename
+	// Save state
 	if err := sm.saveAtomic(); err != nil {
 		return fmt.Errorf("failed to save state atomically: %w", err)
 	}
@@ -121,43 +119,24 @@ func (sm *Manager) GetTimestamp() time.Time {
 	return sm.state.Timestamp
 }
 
-// saveAtomic performs an atomic save using temp file + copy.
-// This ensures that the state file is never corrupted:
-// 1. Write to a temp file
-// 2. Read temp file back and write to target
-// 3. Cleanup the temp file
+// saveAtomic saves the state to disk.
+// S3 Mountpoint and similar filesystems do not support temp file patterns
+// (rename, or read-back of just-written files). Since S3 PUT operations
+// are inherently atomic and the caller holds the mutex, we write directly
+// to the target file.
 //
 // Must be called with the lock held.
 func (sm *Manager) saveAtomic() error {
-	// Create temp file in the same directory as the target
-	tempFile := sm.stateFile + ".tmp"
-
 	// Marshal state to JSON
 	data, err := json.MarshalIndent(sm.state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Write to temp file
-	if err := os.WriteFile(tempFile, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-
-	// Read temp file back and write to target (avoids rename which
-	// is not supported on some filesystems like S3 Mountpoint)
-	committed, err := os.ReadFile(tempFile)
-	if err != nil {
-		os.Remove(tempFile)
-		return fmt.Errorf("failed to read temp file: %w", err)
-	}
-
-	if err := os.WriteFile(sm.stateFile, committed, 0644); err != nil {
-		os.Remove(tempFile)
+	// Write directly to state file (S3 PUT is atomic)
+	if err := os.WriteFile(sm.stateFile, data, 0o644); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
-
-	// Cleanup temp file
-	os.Remove(tempFile)
 
 	return nil
 }

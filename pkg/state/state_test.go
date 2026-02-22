@@ -81,7 +81,7 @@ func TestSetLastChatID(t *testing.T) {
 	}
 }
 
-func TestAtomicity_NoCorruptionOnInterrupt(t *testing.T) {
+func TestOverwriteState(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "state-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -96,23 +96,12 @@ func TestAtomicity_NoCorruptionOnInterrupt(t *testing.T) {
 		t.Fatalf("SetLastChannel failed: %v", err)
 	}
 
-	// Simulate a crash scenario by manually creating a corrupted temp file
-	tempFile := filepath.Join(tmpDir, "state", "state.json.tmp")
-	err = os.WriteFile(tempFile, []byte("corrupted data"), 0o644)
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
+	// Verify initial state
+	if sm.GetLastChannel() != "initial-channel" {
+		t.Errorf("Expected channel 'initial-channel', got '%s'", sm.GetLastChannel())
 	}
 
-	// Verify that the original state is still intact
-	lastChannel := sm.GetLastChannel()
-	if lastChannel != "initial-channel" {
-		t.Errorf("Expected channel 'initial-channel' after corrupted temp file, got '%s'", lastChannel)
-	}
-
-	// Clean up the temp file manually
-	os.Remove(tempFile)
-
-	// Now do a proper save
+	// Overwrite with new state
 	err = sm.SetLastChannel("new-channel")
 	if err != nil {
 		t.Fatalf("SetLastChannel failed: %v", err)
@@ -121,6 +110,18 @@ func TestAtomicity_NoCorruptionOnInterrupt(t *testing.T) {
 	// Verify the new state was saved
 	if sm.GetLastChannel() != "new-channel" {
 		t.Errorf("Expected channel 'new-channel', got '%s'", sm.GetLastChannel())
+	}
+
+	// Verify no temp files left behind
+	stateDir := filepath.Join(tmpDir, "state")
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("Failed to read state dir: %v", err)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".tmp" {
+			t.Errorf("Unexpected temp file found: %s", entry.Name())
+		}
 	}
 }
 
