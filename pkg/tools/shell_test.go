@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 // TestShellTool_Success verifies successful command execution
@@ -292,7 +295,7 @@ func TestShellTool_DeniedCommandLogging(t *testing.T) {
 		t.Fatalf("expected log file to exist: %v", err)
 	}
 
-	var entry deniedCommandEntry
+	var entry DeniedCommandEntry
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
 		t.Fatalf("failed to parse log entry: %v", err)
 	}
@@ -329,7 +332,7 @@ func TestShellTool_DeniedCommandLogging_WorkspaceRestriction(t *testing.T) {
 		t.Fatalf("expected log file to exist: %v", err)
 	}
 
-	var entry deniedCommandEntry
+	var entry DeniedCommandEntry
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
 		t.Fatalf("failed to parse log entry: %v", err)
 	}
@@ -358,4 +361,394 @@ func TestShellTool_DeniedCommandLogging_NoWorkspace(t *testing.T) {
 
 	// Should not panic and no log file should be created anywhere.
 	// The test passes if we reach this point without a panic.
+}
+
+// TestIsExecutableInSystemPath_Found verifies that an executable in a PATH directory is recognized.
+func TestIsExecutableInSystemPath_Found(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "myexe")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	if !isExecutableInSystemPath(exe) {
+		t.Error("expected executable in PATH to return true")
+	}
+}
+
+// TestIsExecutableInSystemPath_NotInPath verifies that an executable NOT in PATH returns false.
+func TestIsExecutableInSystemPath_NotInPath(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "myexe")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/some/other/dir")
+
+	if isExecutableInSystemPath(exe) {
+		t.Error("expected executable not in PATH to return false")
+	}
+}
+
+// TestIsExecutableInSystemPath_NotExecutable verifies that a non-executable file in a PATH dir returns false (Unix only).
+func TestIsExecutableInSystemPath_NotExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("execute-permission check not applicable on Windows")
+	}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "noexec")
+	if err := os.WriteFile(file, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	if isExecutableInSystemPath(file) {
+		t.Error("expected non-executable file to return false")
+	}
+}
+
+// TestIsExecutableInSystemPath_FileDoesNotExist verifies that a nonexistent file returns false.
+func TestIsExecutableInSystemPath_FileDoesNotExist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+
+	if isExecutableInSystemPath(filepath.Join(dir, "nonexistent")) {
+		t.Error("expected nonexistent file to return false")
+	}
+}
+
+// TestIsExecutableInSystemPath_EmptyPATH verifies that an empty PATH returns false.
+func TestIsExecutableInSystemPath_EmptyPATH(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "myexe")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	if isExecutableInSystemPath(exe) {
+		t.Error("expected empty PATH to return false")
+	}
+}
+
+// TestShellTool_RestrictToWorkspace_AllowsPathExecutable verifies that guardCommand allows
+// an absolute path to an executable that resides in a $PATH directory.
+func TestShellTool_RestrictToWorkspace_AllowsPathExecutable(t *testing.T) {
+	workspace := t.TempDir()
+	binDir := t.TempDir()
+
+	exe := filepath.Join(binDir, "mytool")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	tool := NewExecTool(workspace, true)
+	guardErr, _ := tool.guardCommand(exe+" --version", workspace)
+	if guardErr != "" {
+		t.Errorf("expected PATH executable to be allowed, got: %s", guardErr)
+	}
+}
+
+// TestShellTool_RestrictToWorkspace_BlocksNonPathAbsolutePath verifies that an absolute path
+// outside the workspace that is NOT in $PATH is still blocked.
+func TestShellTool_RestrictToWorkspace_BlocksNonPathAbsolutePath(t *testing.T) {
+	workspace := t.TempDir()
+	otherDir := t.TempDir()
+
+	file := filepath.Join(otherDir, "secrets.txt")
+	if err := os.WriteFile(file, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	tool := NewExecTool(workspace, true)
+	guardErr, _ := tool.guardCommand("cat "+file, workspace)
+	if guardErr == "" {
+		t.Error("expected non-PATH outside-workspace path to be blocked")
+	}
+}
+
+// TestShellTool_RestrictToWorkspace_WorkspacePathStillAllowed is a regression test
+// ensuring paths within the workspace continue to be allowed.
+func TestShellTool_RestrictToWorkspace_WorkspacePathStillAllowed(t *testing.T) {
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "myfile.txt")
+	if err := os.WriteFile(file, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewExecTool(workspace, true)
+	guardErr, _ := tool.guardCommand("cat "+file, workspace)
+	if guardErr != "" {
+		t.Errorf("expected workspace path to be allowed, got: %s", guardErr)
+	}
+}
+
+// TestExecTool_AddDenyPattern verifies adding a custom deny pattern.
+func TestExecTool_AddDenyPattern(t *testing.T) {
+	tool := NewExecTool("", false)
+	if err := tool.AddDenyPattern(`\bmy_dangerous_cmd\b`); err != nil {
+		t.Fatalf("AddDenyPattern failed: %v", err)
+	}
+
+	patterns := tool.ListDenyPatterns()
+	found := false
+	for _, p := range patterns {
+		if p.Pattern == `\bmy_dangerous_cmd\b` {
+			if p.IsDefault {
+				t.Error("expected custom pattern to have IsDefault=false")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected custom deny pattern to appear in ListDenyPatterns")
+	}
+
+	// Verify the pattern actually blocks commands
+	guardErr, _ := tool.guardCommand("my_dangerous_cmd --flag", "")
+	if guardErr == "" {
+		t.Error("expected custom deny pattern to block the command")
+	}
+}
+
+// TestExecTool_AddDenyPattern_InvalidRegex verifies that an invalid regex returns an error.
+func TestExecTool_AddDenyPattern_InvalidRegex(t *testing.T) {
+	tool := NewExecTool("", false)
+	err := tool.AddDenyPattern(`[invalid`)
+	if err == nil {
+		t.Error("expected error for invalid regex pattern")
+	}
+}
+
+// TestExecTool_RemoveDenyPattern verifies removing custom patterns works and defaults are immutable.
+func TestExecTool_RemoveDenyPattern(t *testing.T) {
+	tool := NewExecTool("", false)
+
+	// Add then remove a custom pattern
+	if err := tool.AddDenyPattern(`\bcustom_bad\b`); err != nil {
+		t.Fatal(err)
+	}
+	if !tool.RemoveDenyPattern(`\bcustom_bad\b`) {
+		t.Error("expected RemoveDenyPattern to return true for custom pattern")
+	}
+
+	// Verify it's gone
+	for _, p := range tool.ListDenyPatterns() {
+		if p.Pattern == `\bcustom_bad\b` {
+			t.Error("expected custom pattern to be removed")
+		}
+	}
+
+	// Try to remove a default pattern — should return false
+	defaults := tool.ListDenyPatterns()
+	if len(defaults) == 0 {
+		t.Fatal("expected at least one default pattern")
+	}
+	if tool.RemoveDenyPattern(defaults[0].Pattern) {
+		t.Error("expected RemoveDenyPattern to return false for default pattern")
+	}
+}
+
+// TestExecTool_AddRemoveAllowPattern verifies add, list, and remove for allow patterns.
+func TestExecTool_AddRemoveAllowPattern(t *testing.T) {
+	tool := NewExecTool("", false)
+
+	if err := tool.AddAllowPattern(`^echo\b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tool.AddAllowPattern(`^ls\b`); err != nil {
+		t.Fatal(err)
+	}
+
+	patterns := tool.ListAllowPatterns()
+	if len(patterns) != 2 {
+		t.Fatalf("expected 2 allow patterns, got %d", len(patterns))
+	}
+
+	if !tool.RemoveAllowPattern(`^echo\b`) {
+		t.Error("expected RemoveAllowPattern to return true")
+	}
+
+	patterns = tool.ListAllowPatterns()
+	if len(patterns) != 1 {
+		t.Fatalf("expected 1 allow pattern after removal, got %d", len(patterns))
+	}
+	if patterns[0] != `^ls\b` {
+		t.Errorf("expected remaining pattern to be '^ls\\b', got %q", patterns[0])
+	}
+
+	// Remove nonexistent
+	if tool.RemoveAllowPattern(`^nonexistent$`) {
+		t.Error("expected RemoveAllowPattern to return false for nonexistent pattern")
+	}
+}
+
+// TestExecTool_CustomDenyExtendsDefaults verifies that config custom deny patterns
+// are additive to the built-in defaults (not replacing them).
+func TestExecTool_CustomDenyExtendsDefaults(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	cfg.Tools.Exec.CustomDenyPatterns = []string{`\bmy_extra_deny\b`}
+
+	tool := NewExecToolWithConfig("", false, cfg)
+
+	patterns := tool.ListDenyPatterns()
+	hasDefault := false
+	hasCustom := false
+	for _, p := range patterns {
+		if p.IsDefault {
+			hasDefault = true
+		}
+		if p.Pattern == `\bmy_extra_deny\b` && !p.IsDefault {
+			hasCustom = true
+		}
+	}
+	if !hasDefault {
+		t.Error("expected default deny patterns to be present")
+	}
+	if !hasCustom {
+		t.Error("expected custom deny pattern to be present alongside defaults")
+	}
+
+	// Verify built-in pattern still blocks
+	guardErr, _ := tool.guardCommand("rm -rf /", "")
+	if guardErr == "" {
+		t.Error("expected built-in deny pattern to still block 'rm -rf'")
+	}
+
+	// Verify custom pattern also blocks
+	guardErr, _ = tool.guardCommand("my_extra_deny", "")
+	if guardErr == "" {
+		t.Error("expected custom deny pattern to block 'my_extra_deny'")
+	}
+}
+
+// TestExecTool_GetDeniedCommands verifies that a blocked command appears in the log.
+func TestExecTool_GetDeniedCommands(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewExecTool(workspace, false)
+
+	// Trigger a denied command
+	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /"})
+
+	entries, err := tool.GetDeniedCommands(nil)
+	if err != nil {
+		t.Fatalf("GetDeniedCommands error: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one denied command entry")
+	}
+	if entries[0].Command != "rm -rf /" {
+		t.Errorf("expected command 'rm -rf /', got %q", entries[0].Command)
+	}
+}
+
+// TestExecTool_GetDeniedCommands_WithLimit verifies limit/offset pagination.
+func TestExecTool_GetDeniedCommands_WithLimit(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewExecTool(workspace, false)
+
+	// Trigger multiple denied commands
+	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /a"})
+	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /b"})
+	tool.Execute(context.Background(), map[string]any{"command": "rm -rf /c"})
+
+	// Limit to 2
+	entries, err := tool.GetDeniedCommands(&DeniedCommandsOptions{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries with limit=2, got %d", len(entries))
+	}
+
+	// Offset 1, limit 1
+	entries, err = tool.GetDeniedCommands(&DeniedCommandsOptions{Offset: 1, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry with offset=1,limit=1, got %d", len(entries))
+	}
+	if entries[0].Command != "rm -rf /b" {
+		t.Errorf("expected second command 'rm -rf /b', got %q", entries[0].Command)
+	}
+
+	// Offset beyond entries
+	entries, err = tool.GetDeniedCommands(&DeniedCommandsOptions{Offset: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries != nil {
+		t.Errorf("expected nil for offset beyond entries, got %d entries", len(entries))
+	}
+}
+
+// TestExecTool_GetDeniedCommands_NoWorkspace verifies empty workspace returns nil.
+func TestExecTool_GetDeniedCommands_NoWorkspace(t *testing.T) {
+	tool := NewExecTool("", false)
+	entries, err := tool.GetDeniedCommands(nil)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if entries != nil {
+		t.Errorf("expected nil entries for empty workspace, got %d", len(entries))
+	}
+}
+
+// TestExecTool_DenyPatternsEnabled verifies toggling deny patterns on/off.
+func TestExecTool_DenyPatternsEnabled(t *testing.T) {
+	tool := NewExecTool("", false)
+
+	if !tool.DenyPatternsEnabled() {
+		t.Error("expected deny patterns to be enabled by default")
+	}
+
+	// Command should be blocked with deny enabled
+	guardErr, _ := tool.guardCommand("rm -rf /", "")
+	if guardErr == "" {
+		t.Error("expected command to be blocked when deny is enabled")
+	}
+
+	// Disable deny patterns
+	tool.SetDenyPatternsEnabled(false)
+	if tool.DenyPatternsEnabled() {
+		t.Error("expected deny patterns to be disabled")
+	}
+
+	// Command should be allowed now
+	guardErr, _ = tool.guardCommand("rm -rf /", "")
+	if guardErr != "" {
+		t.Errorf("expected command to pass when deny is disabled, got: %s", guardErr)
+	}
+
+	// Re-enable
+	tool.SetDenyPatternsEnabled(true)
+	guardErr, _ = tool.guardCommand("rm -rf /", "")
+	if guardErr == "" {
+		t.Error("expected command to be blocked again after re-enabling")
+	}
+}
+
+// TestExecTool_AllowPatternsFromConfig verifies allow patterns loaded from config.
+func TestExecTool_AllowPatternsFromConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	cfg.Tools.Exec.CustomAllowPatterns = []string{`^echo\b`, `^ls\b`}
+
+	tool := NewExecToolWithConfig("", false, cfg)
+
+	patterns := tool.ListAllowPatterns()
+	if len(patterns) != 2 {
+		t.Fatalf("expected 2 allow patterns from config, got %d", len(patterns))
+	}
+	if patterns[0] != `^echo\b` {
+		t.Errorf("expected first pattern '^echo\\b', got %q", patterns[0])
+	}
+	if patterns[1] != `^ls\b` {
+		t.Errorf("expected second pattern '^ls\\b', got %q", patterns[1])
+	}
 }

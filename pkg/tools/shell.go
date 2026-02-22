@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,11 +18,34 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+// DenyPatternInfo describes a deny pattern and whether it is a built-in default.
+type DenyPatternInfo struct {
+	Pattern   string
+	IsDefault bool
+}
+
+// DeniedCommandsOptions controls pagination for GetDeniedCommands.
+type DeniedCommandsOptions struct {
+	Limit  int
+	Offset int
+}
+
+// DeniedCommandEntry records a single denied command in the JSONL log.
+type DeniedCommandEntry struct {
+	Timestamp      string `json:"timestamp"`
+	Command        string `json:"command"`
+	Reason         string `json:"reason"`
+	MatchedPattern string `json:"matched_pattern,omitempty"`
+	WorkingDir     string `json:"working_dir,omitempty"`
+}
+
 type ExecTool struct {
 	workingDir          string
 	timeout             time.Duration
-	denyPatterns        []*regexp.Regexp
+	defaultDenyPatterns []*regexp.Regexp // immutable built-in defaults
+	customDenyPatterns  []*regexp.Regexp // user-added deny patterns
 	allowPatterns       []*regexp.Regexp
+	denyEnabled         bool
 	restrictToWorkspace bool
 }
 
@@ -73,42 +97,52 @@ func NewExecTool(workingDir string, restrict bool) *ExecTool {
 	return NewExecToolWithConfig(workingDir, restrict, nil)
 }
 
-func NewExecToolWithConfig(workingDir string, restrict bool, config *config.Config) *ExecTool {
-	denyPatterns := make([]*regexp.Regexp, 0)
-
-	enableDenyPatterns := true
-	if config != nil {
-		execConfig := config.Tools.Exec
-		enableDenyPatterns = execConfig.EnableDenyPatterns
-		if enableDenyPatterns {
-			if len(execConfig.CustomDenyPatterns) > 0 {
-				fmt.Printf("Using custom deny patterns: %v\n", execConfig.CustomDenyPatterns)
-				for _, pattern := range execConfig.CustomDenyPatterns {
-					re, err := regexp.Compile(pattern)
-					if err != nil {
-						fmt.Printf("Invalid custom deny pattern %q: %v\n", pattern, err)
-						continue
-					}
-					denyPatterns = append(denyPatterns, re)
-				}
-			} else {
-				denyPatterns = append(denyPatterns, defaultDenyPatterns...)
-			}
-		} else {
-			// If deny patterns are disabled, we won't add any patterns, allowing all commands.
-			fmt.Println("Warning: deny patterns are disabled. All commands will be allowed.")
-		}
-	} else {
-		denyPatterns = append(denyPatterns, defaultDenyPatterns...)
-	}
-
-	return &ExecTool{
+func NewExecToolWithConfig(workingDir string, restrict bool, cfg *config.Config) *ExecTool {
+	tool := &ExecTool{
 		workingDir:          workingDir,
 		timeout:             60 * time.Second,
-		denyPatterns:        denyPatterns,
-		allowPatterns:       nil,
+		denyEnabled:         true,
 		restrictToWorkspace: restrict,
 	}
+
+	if cfg != nil {
+		execConfig := cfg.Tools.Exec
+		tool.denyEnabled = execConfig.EnableDenyPatterns
+
+		if tool.denyEnabled {
+			// Always include built-in defaults
+			tool.defaultDenyPatterns = make([]*regexp.Regexp, len(defaultDenyPatterns))
+			copy(tool.defaultDenyPatterns, defaultDenyPatterns)
+
+			// Custom deny patterns are additive
+			for _, pattern := range execConfig.CustomDenyPatterns {
+				re, err := regexp.Compile(pattern)
+				if err != nil {
+					fmt.Printf("Invalid custom deny pattern %q: %v\n", pattern, err)
+					continue
+				}
+				tool.customDenyPatterns = append(tool.customDenyPatterns, re)
+			}
+		} else {
+			fmt.Println("Warning: deny patterns are disabled. All commands will be allowed.")
+		}
+
+		// Compile custom allow patterns from config
+		for _, pattern := range execConfig.CustomAllowPatterns {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				fmt.Printf("Invalid custom allow pattern %q: %v\n", pattern, err)
+				continue
+			}
+			tool.allowPatterns = append(tool.allowPatterns, re)
+		}
+	} else {
+		// No config: use defaults with deny enabled
+		tool.defaultDenyPatterns = make([]*regexp.Regexp, len(defaultDenyPatterns))
+		copy(tool.defaultDenyPatterns, defaultDenyPatterns)
+	}
+
+	return tool
 }
 
 func (t *ExecTool) Name() string {
@@ -264,9 +298,16 @@ func (t *ExecTool) guardCommand(command, cwd string) (string, string) {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
 
-	for _, pattern := range t.denyPatterns {
-		if pattern.MatchString(lower) {
-			return "Command blocked by safety guard (dangerous pattern detected)", pattern.String()
+	if t.denyEnabled {
+		for _, pattern := range t.defaultDenyPatterns {
+			if pattern.MatchString(lower) {
+				return "Command blocked by safety guard (dangerous pattern detected)", pattern.String()
+			}
+		}
+		for _, pattern := range t.customDenyPatterns {
+			if pattern.MatchString(lower) {
+				return "Command blocked by safety guard (dangerous pattern detected)", pattern.String()
+			}
 		}
 	}
 
@@ -308,12 +349,47 @@ func (t *ExecTool) guardCommand(command, cwd string) (string, string) {
 			}
 
 			if strings.HasPrefix(rel, "..") {
+				if isExecutableInSystemPath(p) {
+					continue
+				}
 				return "Command blocked by safety guard (path outside working dir)", ""
 			}
 		}
 	}
 
 	return "", ""
+}
+
+// isExecutableInSystemPath checks whether absPath is an executable file
+// located in one of the directories listed in $PATH.
+func isExecutableInSystemPath(absPath string) bool {
+	dir := filepath.Clean(filepath.Dir(absPath))
+
+	pathEnv := os.Getenv("PATH")
+	if pathEnv == "" {
+		return false
+	}
+
+	inPath := false
+	for _, d := range strings.Split(pathEnv, string(os.PathListSeparator)) {
+		if filepath.Clean(d) == dir {
+			inPath = true
+			break
+		}
+	}
+	if !inPath {
+		return false
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		return false
+	}
+
+	if runtime.GOOS != "windows" {
+		return info.Mode()&0111 != 0
+	}
+	return true
 }
 
 func (t *ExecTool) SetTimeout(timeout time.Duration) {
@@ -336,12 +412,131 @@ func (t *ExecTool) SetAllowPatterns(patterns []string) error {
 	return nil
 }
 
-type deniedCommandEntry struct {
-	Timestamp      string `json:"timestamp"`
-	Command        string `json:"command"`
-	Reason         string `json:"reason"`
-	MatchedPattern string `json:"matched_pattern,omitempty"`
-	WorkingDir     string `json:"working_dir,omitempty"`
+// AddDenyPattern compiles and appends a custom deny regex pattern.
+func (t *ExecTool) AddDenyPattern(pattern string) error {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return fmt.Errorf("invalid deny pattern %q: %w", pattern, err)
+	}
+	t.customDenyPatterns = append(t.customDenyPatterns, re)
+	return nil
+}
+
+// RemoveDenyPattern removes a custom deny pattern by its string representation.
+// Returns true if the pattern was found and removed. Built-in default patterns
+// cannot be removed.
+func (t *ExecTool) RemoveDenyPattern(pattern string) bool {
+	for i, re := range t.customDenyPatterns {
+		if re.String() == pattern {
+			t.customDenyPatterns = append(t.customDenyPatterns[:i], t.customDenyPatterns[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// ListDenyPatterns returns all deny patterns with a flag indicating whether
+// each is a built-in default or a custom pattern.
+func (t *ExecTool) ListDenyPatterns() []DenyPatternInfo {
+	result := make([]DenyPatternInfo, 0, len(t.defaultDenyPatterns)+len(t.customDenyPatterns))
+	for _, re := range t.defaultDenyPatterns {
+		result = append(result, DenyPatternInfo{Pattern: re.String(), IsDefault: true})
+	}
+	for _, re := range t.customDenyPatterns {
+		result = append(result, DenyPatternInfo{Pattern: re.String(), IsDefault: false})
+	}
+	return result
+}
+
+// AddAllowPattern compiles and appends an allow regex pattern.
+func (t *ExecTool) AddAllowPattern(pattern string) error {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return fmt.Errorf("invalid allow pattern %q: %w", pattern, err)
+	}
+	t.allowPatterns = append(t.allowPatterns, re)
+	return nil
+}
+
+// RemoveAllowPattern removes an allow pattern by its string representation.
+// Returns true if the pattern was found and removed.
+func (t *ExecTool) RemoveAllowPattern(pattern string) bool {
+	for i, re := range t.allowPatterns {
+		if re.String() == pattern {
+			t.allowPatterns = append(t.allowPatterns[:i], t.allowPatterns[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// ListAllowPatterns returns all allow pattern strings.
+func (t *ExecTool) ListAllowPatterns() []string {
+	result := make([]string, 0, len(t.allowPatterns))
+	for _, re := range t.allowPatterns {
+		result = append(result, re.String())
+	}
+	return result
+}
+
+// DenyPatternsEnabled returns whether deny pattern checking is active.
+func (t *ExecTool) DenyPatternsEnabled() bool {
+	return t.denyEnabled
+}
+
+// SetDenyPatternsEnabled toggles deny pattern checking at runtime.
+func (t *ExecTool) SetDenyPatternsEnabled(enabled bool) {
+	t.denyEnabled = enabled
+}
+
+// GetDeniedCommands reads the denied commands JSONL log and returns entries
+// with optional limit/offset pagination. Returns nil if no workspace is set
+// or the log file does not exist.
+func (t *ExecTool) GetDeniedCommands(opts *DeniedCommandsOptions) ([]DeniedCommandEntry, error) {
+	if t.workingDir == "" {
+		return nil, nil
+	}
+
+	logPath := filepath.Join(t.workingDir, "state", "denied_commands.jsonl")
+	f, err := os.Open(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []DeniedCommandEntry
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var entry DeniedCommandEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	if opts != nil {
+		if opts.Offset > 0 {
+			if opts.Offset >= len(entries) {
+				return nil, nil
+			}
+			entries = entries[opts.Offset:]
+		}
+		if opts.Limit > 0 && opts.Limit < len(entries) {
+			entries = entries[:opts.Limit]
+		}
+	}
+
+	return entries, nil
 }
 
 func (t *ExecTool) logDeniedCommand(command, reason, matchedPattern, workDir string) {
@@ -349,7 +544,7 @@ func (t *ExecTool) logDeniedCommand(command, reason, matchedPattern, workDir str
 		return
 	}
 
-	entry := deniedCommandEntry{
+	entry := DeniedCommandEntry{
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		Command:        command,
 		Reason:         reason,
