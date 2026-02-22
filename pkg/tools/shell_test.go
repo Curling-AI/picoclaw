@@ -486,6 +486,40 @@ func TestShellTool_RestrictToWorkspace_WorkspacePathStillAllowed(t *testing.T) {
 	}
 }
 
+// TestShellTool_RestrictToWorkspace_OrgRepoNotBlocked verifies that org/repo
+// arguments (e.g. gh repo clone org/repo) are not incorrectly flagged as
+// filesystem paths outside the working directory.
+func TestShellTool_RestrictToWorkspace_OrgRepoNotBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on Windows")
+	}
+
+	workspace := t.TempDir()
+	binDir := t.TempDir()
+	gh := filepath.Join(binDir, "gh")
+	if err := os.WriteFile(gh, []byte("#!/bin/sh\necho ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	tool := NewExecTool(workspace, true)
+	guardErr, _ := tool.guardCommand(gh+" repo clone org/repo", workspace)
+	if guardErr != "" {
+		t.Errorf("expected org/repo to be allowed, got: %s", guardErr)
+	}
+}
+
+// TestShellTool_RestrictToWorkspace_RedirectOutsideBlocked verifies that
+// absolute paths after shell operators (e.g. > /outside/path) are still caught.
+func TestShellTool_RestrictToWorkspace_RedirectOutsideBlocked(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewExecTool(workspace, true)
+	guardErr, _ := tool.guardCommand("echo foo > /outside/path", workspace)
+	if guardErr == "" {
+		t.Error("expected redirect to /outside/path to be blocked")
+	}
+}
+
 // TestExecTool_AddDenyPattern verifies adding a custom deny pattern.
 func TestExecTool_AddDenyPattern(t *testing.T) {
 	tool := NewExecTool("", false)
