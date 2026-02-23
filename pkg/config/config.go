@@ -167,6 +167,7 @@ type SessionConfig struct {
 }
 
 type AgentDefaults struct {
+	Name                string   `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"`
 	Workspace           string   `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
 	RestrictToWorkspace bool     `json:"restrict_to_workspace"           env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
 	Provider            string   `json:"provider"                        env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`

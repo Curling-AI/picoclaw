@@ -54,9 +54,17 @@ func (c *cmd) Help(ctx context.Context, message telego.Message) error {
 }
 
 func (c *cmd) Start(ctx context.Context, message telego.Message) error {
+	botName := c.config.Agents.Defaults.Name
+	if botName == "" {
+		botName = "PicoClaw"
+	}
+	if me, err := c.bot.GetMe(ctx); err == nil && me != nil {
+		botName = me.FirstName
+	}
+
 	_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
 		ChatID: telego.ChatID{ID: message.Chat.ID},
-		Text:   "Hello! I am PicoClaw 🦞",
+		Text:   fmt.Sprintf("Hello! I am %s 🦞", botName),
 		ReplyParameters: &telego.ReplyParameters{
 			MessageID: message.MessageID,
 		},
