@@ -137,34 +137,38 @@ func DefaultConfig() *Config {
 
 			// OpenAI - https://platform.openai.com/api-keys
 			{
-				ModelName: "gpt-5.2",
-				Model:     "openai/gpt-5.2",
-				APIBase:   "https://api.openai.com/v1",
-				APIKey:    "",
+				ModelName:     "gpt-5.2",
+				Model:         "openai/gpt-5.2",
+				APIBase:       "https://api.openai.com/v1",
+				APIKey:        "",
+				ContextWindow: 1048576, // 1M tokens
 			},
 
 			// Anthropic Claude - https://console.anthropic.com/settings/keys
 			{
-				ModelName: "claude-sonnet-4.6",
-				Model:     "anthropic/claude-sonnet-4.6",
-				APIBase:   "https://api.anthropic.com/v1",
-				APIKey:    "",
+				ModelName:     "claude-sonnet-4.6",
+				Model:         "anthropic/claude-sonnet-4.6",
+				APIBase:       "https://api.anthropic.com/v1",
+				APIKey:        "",
+				ContextWindow: 200000, // 200K tokens
 			},
 
 			// DeepSeek - https://platform.deepseek.com/
 			{
-				ModelName: "deepseek-chat",
-				Model:     "deepseek/deepseek-chat",
-				APIBase:   "https://api.deepseek.com/v1",
-				APIKey:    "",
+				ModelName:     "deepseek-chat",
+				Model:         "deepseek/deepseek-chat",
+				APIBase:       "https://api.deepseek.com/v1",
+				APIKey:        "",
+				ContextWindow: 65536, // 64K tokens
 			},
 
 			// Google Gemini - https://ai.google.dev/
 			{
-				ModelName: "gemini-2.0-flash",
-				Model:     "gemini/gemini-2.0-flash-exp",
-				APIBase:   "https://generativelanguage.googleapis.com/v1beta",
-				APIKey:    "",
+				ModelName:     "gemini-2.0-flash",
+				Model:         "gemini/gemini-2.0-flash-exp",
+				APIBase:       "https://generativelanguage.googleapis.com/v1beta",
+				APIKey:        "",
+				ContextWindow: 1048576, // 1M tokens
 			},
 
 			// Qwen (通义千问) - https://dashscope.console.aliyun.com/apiKey
@@ -177,10 +181,11 @@ func DefaultConfig() *Config {
 
 			// Moonshot (月之暗面) - https://platform.moonshot.cn/console/api-keys
 			{
-				ModelName: "moonshot-v1-8k",
-				Model:     "moonshot/moonshot-v1-8k",
-				APIBase:   "https://api.moonshot.cn/v1",
-				APIKey:    "",
+				ModelName:     "moonshot-v1-8k",
+				Model:         "moonshot/moonshot-v1-8k",
+				APIBase:       "https://api.moonshot.cn/v1",
+				APIKey:        "",
+				ContextWindow: 8192, // 8K tokens
 			},
 
 			// Groq - https://console.groq.com/keys
@@ -239,9 +244,10 @@ func DefaultConfig() *Config {
 
 			// Antigravity (Google Cloud Code Assist) - OAuth only
 			{
-				ModelName:  "gemini-flash",
-				Model:      "antigravity/gemini-3-flash",
-				AuthMethod: "oauth",
+				ModelName:     "gemini-flash",
+				Model:         "antigravity/gemini-3-flash",
+				AuthMethod:    "oauth",
+				ContextWindow: 1048576, // 1M tokens
 			},
 
 			// GitHub Copilot - https://github.com/settings/tokens

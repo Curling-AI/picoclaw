@@ -389,6 +389,46 @@ func TestLoadConfig_OpenAIWebSearchDefaultsTrueWhenUnset(t *testing.T) {
 	}
 }
 
+func TestModelConfig_ContextWindow_JSON_Roundtrip(t *testing.T) {
+	mc := ModelConfig{
+		ModelName:     "claude-sonnet-4.6",
+		Model:         "anthropic/claude-sonnet-4.6",
+		APIBase:       "https://api.anthropic.com/v1",
+		APIKey:        "test-key",
+		ContextWindow: 200000,
+	}
+
+	data, err := json.Marshal(mc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got ModelConfig
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.ContextWindow != 200000 {
+		t.Errorf("ContextWindow = %d, want 200000", got.ContextWindow)
+	}
+	if got.ModelName != "claude-sonnet-4.6" {
+		t.Errorf("ModelName = %q, want 'claude-sonnet-4.6'", got.ModelName)
+	}
+}
+
+func TestModelConfig_ContextWindow_DefaultsToZero(t *testing.T) {
+	data := `{"model_name":"test","model":"openai/test","api_key":"k"}`
+
+	var mc ModelConfig
+	if err := json.Unmarshal([]byte(data), &mc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if mc.ContextWindow != 0 {
+		t.Errorf("ContextWindow = %d, want 0 when omitted", mc.ContextWindow)
+	}
+}
+
 func TestLoadConfig_OpenAIWebSearchCanBeDisabled(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

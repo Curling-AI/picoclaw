@@ -100,6 +100,11 @@ func NewAgentInstance(
 		contextWindow = 131072
 	}
 
+	// Model-specific context window takes highest priority
+	if mc, err := cfg.GetModelConfig(model); err == nil && mc.ContextWindow > 0 {
+		contextWindow = mc.ContextWindow
+	}
+
 	temperature := 0.7
 	if defaults.Temperature != nil {
 		temperature = *defaults.Temperature
