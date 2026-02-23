@@ -106,18 +106,34 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	}
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		if !c.IsAllowed(buildTelegramSenderID(message.From)) {
+			c.rejectStranger(ctx, message.Chat.ID, message.MessageID)
+			return nil
+		}
 		c.commands.Help(ctx, message)
 		return nil
 	}, th.CommandEqual("help"))
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		if !c.IsAllowed(buildTelegramSenderID(message.From)) {
+			c.rejectStranger(ctx, message.Chat.ID, message.MessageID)
+			return nil
+		}
 		return c.commands.Start(ctx, message)
 	}, th.CommandEqual("start"))
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		if !c.IsAllowed(buildTelegramSenderID(message.From)) {
+			c.rejectStranger(ctx, message.Chat.ID, message.MessageID)
+			return nil
+		}
 		return c.commands.Show(ctx, message)
 	}, th.CommandEqual("show"))
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		if !c.IsAllowed(buildTelegramSenderID(message.From)) {
+			c.rejectStranger(ctx, message.Chat.ID, message.MessageID)
+			return nil
+		}
 		return c.commands.List(ctx, message)
 	}, th.CommandEqual("list"))
 
@@ -193,6 +209,29 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) err
 	return nil
 }
 
+// rejectStranger sends a brief message telling an unauthorized user to contact the bot owner.
+func (c *TelegramChannel) rejectStranger(ctx context.Context, chatID int64, messageID int) {
+	_, _ = c.bot.SendMessage(ctx, &telego.SendMessageParams{
+		ChatID: telego.ChatID{ID: chatID},
+		Text:   "Sorry, this bot is private. Please contact the owner directly for access.",
+		ReplyParameters: &telego.ReplyParameters{
+			MessageID: messageID,
+		},
+	})
+}
+
+// buildTelegramSenderID constructs the compound sender ID from a Telegram user.
+// Returns empty string if user is nil.
+func buildTelegramSenderID(user *telego.User) string {
+	if user == nil {
+		return ""
+	}
+	if user.Username != "" {
+		return fmt.Sprintf("%d|%s", user.ID, user.Username)
+	}
+	return fmt.Sprintf("%d", user.ID)
+}
+
 func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Message) error {
 	if message == nil {
 		return fmt.Errorf("message is nil")
@@ -203,16 +242,13 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		return fmt.Errorf("message sender (user) is nil")
 	}
 
-	senderID := fmt.Sprintf("%d", user.ID)
-	if user.Username != "" {
-		senderID = fmt.Sprintf("%d|%s", user.ID, user.Username)
-	}
+	senderID := buildTelegramSenderID(user)
 
-	// 检查白名单，避免为被拒绝的用户下载附件
 	if !c.IsAllowed(senderID) {
 		logger.DebugCF("telegram", "Message rejected by allowlist", map[string]any{
 			"user_id": senderID,
 		})
+		c.rejectStranger(ctx, message.Chat.ID, message.MessageID)
 		return nil
 	}
 
