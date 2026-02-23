@@ -163,8 +163,8 @@ func TestFallback_CooldownSkip(t *testing.T) {
 	ct, _ := newTestTracker(now)
 	fc := NewFallbackChain(ct)
 
-	// Put openai in cooldown
-	ct.MarkFailure("openai", FailoverRateLimit)
+	// Put openai/gpt-4 in cooldown (per-model key)
+	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverRateLimit)
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
@@ -201,9 +201,9 @@ func TestFallback_AllInCooldown(t *testing.T) {
 	ct := NewCooldownTracker()
 	fc := NewFallbackChain(ct)
 
-	// Put all providers in cooldown
-	ct.MarkFailure("openai", FailoverRateLimit)
-	ct.MarkFailure("anthropic", FailoverBilling)
+	// Put all models in cooldown (per-model keys)
+	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverRateLimit)
+	ct.MarkFailure(ModelKey("anthropic", "claude"), FailoverBilling)
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
@@ -284,7 +284,7 @@ func TestFallback_SuccessResetsCooldown(t *testing.T) {
 	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
 		attempt++
 		if attempt == 1 {
-			ct.MarkFailure("openai", FailoverRateLimit) // simulate failure tracked elsewhere
+			ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverRateLimit) // simulate failure tracked elsewhere
 		}
 		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
 	}
@@ -293,8 +293,193 @@ func TestFallback_SuccessResetsCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !ct.IsAvailable("openai") {
+	if !ct.IsAvailable(ModelKey("openai", "gpt-4")) {
 		t.Error("success should reset cooldown")
+	}
+}
+
+func TestFallback_PerModelCooldown_SameProviderAlternative(t *testing.T) {
+	now := time.Now()
+	ct, _ := newTestTracker(now)
+	fc := NewFallbackChain(ct)
+
+	// Model A from openai is in cooldown, model B from openai is not
+	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverRateLimit)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-4o-mini"), // same provider, different model
+		makeCandidate("anthropic", "claude"),
+	}
+
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		if provider == "openai" && model == "gpt-4" {
+			t.Error("should not call gpt-4 (in cooldown)")
+		}
+		return &LLMResponse{Content: "from " + model, FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should use the same-provider alternative, not jump to anthropic
+	if result.Provider != "openai" || result.Model != "gpt-4o-mini" {
+		t.Errorf("expected openai/gpt-4o-mini, got %s/%s", result.Provider, result.Model)
+	}
+}
+
+// TestFallback_PerModelCooldown_RuntimeFailoverToSameProvider verifies that when the
+// primary model fails during execution (not pre-set cooldown), the next call falls
+// back to a same-provider alternative and keeps using it while the primary cools down.
+func TestFallback_PerModelCooldown_RuntimeFailoverToSameProvider(t *testing.T) {
+	now := time.Now()
+	ct, current := newTestTracker(now)
+	fc := NewFallbackChain(ct)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-4o-mini"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	// First call: gpt-4 returns 503, should failover to gpt-4o-mini (same provider)
+	call1Attempts := 0
+	run1 := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		call1Attempts++
+		if model == "gpt-4" {
+			return nil, errors.New("status: 503 service unavailable")
+		}
+		return &LLMResponse{Content: "from " + model, FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run1)
+	if err != nil {
+		t.Fatalf("call 1: unexpected error: %v", err)
+	}
+	if result.Provider != "openai" || result.Model != "gpt-4o-mini" {
+		t.Errorf("call 1: expected openai/gpt-4o-mini, got %s/%s", result.Provider, result.Model)
+	}
+
+	// Second call (still within cooldown): gpt-4 should be skipped, gpt-4o-mini used directly
+	call2Model := ""
+	run2 := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		call2Model = model
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err = fc.Execute(context.Background(), candidates, run2)
+	if err != nil {
+		t.Fatalf("call 2: unexpected error: %v", err)
+	}
+	if call2Model != "gpt-4o-mini" {
+		t.Errorf("call 2: expected gpt-4o-mini (gpt-4 in cooldown), got %s", call2Model)
+	}
+
+	// Third call (after cooldown expires): gpt-4 should be available again
+	*current = now.Add(2 * time.Minute) // past 1-min cooldown
+	call3Model := ""
+	run3 := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		call3Model = model
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err = fc.Execute(context.Background(), candidates, run3)
+	if err != nil {
+		t.Fatalf("call 3: unexpected error: %v", err)
+	}
+	if call3Model != "gpt-4" {
+		t.Errorf("call 3: expected gpt-4 (cooldown expired), got %s", call3Model)
+	}
+}
+
+// TestFallback_PerModelCooldown_IndependentModels verifies that cooldown on model A
+// does not affect model B on the same provider, and vice versa.
+func TestFallback_PerModelCooldown_IndependentModels(t *testing.T) {
+	ct := NewCooldownTracker()
+
+	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverTimeout)
+
+	// gpt-4 should be in cooldown
+	if ct.IsAvailable(ModelKey("openai", "gpt-4")) {
+		t.Error("gpt-4 should be in cooldown")
+	}
+	// gpt-4o-mini on the same provider should still be available
+	if !ct.IsAvailable(ModelKey("openai", "gpt-4o-mini")) {
+		t.Error("gpt-4o-mini should NOT be in cooldown (independent model)")
+	}
+	// claude on a different provider should be unaffected
+	if !ct.IsAvailable(ModelKey("anthropic", "claude")) {
+		t.Error("claude should be available (different provider entirely)")
+	}
+}
+
+// TestFallback_PerModelCooldown_BothSameProviderModelsFail verifies that when all
+// same-provider models fail, the chain falls through to a cross-provider candidate.
+func TestFallback_PerModelCooldown_BothSameProviderModelsFail(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-4o-mini"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		if provider == "openai" {
+			return nil, errors.New("status: 503 service unavailable")
+		}
+		return &LLMResponse{Content: "from claude", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" || result.Model != "claude" {
+		t.Errorf("expected anthropic/claude, got %s/%s", result.Provider, result.Model)
+	}
+	// Both openai models should now be in cooldown
+	if ct.IsAvailable(ModelKey("openai", "gpt-4")) {
+		t.Error("gpt-4 should be in cooldown after 503")
+	}
+	if ct.IsAvailable(ModelKey("openai", "gpt-4o-mini")) {
+		t.Error("gpt-4o-mini should be in cooldown after 503")
+	}
+}
+
+// TestFallback_PerModelCooldown_SuccessResetsOnlyThatModel verifies that a success
+// on model B does not reset cooldown on model A from the same provider.
+func TestFallback_PerModelCooldown_SuccessResetsOnlyThatModel(t *testing.T) {
+	now := time.Now()
+	ct, _ := newTestTracker(now)
+	fc := NewFallbackChain(ct)
+
+	// Put gpt-4 in cooldown
+	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverTimeout)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("openai", "gpt-4o-mini"),
+	}
+
+	// gpt-4 is skipped (cooldown), gpt-4o-mini succeeds
+	result, err := fc.Execute(context.Background(), candidates, successRun("ok"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Model != "gpt-4o-mini" {
+		t.Errorf("expected gpt-4o-mini, got %s", result.Model)
+	}
+
+	// gpt-4 should STILL be in cooldown — success on gpt-4o-mini doesn't reset it
+	if ct.IsAvailable(ModelKey("openai", "gpt-4")) {
+		t.Error("gpt-4 should still be in cooldown (success on different model shouldn't reset it)")
+	}
+	// gpt-4o-mini should be available (it succeeded)
+	if !ct.IsAvailable(ModelKey("openai", "gpt-4o-mini")) {
+		t.Error("gpt-4o-mini should be available (it succeeded)")
 	}
 }
 

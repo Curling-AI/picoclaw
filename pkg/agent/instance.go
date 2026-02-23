@@ -127,6 +127,42 @@ func NewAgentInstance(
 	}
 	candidates := providers.ResolveCandidates(modelCfg, defaults.Provider)
 
+	// Inject same-provider alternatives from model_list after the primary.
+	// If the primary model fails (e.g. 503), we try another model from the
+	// same provider before falling back to a different provider entirely.
+	if len(candidates) > 0 && len(cfg.ModelList) > 0 {
+		primaryProvider := candidates[0].Provider
+		seen := make(map[string]bool)
+		for _, c := range candidates {
+			seen[providers.ModelKey(c.Provider, c.Model)] = true
+		}
+
+		var sameProviderAlts []providers.FallbackCandidate
+		for _, mc := range cfg.ModelList {
+			ref := providers.ParseModelRef(mc.Model, "")
+			if ref == nil || ref.Provider != primaryProvider {
+				continue
+			}
+			key := providers.ModelKey(ref.Provider, ref.Model)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			sameProviderAlts = append(sameProviderAlts, providers.FallbackCandidate{
+				Provider: ref.Provider,
+				Model:    ref.Model,
+			})
+		}
+
+		if len(sameProviderAlts) > 0 {
+			enhanced := make([]providers.FallbackCandidate, 0, len(candidates)+len(sameProviderAlts))
+			enhanced = append(enhanced, candidates[0])          // primary
+			enhanced = append(enhanced, sameProviderAlts...)     // same-provider alternatives
+			enhanced = append(enhanced, candidates[1:]...)       // cross-provider fallbacks
+			candidates = enhanced
+		}
+	}
+
 	return &AgentInstance{
 		ID:             agentID,
 		Name:           agentName,
