@@ -568,7 +568,9 @@ func (al *AgentLoop) runLLMIteration(
 
 			errMsg := strings.ToLower(err.Error())
 			isContextError := strings.Contains(errMsg, "token") ||
-				strings.Contains(errMsg, "context") ||
+				strings.Contains(errMsg, "context_length") ||
+				strings.Contains(errMsg, "context length") ||
+				strings.Contains(errMsg, "context window") ||
 				strings.Contains(errMsg, "invalidparameter") ||
 				strings.Contains(errMsg, "length")
 

@@ -210,18 +210,111 @@ func TestFallback_AllInCooldown(t *testing.T) {
 		makeCandidate("anthropic", "claude"),
 	}
 
-	_, err := fc.Execute(context.Background(), candidates,
-		func(ctx context.Context, provider, model string) (*LLMResponse, error) {
-			t.Error("should not call any provider (all in cooldown)")
-			return nil, nil
-		})
+	// Only primary (index 0) should be skipped via cooldown.
+	// Fallback (index 1) should still be attempted despite cooldown.
+	called := map[string]bool{}
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		called[model] = true
+		return nil, errors.New("rate limit exceeded")
+	}
+
+	_, err := fc.Execute(context.Background(), candidates, run)
 
 	if err == nil {
-		t.Fatal("expected error when all in cooldown")
+		t.Fatal("expected error when all fail")
 	}
 	var exhausted *FallbackExhaustedError
 	if !errors.As(err, &exhausted) {
 		t.Fatalf("expected FallbackExhaustedError, got %T", err)
+	}
+	if called["gpt-4"] {
+		t.Error("primary (gpt-4) should have been skipped via cooldown")
+	}
+	if !called["claude"] {
+		t.Error("fallback (claude) should have been attempted despite cooldown")
+	}
+}
+
+// TestFallback_FallbackInCooldownStillAttempted verifies that a fallback candidate
+// in cooldown is still attempted (only primary is skipped via cooldown).
+func TestFallback_FallbackInCooldownStillAttempted(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct)
+
+	// Put both models in cooldown
+	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverRateLimit)
+	ct.MarkFailure(ModelKey("anthropic", "claude"), FailoverRateLimit)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		if model == "gpt-4" {
+			t.Error("primary (gpt-4) should be skipped via cooldown")
+		}
+		// Fallback succeeds
+		return &LLMResponse{Content: "from claude", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" || result.Model != "claude" {
+		t.Errorf("expected anthropic/claude, got %s/%s", result.Provider, result.Model)
+	}
+}
+
+// TestFallback_FallbackFailsStillTracked verifies that fallback failures are
+// still tracked via MarkFailure for observability, but fallbacks are always
+// retried on subsequent calls (not skipped by cooldown).
+func TestFallback_FallbackFailsStillTracked(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	// First call: both fail
+	run1 := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		return nil, errors.New("rate limit exceeded")
+	}
+	_, err := fc.Execute(context.Background(), candidates, run1)
+	if err == nil {
+		t.Fatal("expected error when all fail")
+	}
+
+	// Both should be in cooldown now
+	if ct.IsAvailable(ModelKey("openai", "gpt-4")) {
+		t.Error("gpt-4 should be in cooldown after failure")
+	}
+	if ct.IsAvailable(ModelKey("anthropic", "claude")) {
+		t.Error("claude should be in cooldown after failure")
+	}
+
+	// Second call: primary skipped (cooldown), fallback retried despite cooldown
+	called := map[string]bool{}
+	run2 := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		called[model] = true
+		return &LLMResponse{Content: "recovered", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if called["gpt-4"] {
+		t.Error("primary should be skipped via cooldown on second call")
+	}
+	if !called["claude"] {
+		t.Error("fallback should be retried despite cooldown")
+	}
+	if result.Provider != "anthropic" || result.Model != "claude" {
+		t.Errorf("expected anthropic/claude, got %s/%s", result.Provider, result.Model)
 	}
 }
 

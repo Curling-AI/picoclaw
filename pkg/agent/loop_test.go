@@ -833,6 +833,50 @@ func (m *mockCustomToolNamed) Execute(ctx context.Context, args map[string]any) 
 	return tools.SilentResult("ok")
 }
 
+// TestIsContextError_Classification verifies that the isContextError detection
+// does not match Go timeout errors like "context deadline exceeded" but does
+// match real context window errors.
+func TestIsContextError_Classification(t *testing.T) {
+	// Helper that mirrors the isContextError logic from runLLMIteration
+	isContextError := func(errMsg string) bool {
+		errMsg = strings.ToLower(errMsg)
+		return strings.Contains(errMsg, "token") ||
+			strings.Contains(errMsg, "context_length") ||
+			strings.Contains(errMsg, "context length") ||
+			strings.Contains(errMsg, "context window") ||
+			strings.Contains(errMsg, "invalidparameter") ||
+			strings.Contains(errMsg, "length")
+	}
+
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected bool
+	}{
+		// Should NOT match (timeout/cancellation errors)
+		{"go timeout", "context deadline exceeded", false},
+		{"go timeout with details", "context deadline exceeded (Client.Timeout exceeded while awaiting headers)", false},
+		{"go cancel", "context canceled", false},
+		{"fallback timeout", "fallback: all 3 candidates failed:\n  [1] openai/gpt-4: context deadline exceeded (reason=timeout)", false},
+
+		// Should match (real context window errors)
+		{"openai context_length", "context_length_exceeded: maximum context length is 128000 tokens", true},
+		{"openai max context", "maximum context length is 128000 tokens", true},
+		{"generic context window", "request exceeds context window of 200000 tokens", true},
+		{"token limit", "total tokens exceed max_tokens limit", true},
+		{"invalid param tokens", "InvalidParameter: Total tokens of image and text exceed max message tokens", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContextError(tt.errMsg)
+			if got != tt.expected {
+				t.Errorf("isContextError(%q) = %v, want %v", tt.errMsg, got, tt.expected)
+			}
+		})
+	}
+}
+
 // failFirstMockProvider fails on the first N calls with a specific error
 type failFirstMockProvider struct {
 	failures    int

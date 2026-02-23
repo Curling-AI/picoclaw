@@ -77,7 +77,7 @@ func ResolveCandidates(cfg ModelConfig, defaultProvider string) []FallbackCandid
 // It tries each candidate in order, respecting cooldowns and error classification.
 //
 // Behavior:
-//   - Candidates in cooldown are skipped (logged as skipped attempt).
+//   - The primary candidate (index 0) in cooldown is skipped (logged as skipped attempt).
 //   - context.Canceled aborts immediately (user abort, no fallback).
 //   - Non-retriable errors (format) abort immediately.
 //   - Retriable errors trigger fallback to next candidate.
@@ -104,7 +104,7 @@ func (fc *FallbackChain) Execute(
 
 		// Check cooldown (per-model: one failing model doesn't block others on the same provider).
 		modelKey := ModelKey(candidate.Provider, candidate.Model)
-		if !fc.cooldown.IsAvailable(modelKey) {
+		if i == 0 && !fc.cooldown.IsAvailable(modelKey) {
 			remaining := fc.cooldown.CooldownRemaining(modelKey)
 			result.Attempts = append(result.Attempts, FallbackAttempt{
 				Provider: candidate.Provider,
@@ -188,7 +188,7 @@ func (fc *FallbackChain) Execute(
 		}
 	}
 
-	// All candidates were skipped (all in cooldown).
+	// All candidates were skipped or failed.
 	return nil, &FallbackExhaustedError{Attempts: result.Attempts}
 }
 
