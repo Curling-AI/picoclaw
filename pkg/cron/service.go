@@ -342,7 +342,7 @@ func (cs *CronService) saveStoreUnsafe() error {
 		return err
 	}
 
-	return os.WriteFile(cs.storePath, data, 0o600)
+	return os.WriteFile(cs.storePath, data, 0o644)
 }
 
 func (cs *CronService) AddJob(
