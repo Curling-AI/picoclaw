@@ -54,7 +54,12 @@ type processOptions struct {
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
 	registry := NewAgentRegistry(cfg, provider)
+	return NewAgentLoopWithRegistry(cfg, msgBus, provider, registry)
+}
 
+// NewAgentLoopWithRegistry creates an AgentLoop using an existing registry,
+// avoiding duplicate registry construction when the caller already has one.
+func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider, registry *AgentRegistry) *AgentLoop {
 	// Register shared tools to all agents
 	registerSharedTools(cfg, msgBus, registry, provider)
 
