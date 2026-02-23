@@ -230,9 +230,36 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 				continue
 			}
 			last := sanitized[len(sanitized)-1]
-			if last.Role != "assistant" || len(last.ToolCalls) == 0 {
+			// Allow tool messages after an assistant with tool calls, or after
+			// another tool message (multi-tool-call turns produce multiple results).
+			if last.Role != "assistant" && last.Role != "tool" {
 				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]any{})
 				continue
+			}
+			if last.Role == "assistant" && len(last.ToolCalls) == 0 {
+				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]any{})
+				continue
+			}
+			// Backfill Name from the preceding assistant's tool calls (for old session history).
+			if msg.Name == "" && msg.ToolCallID != "" {
+				// Walk back to find the assistant message that owns these tool calls.
+				for i := len(sanitized) - 1; i >= 0; i-- {
+					if sanitized[i].Role == "assistant" {
+						for _, tc := range sanitized[i].ToolCalls {
+							if tc.ID == msg.ToolCallID {
+								name := tc.Name
+								if name == "" && tc.Function != nil {
+									name = tc.Function.Name
+								}
+								if name != "" {
+									msg.Name = name
+								}
+								break
+							}
+						}
+						break
+					}
+				}
 			}
 			sanitized = append(sanitized, msg)
 
