@@ -269,6 +269,7 @@ func (cb *ContextBuilder) AddToolResult(
 	messages = append(messages, providers.Message{
 		Role:       "tool",
 		Content:    result,
+		Name:       toolName,
 		ToolCallID: toolCallID,
 	})
 	return messages

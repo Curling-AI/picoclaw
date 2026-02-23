@@ -149,6 +149,7 @@ func RunToolLoop(
 			toolResultMsg := providers.Message{
 				Role:       "tool",
 				Content:    contentForLLM,
+				Name:       tc.Name,
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, toolResultMsg)

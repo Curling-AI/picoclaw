@@ -48,6 +48,76 @@ func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 	}
 }
 
+func TestBuildRequestUsesMessageNameField(t *testing.T) {
+	p := &AntigravityProvider{}
+
+	messages := []Message{
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{{
+				ID: "call_abc123",
+				Function: &FunctionCall{
+					Name:      "read_file",
+					Arguments: `{"path":"main.go"}`,
+				},
+			}},
+		},
+		{
+			Role:       "tool",
+			Name:       "read_file",
+			ToolCallID: "call_abc123",
+			Content:    "file contents",
+		},
+	}
+
+	req := p.buildRequest(messages, nil, "", nil)
+	if len(req.Contents) != 2 {
+		t.Fatalf("expected 2 contents, got %d", len(req.Contents))
+	}
+
+	toolPart := req.Contents[1].Parts[0]
+	if toolPart.FunctionResponse == nil {
+		t.Fatal("expected functionResponse in tool message")
+	}
+	if toolPart.FunctionResponse.Name != "read_file" {
+		t.Fatalf("expected functionResponse name read_file, got %q", toolPart.FunctionResponse.Name)
+	}
+}
+
+func TestBuildRequestNameFieldTakesPrecedenceOverInference(t *testing.T) {
+	p := &AntigravityProvider{}
+
+	// Name field says "write_file" but the tool call ID maps to "read_file"
+	messages := []Message{
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{{
+				ID: "call_read_file_123",
+				Function: &FunctionCall{
+					Name:      "read_file",
+					Arguments: `{}`,
+				},
+			}},
+		},
+		{
+			Role:       "tool",
+			Name:       "write_file",
+			ToolCallID: "call_read_file_123",
+			Content:    "done",
+		},
+	}
+
+	req := p.buildRequest(messages, nil, "", nil)
+	toolPart := req.Contents[1].Parts[0]
+	if toolPart.FunctionResponse == nil {
+		t.Fatal("expected functionResponse in tool message")
+	}
+	// Name field should take precedence
+	if toolPart.FunctionResponse.Name != "write_file" {
+		t.Fatalf("expected Name field to take precedence, got %q", toolPart.FunctionResponse.Name)
+	}
+}
+
 func TestResolveToolResponseNameInfersNameFromGeneratedCallID(t *testing.T) {
 	got := resolveToolResponseName("call_search_docs_999", map[string]string{})
 	if got != "search_docs" {

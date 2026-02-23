@@ -221,7 +221,10 @@ func (p *AntigravityProvider) buildRequest(
 			}
 		case "user":
 			if msg.ToolCallID != "" {
-				toolName := resolveToolResponseName(msg.ToolCallID, toolCallNames)
+				toolName := msg.Name
+				if toolName == "" {
+					toolName = resolveToolResponseName(msg.ToolCallID, toolCallNames)
+				}
 				if toolName == "" {
 					toolName = "unknown_tool"
 				}
@@ -278,7 +281,10 @@ func (p *AntigravityProvider) buildRequest(
 				req.Contents = append(req.Contents, content)
 			}
 		case "tool":
-			toolName := resolveToolResponseName(msg.ToolCallID, toolCallNames)
+			toolName := msg.Name
+			if toolName == "" {
+				toolName = resolveToolResponseName(msg.ToolCallID, toolCallNames)
+			}
 			if toolName == "" {
 				toolName = "unknown_tool"
 			}
