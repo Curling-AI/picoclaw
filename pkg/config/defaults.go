@@ -15,6 +15,7 @@ func DefaultConfig() *Config {
 				Provider:            "",
 				Model:               "glm-4.7",
 				MaxTokens:           8192,
+			ContextWindow:       131072, // 128K tokens — conservative default for most modern models
 				Temperature:         nil, // nil means use provider default
 				MaxToolIterations:       20,
 			ToolErrorNudgeThreshold: 4,

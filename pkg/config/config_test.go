@@ -224,6 +224,18 @@ func TestDefaultConfig_MaxTokens(t *testing.T) {
 	}
 }
 
+// TestDefaultConfig_ContextWindow verifies context window has default value
+func TestDefaultConfig_ContextWindow(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Agents.Defaults.ContextWindow == 0 {
+		t.Error("ContextWindow should not be zero")
+	}
+	if cfg.Agents.Defaults.ContextWindow != 131072 {
+		t.Errorf("ContextWindow = %d, want 131072", cfg.Agents.Defaults.ContextWindow)
+	}
+}
+
 // TestDefaultConfig_MaxToolIterations verifies max tool iterations has default value
 func TestDefaultConfig_MaxToolIterations(t *testing.T) {
 	cfg := DefaultConfig()

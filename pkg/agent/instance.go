@@ -95,6 +95,11 @@ func NewAgentInstance(
 		maxTokens = 8192
 	}
 
+	contextWindow := defaults.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = 131072
+	}
+
 	temperature := 0.7
 	if defaults.Temperature != nil {
 		temperature = *defaults.Temperature
@@ -127,7 +132,7 @@ func NewAgentInstance(
 		ToolErrorNudgeThreshold: errorNudgeThreshold,
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
-		ContextWindow:  maxTokens,
+		ContextWindow:  contextWindow,
 		MaxHistoryMessages:            defaults.MaxHistoryMessages,
 		SummarizationThresholdPercent: summarizationPct,
 		KeepLastMessages:              keepLast,
