@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -519,6 +520,317 @@ func TestToolResult_UserFacingToolDoesSendMessage(t *testing.T) {
 	if response != "Command output: hello world" {
 		t.Errorf("Expected 'Command output: hello world', got: %s", response)
 	}
+}
+
+// toolFailMockProvider simulates an LLM that makes tool calls which fail,
+// then produces a text response after receiving the nudge message.
+type toolFailMockProvider struct {
+	callCount        int
+	failToolCalls    int // Number of iterations that return failing tool calls
+	finalResponse    string
+	nudgeMessageSeen bool
+}
+
+func (m *toolFailMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	m.callCount++
+
+	// Check if the nudge message was injected
+	for _, msg := range messages {
+		if msg.Role == "user" && strings.Contains(msg.Content, "Multiple consecutive tool calls have failed") {
+			m.nudgeMessageSeen = true
+		}
+	}
+
+	// After nudge, return a text-only response
+	if m.nudgeMessageSeen {
+		return &providers.LLMResponse{
+			Content:   m.finalResponse,
+			ToolCalls: []providers.ToolCall{},
+		}, nil
+	}
+
+	// Otherwise keep returning tool calls to a nonexistent tool
+	if m.callCount <= m.failToolCalls {
+		return &providers.LLMResponse{
+			Content: "",
+			ToolCalls: []providers.ToolCall{
+				{
+					ID:   fmt.Sprintf("call_%d", m.callCount),
+					Type: "function",
+					Name: "nonexistent_tool",
+					Function: &providers.FunctionCall{
+						Name:      "nonexistent_tool",
+						Arguments: `{"arg": "value"}`,
+					},
+				},
+			},
+		}, nil
+	}
+
+	// Fallback: return text response
+	return &providers.LLMResponse{
+		Content:   m.finalResponse,
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (m *toolFailMockProvider) GetDefaultModel() string {
+	return "mock-tool-fail-model"
+}
+
+// TestAgentLoop_ConsecutiveToolFailuresNudge verifies that after 3 consecutive
+// tool failures on an interactive channel, the loop breaks and returns a
+// user-facing summary containing the tool name and error details.
+func TestAgentLoop_ConsecutiveToolFailuresNudge(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &toolFailMockProvider{
+		failToolCalls: 10, // Keep failing for many iterations
+		finalResponse: "I attempted to read the file but it was not found. Please check the path and try again.",
+	}
+
+	al := NewAgentLoop(cfg, msgBus, provider)
+	helper := testHelper{al: al}
+
+	ctx := context.Background()
+	msg := bus.InboundMessage{
+		Channel:    "test", // interactive channel
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		Content:    "read nonexistent.txt",
+		SessionKey: "test-session-nudge",
+	}
+
+	response := helper.executeAndGetResponse(t, ctx, msg)
+
+	// On interactive channels, the loop should break (no nudge injected)
+	if provider.nudgeMessageSeen {
+		t.Error("Expected NO nudge message on interactive channel; loop should break with summary")
+	}
+
+	// The response should be a conversational failure summary
+	if !strings.Contains(response, "repeated failures") {
+		t.Errorf("Expected summary about repeated failures, got: %s", response)
+	}
+	if !strings.Contains(response, "nonexistent_tool") {
+		t.Errorf("Expected summary to mention the failing tool name, got: %s", response)
+	}
+
+	// Should have taken exactly 4 calls (threshold=4), then break
+	if provider.callCount != 4 {
+		t.Errorf("Expected 4 LLM calls (break at threshold), got %d", provider.callCount)
+	}
+}
+
+// TestAgentLoop_ConsecutiveToolFailuresNudge_InternalChannel verifies that
+// on internal channels, the old nudge-message injection still fires.
+func TestAgentLoop_ConsecutiveToolFailuresNudge_InternalChannel(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &toolFailMockProvider{
+		failToolCalls: 10,
+		finalResponse: "I could not complete the task.",
+	}
+
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	// Use ProcessDirectWithChannel with "cli" (internal channel)
+	ctx := context.Background()
+	response, err := al.ProcessDirectWithChannel(
+		ctx,
+		"do something",
+		"test-session-internal-nudge",
+		"cli", // internal channel
+		"direct",
+	)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	// On internal channels, the nudge message should have been injected
+	if !provider.nudgeMessageSeen {
+		t.Error("Expected nudge message to be injected on internal channel")
+	}
+
+	// The final response should be the provider's finalResponse (after nudge)
+	if response != provider.finalResponse {
+		t.Errorf("Expected %q, got %q", provider.finalResponse, response)
+	}
+
+	// Should have taken 5 calls: 4 failing + 1 text response after nudge
+	if provider.callCount != 5 {
+		t.Errorf("Expected 5 LLM calls (4 fail + 1 after nudge), got %d", provider.callCount)
+	}
+}
+
+// lateFailMockProvider succeeds with tool calls for the first N iterations,
+// then returns failing tool calls for the remainder. It never returns a text-only response.
+type lateFailMockProvider struct {
+	callCount      int
+	successCalls   int // How many iterations return successful tool calls
+	successToolName string
+	failToolName   string
+}
+
+func (m *lateFailMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	m.callCount++
+
+	toolName := m.failToolName
+	if m.callCount <= m.successCalls {
+		toolName = m.successToolName
+	}
+
+	return &providers.LLMResponse{
+		Content: "",
+		ToolCalls: []providers.ToolCall{
+			{
+				ID:   fmt.Sprintf("call_%d", m.callCount),
+				Type: "function",
+				Name: toolName,
+				Function: &providers.FunctionCall{
+					Name:      toolName,
+					Arguments: `{}`,
+				},
+			},
+		},
+	}, nil
+}
+
+func (m *lateFailMockProvider) GetDefaultModel() string {
+	return "mock-late-fail-model"
+}
+
+// TestAgentLoop_MaxIterationsWithTrailingErrors verifies that when the loop
+// exhausts max iterations with recent (but below-threshold) errors and no text
+// response, the user gets a detailed summary with tool call counts and errors.
+func TestAgentLoop_MaxIterationsWithTrailingErrors(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// MaxToolIterations=5 so the test is fast.
+	// Provider: 3 successful tool calls, then 2 failing ones → hits max iterations.
+	// consecutiveErrors=2 < threshold=3, so no nudge. But the summary kicks in.
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 5,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+
+	// Register a mock tool that always succeeds
+	provider := &lateFailMockProvider{
+		successCalls:    3,
+		successToolName: "mock_ok",
+		failToolName:    "nonexistent_tool",
+	}
+
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	// Register the "mock_ok" tool so those calls succeed
+	al.RegisterTool(&mockCustomToolNamed{name: "mock_ok"})
+
+	helper := testHelper{al: al}
+
+	ctx := context.Background()
+	msg := bus.InboundMessage{
+		Channel:    "test",
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		Content:    "do something",
+		SessionKey: "test-trailing-errors",
+	}
+
+	response := helper.executeAndGetResponse(t, ctx, msg)
+
+	// Should NOT be the generic default
+	if response == "I've completed processing but have no response to give." {
+		t.Error("Expected a detailed summary, got the generic default")
+	}
+
+	// Should contain tool call counts in conversational form
+	if !strings.Contains(response, "3 succeeded") {
+		t.Errorf("Expected summary to mention 3 succeeded, got: %s", response)
+	}
+	if !strings.Contains(response, "2 failed") {
+		t.Errorf("Expected summary to mention 2 failed, got: %s", response)
+	}
+
+	// Should mention the failing tool
+	if !strings.Contains(response, "nonexistent_tool") {
+		t.Errorf("Expected summary to mention nonexistent_tool, got: %s", response)
+	}
+
+	// All 5 iterations should have been used
+	if provider.callCount != 5 {
+		t.Errorf("Expected 5 LLM calls (max iterations), got %d", provider.callCount)
+	}
+}
+
+// mockCustomToolNamed is a simple mock tool with a configurable name
+type mockCustomToolNamed struct {
+	name string
+}
+
+func (m *mockCustomToolNamed) Name() string        { return m.name }
+func (m *mockCustomToolNamed) Description() string  { return "Mock tool: " + m.name }
+func (m *mockCustomToolNamed) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (m *mockCustomToolNamed) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
+	return tools.SilentResult("ok")
 }
 
 // failFirstMockProvider fails on the first N calls with a specific error

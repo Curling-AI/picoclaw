@@ -16,7 +16,8 @@ func DefaultConfig() *Config {
 				Model:               "glm-4.7",
 				MaxTokens:           8192,
 				Temperature:         nil, // nil means use provider default
-				MaxToolIterations:   20,
+				MaxToolIterations:       20,
+			ToolErrorNudgeThreshold: 4,
 				MaxHistoryMessages:            0,  // 0 = disabled, only token threshold triggers summarization
 				SummarizationThresholdPercent: 90, // summarize at 90% of context window
 				KeepLastMessages:              6,  // keep last 6 messages after summarization

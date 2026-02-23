@@ -20,8 +20,9 @@ type AgentInstance struct {
 	Model          string
 	Fallbacks      []string
 	Workspace      string
-	MaxIterations  int
-	MaxTokens      int
+	MaxIterations          int
+	ToolErrorNudgeThreshold int
+	MaxTokens              int
 	Temperature    float64
 	ContextWindow  int
 
@@ -84,6 +85,11 @@ func NewAgentInstance(
 		maxIter = 20
 	}
 
+	errorNudgeThreshold := defaults.ToolErrorNudgeThreshold
+	if errorNudgeThreshold <= 0 {
+		errorNudgeThreshold = 4
+	}
+
 	maxTokens := defaults.MaxTokens
 	if maxTokens == 0 {
 		maxTokens = 8192
@@ -117,7 +123,8 @@ func NewAgentInstance(
 		Model:          model,
 		Fallbacks:      fallbacks,
 		Workspace:      workspace,
-		MaxIterations:  maxIter,
+		MaxIterations:          maxIter,
+		ToolErrorNudgeThreshold: errorNudgeThreshold,
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
 		ContextWindow:  maxTokens,

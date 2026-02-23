@@ -466,6 +466,13 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	return finalContent, nil
 }
 
+// toolCallEntry records a single tool invocation for building failure summaries.
+type toolCallEntry struct {
+	Name    string
+	IsError bool
+	Content string // error message or truncated success content
+}
+
 // runLLMIteration executes the LLM call loop with tool handling.
 func (al *AgentLoop) runLLMIteration(
 	ctx context.Context,
@@ -475,6 +482,12 @@ func (al *AgentLoop) runLLMIteration(
 ) (string, int, error) {
 	iteration := 0
 	var finalContent string
+	consecutiveErrors := 0
+	errorNudgeThreshold := agent.ToolErrorNudgeThreshold
+	if errorNudgeThreshold <= 0 {
+		errorNudgeThreshold = 4
+	}
+	var toolCallLog []toolCallEntry
 
 	for iteration < agent.MaxIterations {
 		iteration++
@@ -717,10 +730,129 @@ func (al *AgentLoop) runLLMIteration(
 
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+
+			// Track consecutive tool errors and log all tool calls
+			if toolResult.IsError || toolResult.Err != nil {
+				consecutiveErrors++
+				errContent := contentForLLM
+				if errContent == "" && toolResult.Err != nil {
+					errContent = toolResult.Err.Error()
+				}
+				toolCallLog = append(toolCallLog, toolCallEntry{
+					Name:    tc.Name,
+					IsError: true,
+					Content: utils.Truncate(errContent, 200),
+				})
+			} else {
+				consecutiveErrors = 0
+				toolCallLog = append(toolCallLog, toolCallEntry{
+					Name:    tc.Name,
+					IsError: false,
+					Content: utils.Truncate(contentForLLM, 100),
+				})
+			}
+		}
+
+		// After processing all tool calls in this iteration,
+		// if we've hit the error threshold, handle based on channel type
+		if consecutiveErrors >= errorNudgeThreshold {
+			if !constants.IsInternalChannel(opts.Channel) {
+				// Interactive channel: break and return a summary to the user
+				finalContent = buildToolSummary(toolCallLog, "nudge")
+				logger.WarnCF("agent", "Breaking loop with tool failure summary for interactive channel",
+					map[string]any{
+						"agent_id":  agent.ID,
+						"iteration": iteration,
+						"threshold": errorNudgeThreshold,
+					})
+				break
+			}
+
+			// Internal channel: inject nudge message for the LLM
+			nudgeMsg := providers.Message{
+				Role:    "user",
+				Content: "[System] Multiple consecutive tool calls have failed. Please stop using tools and provide a direct text response to the user summarizing what you attempted and what went wrong.",
+			}
+			messages = append(messages, nudgeMsg)
+			consecutiveErrors = 0 // Reset so we only nudge once per streak
+
+			logger.WarnCF("agent", "Injected error nudge after consecutive tool failures (internal channel)",
+				map[string]any{
+					"agent_id":  agent.ID,
+					"iteration": iteration,
+					"threshold": errorNudgeThreshold,
+				})
 		}
 	}
 
+	// If we exhausted max iterations without a text response, provide a summary
+	if finalContent == "" && iteration >= agent.MaxIterations && len(toolCallLog) > 0 {
+		finalContent = buildToolSummary(toolCallLog, "max_iterations")
+	}
+
 	return finalContent, iteration, nil
+}
+
+// buildToolSummary constructs a conversational, user-facing summary from tool call history.
+// mode is either "nudge" (consecutive failures hit threshold) or "max_iterations".
+func buildToolSummary(log []toolCallEntry, mode string) string {
+	// Collect recent errors (last 5 at most)
+	var recentErrors []toolCallEntry
+	for i := len(log) - 1; i >= 0 && len(recentErrors) < 5; i-- {
+		if log[i].IsError {
+			recentErrors = append(recentErrors, log[i])
+		}
+	}
+
+	// Deduplicate by tool name, keeping the last error per tool
+	seen := map[string]bool{}
+	var uniqueErrors []toolCallEntry
+	for _, e := range recentErrors {
+		if !seen[e.Name] {
+			seen[e.Name] = true
+			uniqueErrors = append(uniqueErrors, e)
+		}
+	}
+
+	var sb strings.Builder
+
+	if mode == "nudge" {
+		sb.WriteString("I ran into repeated failures and could use your help. ")
+		if len(uniqueErrors) == 1 {
+			e := uniqueErrors[0]
+			sb.WriteString(fmt.Sprintf("The %s tool kept failing with: %s", e.Name, e.Content))
+		} else {
+			sb.WriteString("Here's what went wrong:\n\n")
+			for _, e := range uniqueErrors {
+				sb.WriteString(fmt.Sprintf("%s failed with: %s\n", e.Name, e.Content))
+			}
+		}
+	} else {
+		succeeded := 0
+		failed := 0
+		for _, e := range log {
+			if e.IsError {
+				failed++
+			} else {
+				succeeded++
+			}
+		}
+		sb.WriteString(fmt.Sprintf("I ran out of tool iterations after %d calls (%d succeeded, %d failed). ",
+			succeeded+failed, succeeded, failed))
+
+		if len(uniqueErrors) == 1 {
+			e := uniqueErrors[0]
+			sb.WriteString(fmt.Sprintf("The last error was from %s: %s", e.Name, e.Content))
+		} else if len(uniqueErrors) > 1 {
+			sb.WriteString("The last errors were:\n\n")
+			for _, e := range uniqueErrors {
+				sb.WriteString(fmt.Sprintf("%s: %s\n", e.Name, e.Content))
+			}
+		}
+	}
+
+	sb.WriteString("\n\nHow would you like me to proceed?")
+	return sb.String()
 }
 
 // updateToolContexts updates the context for tools that need channel/chatID info.
