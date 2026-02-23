@@ -790,9 +790,13 @@ func (al *AgentLoop) runLLMIteration(
 		}
 	}
 
-	// If we exhausted max iterations without a text response, provide a summary
-	if finalContent == "" && iteration >= agent.MaxIterations && len(toolCallLog) > 0 {
-		finalContent = buildToolSummary(toolCallLog, "max_iterations")
+	// If we exhausted max iterations without a text response, or stopped without a text response, provide a summary
+	if finalContent == "" && len(toolCallLog) > 0 {
+		if iteration >= agent.MaxIterations {
+			finalContent = buildToolSummary(toolCallLog, "max_iterations")
+		} else {
+			finalContent = buildToolSummary(toolCallLog, "silent")
+		}
 	}
 
 	return finalContent, iteration, nil
@@ -832,7 +836,7 @@ func buildToolSummary(log []toolCallEntry, mode string) string {
 				sb.WriteString(fmt.Sprintf("%s failed with: %s\n", e.Name, e.Content))
 			}
 		}
-	} else {
+	} else if mode == "max_iterations" {
 		succeeded := 0
 		failed := 0
 		for _, e := range log {
@@ -854,9 +858,36 @@ func buildToolSummary(log []toolCallEntry, mode string) string {
 				sb.WriteString(fmt.Sprintf("%s: %s\n", e.Name, e.Content))
 			}
 		}
+	} else if mode == "silent" {
+		succeeded := 0
+		failed := 0
+		for _, e := range log {
+			if e.IsError {
+				failed++
+			} else {
+				succeeded++
+			}
+		}
+		if failed > 0 {
+			sb.WriteString(fmt.Sprintf("I executed %d operations (%d succeeded, %d failed) but stopped without a final response. ",
+				succeeded+failed, succeeded, failed))
+			if len(uniqueErrors) == 1 {
+				e := uniqueErrors[0]
+				sb.WriteString(fmt.Sprintf("The last error was from %s: %s", e.Name, e.Content))
+			} else if len(uniqueErrors) > 1 {
+				sb.WriteString("The last errors were:\n\n")
+				for _, e := range uniqueErrors {
+					sb.WriteString(fmt.Sprintf("%s: %s\n", e.Name, e.Content))
+				}
+			}
+		} else {
+			sb.WriteString(fmt.Sprintf("I successfully executed %d operations in the background.", succeeded))
+		}
 	}
 
-	sb.WriteString("\n\nHow would you like me to proceed?")
+	if mode != "silent" || len(uniqueErrors) > 0 {
+		sb.WriteString("\n\nHow would you like me to proceed?")
+	}
 	return sb.String()
 }
 
