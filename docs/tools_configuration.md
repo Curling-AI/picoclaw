@@ -65,7 +65,7 @@ By default, PicoClaw blocks the following dangerous commands:
 - System operations: `shutdown`, `reboot`, `poweroff`
 - Command substitution: `$()`, `${}`, backticks
 - Pipe to shell: `| sh`, `| bash`
-- Privilege escalation: `sudo`, `chmod`, `chown`
+- Privilege escalation: `chmod`, `chown`
 - Process control: `pkill`, `killall`, `kill -9`
 - Remote operations: `curl | sh`, `wget | sh`, `ssh`
 - Package management: `apt`, `yum`, `dnf`, `npm install -g`, `pip install --user`

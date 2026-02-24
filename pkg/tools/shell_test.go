@@ -767,6 +767,45 @@ func TestExecTool_DenyPatternsEnabled(t *testing.T) {
 	}
 }
 
+// TestExecTool_SudoNotBlockedByDefault verifies sudo is no longer in the default deny list.
+func TestExecTool_SudoNotBlockedByDefault(t *testing.T) {
+	tool := NewExecTool("", false)
+
+	guardErr, _ := tool.guardCommand("sudo ls", "")
+	if guardErr != "" {
+		t.Errorf("expected sudo to be allowed by default, got: %s", guardErr)
+	}
+}
+
+// TestExecTool_AllowlistBypassesDenylist verifies that an allowlisted command
+// is not blocked by deny patterns (allowlist takes precedence).
+func TestExecTool_AllowlistBypassesDenylist(t *testing.T) {
+	tool := NewExecTool("", false)
+
+	// "apt install" is blocked by a default deny pattern
+	guardErr, _ := tool.guardCommand("apt install vim", "")
+	if guardErr == "" {
+		t.Fatal("expected 'apt install' to be blocked by default deny pattern")
+	}
+
+	// Now add an allow pattern that matches "apt install"
+	if err := tool.SetAllowPatterns([]string{`\bapt\s+install\b`}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same command should now be allowed because allowlist has priority
+	guardErr, _ = tool.guardCommand("apt install vim", "")
+	if guardErr != "" {
+		t.Errorf("expected allowlisted command to bypass deny patterns, got: %s", guardErr)
+	}
+
+	// A command not in the allowlist should still be blocked (allowlist mode)
+	guardErr, _ = tool.guardCommand("echo hello", "")
+	if guardErr == "" {
+		t.Error("expected command not in allowlist to be blocked in allowlist mode")
+	}
+}
+
 // TestExecTool_AllowPatternsFromConfig verifies allow patterns loaded from config.
 func TestExecTool_AllowPatternsFromConfig(t *testing.T) {
 	cfg := &config.Config{}

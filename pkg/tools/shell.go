@@ -68,7 +68,6 @@ var defaultDenyPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\$\(\s*curl\s+`),
 	regexp.MustCompile(`\$\(\s*wget\s+`),
 	regexp.MustCompile(`\$\(\s*which\s+`),
-	regexp.MustCompile(`\bsudo\b`),
 	regexp.MustCompile(`\bchmod\s+[0-7]{3,4}\b`),
 	regexp.MustCompile(`\bchown\b`),
 	regexp.MustCompile(`\bpkill\b`),
@@ -294,6 +293,24 @@ func (t *ExecTool) guardCommand(command, cwd string) (string, string) {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
 
+	// Check allowlist first: if an allowlist is configured and the command
+	// matches, skip deny-pattern checks entirely (allowlist has priority).
+	if len(t.allowPatterns) > 0 {
+		allowed := false
+		for _, pattern := range t.allowPatterns {
+			if pattern.MatchString(lower) {
+				allowed = true
+				break
+			}
+		}
+		if allowed {
+			// Explicitly allowlisted — bypass deny patterns
+			goto postDeny
+		}
+		// Allowlist is configured but command didn't match — block
+		return "Command blocked by safety guard (not in allowlist)", "(allowlist mode)"
+	}
+
 	if t.denyEnabled {
 		for _, pattern := range t.defaultDenyPatterns {
 			if pattern.MatchString(lower) {
@@ -307,18 +324,7 @@ func (t *ExecTool) guardCommand(command, cwd string) (string, string) {
 		}
 	}
 
-	if len(t.allowPatterns) > 0 {
-		allowed := false
-		for _, pattern := range t.allowPatterns {
-			if pattern.MatchString(lower) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return "Command blocked by safety guard (not in allowlist)", "(allowlist mode)"
-		}
-	}
+postDeny:
 
 	if t.restrictToWorkspace {
 		if strings.Contains(cmd, "..\\") || strings.Contains(cmd, "../") {
