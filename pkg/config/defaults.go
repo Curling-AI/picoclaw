@@ -17,7 +17,7 @@ func DefaultConfig() *Config {
 				MaxTokens:           8192,
 			ContextWindow:       131072, // 128K tokens — conservative default for most modern models
 				Temperature:         nil, // nil means use provider default
-				MaxToolIterations:       20,
+				MaxToolIterations:       200,
 			ToolErrorNudgeThreshold: 4,
 				MaxHistoryMessages:            0,  // 0 = disabled, only token threshold triggers summarization
 				SummarizationThresholdPercent: 90, // summarize at 90% of context window

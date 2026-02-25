@@ -89,7 +89,7 @@ func NewAgentInstance(
 
 	maxIter := defaults.MaxToolIterations
 	if maxIter == 0 {
-		maxIter = 20
+		maxIter = 200
 	}
 
 	errorNudgeThreshold := defaults.ToolErrorNudgeThreshold
