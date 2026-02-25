@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -276,6 +277,37 @@ func TestResolveRoute_DefaultAgentSelection(t *testing.T) {
 
 	if route.AgentID != "beta" {
 		t.Errorf("AgentID = %q, want 'beta' (marked as default)", route.AgentID)
+	}
+}
+
+func TestResolveRoute_ThreadScoped(t *testing.T) {
+	cfg := testConfig(nil, nil)
+	cfg.Session.ThreadScope = "per-thread"
+	r := NewRouteResolver(cfg)
+
+	route := r.ResolveRoute(RouteInput{
+		Channel:  "slack",
+		Peer:     &RoutePeer{Kind: "direct", ID: "user1"},
+		ThreadID: "ts.12345",
+	})
+
+	if !strings.Contains(route.SessionKey, "thread:ts.12345") {
+		t.Errorf("SessionKey = %q, expected to contain 'thread:ts.12345'", route.SessionKey)
+	}
+}
+
+func TestResolveRoute_ThreadScoped_NoThreadID(t *testing.T) {
+	cfg := testConfig(nil, nil)
+	cfg.Session.ThreadScope = "per-thread"
+	r := NewRouteResolver(cfg)
+
+	route := r.ResolveRoute(RouteInput{
+		Channel: "slack",
+		Peer:    &RoutePeer{Kind: "direct", ID: "user1"},
+	})
+
+	if strings.Contains(route.SessionKey, "thread:") {
+		t.Errorf("SessionKey = %q, should not contain 'thread:' without ThreadID", route.SessionKey)
 	}
 }
 

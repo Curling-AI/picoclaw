@@ -77,7 +77,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	}
 
 	// Only include session if not empty
-	if c.Session.DMScope != "" || len(c.Session.IdentityLinks) > 0 {
+	if c.Session.DMScope != "" || len(c.Session.IdentityLinks) > 0 || c.Session.ThreadScope != "" || c.Session.ResetPolicy != nil {
 		aux.Session = &c.Session
 	}
 
@@ -164,6 +164,15 @@ type AgentBinding struct {
 type SessionConfig struct {
 	DMScope       string              `json:"dm_scope,omitempty"`
 	IdentityLinks map[string][]string `json:"identity_links,omitempty"`
+	ThreadScope   string              `json:"thread_scope,omitempty"`  // "", "per-thread"
+	ResetPolicy   *ResetPolicyConfig  `json:"reset_policy,omitempty"`
+}
+
+// ResetPolicyConfig controls automatic session reset behavior.
+type ResetPolicyConfig struct {
+	DailyResetHour *int   `json:"daily_reset_hour,omitempty"` // 0-23, nil=disabled
+	IdleExpiryMins int    `json:"idle_expiry_mins,omitempty"` // 0=disabled
+	Timezone       string `json:"timezone,omitempty"`         // default "UTC"
 }
 
 type AgentDefaults struct {
@@ -188,6 +197,8 @@ type AgentDefaults struct {
 	SummarizationThresholdPercent int      `json:"summarization_threshold_percent,omitempty"   env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZATION_THRESHOLD_PERCENT"`
 	// KeepLastMessages: number of recent messages to keep after summarization (default 6).
 	KeepLastMessages              int      `json:"keep_last_messages,omitempty"                env:"PICOCLAW_AGENTS_DEFAULTS_KEEP_LAST_MESSAGES"`
+	// ToolResultMaxChars: max chars for tool results before pruning (default 4000, 0 = use default).
+	ToolResultMaxChars            int      `json:"tool_result_max_chars,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_TOOL_RESULT_MAX_CHARS"`
 }
 
 type ChannelsConfig struct {

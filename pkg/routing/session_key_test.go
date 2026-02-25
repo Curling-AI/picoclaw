@@ -143,6 +143,68 @@ func TestParseAgentSessionKey_Invalid(t *testing.T) {
 	}
 }
 
+func TestBuildAgentPeerSessionKey_ThreadScope_PerThread(t *testing.T) {
+	got := BuildAgentPeerSessionKey(SessionKeyParams{
+		AgentID:     "main",
+		Channel:     "slack",
+		Peer:        &RoutePeer{Kind: "direct", ID: "user1"},
+		DMScope:     DMScopePerPeer,
+		ThreadScope: "per-thread",
+		ThreadID:    "1234567890.123456",
+	})
+	want := "agent:main:direct:user1:thread:1234567890.123456"
+	if got != want {
+		t.Errorf("ThreadScope per-thread = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAgentPeerSessionKey_ThreadScope_Empty(t *testing.T) {
+	got := BuildAgentPeerSessionKey(SessionKeyParams{
+		AgentID:     "main",
+		Channel:     "slack",
+		Peer:        &RoutePeer{Kind: "direct", ID: "user1"},
+		DMScope:     DMScopePerPeer,
+		ThreadScope: "",
+		ThreadID:    "1234567890.123456",
+	})
+	// Without per-thread scope, thread ID is ignored
+	want := "agent:main:direct:user1"
+	if got != want {
+		t.Errorf("ThreadScope empty = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAgentPeerSessionKey_ThreadScope_NoThreadID(t *testing.T) {
+	got := BuildAgentPeerSessionKey(SessionKeyParams{
+		AgentID:     "main",
+		Channel:     "slack",
+		Peer:        &RoutePeer{Kind: "direct", ID: "user1"},
+		DMScope:     DMScopePerPeer,
+		ThreadScope: "per-thread",
+		ThreadID:    "",
+	})
+	// Without thread ID, falls back to base key
+	want := "agent:main:direct:user1"
+	if got != want {
+		t.Errorf("ThreadScope no threadID = %q, want %q", got, want)
+	}
+}
+
+func TestBuildAgentPeerSessionKey_ThreadScope_GroupPeer(t *testing.T) {
+	got := BuildAgentPeerSessionKey(SessionKeyParams{
+		AgentID:     "main",
+		Channel:     "slack",
+		Peer:        &RoutePeer{Kind: "channel", ID: "C123"},
+		DMScope:     DMScopePerPeer,
+		ThreadScope: "per-thread",
+		ThreadID:    "ts.999",
+	})
+	want := "agent:main:slack:channel:c123:thread:ts.999"
+	if got != want {
+		t.Errorf("ThreadScope group peer = %q, want %q", got, want)
+	}
+}
+
 func TestIsSubagentSessionKey(t *testing.T) {
 	tests := []struct {
 		input string

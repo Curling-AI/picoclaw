@@ -23,6 +23,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -30,14 +31,15 @@ import (
 )
 
 type AgentLoop struct {
-	bus            *bus.MessageBus
-	cfg            *config.Config
-	registry       *AgentRegistry
-	state          *state.Manager
-	running        atomic.Bool
-	summarizing    sync.Map
-	fallback       *providers.FallbackChain
-	channelManager *channels.Manager
+	bus                *bus.MessageBus
+	cfg                *config.Config
+	registry           *AgentRegistry
+	state              *state.Manager
+	running            atomic.Bool
+	summarizing        sync.Map
+	fallback           *providers.FallbackChain
+	channelManager     *channels.Manager
+	lifecycleManagers  map[string]*session.LifecycleManager // agentID -> lifecycle
 }
 
 // processOptions configures how a message is processed
@@ -74,13 +76,24 @@ func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provid
 		stateManager = state.NewManager(defaultAgent.Workspace)
 	}
 
+	// Initialize lifecycle managers for each agent
+	lifecycleManagers := make(map[string]*session.LifecycleManager)
+	for _, agentID := range registry.ListAgentIDs() {
+		if agent, ok := registry.GetAgent(agentID); ok {
+			lifecycleManagers[agentID] = session.NewLifecycleManager(
+				agent.Sessions, cfg.Session.ResetPolicy,
+			)
+		}
+	}
+
 	return &AgentLoop{
-		bus:         msgBus,
-		cfg:         cfg,
-		registry:    registry,
-		state:       stateManager,
-		summarizing: sync.Map{},
-		fallback:    fallbackChain,
+		bus:               msgBus,
+		cfg:               cfg,
+		registry:          registry,
+		state:             stateManager,
+		summarizing:       sync.Map{},
+		fallback:          fallbackChain,
+		lifecycleManagers: lifecycleManagers,
 	}
 }
 
@@ -304,6 +317,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		ParentPeer: extractParentPeer(msg),
 		GuildID:    msg.Metadata["guild_id"],
 		TeamID:     msg.Metadata["team_id"],
+		ThreadID:   msg.Metadata["thread_ts"],
 	})
 
 	agent, ok := al.registry.GetAgent(route.AgentID)
@@ -407,6 +421,17 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	// 1. Update tool contexts
 	al.updateToolContexts(agent, opts.Channel, opts.ChatID)
 
+	// 1.5. Check lifecycle reset before loading history
+	if lm, ok := al.lifecycleManagers[agent.ID]; ok && !opts.NoHistory {
+		if shouldReset, reason := lm.ShouldReset(opts.SessionKey); shouldReset {
+			logger.InfoCF("agent", "Auto-resetting session", map[string]any{
+				"session_key": opts.SessionKey,
+				"reason":      reason,
+			})
+			lm.Reset(opts.SessionKey, reason)
+		}
+	}
+
 	// 2. Build messages (skip history for heartbeat)
 	var history []providers.Message
 	var summary string
@@ -426,8 +451,13 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 	// 3. Save user message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "user", opts.UserMessage)
 
-	// 4. Run LLM iteration loop
-	finalContent, iteration, err := al.runLLMIteration(ctx, agent, messages, opts)
+	// 3.5. Apply pruning before LLM call (prune oversized tool results)
+	prunedMessages := PruneMessages(messages, PruningConfig{
+		MaxToolResultChars: agent.ToolResultMaxChars,
+	})
+
+	// 4. Run LLM iteration loop (use pruned messages for LLM, original for history)
+	finalContent, iteration, err := al.runLLMIteration(ctx, agent, prunedMessages, opts)
 	if err != nil {
 		return "", err
 	}
@@ -575,7 +605,7 @@ func (al *AgentLoop) runLLMIteration(
 				strings.Contains(errMsg, "length")
 
 			if isContextError && retry < maxRetries {
-				logger.WarnCF("agent", "Context window error detected, attempting compression", map[string]any{
+				logger.WarnCF("agent", "Context window error detected, attempting compaction", map[string]any{
 					"error": err.Error(),
 					"retry": retry,
 				})
@@ -588,13 +618,23 @@ func (al *AgentLoop) runLLMIteration(
 					})
 				}
 
-				al.forceCompression(agent, opts.SessionKey)
+				// Try CompactSession first; fall back to forceCompression if it can't help
+				compactCtx, compactCancel := context.WithTimeout(ctx, 60*time.Second)
+				if compactErr := al.CompactSession(compactCtx, agent, opts.SessionKey); compactErr != nil {
+					al.forceCompression(agent, opts.SessionKey)
+				}
+				compactCancel()
+
 				newHistory := agent.Sessions.GetHistory(opts.SessionKey)
 				newSummary := agent.Sessions.GetSummary(opts.SessionKey)
 				messages = agent.ContextBuilder.BuildMessages(
 					newHistory, newSummary, "",
 					nil, opts.Channel, opts.ChatID,
 				)
+				// Re-apply pruning after compaction
+				messages = PruneMessages(messages, PruningConfig{
+					MaxToolResultChars: agent.ToolResultMaxChars,
+				})
 				continue
 			}
 			break
@@ -936,7 +976,9 @@ func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, c
 						Content: "Memory threshold reached. Optimizing conversation history...",
 					})
 				}
-				al.summarizeSession(agent, sessionKey)
+				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+				defer cancel()
+				al.CompactSession(ctx, agent, sessionKey)
 			}()
 		}
 	}
@@ -1264,6 +1306,88 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 		default:
 			return fmt.Sprintf("Unknown list target: %s", args[0]), true
 		}
+
+	case "/compact":
+		// Trigger compaction synchronously
+		route := al.registry.ResolveRoute(routing.RouteInput{
+			Channel:   msg.Channel,
+			AccountID: msg.Metadata["account_id"],
+			Peer:      extractPeer(msg),
+			ThreadID:  msg.Metadata["thread_ts"],
+		})
+		agent, ok := al.registry.GetAgent(route.AgentID)
+		if !ok {
+			agent = al.registry.GetDefaultAgent()
+		}
+		sessionKey := route.SessionKey
+		if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+			sessionKey = msg.SessionKey
+		}
+		historyBefore := agent.Sessions.GetHistory(sessionKey)
+		tokensBefore := al.estimateTokens(historyBefore)
+		compactCtx, compactCancel := context.WithTimeout(ctx, 120*time.Second)
+		err := al.CompactSession(compactCtx, agent, sessionKey)
+		compactCancel()
+		if err != nil {
+			return fmt.Sprintf("Compaction failed: %v", err), true
+		}
+		historyAfter := agent.Sessions.GetHistory(sessionKey)
+		tokensAfter := al.estimateTokens(historyAfter)
+		return fmt.Sprintf("Compaction complete. Messages: %d -> %d, Tokens (est): %d -> %d",
+			len(historyBefore), len(historyAfter), tokensBefore, tokensAfter), true
+
+	case "/status":
+		// Show session status
+		route := al.registry.ResolveRoute(routing.RouteInput{
+			Channel:   msg.Channel,
+			AccountID: msg.Metadata["account_id"],
+			Peer:      extractPeer(msg),
+			ThreadID:  msg.Metadata["thread_ts"],
+		})
+		agent, ok := al.registry.GetAgent(route.AgentID)
+		if !ok {
+			agent = al.registry.GetDefaultAgent()
+		}
+		sessionKey := route.SessionKey
+		if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+			sessionKey = msg.SessionKey
+		}
+		history := agent.Sessions.GetHistory(sessionKey)
+		tokenEstimate := al.estimateTokens(history)
+		contextPct := 0
+		if agent.ContextWindow > 0 {
+			contextPct = tokenEstimate * 100 / agent.ContextWindow
+		}
+		summaryStatus := "none"
+		if s := agent.Sessions.GetSummary(sessionKey); s != "" {
+			summaryStatus = fmt.Sprintf("%d chars", len(s))
+		}
+		return fmt.Sprintf("Session: %s\nAgent: %s\nModel: %s\nMessages: %d\nTokens (est): %d / %d (%d%%)\nSummary: %s",
+			sessionKey, agent.ID, agent.Model, len(history),
+			tokenEstimate, agent.ContextWindow, contextPct, summaryStatus), true
+
+	case "/new", "/reset":
+		// Reset the current session
+		route := al.registry.ResolveRoute(routing.RouteInput{
+			Channel:   msg.Channel,
+			AccountID: msg.Metadata["account_id"],
+			Peer:      extractPeer(msg),
+			ThreadID:  msg.Metadata["thread_ts"],
+		})
+		agent, ok := al.registry.GetAgent(route.AgentID)
+		if !ok {
+			agent = al.registry.GetDefaultAgent()
+		}
+		sessionKey := route.SessionKey
+		if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+			sessionKey = msg.SessionKey
+		}
+		if lm, ok := al.lifecycleManagers[agent.ID]; ok {
+			lm.Reset(sessionKey, "user command: "+cmd)
+		} else {
+			agent.Sessions.ClearSession(sessionKey)
+		}
+		return "Session reset. Starting fresh.", true
 
 	case "/switch":
 		if len(args) < 3 || args[1] != "to" {

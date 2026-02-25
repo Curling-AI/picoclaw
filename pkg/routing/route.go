@@ -14,6 +14,7 @@ type RouteInput struct {
 	ParentPeer *RoutePeer
 	GuildID    string
 	TeamID     string
+	ThreadID   string // thread timestamp or ID for per-thread session scoping
 }
 
 // ResolvedRoute is the result of agent routing.
@@ -52,6 +53,9 @@ func (r *RouteResolver) ResolveRoute(input RouteInput) ResolvedRoute {
 
 	bindings := r.filterBindings(channel, accountID)
 
+	threadScope := r.cfg.Session.ThreadScope
+	threadID := input.ThreadID
+
 	choose := func(agentID string, matchedBy string) ResolvedRoute {
 		resolvedAgentID := r.pickAgentID(agentID)
 		sessionKey := strings.ToLower(BuildAgentPeerSessionKey(SessionKeyParams{
@@ -61,6 +65,8 @@ func (r *RouteResolver) ResolveRoute(input RouteInput) ResolvedRoute {
 			Peer:          peer,
 			DMScope:       dmScope,
 			IdentityLinks: identityLinks,
+			ThreadScope:   threadScope,
+			ThreadID:      threadID,
 		}))
 		mainSessionKey := strings.ToLower(BuildAgentMainSessionKey(resolvedAgentID))
 		return ResolvedRoute{

@@ -31,6 +31,9 @@ type AgentInstance struct {
 	SummarizationThresholdPercent int // percentage of ContextWindow (default 90)
 	KeepLastMessages              int // messages to keep after summarization (default 6)
 
+	// Context pruning
+	ToolResultMaxChars int // max chars for tool results before pruning (default 4000; 0 = use default)
+
 	Provider       providers.LLMProvider
 	Sessions       *session.SessionManager
 	ContextBuilder *ContextBuilder
@@ -120,6 +123,12 @@ func NewAgentInstance(
 		keepLast = 6
 	}
 
+	// Tool result pruning
+	toolResultMaxChars := defaults.ToolResultMaxChars
+	if toolResultMaxChars <= 0 {
+		toolResultMaxChars = 4000
+	}
+
 	// Resolve fallback candidates
 	modelCfg := providers.ModelConfig{
 		Primary:   model,
@@ -177,6 +186,7 @@ func NewAgentInstance(
 		MaxHistoryMessages:            defaults.MaxHistoryMessages,
 		SummarizationThresholdPercent: summarizationPct,
 		KeepLastMessages:              keepLast,
+		ToolResultMaxChars:            toolResultMaxChars,
 		Provider:       provider,
 		Sessions:       sessionsManager,
 		ContextBuilder: contextBuilder,

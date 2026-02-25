@@ -20,23 +20,61 @@ type Session struct {
 }
 
 type SessionManager struct {
-	sessions map[string]*Session
-	mu       sync.RWMutex
-	storage  string
+	sessions    map[string]*Session
+	mu          sync.RWMutex
+	storage     string
+	transcripts map[string]*TranscriptWriter
+	records     *RecordStore
 }
 
 func NewSessionManager(storage string) *SessionManager {
 	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		storage:  storage,
+		sessions:    make(map[string]*Session),
+		storage:     storage,
+		transcripts: make(map[string]*TranscriptWriter),
 	}
 
 	if storage != "" {
 		os.MkdirAll(storage, 0o755)
+		sm.records = NewRecordStore(storage)
 		sm.loadSessions()
 	}
 
 	return sm
+}
+
+// GetRecordStore returns the record store for external access.
+func (sm *SessionManager) GetRecordStore() *RecordStore {
+	return sm.records
+}
+
+// GetTranscriptWriter returns the transcript writer for a session key,
+// creating one if it doesn't exist.
+func (sm *SessionManager) GetTranscriptWriter(key string) *TranscriptWriter {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if tw, ok := sm.transcripts[key]; ok {
+		return tw
+	}
+	tw := sm.ensureTranscriptWriter(key)
+	return tw
+}
+
+// ensureTranscriptWriter returns or creates a TranscriptWriter for the key.
+// Caller must hold sm.mu.
+func (sm *SessionManager) ensureTranscriptWriter(key string) *TranscriptWriter {
+	if tw, ok := sm.transcripts[key]; ok {
+		return tw
+	}
+	if sm.storage == "" {
+		return nil
+	}
+	filename := sanitizeFilename(key)
+	path := filepath.Join(sm.storage, filename+".jsonl")
+	tw := NewTranscriptWriter(path)
+	sm.transcripts[key] = tw
+	return tw
 }
 
 func (sm *SessionManager) GetOrCreate(key string) *Session {
@@ -55,6 +93,11 @@ func (sm *SessionManager) GetOrCreate(key string) *Session {
 		Updated:  time.Now(),
 	}
 	sm.sessions[key] = session
+
+	// Ensure record exists
+	if sm.records != nil {
+		sm.records.GetOrCreate(key, "")
+	}
 
 	return session
 }
@@ -84,6 +127,19 @@ func (sm *SessionManager) AddFullMessage(sessionKey string, msg providers.Messag
 
 	session.Messages = append(session.Messages, msg)
 	session.Updated = time.Now()
+
+	// Append to JSONL transcript
+	if tw := sm.ensureTranscriptWriter(sessionKey); tw != nil {
+		tw.Append(TranscriptEntry{Kind: "message", Message: &msg})
+	}
+
+	// Update record store message count
+	if sm.records != nil {
+		sm.records.GetOrCreate(sessionKey, "")
+		sm.records.Update(sessionKey, func(r *SessionRecord) {
+			r.MessageCount = len(session.Messages)
+		})
+	}
 }
 
 func (sm *SessionManager) GetHistory(key string) []providers.Message {
@@ -120,6 +176,18 @@ func (sm *SessionManager) SetSummary(key string, summary string) {
 		session.Summary = summary
 		session.Updated = time.Now()
 	}
+
+	// Append summary entry to transcript
+	if tw := sm.ensureTranscriptWriter(key); tw != nil {
+		tw.Append(TranscriptEntry{Kind: "summary", Summary: summary})
+	}
+
+	// Update record store
+	if sm.records != nil {
+		sm.records.Update(key, func(r *SessionRecord) {
+			r.HasSummary = summary != ""
+		})
+	}
 }
 
 func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
@@ -141,8 +209,21 @@ func (sm *SessionManager) TruncateHistory(key string, keepLast int) {
 		return
 	}
 
+	droppedCount := len(session.Messages) - keepLast
 	session.Messages = session.Messages[len(session.Messages)-keepLast:]
 	session.Updated = time.Now()
+
+	// Append meta entry recording truncation
+	if tw := sm.ensureTranscriptWriter(key); tw != nil {
+		tw.Append(TranscriptEntry{
+			Kind: "meta",
+			Meta: map[string]any{
+				"action":  "truncate",
+				"kept":    keepLast,
+				"dropped": droppedCount,
+			},
+		})
+	}
 }
 
 // sanitizeFilename converts a session key into a cross-platform safe filename.
@@ -162,46 +243,17 @@ func (sm *SessionManager) Save(key string) error {
 	filename := sanitizeFilename(key)
 
 	// filepath.IsLocal rejects empty names, "..", absolute paths, and
-	// OS-reserved device names (NUL, COM1 … on Windows).
+	// OS-reserved device names (NUL, COM1 ... on Windows).
 	// The extra checks reject "." and any directory separators so that
 	// the session file is always written directly inside sm.storage.
 	if filename == "." || !filepath.IsLocal(filename) || strings.ContainsAny(filename, `/\`) {
 		return os.ErrInvalid
 	}
 
-	// Snapshot under read lock, then perform slow file I/O after unlock.
-	sm.mu.RLock()
-	stored, ok := sm.sessions[key]
-	if !ok {
-		sm.mu.RUnlock()
-		return nil
-	}
-
-	snapshot := Session{
-		Key:     stored.Key,
-		Summary: stored.Summary,
-		Created: stored.Created,
-		Updated: stored.Updated,
-	}
-	if len(stored.Messages) > 0 {
-		snapshot.Messages = make([]providers.Message, len(stored.Messages))
-		copy(snapshot.Messages, stored.Messages)
-	} else {
-		snapshot.Messages = []providers.Message{}
-	}
-	sm.mu.RUnlock()
-
-	data, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	sessionPath := filepath.Join(sm.storage, filename+".json")
-
-	// Write directly to target file. S3 Mountpoint and similar
-	// filesystems do not support CreateTemp/Rename patterns.
-	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
-		return err
+	// JSONL transcript is append-only (already persisted on each AddFullMessage).
+	// Save only updates the record store index.
+	if sm.records != nil {
+		return sm.records.Save()
 	}
 	return nil
 }
@@ -212,30 +264,176 @@ func (sm *SessionManager) loadSessions() error {
 		return err
 	}
 
+	// Build set of JSONL files for priority check
+	jsonlFiles := make(map[string]bool)
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+		if filepath.Ext(file.Name()) == ".jsonl" {
+			base := strings.TrimSuffix(file.Name(), ".jsonl")
+			jsonlFiles[base] = true
+		}
+	}
+
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
 
-		if filepath.Ext(file.Name()) != ".json" {
-			continue
-		}
+		ext := filepath.Ext(file.Name())
+		base := strings.TrimSuffix(file.Name(), ext)
 
-		sessionPath := filepath.Join(sm.storage, file.Name())
-		data, err := os.ReadFile(sessionPath)
-		if err != nil {
-			continue
-		}
+		switch ext {
+		case ".jsonl":
+			sm.loadJSONL(file.Name())
 
-		var session Session
-		if err := json.Unmarshal(data, &session); err != nil {
-			continue
+		case ".json":
+			// Skip if already migrated or if the index file
+			if strings.HasSuffix(file.Name(), ".migrated") {
+				continue
+			}
+			if file.Name() == "sessions_index.json" {
+				continue
+			}
+			// If a .jsonl already exists for this base, skip the .json
+			if jsonlFiles[base] {
+				continue
+			}
+			// Auto-migrate: read JSON, write JSONL, rename .json -> .json.migrated
+			sm.migrateJSON(file.Name())
 		}
-
-		sm.sessions[session.Key] = &session
 	}
 
 	return nil
+}
+
+// loadJSONL loads a JSONL transcript file into in-memory session.
+func (sm *SessionManager) loadJSONL(filename string) {
+	path := filepath.Join(sm.storage, filename)
+	tr := NewTranscriptReader(path)
+	messages, summary, err := tr.ReadMessages()
+	if err != nil {
+		return
+	}
+
+	entries, _ := tr.ReadAll()
+	var maxSeq int64
+	for _, e := range entries {
+		if e.Seq > maxSeq {
+			maxSeq = e.Seq
+		}
+	}
+
+	// Derive session key from filename (reverse sanitizeFilename is lossy,
+	// so we also check entries for the original key from message metadata).
+	// For JSONL files we use the sanitized name as-is since the key is embedded in records.
+	base := strings.TrimSuffix(filename, ".jsonl")
+	// Attempt to find the real key from the record store
+	sessionKey := sm.findSessionKeyForBase(base)
+	if sessionKey == "" {
+		// Fallback: use base as key (works for simple keys)
+		sessionKey = base
+	}
+
+	session := &Session{
+		Key:      sessionKey,
+		Messages: messages,
+		Summary:  summary,
+		Created:  time.Now(),
+		Updated:  time.Now(),
+	}
+	if len(entries) > 0 {
+		session.Created = entries[0].Timestamp
+		session.Updated = entries[len(entries)-1].Timestamp
+	}
+
+	sm.sessions[sessionKey] = session
+
+	// Set up transcript writer with correct sequence
+	tw := NewTranscriptWriter(path)
+	tw.SetSeq(maxSeq)
+	sm.transcripts[sessionKey] = tw
+
+	// Update record store
+	if sm.records != nil {
+		rec := sm.records.GetOrCreate(sessionKey, "")
+		rec.MessageCount = len(messages)
+		rec.HasSummary = summary != ""
+		rec.TranscriptFile = filename
+		if len(entries) > 0 {
+			rec.Created = entries[0].Timestamp
+			rec.Updated = entries[len(entries)-1].Timestamp
+		}
+	}
+}
+
+// migrateJSON reads a legacy .json session file and converts it to JSONL format.
+func (sm *SessionManager) migrateJSON(filename string) {
+	jsonPath := filepath.Join(sm.storage, filename)
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		return
+	}
+
+	var session Session
+	if err := json.Unmarshal(data, &session); err != nil {
+		return
+	}
+
+	// Write each message as a JSONL entry
+	base := strings.TrimSuffix(filename, ".json")
+	jsonlPath := filepath.Join(sm.storage, base+".jsonl")
+	tw := NewTranscriptWriter(jsonlPath)
+
+	for _, msg := range session.Messages {
+		msgCopy := msg
+		tw.Append(TranscriptEntry{
+			Kind:      "message",
+			Message:   &msgCopy,
+			Timestamp: session.Updated,
+		})
+	}
+
+	if session.Summary != "" {
+		tw.Append(TranscriptEntry{
+			Kind:      "summary",
+			Summary:   session.Summary,
+			Timestamp: session.Updated,
+		})
+	}
+
+	// Store in-memory
+	sm.sessions[session.Key] = &session
+	sm.transcripts[session.Key] = tw
+
+	// Update record store
+	if sm.records != nil {
+		rec := sm.records.GetOrCreate(session.Key, "")
+		rec.MessageCount = len(session.Messages)
+		rec.HasSummary = session.Summary != ""
+		rec.TranscriptFile = base + ".jsonl"
+		rec.Created = session.Created
+		rec.Updated = session.Updated
+	}
+
+	// Rename .json -> .json.migrated
+	os.Rename(jsonPath, jsonPath+".migrated")
+}
+
+// findSessionKeyForBase looks up the record store for a session whose transcript
+// file matches the given base name.
+func (sm *SessionManager) findSessionKeyForBase(base string) string {
+	if sm.records == nil {
+		return ""
+	}
+	expectedFile := base + ".jsonl"
+	for _, rec := range sm.records.List() {
+		if rec.TranscriptFile == expectedFile {
+			return rec.SessionKey
+		}
+	}
+	return ""
 }
 
 // SetHistory updates the messages of a session.
@@ -252,4 +450,30 @@ func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
 		session.Messages = msgs
 		session.Updated = time.Now()
 	}
+}
+
+// ClearSession resets a session's in-memory messages and summary.
+func (sm *SessionManager) ClearSession(key string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		return
+	}
+	session.Messages = []providers.Message{}
+	session.Summary = ""
+	session.Updated = time.Now()
+}
+
+// GetSession returns the session object for the given key, or nil if not found.
+func (sm *SessionManager) GetSession(key string) *Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		return nil
+	}
+	return session
 }

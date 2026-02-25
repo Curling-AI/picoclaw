@@ -29,6 +29,8 @@ type SessionKeyParams struct {
 	Peer          *RoutePeer
 	DMScope       DMScope
 	IdentityLinks map[string][]string
+	ThreadScope   string // "", "per-thread"
+	ThreadID      string // thread timestamp or ID
 }
 
 // ParsedSessionKey is the result of parsing an agent-scoped session key.
@@ -75,16 +77,19 @@ func BuildAgentPeerSessionKey(params SessionKeyParams) string {
 			if peerID != "" {
 				channel := normalizeChannel(params.Channel)
 				accountID := NormalizeAccountID(params.AccountID)
-				return fmt.Sprintf("agent:%s:%s:%s:direct:%s", agentID, channel, accountID, peerID)
+				key := fmt.Sprintf("agent:%s:%s:%s:direct:%s", agentID, channel, accountID, peerID)
+				return appendThreadScope(key, params.ThreadScope, params.ThreadID)
 			}
 		case DMScopePerChannelPeer:
 			if peerID != "" {
 				channel := normalizeChannel(params.Channel)
-				return fmt.Sprintf("agent:%s:%s:direct:%s", agentID, channel, peerID)
+				key := fmt.Sprintf("agent:%s:%s:direct:%s", agentID, channel, peerID)
+				return appendThreadScope(key, params.ThreadScope, params.ThreadID)
 			}
 		case DMScopePerPeer:
 			if peerID != "" {
-				return fmt.Sprintf("agent:%s:direct:%s", agentID, peerID)
+				key := fmt.Sprintf("agent:%s:direct:%s", agentID, peerID)
+				return appendThreadScope(key, params.ThreadScope, params.ThreadID)
 			}
 		}
 		return BuildAgentMainSessionKey(agentID)
@@ -96,7 +101,16 @@ func BuildAgentPeerSessionKey(params SessionKeyParams) string {
 	if peerID == "" {
 		peerID = "unknown"
 	}
-	return fmt.Sprintf("agent:%s:%s:%s:%s", agentID, channel, peerKind, peerID)
+	key := fmt.Sprintf("agent:%s:%s:%s:%s", agentID, channel, peerKind, peerID)
+	return appendThreadScope(key, params.ThreadScope, params.ThreadID)
+}
+
+// appendThreadScope appends a thread segment to a session key if per-thread scoping is enabled.
+func appendThreadScope(key, threadScope, threadID string) string {
+	if threadScope == "per-thread" && strings.TrimSpace(threadID) != "" {
+		return fmt.Sprintf("%s:thread:%s", key, strings.TrimSpace(threadID))
+	}
+	return key
 }
 
 // ParseAgentSessionKey extracts agentId and rest from "agent:<agentId>:<rest>".

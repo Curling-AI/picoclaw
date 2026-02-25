@@ -6,7 +6,9 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-type mockProvider struct{}
+type mockProvider struct {
+	response string // configurable response; defaults to "Mock response"
+}
 
 func (m *mockProvider) Chat(
 	ctx context.Context,
@@ -15,8 +17,12 @@ func (m *mockProvider) Chat(
 	model string,
 	opts map[string]any,
 ) (*providers.LLMResponse, error) {
+	content := m.response
+	if content == "" {
+		content = "Mock response"
+	}
 	return &providers.LLMResponse{
-		Content:   "Mock response",
+		Content:   content,
 		ToolCalls: []providers.ToolCall{},
 	}, nil
 }
