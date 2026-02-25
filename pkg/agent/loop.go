@@ -40,6 +40,7 @@ type AgentLoop struct {
 	fallback           *providers.FallbackChain
 	channelManager     *channels.Manager
 	lifecycleManagers  map[string]*session.LifecycleManager // agentID -> lifecycle
+	activeRuns         sync.Map // sessionKey -> chan struct{} (stop signal)
 }
 
 // processOptions configures how a message is processed
@@ -179,6 +180,20 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			msg, ok := al.bus.ConsumeInbound(ctx)
 			if !ok {
 				continue
+			}
+
+			// Check if this session has an active run and the message is a stop signal
+			sessionKey := al.resolveSessionKey(msg)
+			if stopCh, ok := al.activeRuns.Load(sessionKey); ok {
+				if isStopMessage(msg.Content) {
+					close(stopCh.(chan struct{}))
+					al.activeRuns.Delete(sessionKey)
+					logger.InfoCF("agent", "User stop signal received", map[string]any{
+						"session_key": sessionKey,
+						"content":     msg.Content,
+					})
+					continue
+				}
 			}
 
 			response, err := al.processMessage(ctx, msg)
@@ -463,8 +478,14 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		runCtx, runCancel = context.WithTimeout(ctx, time.Duration(agent.TimeoutSeconds)*time.Second)
 		defer runCancel()
 	}
+
+	// Register stop channel for this session so Run() can signal cancellation
+	stopCh := make(chan struct{})
+	al.activeRuns.Store(opts.SessionKey, stopCh)
+	defer al.activeRuns.Delete(opts.SessionKey)
+
 	startTime := time.Now()
-	finalContent, iteration, toolLog, err := al.runLLMIteration(runCtx, agent, prunedMessages, opts)
+	finalContent, iteration, toolLog, err := al.runLLMIteration(runCtx, agent, prunedMessages, opts, stopCh)
 	if err != nil && runCtx.Err() == context.DeadlineExceeded {
 		// Timeout hit — produce a summary instead of returning an error
 		finalContent = buildTimeoutSummary(toolLog, "", time.Since(startTime), VerbosityLevel(agent.VerbosityLevel))
@@ -522,11 +543,14 @@ type toolCallEntry struct {
 }
 
 // runLLMIteration executes the LLM call loop with tool handling.
+// stopCh is closed when the user sends a stop signal; the loop checks it
+// before each LLM call and between tool executions.
 func (al *AgentLoop) runLLMIteration(
 	ctx context.Context,
 	agent *AgentInstance,
 	messages []providers.Message,
 	opts processOptions,
+	stopCh <-chan struct{},
 ) (string, int, []toolCallEntry, error) {
 	iteration := 0
 	var finalContent string
@@ -542,6 +566,17 @@ func (al *AgentLoop) runLLMIteration(
 
 	for iteration < agent.MaxIterations {
 		iteration++
+
+		// Check for user stop signal before each LLM call
+		select {
+		case <-stopCh:
+			finalContent = buildStopSummary(toolCallLog)
+			logger.InfoCF("agent", "Stopped by user before LLM call", map[string]any{
+				"agent_id": agent.ID, "iteration": iteration,
+			})
+			return finalContent, iteration, toolCallLog, nil
+		default:
+		}
 
 		logger.DebugCF("agent", "LLM iteration",
 			map[string]any{
@@ -730,6 +765,17 @@ func (al *AgentLoop) runLLMIteration(
 
 		// Execute tool calls
 		for _, tc := range normalizedToolCalls {
+			// Check for user stop signal between tool calls
+			select {
+			case <-stopCh:
+				finalContent = buildStopSummary(toolCallLog)
+				logger.InfoCF("agent", "Stopped by user between tool calls", map[string]any{
+					"agent_id": agent.ID, "iteration": iteration, "pending_tool": tc.Name,
+				})
+				return finalContent, iteration, toolCallLog, nil
+			default:
+			}
+
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			argsPreview := utils.Truncate(string(argsJSON), 200)
 			logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
@@ -1487,4 +1533,24 @@ func extractParentPeer(msg bus.InboundMessage) *routing.RoutePeer {
 		return nil
 	}
 	return &routing.RoutePeer{Kind: parentKind, ID: parentID}
+}
+
+// resolveSessionKey determines the session key for an inbound message,
+// mirroring the logic in processMessage so that Run() can peek at it
+// before entering the blocking processMessage call.
+func (al *AgentLoop) resolveSessionKey(msg bus.InboundMessage) string {
+	// Honor pre-set agent-scoped keys (for ProcessDirect/cron)
+	if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+		return msg.SessionKey
+	}
+	route := al.registry.ResolveRoute(routing.RouteInput{
+		Channel:    msg.Channel,
+		AccountID:  msg.Metadata["account_id"],
+		Peer:       extractPeer(msg),
+		ParentPeer: extractParentPeer(msg),
+		GuildID:    msg.Metadata["guild_id"],
+		TeamID:     msg.Metadata["team_id"],
+		ThreadID:   msg.Metadata["thread_ts"],
+	})
+	return route.SessionKey
 }

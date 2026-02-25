@@ -357,6 +357,48 @@ func buildFallbackErrorReply(lastErr toolCallEntry) string {
 	return fmt.Sprintf("The %s tool failed: %s\n\nPlease check the input and try again.", lastErr.Name, lastErr.Content)
 }
 
+// stopPatterns lists keywords that indicate the user wants to abort the current run.
+var stopPatterns = []string{
+	"stop", "cancel", "abort", "halt",
+	"don't do this", "dont do this",
+	"stop that", "never mind", "nevermind",
+}
+
+// isStopMessage returns true if the message content matches a user stop intent.
+func isStopMessage(content string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(content))
+	if normalized == "" {
+		return false
+	}
+	for _, pattern := range stopPatterns {
+		if normalized == pattern || strings.HasPrefix(normalized, pattern+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// buildStopSummary constructs a user-facing message when a run is stopped by the user.
+func buildStopSummary(log []toolCallEntry) string {
+	var sb strings.Builder
+	sb.WriteString("Stopped by user request. ")
+	if len(log) > 0 {
+		succeeded := 0
+		failed := 0
+		for _, e := range log {
+			if e.IsError {
+				failed++
+			} else {
+				succeeded++
+			}
+		}
+		sb.WriteString(fmt.Sprintf("Completed %d tool calls (%d succeeded, %d failed) before stopping.",
+			len(log), succeeded, failed))
+	}
+	sb.WriteString("\n\nWhat would you like me to do instead?")
+	return sb.String()
+}
+
 // shouldSuppressToolErrorForUser returns true if errors from non-mutating tools
 // should be hidden from the user when suppress_tool_errors is enabled.
 func shouldSuppressToolErrorForUser(toolName string, suppress bool) bool {

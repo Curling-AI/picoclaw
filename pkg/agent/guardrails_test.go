@@ -354,6 +354,93 @@ func TestShouldSuppressToolErrorForUser(t *testing.T) {
 	}
 }
 
+func TestIsStopMessage(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		// Exact matches
+		{"stop", true},
+		{"cancel", true},
+		{"abort", true},
+		{"halt", true},
+		{"never mind", true},
+		{"nevermind", true},
+		{"don't do this", true},
+		{"dont do this", true},
+		{"stop that", true},
+
+		// Case insensitive
+		{"Stop", true},
+		{"STOP", true},
+		{"Cancel", true},
+		{"ABORT", true},
+		{"Never Mind", true},
+
+		// With trailing text (prefix match with space)
+		{"stop please", true},
+		{"cancel the operation", true},
+		{"abort now", true},
+		{"stop that right now", true},
+
+		// With leading/trailing whitespace
+		{"  stop  ", true},
+		{"\tstop\n", true},
+
+		// Non-stop messages
+		{"hello", false},
+		{"please continue", false},
+		{"don't stop", false},
+		{"stopping is not needed", false},
+		{"unstoppable", false},
+		{"", false},
+		{"cancelled yesterday", false},
+		{"stopwatch", false}, // "stop" is a prefix but no space follows
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := isStopMessage(tt.input)
+			if got != tt.expected {
+				t.Errorf("isStopMessage(%q) = %v, want %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildStopSummary(t *testing.T) {
+	t.Run("no tool calls", func(t *testing.T) {
+		summary := buildStopSummary(nil)
+		if !strings.Contains(summary, "Stopped by user request") {
+			t.Errorf("Expected stop header, got: %s", summary)
+		}
+		if !strings.Contains(summary, "What would you like me to do instead?") {
+			t.Errorf("Expected prompt, got: %s", summary)
+		}
+	})
+
+	t.Run("with tool calls", func(t *testing.T) {
+		log := []toolCallEntry{
+			{Name: "read_file", IsError: false, Content: "ok"},
+			{Name: "exec", IsError: true, Content: "command not found"},
+			{Name: "write_file", IsError: false, Content: "ok"},
+		}
+		summary := buildStopSummary(log)
+		if !strings.Contains(summary, "Stopped by user request") {
+			t.Errorf("Expected stop header, got: %s", summary)
+		}
+		if !strings.Contains(summary, "3 tool calls") {
+			t.Errorf("Expected tool count, got: %s", summary)
+		}
+		if !strings.Contains(summary, "2 succeeded") {
+			t.Errorf("Expected succeeded count, got: %s", summary)
+		}
+		if !strings.Contains(summary, "1 failed") {
+			t.Errorf("Expected failed count, got: %s", summary)
+		}
+	})
+}
+
 // --- Integration tests using mock providers ---
 
 // blockingMockProvider blocks until context is cancelled, simulating a slow LLM.

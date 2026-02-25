@@ -987,3 +987,123 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 		t.Errorf("Expected history to be compressed (len < 8), got %d", len(finalHistory))
 	}
 }
+
+// slowToolMockProvider returns tool calls and waits briefly so the stop
+// channel can be closed mid-iteration.
+type slowToolMockProvider struct {
+	callCount int
+	toolName  string
+	delay     time.Duration
+}
+
+func (m *slowToolMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	m.callCount++
+
+	// Simulate thinking time so the stop signal can arrive
+	select {
+	case <-time.After(m.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	return &providers.LLMResponse{
+		Content: "",
+		ToolCalls: []providers.ToolCall{
+			{
+				ID:   fmt.Sprintf("call_%d", m.callCount),
+				Type: "function",
+				Name: m.toolName,
+				Function: &providers.FunctionCall{
+					Name:      m.toolName,
+					Arguments: `{}`,
+				},
+				Arguments: map[string]any{},
+			},
+		},
+	}, nil
+}
+
+func (m *slowToolMockProvider) GetDefaultModel() string {
+	return "mock-slow-model"
+}
+
+// TestRunLLMIteration_StopSignal verifies that closing the stop channel
+// causes runLLMIteration to return early with a stop summary.
+func TestRunLLMIteration_StopSignal(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-stop-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 50, // High so we don't hit max iterations
+				TimeoutSeconds:    30,
+				VerboseDefault:    "off",
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &slowToolMockProvider{
+		toolName: "mock_ok",
+		delay:    50 * time.Millisecond,
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.RegisterTool(&mockCustomToolNamed{name: "mock_ok"})
+
+	agent := al.registry.GetDefaultAgent()
+	sessionKey := "test-session-stop"
+	opts := processOptions{
+		SessionKey:  sessionKey,
+		Channel:     "test",
+		ChatID:      "test-chat",
+		UserMessage: "do a long task",
+	}
+
+	// Build messages manually
+	messages := agent.ContextBuilder.BuildMessages(
+		nil, "", opts.UserMessage, nil, opts.Channel, opts.ChatID,
+	)
+
+	stopCh := make(chan struct{})
+
+	// Close stop channel after a short delay (allow 2-3 tool calls)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		close(stopCh)
+	}()
+
+	ctx := context.Background()
+	finalContent, iteration, toolLog, err := al.runLLMIteration(ctx, agent, messages, opts, stopCh)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if !strings.Contains(finalContent, "Stopped by user request") {
+		t.Errorf("Expected stop summary, got: %s", finalContent)
+	}
+
+	// Should have stopped well before max iterations
+	if iteration > 10 {
+		t.Errorf("Expected early stop, but ran %d iterations", iteration)
+	}
+
+	// Should have some tool calls logged
+	if len(toolLog) == 0 {
+		t.Error("Expected at least some tool calls before stop")
+	}
+
+	t.Logf("Stopped after %d iterations, %d tool calls", iteration, len(toolLog))
+}
