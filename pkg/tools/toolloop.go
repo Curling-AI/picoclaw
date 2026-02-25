@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -18,11 +19,12 @@ import (
 
 // ToolLoopConfig configures the tool execution loop.
 type ToolLoopConfig struct {
-	Provider      providers.LLMProvider
-	Model         string
-	Tools         *ToolRegistry
-	MaxIterations int
-	LLMOptions    map[string]any
+	Provider       providers.LLMProvider
+	Model          string
+	Tools          *ToolRegistry
+	MaxIterations  int
+	TimeoutSeconds int // wall-clock timeout; 0 = no timeout
+	LLMOptions     map[string]any
 }
 
 // ToolLoopResult contains the result of running the tool loop.
@@ -39,6 +41,12 @@ func RunToolLoop(
 	messages []providers.Message,
 	channel, chatID string,
 ) (*ToolLoopResult, error) {
+	if config.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
 	iteration := 0
 	var finalContent string
 

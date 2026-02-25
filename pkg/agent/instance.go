@@ -34,6 +34,10 @@ type AgentInstance struct {
 	// Context pruning
 	ToolResultMaxChars int // max chars for tool results before pruning (default 4000; 0 = use default)
 
+	// Guardrails
+	TimeoutSeconds int    // wall-clock timeout per run (default 600)
+	VerbosityLevel string // "off", "on", "full" (default "off")
+
 	Provider       providers.LLMProvider
 	Sessions       *session.SessionManager
 	ContextBuilder *ContextBuilder
@@ -129,6 +133,16 @@ func NewAgentInstance(
 		toolResultMaxChars = 4000
 	}
 
+	// Guardrails
+	timeoutSeconds := defaults.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 600
+	}
+	verbosityLevel := defaults.VerboseDefault
+	if verbosityLevel == "" {
+		verbosityLevel = "off"
+	}
+
 	// Resolve fallback candidates
 	modelCfg := providers.ModelConfig{
 		Primary:   model,
@@ -187,6 +201,8 @@ func NewAgentInstance(
 		SummarizationThresholdPercent: summarizationPct,
 		KeepLastMessages:              keepLast,
 		ToolResultMaxChars:            toolResultMaxChars,
+		TimeoutSeconds:                timeoutSeconds,
+		VerbosityLevel:                verbosityLevel,
 		Provider:       provider,
 		Sessions:       sessionsManager,
 		ContextBuilder: contextBuilder,

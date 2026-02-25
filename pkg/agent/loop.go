@@ -456,11 +456,24 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 		MaxToolResultChars: agent.ToolResultMaxChars,
 	})
 
-	// 4. Run LLM iteration loop (use pruned messages for LLM, original for history)
-	finalContent, iteration, err := al.runLLMIteration(ctx, agent, prunedMessages, opts)
+	// 4. Run LLM iteration loop with timeout wrapper
+	runCtx := ctx
+	var runCancel context.CancelFunc
+	if agent.TimeoutSeconds > 0 {
+		runCtx, runCancel = context.WithTimeout(ctx, time.Duration(agent.TimeoutSeconds)*time.Second)
+		defer runCancel()
+	}
+	startTime := time.Now()
+	finalContent, iteration, toolLog, err := al.runLLMIteration(runCtx, agent, prunedMessages, opts)
+	if err != nil && runCtx.Err() == context.DeadlineExceeded {
+		// Timeout hit — produce a summary instead of returning an error
+		finalContent = buildTimeoutSummary(toolLog, "", time.Since(startTime), VerbosityLevel(agent.VerbosityLevel))
+		err = nil
+	}
 	if err != nil {
 		return "", err
 	}
+	_ = toolLog // used above for timeout summary
 
 	// If last tool had ForUser content and we already sent it, we might not need to send final response
 	// This is controlled by the tool's Silent flag and ForUser content
@@ -514,7 +527,7 @@ func (al *AgentLoop) runLLMIteration(
 	agent *AgentInstance,
 	messages []providers.Message,
 	opts processOptions,
-) (string, int, error) {
+) (string, int, []toolCallEntry, error) {
 	iteration := 0
 	var finalContent string
 	consecutiveErrors := 0
@@ -523,6 +536,9 @@ func (al *AgentLoop) runLLMIteration(
 		errorNudgeThreshold = 4
 	}
 	var toolCallLog []toolCallEntry
+
+	// Initialize loop detector from config
+	loopDetector := NewLoopDetector(al.cfg.Tools.LoopDetection)
 
 	for iteration < agent.MaxIterations {
 		iteration++
@@ -647,7 +663,7 @@ func (al *AgentLoop) runLLMIteration(
 					"iteration": iteration,
 					"error":     err.Error(),
 				})
-			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
+			return "", iteration, toolCallLog, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
 		// Check if no tool calls - we're done
@@ -749,7 +765,10 @@ func (al *AgentLoop) runLLMIteration(
 			)
 
 			// Send ForUser content to user immediately if not Silent
-			if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
+			// Suppress non-mutating tool errors if configured
+			if shouldSuppressToolErrorForUser(tc.Name, al.cfg.Messages.SuppressToolErrors) && toolResult.IsError {
+				// Skip sending this error to the user
+			} else if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
 				al.bus.PublishOutbound(bus.OutboundMessage{
 					Channel: opts.Channel,
 					ChatID:  opts.ChatID,
@@ -799,6 +818,28 @@ func (al *AgentLoop) runLLMIteration(
 					Content: utils.Truncate(contentForLLM, 100),
 				})
 			}
+
+			// Loop detection: check for repetitive patterns
+			if loopDetector != nil {
+				signal := loopDetector.Record(tc.Name, tc.Arguments, contentForLLM)
+				switch signal {
+				case LoopSignalWarning:
+					logger.WarnCF("agent", "Loop detector warning", map[string]any{
+						"tool": tc.Name, "iteration": iteration,
+					})
+				case LoopSignalBlock:
+					messages = append(messages, providers.Message{
+						Role:    "user",
+						Content: "[System] Repetitive loop detected for " + tc.Name + ". Try a different approach.",
+					})
+				case LoopSignalAbort:
+					finalContent = buildLoopAbortSummary(toolCallLog, "circuit breaker")
+					logger.WarnCF("agent", "Loop detector abort — circuit breaker tripped", map[string]any{
+						"tool": tc.Name, "iteration": iteration,
+					})
+					return finalContent, iteration, toolCallLog, nil
+				}
+			}
 		}
 
 		// After processing all tool calls in this iteration,
@@ -842,7 +883,7 @@ func (al *AgentLoop) runLLMIteration(
 		}
 	}
 
-	return finalContent, iteration, nil
+	return finalContent, iteration, toolCallLog, nil
 }
 
 // buildToolSummary constructs a conversational, user-facing summary from tool call history.

@@ -22,6 +22,8 @@ func DefaultConfig() *Config {
 				MaxHistoryMessages:            0,  // 0 = disabled, only token threshold triggers summarization
 				SummarizationThresholdPercent: 90, // summarize at 90% of context window
 				KeepLastMessages:              6,  // keep last 6 messages after summarization
+				TimeoutSeconds:                600, // 10 minute wall-clock timeout per agent run
+				VerboseDefault:                "off",
 			},
 		},
 		Bindings: []AgentBinding{},
@@ -301,6 +303,18 @@ func DefaultConfig() *Config {
 			Exec: ExecConfig{
 				EnableDenyPatterns: true,
 			},
+			LoopDetection: LoopDetectionConfig{
+				Enabled:                       false,
+				HistorySize:                   30,
+				WarningThreshold:              10,
+				CriticalThreshold:             20,
+				GlobalCircuitBreakerThreshold: 30,
+				Detectors: LoopDetectorsConfig{
+					GenericRepeat:       true,
+					KnownPollNoProgress: true,
+					PingPong:            true,
+				},
+			},
 			Skills: SkillsToolsConfig{
 				Registries: SkillsRegistriesConfig{
 					ClawHub: ClawHubRegistryConfig{
@@ -314,6 +328,9 @@ func DefaultConfig() *Config {
 					TTLSeconds: 300,
 				},
 			},
+		},
+		Messages: MessagesConfig{
+			SuppressToolErrors: false,
 		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:  true,

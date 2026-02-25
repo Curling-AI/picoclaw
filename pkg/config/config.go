@@ -55,6 +55,7 @@ type Config struct {
 	ModelList []ModelConfig   `json:"model_list"` // New model-centric provider configuration
 	Gateway   GatewayConfig   `json:"gateway"`
 	Tools     ToolsConfig     `json:"tools"`
+	Messages  MessagesConfig  `json:"messages"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
 }
@@ -189,6 +190,8 @@ type AgentDefaults struct {
 	Temperature                   *float64 `json:"temperature,omitempty"                      env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
 	MaxToolIterations             int      `json:"max_tool_iterations"                        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
 	ToolErrorNudgeThreshold       int      `json:"tool_error_nudge_threshold,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_TOOL_ERROR_NUDGE_THRESHOLD"`
+	TimeoutSeconds                int      `json:"timeout_seconds,omitempty"                   env:"PICOCLAW_AGENTS_DEFAULTS_TIMEOUT_SECONDS"`
+	VerboseDefault                string   `json:"verbose_default,omitempty"                   env:"PICOCLAW_AGENTS_DEFAULTS_VERBOSE_DEFAULT"`
 
 	// Memory management: controls when summarization triggers and how much history to keep.
 	// MaxHistoryMessages: max messages before summarization triggers (0 = disabled, only token threshold used).
@@ -476,11 +479,48 @@ type ExecConfig struct {
 	CustomAllowPatterns []string `json:"custom_allow_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_ALLOW_PATTERNS"`
 }
 
+type LoopDetectorsConfig struct {
+	GenericRepeat       bool `json:"generic_repeat"`
+	KnownPollNoProgress bool `json:"known_poll_no_progress"`
+	PingPong            bool `json:"ping_pong"`
+}
+
+type LoopDetectionConfig struct {
+	Enabled                       bool                `json:"enabled"`
+	HistorySize                   int                 `json:"history_size"`
+	WarningThreshold              int                 `json:"warning_threshold"`
+	CriticalThreshold             int                 `json:"critical_threshold"`
+	GlobalCircuitBreakerThreshold int                 `json:"global_circuit_breaker_threshold"`
+	Detectors                     LoopDetectorsConfig `json:"detectors"`
+}
+
+// Validate checks that loop detection thresholds are strictly increasing when enabled.
+func (c *LoopDetectionConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.WarningThreshold <= 0 || c.CriticalThreshold <= 0 || c.GlobalCircuitBreakerThreshold <= 0 {
+		return fmt.Errorf("loop detection thresholds must be positive when enabled")
+	}
+	if c.WarningThreshold >= c.CriticalThreshold {
+		return fmt.Errorf("warning_threshold (%d) must be less than critical_threshold (%d)", c.WarningThreshold, c.CriticalThreshold)
+	}
+	if c.CriticalThreshold >= c.GlobalCircuitBreakerThreshold {
+		return fmt.Errorf("critical_threshold (%d) must be less than global_circuit_breaker_threshold (%d)", c.CriticalThreshold, c.GlobalCircuitBreakerThreshold)
+	}
+	return nil
+}
+
+type MessagesConfig struct {
+	SuppressToolErrors bool `json:"suppress_tool_errors" env:"PICOCLAW_MESSAGES_SUPPRESS_TOOL_ERRORS"`
+}
+
 type ToolsConfig struct {
-	Web    WebToolsConfig    `json:"web"`
-	Cron   CronToolsConfig   `json:"cron"`
-	Exec   ExecConfig        `json:"exec"`
-	Skills SkillsToolsConfig `json:"skills"`
+	Web           WebToolsConfig      `json:"web"`
+	Cron          CronToolsConfig     `json:"cron"`
+	Exec          ExecConfig          `json:"exec"`
+	Skills        SkillsToolsConfig   `json:"skills"`
+	LoopDetection LoopDetectionConfig `json:"loop_detection"`
 }
 
 type SkillsToolsConfig struct {
@@ -537,6 +577,11 @@ func LoadConfig(path string) (*Config, error) {
 	// Validate model_list for uniqueness and required fields
 	if err := cfg.ValidateModelList(); err != nil {
 		return nil, err
+	}
+
+	// Validate loop detection config
+	if err := cfg.Tools.LoopDetection.Validate(); err != nil {
+		return nil, fmt.Errorf("tools.loop_detection: %w", err)
 	}
 
 	return cfg, nil
