@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
@@ -189,4 +190,23 @@ func getDefaultAPIBase(protocol string) string {
 	default:
 		return ""
 	}
+}
+
+// BuildProviderRegistry creates a ProviderRegistry populated from cfg.ModelList.
+// Each entry is keyed by its normalized protocol and model ID.
+// Entries that fail to create a provider are logged and skipped.
+func BuildProviderRegistry(cfg *config.Config, fallback LLMProvider) *ProviderRegistry {
+	reg := NewProviderRegistry(fallback)
+	for i := range cfg.ModelList {
+		mc := cfg.ModelList[i]
+		p, modelID, err := CreateProviderFromConfig(&mc)
+		if err != nil {
+			logger.WarnCF("registry", fmt.Sprintf("skipping model_list[%d] %q: %v", i, mc.Model, err),
+				map[string]any{"model": mc.Model, "error": err.Error()})
+			continue
+		}
+		protocol, _ := ExtractProtocol(mc.Model)
+		reg.Register(NormalizeProvider(protocol), modelID, p)
+	}
+	return reg
 }

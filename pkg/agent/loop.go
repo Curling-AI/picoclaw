@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -38,6 +39,7 @@ type AgentLoop struct {
 	running            atomic.Bool
 	summarizing        sync.Map
 	fallback           *providers.FallbackChain
+	providerRegistry   *providers.ProviderRegistry
 	channelManager     *channels.Manager
 	lifecycleManagers  map[string]*session.LifecycleManager // agentID -> lifecycle
 	activeRuns         sync.Map // sessionKey -> chan struct{} (stop signal)
@@ -66,9 +68,24 @@ func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provid
 	// Register shared tools to all agents
 	registerSharedTools(cfg, msgBus, registry, provider)
 
-	// Set up shared fallback chain
+	// Set up shared fallback chain with logging
 	cooldown := providers.NewCooldownTracker()
-	fallbackChain := providers.NewFallbackChain(cooldown)
+	fallbackLogFunc := providers.LogFunc(func(level, msg string, fields map[string]any) {
+		switch level {
+		case "error":
+			logger.ErrorCF("fallback", msg, fields)
+		case "warn":
+			logger.WarnCF("fallback", msg, fields)
+		default:
+			logger.InfoCF("fallback", msg, fields)
+		}
+	})
+	fallbackChain := providers.NewFallbackChain(cooldown,
+		providers.WithLogFunc(fallbackLogFunc),
+	)
+
+	// Build provider registry so fallback candidates use the correct provider.
+	providerRegistry := providers.BuildProviderRegistry(cfg, provider)
 
 	// Create state manager using default agent's workspace for channel recording
 	defaultAgent := registry.GetDefaultAgent()
@@ -88,12 +105,13 @@ func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provid
 	}
 
 	return &AgentLoop{
-		bus:               msgBus,
-		cfg:               cfg,
-		registry:          registry,
-		state:             stateManager,
-		summarizing:       sync.Map{},
-		fallback:          fallbackChain,
+		bus:              msgBus,
+		cfg:              cfg,
+		registry:         registry,
+		state:            stateManager,
+		summarizing:      sync.Map{},
+		fallback:         fallbackChain,
+		providerRegistry: providerRegistry,
 		lifecycleManagers: lifecycleManagers,
 	}
 }
@@ -613,11 +631,21 @@ func (al *AgentLoop) runLLMIteration(
 		var response *providers.LLMResponse
 		var err error
 
+		useFallback := len(agent.Candidates) > 1 && al.fallback != nil
+		if useFallback {
+			logger.InfoCF("agent", fmt.Sprintf("LLM call using fallback chain (%d candidates)", len(agent.Candidates)),
+				map[string]any{"agent_id": agent.ID, "iteration": iteration, "candidates": len(agent.Candidates)})
+		} else {
+			logger.InfoCF("agent", "LLM call using direct provider",
+				map[string]any{"agent_id": agent.ID, "iteration": iteration, "model": agent.Model})
+		}
+
 		callLLM := func() (*providers.LLMResponse, error) {
-			if len(agent.Candidates) > 1 && al.fallback != nil {
+			if useFallback {
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
-						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
+						p := al.providerRegistry.Get(provider, model)
+					return p.Chat(ctx, messages, providerToolDefs, model, map[string]any{
 							"max_tokens":  agent.MaxTokens,
 							"temperature": agent.Temperature,
 						})
@@ -627,9 +655,15 @@ func (al *AgentLoop) runLLMIteration(
 					return nil, fbErr
 				}
 				if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
-					logger.InfoCF("agent", fmt.Sprintf("Fallback: succeeded with %s/%s after %d attempts",
-						fbResult.Provider, fbResult.Model, len(fbResult.Attempts)+1),
-						map[string]any{"agent_id": agent.ID, "iteration": iteration})
+					totalRetries := 0
+					for _, a := range fbResult.Attempts {
+						totalRetries += a.Retries
+					}
+					logger.InfoCF("agent", fmt.Sprintf("Fallback: succeeded with %s/%s after %d attempts (%d retries)",
+						fbResult.Provider, fbResult.Model, len(fbResult.Attempts)+1, totalRetries),
+						map[string]any{"agent_id": agent.ID, "iteration": iteration,
+							"provider": fbResult.Provider, "model": fbResult.Model,
+							"attempts": len(fbResult.Attempts) + 1, "total_retries": totalRetries})
 				}
 				return fbResult.Response, nil
 			}
@@ -692,12 +726,21 @@ func (al *AgentLoop) runLLMIteration(
 		}
 
 		if err != nil {
-			logger.ErrorCF("agent", "LLM call failed",
-				map[string]any{
-					"agent_id":  agent.ID,
-					"iteration": iteration,
-					"error":     err.Error(),
-				})
+			errFields := map[string]any{
+				"agent_id":  agent.ID,
+				"iteration": iteration,
+				"error":     err.Error(),
+			}
+			var exhausted *providers.FallbackExhaustedError
+			if errors.As(err, &exhausted) {
+				totalRetries := 0
+				for _, a := range exhausted.Attempts {
+					totalRetries += a.Retries
+				}
+				errFields["candidates_tried"] = len(exhausted.Attempts)
+				errFields["total_retries"] = totalRetries
+			}
+			logger.ErrorCF("agent", "LLM call failed", errFields)
 			return "", iteration, toolCallLog, fmt.Errorf("LLM call failed after retries: %w", err)
 		}
 
