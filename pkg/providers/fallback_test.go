@@ -894,7 +894,7 @@ func TestFallback_TransientRetry_ExhaustsRetriesThenFallsBack(t *testing.T) {
 	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
 		callCount[model]++
 		if model == "gpt-4" {
-			return nil, errors.New("context deadline exceeded")
+			return nil, errors.New("status: 429 too many requests")
 		}
 		return &LLMResponse{Content: "from claude", FinishReason: "stop"}, nil
 	}
@@ -919,6 +919,58 @@ func TestFallback_TransientRetry_ExhaustsRetriesThenFallsBack(t *testing.T) {
 	}
 	if result.Attempts[0].Retries != 2 {
 		t.Errorf("retries = %d, want 2", result.Attempts[0].Retries)
+	}
+}
+
+// TestFallback_TimeoutNoRetry_ImmediateFallback verifies that timeout errors
+// trigger immediate fallback to the next candidate without retrying the same one.
+// This prevents burning 6+ minutes retrying a dead endpoint.
+func TestFallback_TimeoutNoRetry_ImmediateFallback(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	callCount := map[string]int{}
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		callCount[model]++
+		if model == "gpt-4" {
+			return nil, errors.New("context deadline exceeded")
+		}
+		return &LLMResponse{Content: "from claude", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" {
+		t.Errorf("provider = %q, want anthropic", result.Provider)
+	}
+	// gpt-4 should be called only once — timeout is not transient, no retries.
+	if callCount["gpt-4"] != 1 {
+		t.Errorf("gpt-4 calls = %d, want 1 (timeout should not retry)", callCount["gpt-4"])
+	}
+	if callCount["claude"] != 1 {
+		t.Errorf("claude calls = %d, want 1", callCount["claude"])
+	}
+	// The failed attempt should record zero retries.
+	if len(result.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want 1 (gpt-4 failed)", len(result.Attempts))
+	}
+	if result.Attempts[0].Retries != 0 {
+		t.Errorf("retries = %d, want 0 (timeout should not retry)", result.Attempts[0].Retries)
+	}
+	if result.Attempts[0].Reason != FailoverTimeout {
+		t.Errorf("reason = %q, want timeout", result.Attempts[0].Reason)
 	}
 }
 
@@ -980,7 +1032,7 @@ func TestFallback_TransientRetry_ContextCancelDuringBackoff(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 				cancel()
 			}()
-			return nil, errors.New("context deadline exceeded")
+			return nil, errors.New("status: 429 too many requests")
 		}
 		t.Error("should not reach second attempt after cancel")
 		return nil, nil
@@ -1022,7 +1074,7 @@ func TestFallback_LogFunc_Called(t *testing.T) {
 	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
 		callCount++
 		if model == "gpt-4" {
-			return nil, errors.New("context deadline exceeded")
+			return nil, errors.New("status: 429 too many requests")
 		}
 		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
 	}
@@ -1088,7 +1140,7 @@ func TestFallback_LogFunc_Nil(t *testing.T) {
 	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
 		attempt++
 		if attempt <= 2 {
-			return nil, errors.New("context deadline exceeded")
+			return nil, errors.New("status: 429 too many requests")
 		}
 		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
 	}

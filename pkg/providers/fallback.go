@@ -98,9 +98,11 @@ func (fc *FallbackChain) log(level, msg string, fields map[string]any) {
 }
 
 // isTransientReason returns true if the error reason is transient and worth
-// retrying on the same candidate (timeout, rate_limit, overloaded).
+// retrying on the same candidate (rate_limit, overloaded).
+// Timeouts are NOT transient: a 120s timeout means the endpoint is down,
+// and retrying burns another 120s. Immediate fallback is better.
 func isTransientReason(reason FailoverReason) bool {
-	return reason == FailoverTimeout || reason == FailoverRateLimit || reason == FailoverOverloaded
+	return reason == FailoverRateLimit || reason == FailoverOverloaded
 }
 
 // backoffWait waits for the given duration, respecting context cancellation.
@@ -154,7 +156,8 @@ func ResolveCandidates(cfg ModelConfig, defaultProvider string) []FallbackCandid
 //   - The primary candidate (index 0) in cooldown is skipped (logged as skipped attempt).
 //   - context.Canceled aborts immediately (user abort, no fallback).
 //   - Non-retriable errors (format) abort immediately.
-//   - Transient retriable errors (timeout, rate_limit, overloaded) retry with backoff.
+//   - Transient retriable errors (rate_limit, overloaded) retry with backoff.
+//   - Timeout errors trigger immediate fallback (no retry on same candidate).
 //   - Non-transient retriable errors trigger fallback to next candidate.
 //   - Success marks provider as good (resets cooldown).
 //   - If all fail, returns aggregate error with all attempts.
