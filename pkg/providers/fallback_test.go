@@ -3,6 +3,8 @@ package providers
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,17 +44,21 @@ func TestFallback_SingleCandidate_Success(t *testing.T) {
 
 func TestFallback_SecondCandidateSuccess(t *testing.T) {
 	ct := NewCooldownTracker()
-	fc := NewFallbackChain(ct)
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
 		makeCandidate("anthropic", "claude-opus"),
 	}
 
-	attempt := 0
+	// Always fail for openai so retries exhaust, then fallback to anthropic.
 	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
-		attempt++
-		if attempt == 1 {
+		if provider == "openai" {
 			return nil, errors.New("rate limit exceeded")
 		}
 		return &LLMResponse{Content: "from claude", FinishReason: "stop"}, nil
@@ -71,11 +77,19 @@ func TestFallback_SecondCandidateSuccess(t *testing.T) {
 	if len(result.Attempts) != 1 {
 		t.Errorf("attempts = %d, want 1 (failed attempt recorded)", len(result.Attempts))
 	}
+	if result.Attempts[0].Retries != 2 {
+		t.Errorf("retries = %d, want 2", result.Attempts[0].Retries)
+	}
 }
 
 func TestFallback_AllFail(t *testing.T) {
 	ct := NewCooldownTracker()
-	fc := NewFallbackChain(ct)
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
@@ -199,7 +213,12 @@ func TestFallback_CooldownSkip(t *testing.T) {
 
 func TestFallback_AllInCooldown(t *testing.T) {
 	ct := NewCooldownTracker()
-	fc := NewFallbackChain(ct)
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
 
 	// Put all models in cooldown (per-model keys)
 	ct.MarkFailure(ModelKey("openai", "gpt-4"), FailoverRateLimit)
@@ -272,7 +291,12 @@ func TestFallback_FallbackInCooldownStillAttempted(t *testing.T) {
 // retried on subsequent calls (not skipped by cooldown).
 func TestFallback_FallbackFailsStillTracked(t *testing.T) {
 	ct := NewCooldownTracker()
-	fc := NewFallbackChain(ct)
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
@@ -428,7 +452,12 @@ func TestFallback_PerModelCooldown_SameProviderAlternative(t *testing.T) {
 func TestFallback_PerModelCooldown_RuntimeFailoverToSameProvider(t *testing.T) {
 	now := time.Now()
 	ct, current := newTestTracker(now)
-	fc := NewFallbackChain(ct)
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
@@ -511,7 +540,12 @@ func TestFallback_PerModelCooldown_IndependentModels(t *testing.T) {
 // same-provider models fail, the chain falls through to a cross-provider candidate.
 func TestFallback_PerModelCooldown_BothSameProviderModelsFail(t *testing.T) {
 	ct := NewCooldownTracker()
-	fc := NewFallbackChain(ct)
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
 
 	candidates := []FallbackCandidate{
 		makeCandidate("openai", "gpt-4"),
@@ -573,6 +607,36 @@ func TestFallback_PerModelCooldown_SuccessResetsOnlyThatModel(t *testing.T) {
 	// gpt-4o-mini should be available (it succeeded)
 	if !ct.IsAvailable(ModelKey("openai", "gpt-4o-mini")) {
 		t.Error("gpt-4o-mini should be available (it succeeded)")
+	}
+}
+
+func TestFallback_ContextDeadlineExceeded_BailsOut(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	// Use an already-expired deadline so the chain bails out immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
+	defer cancel()
+	time.Sleep(2 * time.Millisecond) // ensure deadline has passed
+
+	attempt := 0
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		attempt++
+		t.Error("run should not be called when context deadline already exceeded")
+		return nil, nil
+	}
+
+	_, err := fc.Execute(ctx, candidates, run)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+	if attempt != 0 {
+		t.Errorf("attempt = %d, want 0 (should bail out before trying any candidate)", attempt)
 	}
 }
 
@@ -753,5 +817,287 @@ func TestFallbackExhaustedError_Message(t *testing.T) {
 	msg := e.Error()
 	if msg == "" {
 		t.Error("expected non-empty error message")
+	}
+}
+
+func TestFallbackExhaustedError_MessageWithRetries(t *testing.T) {
+	e := &FallbackExhaustedError{
+		Attempts: []FallbackAttempt{
+			{
+				Provider: "openai",
+				Model:    "gpt-4",
+				Error:    errors.New("timeout"),
+				Reason:   FailoverTimeout,
+				Duration: 5 * time.Second,
+				Retries:  2,
+			},
+		},
+	}
+	msg := e.Error()
+	if !strings.Contains(msg, "retries=2") {
+		t.Errorf("expected retries=2 in message, got: %s", msg)
+	}
+}
+
+// --- Retry Tests ---
+
+func TestFallback_TransientRetry_SucceedsOnRetry(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
+
+	candidates := []FallbackCandidate{makeCandidate("openai", "gpt-4")}
+
+	attempt := 0
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		attempt++
+		if attempt == 1 {
+			return nil, errors.New("status: 429 too many requests")
+		}
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response.Content != "ok" {
+		t.Errorf("content = %q, want ok", result.Response.Content)
+	}
+	if result.Provider != "openai" || result.Model != "gpt-4" {
+		t.Errorf("expected openai/gpt-4, got %s/%s", result.Provider, result.Model)
+	}
+	if attempt != 2 {
+		t.Errorf("attempt = %d, want 2 (one fail + one success)", attempt)
+	}
+}
+
+func TestFallback_TransientRetry_ExhaustsRetriesThenFallsBack(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	callCount := map[string]int{}
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		callCount[model]++
+		if model == "gpt-4" {
+			return nil, errors.New("context deadline exceeded")
+		}
+		return &LLMResponse{Content: "from claude", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Provider != "anthropic" {
+		t.Errorf("provider = %q, want anthropic", result.Provider)
+	}
+	// gpt-4 should be called 3 times (1 initial + 2 retries)
+	if callCount["gpt-4"] != 3 {
+		t.Errorf("gpt-4 calls = %d, want 3 (initial + 2 retries)", callCount["gpt-4"])
+	}
+	if callCount["claude"] != 1 {
+		t.Errorf("claude calls = %d, want 1", callCount["claude"])
+	}
+	// The failed attempt should record retries
+	if len(result.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want 1 (gpt-4 failed)", len(result.Attempts))
+	}
+	if result.Attempts[0].Retries != 2 {
+		t.Errorf("retries = %d, want 2", result.Attempts[0].Retries)
+	}
+}
+
+func TestFallback_TransientRetry_NonTransientNoRetry(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	attempt := 0
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		attempt++
+		return nil, errors.New("string should match pattern") // format error
+	}
+
+	_, err := fc.Execute(context.Background(), candidates, run)
+	if err == nil {
+		t.Fatal("expected error for non-retriable")
+	}
+	var fe *FailoverError
+	if !errors.As(err, &fe) {
+		t.Fatalf("expected FailoverError, got %T", err)
+	}
+	if fe.Reason != FailoverFormat {
+		t.Errorf("reason = %q, want format", fe.Reason)
+	}
+	// Format errors are non-retriable: should not retry or fallback.
+	if attempt != 1 {
+		t.Errorf("attempt = %d, want 1 (no retry for non-retriable)", attempt)
+	}
+}
+
+func TestFallback_TransientRetry_ContextCancelDuringBackoff(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     2,
+		InitialBackoff: 5 * time.Second, // long backoff to ensure cancel hits during wait
+		BackoffFactor:  2.0,
+		MaxBackoff:     30 * time.Second,
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	candidates := []FallbackCandidate{makeCandidate("openai", "gpt-4")}
+
+	attempt := 0
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		attempt++
+		if attempt == 1 {
+			// Cancel during the upcoming backoff wait.
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				cancel()
+			}()
+			return nil, errors.New("context deadline exceeded")
+		}
+		t.Error("should not reach second attempt after cancel")
+		return nil, nil
+	}
+
+	_, err := fc.Execute(ctx, candidates, run)
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	if attempt != 1 {
+		t.Errorf("attempt = %d, want 1", attempt)
+	}
+}
+
+func TestFallback_LogFunc_Called(t *testing.T) {
+	ct := NewCooldownTracker()
+
+	var logs []string
+	logFunc := func(level, msg string, fields map[string]any) {
+		logs = append(logs, fmt.Sprintf("[%s] %s", level, msg))
+	}
+
+	fc := NewFallbackChain(ct,
+		WithLogFunc(logFunc),
+		WithRetryConfig(RetryConfig{
+			MaxRetries:     1,
+			InitialBackoff: 10 * time.Millisecond,
+			BackoffFactor:  2.0,
+			MaxBackoff:     100 * time.Millisecond,
+		}),
+	)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	callCount := 0
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		callCount++
+		if model == "gpt-4" {
+			return nil, errors.New("context deadline exceeded")
+		}
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	_, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(logs) == 0 {
+		t.Fatal("expected log messages to be emitted")
+	}
+
+	// Verify key log messages are present.
+	hasStarting := false
+	hasTrying := false
+	hasRetrying := false
+	hasFailed := false
+	for _, log := range logs {
+		if strings.Contains(log, "starting chain") {
+			hasStarting = true
+		}
+		if strings.Contains(log, "trying candidate") {
+			hasTrying = true
+		}
+		if strings.Contains(log, "retrying") {
+			hasRetrying = true
+		}
+		if strings.Contains(log, "failed") {
+			hasFailed = true
+		}
+	}
+	if !hasStarting {
+		t.Error("expected 'starting chain' log")
+	}
+	if !hasTrying {
+		t.Error("expected 'trying candidate' log")
+	}
+	if !hasRetrying {
+		t.Error("expected 'retrying' log")
+	}
+	if !hasFailed {
+		t.Error("expected 'failed' log")
+	}
+}
+
+func TestFallback_LogFunc_Nil(t *testing.T) {
+	ct := NewCooldownTracker()
+	// No WithLogFunc — logFunc is nil. Should not panic.
+	fc := NewFallbackChain(ct, WithRetryConfig(RetryConfig{
+		MaxRetries:     1,
+		InitialBackoff: 10 * time.Millisecond,
+		BackoffFactor:  2.0,
+		MaxBackoff:     100 * time.Millisecond,
+	}))
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude"),
+	}
+
+	attempt := 0
+	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+		attempt++
+		if attempt <= 2 {
+			return nil, errors.New("context deadline exceeded")
+		}
+		return &LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+	}
+
+	result, err := fc.Execute(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Response.Content != "ok" {
+		t.Errorf("content = %q, want ok", result.Response.Content)
 	}
 }
