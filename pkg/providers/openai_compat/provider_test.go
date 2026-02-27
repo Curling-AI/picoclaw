@@ -1,11 +1,14 @@
 package openai_compat
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestProviderChat_UsesMaxCompletionTokensForGLM(t *testing.T) {
@@ -279,5 +282,36 @@ func TestNormalizeModel_UsesAPIBase(t *testing.T) {
 	}
 	if got := normalizeModel("openrouter/auto", "https://openrouter.ai/api/v1"); got != "openrouter/auto" {
 		t.Fatalf("normalizeModel(openrouter) = %q, want %q", got, "openrouter/auto")
+	}
+}
+
+func TestProvider_PerRequestTimeout(t *testing.T) {
+	// Server that delays longer than the per-request timeout.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+
+	// Parent context with a generous deadline (5s) — should NOT expire.
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer parentCancel()
+
+	p := NewProvider("key", server.URL, "")
+	p.requestTimeout = 50 * time.Millisecond // very short per-request timeout
+
+	_, err := p.Chat(parentCtx, []Message{{Role: "user", Content: "hi"}}, nil, "gpt-4o", nil)
+	if err == nil {
+		t.Fatal("expected error from per-request timeout, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded in error chain, got: %v", err)
+	}
+
+	// The parent context must still be alive — proving the timeout was scoped to the request.
+	if parentCtx.Err() != nil {
+		t.Fatalf("parent context should still be alive, got: %v", parentCtx.Err())
 	}
 }

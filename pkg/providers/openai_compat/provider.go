@@ -27,11 +27,14 @@ type (
 	GoogleExtra            = protocoltypes.GoogleExtra
 )
 
+const defaultRequestTimeout = 120 * time.Second
+
 type Provider struct {
 	apiKey         string
 	apiBase        string
 	maxTokensField string // Field name for max tokens (e.g., "max_completion_tokens" for o1/glm models)
 	httpClient     *http.Client
+	requestTimeout time.Duration
 }
 
 func NewProvider(apiKey, apiBase, proxy string) *Provider {
@@ -39,9 +42,7 @@ func NewProvider(apiKey, apiBase, proxy string) *Provider {
 }
 
 func NewProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField string) *Provider {
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-	}
+	client := &http.Client{}
 
 	if proxy != "" {
 		parsed, err := url.Parse(proxy)
@@ -59,6 +60,7 @@ func NewProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField string
 		apiBase:        strings.TrimRight(apiBase, "/"),
 		maxTokensField: maxTokensField,
 		httpClient:     client,
+		requestTimeout: defaultRequestTimeout,
 	}
 }
 
@@ -116,7 +118,11 @@ func (p *Provider) Chat(
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", p.apiBase+"/chat/completions", bytes.NewReader(jsonData))
+	// Per-request timeout: use the shorter of requestTimeout or remaining context deadline.
+	reqCtx, reqCancel := context.WithTimeout(ctx, p.requestTimeout)
+	defer reqCancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", p.apiBase+"/chat/completions", bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
