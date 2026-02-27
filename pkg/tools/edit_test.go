@@ -287,3 +287,50 @@ func TestEditTool_AppendFile_MissingContent(t *testing.T) {
 		t.Errorf("Expected error when content is missing")
 	}
 }
+
+// TestEditTool_HomeDirectory_Allowed verifies editing a file in a second allowed dir.
+func TestEditTool_HomeDirectory_Allowed(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	testFile := filepath.Join(homeDir, "config.txt")
+	os.WriteFile(testFile, []byte("old value"), 0o644)
+
+	tool := NewEditFileToolWithDirs([]string{workspace, homeDir}, true)
+	result := tool.Execute(context.Background(), map[string]any{
+		"path":     testFile,
+		"old_text": "old value",
+		"new_text": "new value",
+	})
+
+	if result.IsError {
+		t.Fatalf("expected edit in home dir to succeed, got error: %s", result.ForLLM)
+	}
+
+	content, _ := os.ReadFile(testFile)
+	if string(content) != "new value" {
+		t.Errorf("expected 'new value', got: %s", string(content))
+	}
+}
+
+// TestAppendTool_HomeDirectory_Allowed verifies appending to a file in a second allowed dir.
+func TestAppendTool_HomeDirectory_Allowed(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	testFile := filepath.Join(homeDir, "log.txt")
+	os.WriteFile(testFile, []byte("line1\n"), 0o644)
+
+	tool := NewAppendFileToolWithDirs([]string{workspace, homeDir}, true)
+	result := tool.Execute(context.Background(), map[string]any{
+		"path":    testFile,
+		"content": "line2\n",
+	})
+
+	if result.IsError {
+		t.Fatalf("expected append in home dir to succeed, got error: %s", result.ForLLM)
+	}
+
+	content, _ := os.ReadFile(testFile)
+	if string(content) != "line1\nline2\n" {
+		t.Errorf("expected 'line1\\nline2\\n', got: %s", string(content))
+	}
+}

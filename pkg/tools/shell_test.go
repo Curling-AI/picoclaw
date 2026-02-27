@@ -510,13 +510,13 @@ func TestShellTool_RestrictToWorkspace_OrgRepoNotBlocked(t *testing.T) {
 }
 
 // TestShellTool_RestrictToWorkspace_RedirectOutsideBlocked verifies that
-// absolute paths after shell operators (e.g. > /outside/path) are still caught.
+// absolute paths after shell operators (e.g. > /tmp/outside) are still caught.
 func TestShellTool_RestrictToWorkspace_RedirectOutsideBlocked(t *testing.T) {
 	workspace := t.TempDir()
 	tool := NewExecTool(workspace, true)
-	guardErr, _ := tool.guardCommand("echo foo > /outside/path", workspace)
+	guardErr, _ := tool.guardCommand("echo foo > /tmp/outside", workspace)
 	if guardErr == "" {
-		t.Error("expected redirect to /outside/path to be blocked")
+		t.Error("expected redirect to /tmp/outside to be blocked")
 	}
 }
 
@@ -803,6 +803,56 @@ func TestExecTool_AllowlistBypassesDenylist(t *testing.T) {
 	guardErr, _ = tool.guardCommand("echo hello", "")
 	if guardErr == "" {
 		t.Error("expected command not in allowlist to be blocked in allowlist mode")
+	}
+}
+
+// TestShellTool_GuardCommand_AllowsHomePaths verifies that guardCommand allows
+// absolute paths within the home (second allowed) directory.
+func TestShellTool_GuardCommand_AllowsHomePaths(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	homeFile := filepath.Join(homeDir, "config.txt")
+	os.WriteFile(homeFile, []byte("data"), 0o644)
+
+	tool := NewExecToolWithDirs(workspace, []string{workspace, homeDir}, true, nil)
+	guardErr, _ := tool.guardCommand("cat "+homeFile, workspace)
+	if guardErr != "" {
+		t.Errorf("expected home dir path to be allowed, got: %s", guardErr)
+	}
+}
+
+// TestShellTool_GuardCommand_BlocksOutsideBothDirs verifies that guardCommand blocks
+// absolute paths outside both workspace and home directories.
+func TestShellTool_GuardCommand_BlocksOutsideBothDirs(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	os.WriteFile(outsideFile, []byte("secret"), 0o644)
+
+	tool := NewExecToolWithDirs(workspace, []string{workspace, homeDir}, true, nil)
+	guardErr, _ := tool.guardCommand("cat "+outsideFile, workspace)
+	if guardErr == "" {
+		t.Error("expected path outside both dirs to be blocked")
+	}
+}
+
+// TestShellTool_GuardCommand_AllowsAPIPath verifies that API-style paths
+// (e.g. /repos/org/name/...) are not incorrectly blocked as filesystem paths.
+func TestShellTool_GuardCommand_AllowsAPIPath(t *testing.T) {
+	workspace := t.TempDir()
+	binDir := t.TempDir()
+	gh := filepath.Join(binDir, "gh")
+	os.WriteFile(gh, []byte("#!/bin/sh\necho ok"), 0o755)
+	t.Setenv("PATH", binDir)
+
+	tool := NewExecTool(workspace, true)
+	guardErr, _ := tool.guardCommand(
+		gh+` api -H "Accept: application/vnd.github+json" /repos/my-org/my-repo/dependabot/alerts -f state=open`,
+		workspace,
+	)
+	if guardErr != "" {
+		t.Errorf("expected API path to be allowed, got: %s", guardErr)
 	}
 }
 

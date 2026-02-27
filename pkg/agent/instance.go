@@ -61,13 +61,24 @@ func NewAgentInstance(
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
 
 	restrict := defaults.RestrictToWorkspace
+	allowedDirs := []string{workspace}
+	if restrict {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			absWS, _ := filepath.Abs(workspace)
+			absHome, _ := filepath.Abs(homeDir)
+			if absWS != absHome {
+				allowedDirs = append(allowedDirs, homeDir)
+			}
+		}
+	}
+
 	toolsRegistry := tools.NewToolRegistry()
-	toolsRegistry.Register(tools.NewReadFileTool(workspace, restrict))
-	toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict))
-	toolsRegistry.Register(tools.NewListDirTool(workspace, restrict))
-	toolsRegistry.Register(tools.NewExecToolWithConfig(workspace, restrict, cfg))
-	toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict))
-	toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict))
+	toolsRegistry.Register(tools.NewReadFileToolWithDirs(allowedDirs, restrict))
+	toolsRegistry.Register(tools.NewWriteFileToolWithDirs(allowedDirs, restrict))
+	toolsRegistry.Register(tools.NewListDirToolWithDirs(allowedDirs, restrict))
+	toolsRegistry.Register(tools.NewExecToolWithDirs(workspace, allowedDirs, restrict, cfg))
+	toolsRegistry.Register(tools.NewEditFileToolWithDirs(allowedDirs, restrict))
+	toolsRegistry.Register(tools.NewAppendFileToolWithDirs(allowedDirs, restrict))
 
 	sessionsDir := filepath.Join(workspace, "sessions")
 	sessionsManager := session.NewSessionManager(sessionsDir)

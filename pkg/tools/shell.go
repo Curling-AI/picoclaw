@@ -41,6 +41,7 @@ type DeniedCommandEntry struct {
 
 type ExecTool struct {
 	workingDir          string
+	allowedDirs         []string
 	timeout             time.Duration
 	defaultDenyPatterns []*regexp.Regexp // immutable built-in defaults
 	customDenyPatterns  []*regexp.Regexp // user-added deny patterns
@@ -92,9 +93,16 @@ func NewExecTool(workingDir string, restrict bool) *ExecTool {
 	return NewExecToolWithConfig(workingDir, restrict, nil)
 }
 
+func NewExecToolWithDirs(workingDir string, allowedDirs []string, restrict bool, cfg *config.Config) *ExecTool {
+	tool := NewExecToolWithConfig(workingDir, restrict, cfg)
+	tool.allowedDirs = allowedDirs
+	return tool
+}
+
 func NewExecToolWithConfig(workingDir string, restrict bool, cfg *config.Config) *ExecTool {
 	tool := &ExecTool{
 		workingDir:          workingDir,
+		allowedDirs:         []string{workingDir},
 		timeout:             60 * time.Second,
 		denyEnabled:         true,
 		restrictToWorkspace: restrict,
@@ -174,7 +182,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	cwd := t.workingDir
 	if wd, ok := args["working_dir"].(string); ok && wd != "" {
 		if t.restrictToWorkspace && t.workingDir != "" {
-			resolvedWD, err := validatePath(wd, t.workingDir, true)
+			resolvedWD, err := validatePath(wd, t.allowedDirs, true)
 			if err != nil {
 				reason := "Command blocked by safety guard (" + err.Error() + ")"
 				t.logDeniedCommand(command, reason, "", wd)
@@ -360,7 +368,13 @@ postDeny:
 			}
 
 			if strings.HasPrefix(rel, "..") {
+				if isWithinAnyAllowedDir(p, t.allowedDirs) {
+					continue
+				}
 				if isExecutableInSystemPath(p) {
+					continue
+				}
+				if !looksLikeFilesystemPath(raw) {
 					continue
 				}
 				return "Command blocked by safety guard (path outside working dir)", ""
@@ -369,6 +383,28 @@ postDeny:
 	}
 
 	return "", ""
+}
+
+// looksLikeFilesystemPath heuristically checks whether a string that starts with /
+// is likely intended as a filesystem path rather than a URL path, API route, etc.
+// Returns false for strings that look like API paths (e.g. /repos/org/name/...).
+func looksLikeFilesystemPath(raw string) bool {
+	// If the path or its parent exists on disk, it's definitely a filesystem path
+	if _, err := os.Stat(raw); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Dir(raw)); err == nil {
+		return true
+	}
+	// Common filesystem root prefixes always count as filesystem paths
+	fsRoots := []string{"/home/", "/tmp/", "/etc/", "/var/", "/usr/", "/opt/", "/root/", "/dev/", "/proc/", "/sys/", "/mnt/", "/media/", "/srv/", "/run/", "/boot/"}
+	for _, root := range fsRoots {
+		if strings.HasPrefix(raw, root) {
+			return true
+		}
+	}
+	// Otherwise assume it's an API path / URL path argument
+	return false
 }
 
 // isExecutableInSystemPath checks whether absPath is an executable file

@@ -275,7 +275,81 @@ func TestFilesystemTool_ReadFile_RejectsSymlinkEscape(t *testing.T) {
 	if !result.IsError {
 		t.Fatalf("expected symlink escape to be blocked")
 	}
-	if !strings.Contains(result.ForLLM, "symlink resolves outside workspace") {
+	if !strings.Contains(result.ForLLM, "symlink resolves outside allowed directories") {
 		t.Fatalf("expected symlink escape error, got: %s", result.ForLLM)
+	}
+}
+
+// TestValidatePath_AllowsHomeDirectory verifies that a path in a second allowed dir is accepted.
+func TestValidatePath_AllowsHomeDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	testFile := filepath.Join(homeDir, "config.txt")
+	os.WriteFile(testFile, []byte("config"), 0o644)
+
+	result, err := validatePath(testFile, []string{workspace, homeDir}, true)
+	if err != nil {
+		t.Fatalf("expected path in home dir to be allowed, got error: %v", err)
+	}
+	if result != testFile {
+		t.Errorf("expected resolved path %q, got %q", testFile, result)
+	}
+}
+
+// TestValidatePath_BlocksOutsideBothDirs verifies that a path outside both allowed dirs is rejected.
+func TestValidatePath_BlocksOutsideBothDirs(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	outsideDir := t.TempDir()
+	testFile := filepath.Join(outsideDir, "secret.txt")
+
+	_, err := validatePath(testFile, []string{workspace, homeDir}, true)
+	if err == nil {
+		t.Fatal("expected path outside both dirs to be rejected")
+	}
+	if !strings.Contains(err.Error(), "outside allowed directories") {
+		t.Errorf("expected 'outside allowed directories' error, got: %v", err)
+	}
+}
+
+// TestValidatePath_SymlinkFromHomeToOutside_Blocked verifies a symlink in home dir
+// pointing outside all allowed dirs is blocked.
+func TestValidatePath_SymlinkFromHomeToOutside_Blocked(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	secret := filepath.Join(outsideDir, "secret.txt")
+	os.WriteFile(secret, []byte("top secret"), 0o644)
+
+	link := filepath.Join(homeDir, "escape.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	_, err := validatePath(link, []string{workspace, homeDir}, true)
+	if err == nil {
+		t.Fatal("expected symlink escaping home dir to be blocked")
+	}
+	if !strings.Contains(err.Error(), "symlink resolves outside allowed directories") {
+		t.Errorf("expected symlink error, got: %v", err)
+	}
+}
+
+// TestReadFileTool_HomeDirectory_Allowed verifies end-to-end read from a second allowed dir.
+func TestReadFileTool_HomeDirectory_Allowed(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := t.TempDir()
+	testFile := filepath.Join(homeDir, ".bashrc")
+	os.WriteFile(testFile, []byte("export PATH=/usr/bin"), 0o644)
+
+	tool := NewReadFileToolWithDirs([]string{workspace, homeDir}, true)
+	result := tool.Execute(context.Background(), map[string]any{"path": testFile})
+
+	if result.IsError {
+		t.Fatalf("expected read from home dir to succeed, got error: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "export PATH") {
+		t.Errorf("expected file content, got: %s", result.ForLLM)
 	}
 }

@@ -10,15 +10,23 @@ import (
 // EditFileTool edits a file by replacing old_text with new_text.
 // The old_text must exist exactly in the file.
 type EditFileTool struct {
-	allowedDir string
-	restrict   bool
+	allowedDirs []string
+	restrict    bool
 }
 
 // NewEditFileTool creates a new EditFileTool with optional directory restriction.
 func NewEditFileTool(allowedDir string, restrict bool) *EditFileTool {
 	return &EditFileTool{
-		allowedDir: allowedDir,
-		restrict:   restrict,
+		allowedDirs: []string{allowedDir},
+		restrict:    restrict,
+	}
+}
+
+// NewEditFileToolWithDirs creates a new EditFileTool with multiple allowed directories.
+func NewEditFileToolWithDirs(allowedDirs []string, restrict bool) *EditFileTool {
+	return &EditFileTool{
+		allowedDirs: allowedDirs,
+		restrict:    restrict,
 	}
 }
 
@@ -67,7 +75,7 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		return ErrorResult("new_text is required")
 	}
 
-	resolvedPath, err := validatePath(path, t.allowedDir, t.restrict)
+	resolvedPath, err := validatePath(path, t.allowedDirs, t.restrict)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
@@ -104,12 +112,16 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 }
 
 type AppendFileTool struct {
-	workspace string
-	restrict  bool
+	allowedDirs []string
+	restrict    bool
 }
 
 func NewAppendFileTool(workspace string, restrict bool) *AppendFileTool {
-	return &AppendFileTool{workspace: workspace, restrict: restrict}
+	return &AppendFileTool{allowedDirs: []string{workspace}, restrict: restrict}
+}
+
+func NewAppendFileToolWithDirs(allowedDirs []string, restrict bool) *AppendFileTool {
+	return &AppendFileTool{allowedDirs: allowedDirs, restrict: restrict}
 }
 
 func (t *AppendFileTool) Name() string {
@@ -148,7 +160,7 @@ func (t *AppendFileTool) Execute(ctx context.Context, args map[string]any) *Tool
 		return ErrorResult("content is required")
 	}
 
-	resolvedPath, err := validatePath(path, t.workspace, t.restrict)
+	resolvedPath, err := validatePath(path, t.allowedDirs, t.restrict)
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
