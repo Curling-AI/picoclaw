@@ -43,6 +43,20 @@ type AgentLoop struct {
 	channelManager     *channels.Manager
 	lifecycleManagers  map[string]*session.LifecycleManager // agentID -> lifecycle
 	activeRuns         sync.Map // sessionKey -> chan struct{} (stop signal)
+	eventHandler       EventHandler
+}
+
+// SetEventHandler registers a callback for agent lifecycle events.
+// Pass nil to remove the handler.
+func (al *AgentLoop) SetEventHandler(handler EventHandler) {
+	al.eventHandler = handler
+}
+
+// emit sends an event to the registered handler, if any.
+func (al *AgentLoop) emit(event AgentEvent) {
+	if al.eventHandler != nil {
+		al.eventHandler(event)
+	}
 }
 
 // processOptions configures how a message is processed
@@ -589,6 +603,7 @@ func (al *AgentLoop) runLLMIteration(
 		select {
 		case <-stopCh:
 			finalContent = buildStopSummary(toolCallLog)
+			al.emit(AgentEvent{Type: EventStopped, Iteration: iteration})
 			logger.InfoCF("agent", "Stopped by user before LLM call", map[string]any{
 				"agent_id": agent.ID, "iteration": iteration,
 			})
@@ -626,6 +641,9 @@ func (al *AgentLoop) runLLMIteration(
 				"messages_json": formatMessagesForLog(messages),
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
+
+		// Emit thinking event before LLM call
+		al.emit(AgentEvent{Type: EventThinking, Iteration: iteration})
 
 		// Call LLM with fallback chain if candidates are configured.
 		var response *providers.LLMResponse
@@ -704,6 +722,7 @@ func (al *AgentLoop) runLLMIteration(
 				}
 
 				// Try CompactSession first; fall back to forceCompression if it can't help
+				al.emit(AgentEvent{Type: EventCompacting, Iteration: iteration})
 				compactCtx, compactCancel := context.WithTimeout(ctx, 60*time.Second)
 				if compactErr := al.CompactSession(compactCtx, agent, opts.SessionKey); compactErr != nil {
 					al.forceCompression(agent, opts.SessionKey)
@@ -747,6 +766,7 @@ func (al *AgentLoop) runLLMIteration(
 		// Check if no tool calls - we're done
 		if len(response.ToolCalls) == 0 {
 			finalContent = response.Content
+			al.emit(AgentEvent{Type: EventResponse, Content: finalContent, Iteration: iteration})
 			logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
 				map[string]any{
 					"agent_id":      agent.ID,
@@ -821,6 +841,14 @@ func (al *AgentLoop) runLLMIteration(
 
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			argsPreview := utils.Truncate(string(argsJSON), 200)
+
+			al.emit(AgentEvent{
+				Type:      EventToolStart,
+				ToolName:  tc.Name,
+				ToolArgs:  tc.Arguments,
+				Iteration: iteration,
+			})
+
 			logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
 				map[string]any{
 					"agent_id":  agent.ID,
@@ -844,6 +872,7 @@ func (al *AgentLoop) runLLMIteration(
 				}
 			}
 
+			toolStart := time.Now()
 			toolResult := agent.Tools.ExecuteWithContext(
 				ctx,
 				tc.Name,
@@ -852,6 +881,24 @@ func (al *AgentLoop) runLLMIteration(
 				opts.ChatID,
 				asyncCallback,
 			)
+			toolDuration := time.Since(toolStart)
+
+			if toolResult.IsError || toolResult.Err != nil {
+				al.emit(AgentEvent{
+					Type:      EventToolError,
+					ToolName:  tc.Name,
+					IsError:   true,
+					Duration:  toolDuration,
+					Iteration: iteration,
+				})
+			} else {
+				al.emit(AgentEvent{
+					Type:      EventToolComplete,
+					ToolName:  tc.Name,
+					Duration:  toolDuration,
+					Iteration: iteration,
+				})
+			}
 
 			// Send ForUser content to user immediately if not Silent
 			// Suppress non-mutating tool errors if configured

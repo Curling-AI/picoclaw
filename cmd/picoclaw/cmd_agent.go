@@ -18,12 +18,15 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tui"
 )
 
 func agentCmd() {
 	message := ""
 	sessionKey := "cli:default"
 	modelOverride := ""
+	forceTUI := false
+	forceSimple := false
 
 	args := os.Args[2:]
 	for i := 0; i < len(args); i++ {
@@ -46,6 +49,10 @@ func agentCmd() {
 				modelOverride = args[i+1]
 				i++
 			}
+		case "--tui":
+			forceTUI = true
+		case "--simple":
+			forceSimple = true
 		}
 	}
 
@@ -82,6 +89,7 @@ func agentCmd() {
 		})
 
 	if message != "" {
+		// One-shot mode: always simple, no TUI
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, message, sessionKey)
 		if err != nil {
@@ -89,6 +97,21 @@ func agentCmd() {
 			os.Exit(1)
 		}
 		fmt.Printf("\n%s %s\n", logo, response)
+		return
+	}
+
+	// Interactive mode: determine TUI vs simple
+	useTUI := tui.IsTerminal() // auto-detect
+	if forceTUI {
+		useTUI = true
+	}
+	if forceSimple {
+		useTUI = false
+	}
+
+	if useTUI {
+		t := tui.New(agentLoop, sessionKey, logo)
+		t.Run()
 	} else {
 		fmt.Printf("%s Interactive mode (Ctrl+C to exit)\n\n", logo)
 		interactiveMode(agentLoop, sessionKey)
