@@ -103,6 +103,60 @@ func TestStripToolCallsFromText_NoToolCalls(t *testing.T) {
 	}
 }
 
+func TestExtractToolCallsFromText_BareJSON(t *testing.T) {
+	text := `{"name":"spawn","arguments":{"task":"list files"}}`
+
+	calls := ExtractToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("len(calls) = %d, want 1", len(calls))
+	}
+	if calls[0].Name != "spawn" {
+		t.Fatalf("Name = %q, want %q", calls[0].Name, "spawn")
+	}
+	if calls[0].Arguments["task"] != "list files" {
+		t.Fatalf("Arguments[task] = %v, want %q", calls[0].Arguments["task"], "list files")
+	}
+	if calls[0].ID != "bare_call_0" {
+		t.Fatalf("ID = %q, want %q", calls[0].ID, "bare_call_0")
+	}
+	if calls[0].Function == nil || calls[0].Function.Name != "spawn" {
+		t.Fatalf("Function.Name not set correctly")
+	}
+}
+
+func TestExtractToolCallsFromText_BareJSONWithSurroundingText(t *testing.T) {
+	text := `I will spawn a subagent now. {"name":"spawn","arguments":{"task":"analyze code"}} Let me continue.`
+
+	calls := ExtractToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("len(calls) = %d, want 1", len(calls))
+	}
+	if calls[0].Name != "spawn" {
+		t.Fatalf("Name = %q, want %q", calls[0].Name, "spawn")
+	}
+	if calls[0].Arguments["task"] != "analyze code" {
+		t.Fatalf("Arguments[task] = %v, want %q", calls[0].Arguments["task"], "analyze code")
+	}
+}
+
+func TestStripToolCallsFromText_BareJSON(t *testing.T) {
+	text := `I will do this. {"name":"spawn","arguments":{"task":"check"}} Done.`
+	got := StripToolCallsFromText(text)
+	want := "I will do this.  Done."
+	if got != want {
+		t.Fatalf("StripToolCallsFromText = %q, want %q", got, want)
+	}
+}
+
+func TestExtractToolCallsFromText_BareJSONIgnoresNonToolJSON(t *testing.T) {
+	// A JSON object that has no "name" or "arguments" should not be extracted.
+	text := `Here is some config: {"key":"value","count":42}`
+	calls := ExtractToolCallsFromText(text)
+	if calls != nil {
+		t.Fatalf("expected nil for non-tool JSON, got %v", calls)
+	}
+}
+
 func TestFindMatchingBrace(t *testing.T) {
 	tests := []struct {
 		text string

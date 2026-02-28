@@ -11,20 +11,25 @@ import (
 var xmlToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
 
 // ExtractToolCallsFromText parses tool call JSON embedded in response text.
-// It supports two formats:
+// It supports three formats:
 //  1. JSON wrapper: {"tool_calls": [{"id":"…","type":"function","function":{…}}]}
 //  2. XML tag:      <tool_call>{"name":"…","arguments":{…}}</tool_call>
+//  3. Bare JSON:    {"name":"…","arguments":{…}}
 func ExtractToolCallsFromText(text string) []ToolCall {
 	if calls := extractJSONWrapper(text); len(calls) > 0 {
 		return calls
 	}
-	return extractXMLToolCalls(text)
+	if calls := extractXMLToolCalls(text); len(calls) > 0 {
+		return calls
+	}
+	return extractBareToolCalls(text)
 }
 
 // StripToolCallsFromText removes tool call JSON/XML from response text.
 func StripToolCallsFromText(text string) string {
 	text = stripJSONWrapper(text)
 	text = xmlToolCallRe.ReplaceAllString(text, "")
+	text = stripBareToolCalls(text)
 	return strings.TrimSpace(text)
 }
 
@@ -107,6 +112,89 @@ func stripJSONWrapper(text string) string {
 	}
 
 	return strings.TrimSpace(text[:start] + text[end:])
+}
+
+// --- Bare JSON format ---
+// Matches {"name":"…","arguments":{…}} directly in text without any wrapper.
+
+func extractBareToolCalls(text string) []ToolCall {
+	var result []ToolCall
+	idx := 0
+	for idx < len(text) {
+		start := strings.Index(text[idx:], "{")
+		if start == -1 {
+			break
+		}
+		start += idx
+
+		end := FindMatchingBrace(text, start)
+		if end == start {
+			idx = start + 1
+			continue
+		}
+
+		jsonStr := text[start:end]
+
+		var raw struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil || raw.Name == "" || raw.Arguments == nil {
+			idx = start + 1
+			continue
+		}
+
+		argsJSON, _ := json.Marshal(raw.Arguments)
+		result = append(result, ToolCall{
+			ID:        fmt.Sprintf("bare_call_%d", len(result)),
+			Name:      raw.Name,
+			Arguments: raw.Arguments,
+			Function: &FunctionCall{
+				Name:      raw.Name,
+				Arguments: string(argsJSON),
+			},
+		})
+
+		idx = end
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func stripBareToolCalls(text string) string {
+	idx := 0
+	for idx < len(text) {
+		start := strings.Index(text[idx:], "{")
+		if start == -1 {
+			break
+		}
+		start += idx
+
+		end := FindMatchingBrace(text, start)
+		if end == start {
+			idx = start + 1
+			continue
+		}
+
+		jsonStr := text[start:end]
+
+		var raw struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil || raw.Name == "" || raw.Arguments == nil {
+			idx = start + 1
+			continue
+		}
+
+		text = text[:start] + text[end:]
+		// don't advance idx — next JSON object may start at same position
+	}
+
+	return text
 }
 
 // --- XML <tool_call> format ---

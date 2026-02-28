@@ -386,6 +386,36 @@ func TestParseResponse_XMLToolCallFallback(t *testing.T) {
 	}
 }
 
+func TestParseResponse_BareJSONToolCallFallback(t *testing.T) {
+	body := []byte(`{
+		"choices": [{
+			"message": {
+				"content": "I will spawn a subagent. {\"name\":\"spawn\",\"arguments\":{\"task\":\"list files\"}}"
+			},
+			"finish_reason": "stop"
+		}]
+	}`)
+
+	resp, err := parseResponse(body)
+	if err != nil {
+		t.Fatalf("parseResponse() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "spawn" {
+		t.Fatalf("ToolCalls[0].Name = %q, want %q", resp.ToolCalls[0].Name, "spawn")
+	}
+	if resp.ToolCalls[0].Arguments["task"] != "list files" {
+		t.Fatalf("ToolCalls[0].Arguments[task] = %v, want %q", resp.ToolCalls[0].Arguments["task"], "list files")
+	}
+	// Content should have the bare JSON stripped
+	want := "I will spawn a subagent."
+	if resp.Content != want {
+		t.Fatalf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
 func TestProvider_PerRequestTimeout(t *testing.T) {
 	// Server that delays longer than the per-request timeout.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
