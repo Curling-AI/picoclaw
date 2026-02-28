@@ -285,6 +285,107 @@ func TestNormalizeModel_UsesAPIBase(t *testing.T) {
 	}
 }
 
+func TestParseResponse_FallbackExtractsToolCallsFromContent(t *testing.T) {
+	// Simulate a model (e.g. Ollama qwen2.5) that puts tool calls in text content
+	// instead of the structured tool_calls field.
+	body := []byte(`{
+		"choices": [{
+			"message": {
+				"content": "I'll check the weather. {\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"SF\\\"}\"}}]}"
+			},
+			"finish_reason": "stop"
+		}]
+	}`)
+
+	resp, err := parseResponse(body)
+	if err != nil {
+		t.Fatalf("parseResponse() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "get_weather" {
+		t.Fatalf("ToolCalls[0].Name = %q, want %q", resp.ToolCalls[0].Name, "get_weather")
+	}
+	if resp.ToolCalls[0].Arguments["city"] != "SF" {
+		t.Fatalf("ToolCalls[0].Arguments[city] = %v, want SF", resp.ToolCalls[0].Arguments["city"])
+	}
+}
+
+func TestParseResponse_StructuredToolCallsTakePrecedence(t *testing.T) {
+	// When both structured tool_calls and text-embedded tool calls exist,
+	// the structured ones should win (no fallback).
+	body := []byte(`{
+		"choices": [{
+			"message": {
+				"content": "{\"tool_calls\":[{\"id\":\"text1\",\"type\":\"function\",\"function\":{\"name\":\"text_tool\",\"arguments\":\"{}\"}}]}",
+				"tool_calls": [{
+					"id": "struct1",
+					"type": "function",
+					"function": {"name": "struct_tool", "arguments": "{}"}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}]
+	}`)
+
+	resp, err := parseResponse(body)
+	if err != nil {
+		t.Fatalf("parseResponse() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "struct_tool" {
+		t.Fatalf("ToolCalls[0].Name = %q, want %q (structured should take precedence)", resp.ToolCalls[0].Name, "struct_tool")
+	}
+}
+
+func TestParseResponse_StripsExtractedToolCallsFromContent(t *testing.T) {
+	body := []byte(`{
+		"choices": [{
+			"message": {
+				"content": "Here is my plan. {\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"fn\",\"arguments\":\"{}\"}}]} Let me do that."
+			},
+			"finish_reason": "stop"
+		}]
+	}`)
+
+	resp, err := parseResponse(body)
+	if err != nil {
+		t.Fatalf("parseResponse() error = %v", err)
+	}
+	want := "Here is my plan.  Let me do that."
+	if resp.Content != want {
+		t.Fatalf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
+func TestParseResponse_XMLToolCallFallback(t *testing.T) {
+	body := []byte(`{
+		"choices": [{
+			"message": {
+				"content": "Let me read that.\n<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"/tmp/x\"}}</tool_call>"
+			},
+			"finish_reason": "stop"
+		}]
+	}`)
+
+	resp, err := parseResponse(body)
+	if err != nil {
+		t.Fatalf("parseResponse() error = %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("len(ToolCalls) = %d, want 1", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "read_file" {
+		t.Fatalf("ToolCalls[0].Name = %q, want %q", resp.ToolCalls[0].Name, "read_file")
+	}
+	if resp.ToolCalls[0].Arguments["path"] != "/tmp/x" {
+		t.Fatalf("ToolCalls[0].Arguments[path] = %v, want /tmp/x", resp.ToolCalls[0].Arguments["path"])
+	}
+}
+
 func TestProvider_PerRequestTimeout(t *testing.T) {
 	// Server that delays longer than the per-request timeout.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

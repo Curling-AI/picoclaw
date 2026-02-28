@@ -226,8 +226,21 @@ func parseResponse(body []byte) (*LLMResponse, error) {
 		toolCalls = append(toolCalls, toolCall)
 	}
 
+	content := choice.Message.Content
+
+	// Fallback: extract tool calls from text when structured field is empty.
+	// Some models (e.g. Ollama qwen2.5) embed tool call JSON in the text
+	// content instead of the structured tool_calls response field.
+	if len(toolCalls) == 0 && content != "" {
+		extracted := protocoltypes.ExtractToolCallsFromText(content)
+		if len(extracted) > 0 {
+			toolCalls = extracted
+			content = protocoltypes.StripToolCallsFromText(content)
+		}
+	}
+
 	return &LLMResponse{
-		Content:      choice.Message.Content,
+		Content:      content,
 		ToolCalls:    toolCalls,
 		FinishReason: choice.FinishReason,
 		Usage:        apiResponse.Usage,
