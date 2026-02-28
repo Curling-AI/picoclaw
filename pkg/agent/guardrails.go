@@ -47,6 +47,12 @@ type loopHistoryEntry struct {
 	OutputHash string
 }
 
+// driftState tracks consecutive argument growth for a single tool.
+type driftState struct {
+	prevArgsLen       int
+	consecutiveGrowth int
+}
+
 // LoopDetector tracks tool call patterns within a single agent run to detect
 // repetitive loops that waste tokens without making progress.
 type LoopDetector struct {
@@ -57,6 +63,8 @@ type LoopDetector struct {
 	lastTool          string
 	prevLastTool      string
 	pingPongCounts    map[string]int // key: "toolA->toolB"
+	toolFreqCounts    map[string]int           // key: toolName
+	driftTrackers     map[string]*driftState   // key: toolName
 	detectedLoopCount int
 }
 
@@ -71,6 +79,8 @@ func NewLoopDetector(cfg config.LoopDetectionConfig) *LoopDetector {
 		patternCounts:    make(map[string]int),
 		pollOutputCounts: make(map[string]int),
 		pingPongCounts:   make(map[string]int),
+		toolFreqCounts:   make(map[string]int),
+		driftTrackers:    make(map[string]*driftState),
 	}
 }
 
@@ -114,6 +124,20 @@ func (ld *LoopDetector) Record(toolName string, args map[string]any, output stri
 	// 3. Ping-pong detector
 	if ld.cfg.Detectors.PingPong {
 		if sig := ld.detectPingPong(toolName); sig > worst {
+			worst = sig
+		}
+	}
+
+	// 4. Tool frequency detector
+	if ld.cfg.Detectors.ToolFrequency {
+		if sig := ld.detectToolFrequency(toolName); sig > worst {
+			worst = sig
+		}
+	}
+
+	// 5. Argument drift detector
+	if ld.cfg.Detectors.ArgumentDrift {
+		if sig := ld.detectArgumentDrift(toolName, argsKey); sig > worst {
 			worst = sig
 		}
 	}
@@ -221,6 +245,81 @@ func (ld *LoopDetector) detectPingPong(toolName string) LoopSignal {
 		}
 	}
 
+	return LoopSignalNone
+}
+
+// detectToolFrequency counts calls per tool name regardless of arguments.
+// Uses 1.5x the configured thresholds since same-tool-different-args is a weaker signal.
+func (ld *LoopDetector) detectToolFrequency(toolName string) LoopSignal {
+	ld.toolFreqCounts[toolName]++
+	count := ld.toolFreqCounts[toolName]
+
+	warnAt := ld.cfg.WarningThreshold + ld.cfg.WarningThreshold/2
+	blockAt := ld.cfg.CriticalThreshold + ld.cfg.CriticalThreshold/2
+	abortAt := ld.cfg.GlobalCircuitBreakerThreshold + ld.cfg.GlobalCircuitBreakerThreshold/2
+
+	if count >= abortAt {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Circuit breaker: tool frequency", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalAbort
+	}
+	if count >= blockAt {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Critical: tool frequency", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalBlock
+	}
+	if count >= warnAt {
+		logger.WarnCF("guardrails", "Warning: tool frequency", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalWarning
+	}
+	return LoopSignalNone
+}
+
+// detectArgumentDrift tracks if len(normalizeArgs(args)) is monotonically increasing
+// for consecutive calls to the same tool. Resets when args length stays the same or shrinks.
+func (ld *LoopDetector) detectArgumentDrift(toolName, argsKey string) LoopSignal {
+	ds, ok := ld.driftTrackers[toolName]
+	if !ok {
+		ds = &driftState{}
+		ld.driftTrackers[toolName] = ds
+	}
+
+	argsLen := len(argsKey)
+	if argsLen > ds.prevArgsLen {
+		ds.consecutiveGrowth++
+	} else {
+		ds.consecutiveGrowth = 0
+	}
+	ds.prevArgsLen = argsLen
+
+	count := ds.consecutiveGrowth
+
+	if count >= ld.cfg.GlobalCircuitBreakerThreshold {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Circuit breaker: argument drift", map[string]any{
+			"tool": toolName, "growth": count,
+		})
+		return LoopSignalAbort
+	}
+	if count >= ld.cfg.CriticalThreshold {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Critical: argument drift", map[string]any{
+			"tool": toolName, "growth": count,
+		})
+		return LoopSignalBlock
+	}
+	if count >= ld.cfg.WarningThreshold {
+		logger.WarnCF("guardrails", "Warning: argument drift", map[string]any{
+			"tool": toolName, "growth": count,
+		})
+		return LoopSignalWarning
+	}
 	return LoopSignalNone
 }
 

@@ -483,6 +483,8 @@ type LoopDetectorsConfig struct {
 	GenericRepeat       bool `json:"generic_repeat"`
 	KnownPollNoProgress bool `json:"known_poll_no_progress"`
 	PingPong            bool `json:"ping_pong"`
+	ToolFrequency       bool `json:"tool_frequency"`
+	ArgumentDrift       bool `json:"argument_drift"`
 }
 
 type LoopDetectionConfig struct {

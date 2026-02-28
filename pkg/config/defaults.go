@@ -313,6 +313,8 @@ func DefaultConfig() *Config {
 					GenericRepeat:       true,
 					KnownPollNoProgress: true,
 					PingPong:            true,
+					ToolFrequency:       true,
+					ArgumentDrift:       true,
 				},
 			},
 			Skills: SkillsToolsConfig{

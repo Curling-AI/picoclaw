@@ -24,6 +24,8 @@ func testLoopDetectionConfig() config.LoopDetectionConfig {
 			GenericRepeat:       true,
 			KnownPollNoProgress: true,
 			PingPong:            true,
+			ToolFrequency:       true,
+			ArgumentDrift:       true,
 		},
 	}
 }
@@ -441,6 +443,224 @@ func TestBuildStopSummary(t *testing.T) {
 	})
 }
 
+// --- Tool Frequency detector tests ---
+
+func TestLoopDetector_ToolFrequency_WarningAtThreshold(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	// Disable other detectors to isolate tool frequency
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ArgumentDrift = false
+	ld := NewLoopDetector(cfg)
+
+	// 1.5x threshold: warning at 15 (10 + 10/2)
+	warnAt := cfg.WarningThreshold + cfg.WarningThreshold/2
+
+	for i := 1; i < warnAt; i++ {
+		args := map[string]any{"query": fmt.Sprintf("search-%d", i)}
+		sig := ld.Record("web_search", args, fmt.Sprintf("result-%d", i))
+		if sig != LoopSignalNone {
+			t.Fatalf("Expected None at count %d, got %v", i, sig)
+		}
+	}
+
+	sig := ld.Record("web_search", map[string]any{"query": "final"}, "result-final")
+	if sig != LoopSignalWarning {
+		t.Fatalf("Expected Warning at count %d, got %v", warnAt, sig)
+	}
+}
+
+func TestLoopDetector_ToolFrequency_BlockAtThreshold(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ArgumentDrift = false
+	ld := NewLoopDetector(cfg)
+
+	blockAt := cfg.CriticalThreshold + cfg.CriticalThreshold/2 // 30
+
+	for i := 1; i < blockAt; i++ {
+		ld.Record("web_search", map[string]any{"q": fmt.Sprintf("q%d", i)}, fmt.Sprintf("r%d", i))
+	}
+
+	sig := ld.Record("web_search", map[string]any{"q": "final"}, "done")
+	if sig != LoopSignalBlock {
+		t.Fatalf("Expected Block at count %d, got %v", blockAt, sig)
+	}
+}
+
+func TestLoopDetector_ToolFrequency_AbortAtThreshold(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ArgumentDrift = false
+	ld := NewLoopDetector(cfg)
+
+	abortAt := cfg.GlobalCircuitBreakerThreshold + cfg.GlobalCircuitBreakerThreshold/2 // 45
+
+	for i := 1; i < abortAt; i++ {
+		ld.Record("web_search", map[string]any{"q": fmt.Sprintf("q%d", i)}, fmt.Sprintf("r%d", i))
+	}
+
+	sig := ld.Record("web_search", map[string]any{"q": "final"}, "done")
+	if sig != LoopSignalAbort {
+		t.Fatalf("Expected Abort at count %d, got %v", abortAt, sig)
+	}
+}
+
+func TestLoopDetector_ToolFrequency_DifferentToolsNoFire(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ArgumentDrift = false
+	ld := NewLoopDetector(cfg)
+
+	tools := []string{"web_search", "read_file", "exec", "list_dir", "web_fetch"}
+	warnAt := cfg.WarningThreshold + cfg.WarningThreshold/2
+
+	// Interleave 5 tools — each tool called (warnAt-1) times, never hitting threshold
+	for i := 0; i < warnAt-1; i++ {
+		for _, tool := range tools {
+			sig := ld.Record(tool, map[string]any{"i": fmt.Sprintf("%s-%d", tool, i)}, "out")
+			if sig != LoopSignalNone {
+				t.Fatalf("Unexpected signal %v for tool %s at iteration %d", sig, tool, i)
+			}
+		}
+	}
+}
+
+// --- Argument Drift detector tests ---
+
+func TestLoopDetector_ArgumentDrift_WarningAtThreshold(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ToolFrequency = false
+	ld := NewLoopDetector(cfg)
+
+	// Build monotonically growing query
+	query := "search"
+	for i := 1; i <= cfg.WarningThreshold; i++ {
+		query += " keyword"
+		sig := ld.Record("web_search", map[string]any{"query": query}, fmt.Sprintf("r%d", i))
+		if i < cfg.WarningThreshold && sig != LoopSignalNone {
+			t.Fatalf("Expected None at growth %d, got %v", i, sig)
+		}
+		if i == cfg.WarningThreshold && sig != LoopSignalWarning {
+			t.Fatalf("Expected Warning at growth %d, got %v", cfg.WarningThreshold, sig)
+		}
+	}
+}
+
+func TestLoopDetector_ArgumentDrift_ResetsOnShrink(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ToolFrequency = false
+	ld := NewLoopDetector(cfg)
+
+	// Grow for threshold-2 calls (just below warning)
+	query := "q"
+	for i := 0; i < cfg.WarningThreshold-2; i++ {
+		query += " word"
+		ld.Record("web_search", map[string]any{"query": query}, "out")
+	}
+
+	// Shrink — should reset consecutive growth
+	ld.Record("web_search", map[string]any{"query": "short"}, "out")
+
+	// Grow again for threshold-1 calls — should NOT fire because growth was reset
+	query = "restart"
+	for i := 0; i < cfg.WarningThreshold-1; i++ {
+		query += " word"
+		sig := ld.Record("web_search", map[string]any{"query": query}, "out")
+		if sig != LoopSignalNone {
+			t.Fatalf("Expected None after reset at growth %d, got %v", i+1, sig)
+		}
+	}
+}
+
+func TestLoopDetector_ArgumentDrift_AbortAtThreshold(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ToolFrequency = false
+	ld := NewLoopDetector(cfg)
+
+	query := "s"
+	for i := 1; i <= cfg.GlobalCircuitBreakerThreshold; i++ {
+		query += " w"
+		sig := ld.Record("web_search", map[string]any{"query": query}, fmt.Sprintf("r%d", i))
+		if i == cfg.GlobalCircuitBreakerThreshold && sig != LoopSignalAbort {
+			t.Fatalf("Expected Abort at growth %d, got %v", i, sig)
+		}
+	}
+}
+
+func TestLoopDetector_ArgumentDrift_IndependentPerTool(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	cfg.Detectors.ToolFrequency = false
+	ld := NewLoopDetector(cfg)
+
+	// Grow web_search args for threshold-2 calls
+	query := "q"
+	for i := 0; i < cfg.WarningThreshold-2; i++ {
+		query += " w"
+		ld.Record("web_search", map[string]any{"query": query}, "out")
+	}
+
+	// Interleave a different tool with short args — should not affect web_search drift
+	ld.Record("read_file", map[string]any{"path": "/a"}, "content")
+
+	// Continue growing web_search — the interleaved call should not reset it
+	query += " w"
+	sig := ld.Record("web_search", map[string]any{"query": query}, "out")
+	// This is growth count = threshold-1, still None
+	if sig != LoopSignalNone {
+		t.Fatalf("Expected None at growth %d, got %v", cfg.WarningThreshold-1, sig)
+	}
+
+	query += " w"
+	sig = ld.Record("web_search", map[string]any{"query": query}, "out")
+	if sig != LoopSignalWarning {
+		t.Fatalf("Expected Warning at growth %d, got %v", cfg.WarningThreshold, sig)
+	}
+}
+
+func TestLoopDetector_RecursiveQueryConcatenation_BothDetectorsFire(t *testing.T) {
+	cfg := testLoopDetectionConfig()
+	// Disable generic repeat and poll since args differ each time
+	cfg.Detectors.GenericRepeat = false
+	cfg.Detectors.KnownPollNoProgress = false
+	cfg.Detectors.PingPong = false
+	ld := NewLoopDetector(cfg)
+
+	// Simulate the original bug: web_search with recursively concatenating queries
+	query := "initial search"
+	var lastSig LoopSignal
+	for i := 0; i < 50; i++ {
+		query += " " + fmt.Sprintf("keyword%d", i)
+		lastSig = ld.Record("web_search", map[string]any{"query": query}, fmt.Sprintf("result-%d", i))
+		if lastSig == LoopSignalAbort {
+			break
+		}
+	}
+
+	if lastSig != LoopSignalAbort {
+		t.Fatalf("Expected Abort for recursive query concatenation, got %v", lastSig)
+	}
+}
+
 // --- Integration tests using mock providers ---
 
 // blockingMockProvider blocks until context is cancelled, simulating a slow LLM.
@@ -573,6 +793,8 @@ func TestRunLLMIteration_LoopDetectorAbort(t *testing.T) {
 					GenericRepeat:       true,
 					KnownPollNoProgress: true,
 					PingPong:            true,
+					ToolFrequency:       true,
+					ArgumentDrift:       true,
 				},
 			},
 		},
