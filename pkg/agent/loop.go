@@ -105,7 +105,7 @@ func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provid
 	defaultAgent := registry.GetDefaultAgent()
 	var stateManager *state.Manager
 	if defaultAgent != nil {
-		stateManager = state.NewManager(defaultAgent.Workspace)
+		stateManager = state.NewManager(cfg.StateDirPath())
 	}
 
 	// Initialize lifecycle managers for each agent

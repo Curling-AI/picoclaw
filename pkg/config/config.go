@@ -179,6 +179,7 @@ type ResetPolicyConfig struct {
 type AgentDefaults struct {
 	Name                string   `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"`
 	Workspace           string   `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	StateDir            string   `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
 	RestrictToWorkspace bool     `json:"restrict_to_workspace"           env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
 	Provider            string   `json:"provider"                        env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
 	Model               string   `json:"model"                           env:"PICOCLAW_AGENTS_DEFAULTS_MODEL"`
@@ -605,6 +606,14 @@ func SaveConfig(path string, cfg *Config) error {
 
 func (c *Config) WorkspacePath() string {
 	return expandHome(c.Agents.Defaults.Workspace)
+}
+
+func (c *Config) StateDirPath() string {
+	if c.Agents.Defaults.StateDir != "" {
+		return expandHome(c.Agents.Defaults.StateDir)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".picoclaw", "state")
 }
 
 func (c *Config) GetAPIKey() string {

@@ -27,7 +27,7 @@ func cronCmd() {
 		return
 	}
 
-	cronStorePath := filepath.Join(cfg.WorkspacePath(), "cron", "jobs.json")
+	cronStorePath := filepath.Join(cfg.StateDirPath(), "cron", "jobs.json")
 
 	switch subcommand {
 	case "list":

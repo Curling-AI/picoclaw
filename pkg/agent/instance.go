@@ -80,7 +80,7 @@ func NewAgentInstance(
 	toolsRegistry.Register(tools.NewEditFileToolWithDirs(allowedDirs, restrict))
 	toolsRegistry.Register(tools.NewAppendFileToolWithDirs(allowedDirs, restrict))
 
-	sessionsDir := filepath.Join(workspace, "sessions")
+	sessionsDir := resolveAgentStateDir(agentCfg, defaults)
 	sessionsManager := session.NewSessionManager(sessionsDir)
 
 	contextBuilder := NewContextBuilder(workspace)
@@ -251,6 +251,20 @@ func resolveAgentFallbacks(agentCfg *config.AgentConfig, defaults *config.AgentD
 		return agentCfg.Model.Fallbacks
 	}
 	return defaults.ModelFallbacks
+}
+
+// resolveAgentStateDir determines the sessions state directory for an agent.
+func resolveAgentStateDir(agentCfg *config.AgentConfig, defaults *config.AgentDefaults) string {
+	stateDir := expandHome(defaults.StateDir)
+	if stateDir == "" {
+		home, _ := os.UserHomeDir()
+		stateDir = filepath.Join(home, ".picoclaw", "state")
+	}
+	agentID := "main"
+	if agentCfg != nil && agentCfg.ID != "" {
+		agentID = routing.NormalizeAgentID(agentCfg.ID)
+	}
+	return filepath.Join(stateDir, "sessions", agentID)
 }
 
 func expandHome(path string) string {

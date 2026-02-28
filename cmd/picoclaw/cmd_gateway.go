@@ -85,10 +85,12 @@ func gatewayCmd() {
 		cfg.Agents.Defaults.RestrictToWorkspace,
 		execTimeout,
 		cfg,
+		cfg.StateDirPath(),
 	)
 
 	heartbeatService := heartbeat.NewHeartbeatService(
 		cfg.WorkspacePath(),
+		cfg.StateDirPath(),
 		cfg.Heartbeat.Interval,
 		cfg.Heartbeat.Enabled,
 	)
@@ -180,7 +182,7 @@ func gatewayCmd() {
 	}
 	fmt.Println("✓ Heartbeat service started")
 
-	stateManager := state.NewManager(cfg.WorkspacePath())
+	stateManager := state.NewManager(cfg.StateDirPath())
 	deviceService := devices.NewService(devices.Config{
 		Enabled:    cfg.Devices.Enabled,
 		MonitorUSB: cfg.Devices.MonitorUSB,
@@ -228,8 +230,9 @@ func setupCronTool(
 	restrict bool,
 	execTimeout time.Duration,
 	cfg *config.Config,
+	stateDir string,
 ) *cron.CronService {
-	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
+	cronStorePath := filepath.Join(stateDir, "cron", "jobs.json")
 
 	// Create cron service
 	cronService := cron.NewCronService(cronStorePath, nil)
