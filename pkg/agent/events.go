@@ -16,6 +16,9 @@ const (
 	EventResponse                      // Final text response ready
 	EventCompacting                    // Context compaction in progress
 	EventStopped                       // User stop signal processed
+	EventSubagentSpawned               // Subagent started
+	EventSubagentCompleted             // Subagent finished successfully
+	EventSubagentFailed                // Subagent failed or was cancelled
 )
 
 // AgentEvent carries details about an agent lifecycle event.

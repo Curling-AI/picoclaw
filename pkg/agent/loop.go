@@ -118,7 +118,7 @@ func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provid
 		}
 	}
 
-	return &AgentLoop{
+	al := &AgentLoop{
 		bus:              msgBus,
 		cfg:              cfg,
 		registry:         registry,
@@ -127,6 +127,59 @@ func NewAgentLoopWithRegistry(cfg *config.Config, msgBus *bus.MessageBus, provid
 		fallback:         fallbackChain,
 		providerRegistry: providerRegistry,
 		lifecycleManagers: lifecycleManagers,
+	}
+
+	// Wire subagent event and session callbacks now that the loop exists
+	al.wireSubagentCallbacks()
+
+	return al
+}
+
+// wireSubagentCallbacks connects SubagentManagers (found via spawn tools) to the
+// AgentLoop's event system and session storage so that subagent lifecycle events
+// reach the TUI and results are persisted in session history.
+func (al *AgentLoop) wireSubagentCallbacks() {
+	for _, agentID := range al.registry.ListAgentIDs() {
+		agent, ok := al.registry.GetAgent(agentID)
+		if !ok {
+			continue
+		}
+		tool, ok := agent.Tools.Get("spawn")
+		if !ok {
+			continue
+		}
+		spawnTool, ok := tool.(*tools.SpawnTool)
+		if !ok {
+			continue
+		}
+		mgr := spawnTool.Manager()
+		if mgr == nil {
+			continue
+		}
+
+		// Bridge subagent events into the agent loop's event system
+		mgr.SetEventCallback(func(eventType int, label, content string) {
+			var evType EventType
+			switch eventType {
+			case 0:
+				evType = EventSubagentSpawned
+			case 1:
+				evType = EventSubagentCompleted
+			case 2:
+				evType = EventSubagentFailed
+			default:
+				return
+			}
+			al.emit(AgentEvent{Type: evType, ToolName: label, Content: content})
+		})
+
+		// Bridge subagent results into the agent's session history
+		currentAgent := agent
+		sessionKey := routing.BuildAgentMainSessionKey(agentID)
+		mgr.SetSessionWriter(func(role, content string) {
+			currentAgent.Sessions.AddMessage(sessionKey, role, content)
+			currentAgent.Sessions.Save(sessionKey)
+		})
 	}
 }
 

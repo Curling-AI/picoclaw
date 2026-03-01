@@ -22,6 +22,13 @@ type SubagentTask struct {
 	Created       int64
 }
 
+// SubagentEventCallback is called when a subagent lifecycle event occurs.
+// eventType: 0=spawned, 1=completed, 2=failed. Matches agent.EventSubagentSpawned/Completed/Failed offsets.
+type SubagentEventCallback func(eventType int, label, content string)
+
+// SessionWriteCallback writes a message into the agent's session history.
+type SessionWriteCallback func(role, content string)
+
 type SubagentManager struct {
 	tasks          map[string]*SubagentTask
 	mu             sync.RWMutex
@@ -36,6 +43,8 @@ type SubagentManager struct {
 	hasMaxTokens   bool
 	hasTemperature bool
 	nextID         int
+	eventCallback  SubagentEventCallback
+	sessionWriter  SessionWriteCallback
 }
 
 func NewSubagentManager(
@@ -52,6 +61,40 @@ func NewSubagentManager(
 		tools:         NewToolRegistry(),
 		maxIterations: 10,
 		nextID:        1,
+	}
+}
+
+// SetEventCallback registers a callback for subagent lifecycle events.
+func (sm *SubagentManager) SetEventCallback(cb SubagentEventCallback) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.eventCallback = cb
+}
+
+// SetSessionWriter registers a callback to write subagent results into session history.
+func (sm *SubagentManager) SetSessionWriter(cb SessionWriteCallback) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.sessionWriter = cb
+}
+
+// emitEvent sends a subagent event if a callback is registered.
+func (sm *SubagentManager) emitEvent(eventType int, label, content string) {
+	sm.mu.RLock()
+	cb := sm.eventCallback
+	sm.mu.RUnlock()
+	if cb != nil {
+		cb(eventType, label, content)
+	}
+}
+
+// writeSession writes a message to the agent session if a writer is registered.
+func (sm *SubagentManager) writeSession(role, content string) {
+	sm.mu.RLock()
+	cb := sm.sessionWriter
+	sm.mu.RUnlock()
+	if cb != nil {
+		cb(role, content)
 	}
 }
 
@@ -103,8 +146,12 @@ func (sm *SubagentManager) Spawn(
 	}
 	sm.tasks[taskID] = subagentTask
 
-	// Start task in background with context cancellation support
-	go sm.runTask(ctx, subagentTask, callback)
+	// Detach from caller's context so the subagent survives the parent returning
+	taskCtx := context.WithoutCancel(ctx)
+	go sm.runTask(taskCtx, subagentTask, callback)
+
+	// Emit spawned event
+	sm.emitEvent(0, label, task)
 
 	if label != "" {
 		return fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task), nil
@@ -215,7 +262,16 @@ After completing the task, provide a clear summary of what was done.`
 		}
 	}
 
-	// Send announce message back to main agent
+	// Emit lifecycle event and write to session history
+	if task.Status == "completed" {
+		sm.emitEvent(1, task.Label, task.Result)
+		sm.writeSession("user", fmt.Sprintf("[System: subagent:%s] Task '%s' completed.\n\nResult:\n%s", task.ID, task.Label, task.Result))
+	} else {
+		sm.emitEvent(2, task.Label, task.Result)
+		sm.writeSession("user", fmt.Sprintf("[System: subagent:%s] Task '%s' failed: %s", task.ID, task.Label, task.Result))
+	}
+
+	// Send announce message back to main agent (for external channels via bus)
 	if sm.bus != nil {
 		announceContent := fmt.Sprintf("Task '%s' completed.\n\nResult:\n%s", task.Label, task.Result)
 		sm.bus.PublishInbound(bus.InboundMessage{

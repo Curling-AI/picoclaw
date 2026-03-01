@@ -64,6 +64,11 @@ func (t *SpawnTool) SetAllowlistChecker(check func(targetAgentID string) bool) {
 	t.allowlistCheck = check
 }
 
+// Manager returns the underlying SubagentManager.
+func (t *SpawnTool) Manager() *SubagentManager {
+	return t.manager
+}
+
 func (t *SpawnTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	task, ok := args["task"].(string)
 	if !ok {
