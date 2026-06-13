@@ -6572,13 +6572,18 @@ func TestResolveMediaRefs_HistoricalAndCurrentToolImagesOnlyRehydrateCurrentTurn
 	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 1)
 
 	if len(result) != 4 {
-		t.Fatalf("expected 4 messages (historical tool + assistant + current tool + synthetic user), got %d", len(result))
+		t.Fatalf("expected 4 messages (historical tool + assistant + current tool + synthetic user), "+
+			"got %d", len(result))
 	}
 	if result[0].Role != "tool" || len(result[0].Media) != 0 {
 		t.Fatalf("historical tool message = %#v, want path-tagged tool without media", result[0])
 	}
 	if !strings.Contains(result[0].Content, "[image:"+historicalPath+"]") {
-		t.Fatalf("expected historical tool content to contain %q, got %q", "[image:"+historicalPath+"]", result[0].Content)
+		t.Fatalf(
+			"expected historical tool content to contain %q, got %q",
+			"[image:"+historicalPath+"]",
+			result[0].Content,
+		)
 	}
 	if result[1].Role != "assistant" || result[1].Content != "Now I will inspect a new image." {
 		t.Fatalf("assistant boundary message = %#v, want untouched assistant", result[1])
