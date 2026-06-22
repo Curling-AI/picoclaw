@@ -1,6 +1,9 @@
 package pico
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestSetTurnUsagePayload(t *testing.T) {
 	t.Run("populates usage block when counts present", func(t *testing.T) {
@@ -33,4 +36,34 @@ func TestSetTurnUsagePayload(t *testing.T) {
 			t.Errorf("expected no %q key when counts are zero", PayloadKeyUsage)
 		}
 	})
+}
+
+// newCaptureStreamer returns a streamer whose broadcasts are captured into the
+// returned map pointer, so tests need no live websocket.
+func newCaptureStreamer() (*picoStreamer, *map[string]any) {
+	var last map[string]any
+	ch := &PicoChannel{}
+	ch.broadcastFn = func(chatID string, msg PicoMessage) error {
+		last = msg.Payload
+		return nil
+	}
+	s := &picoStreamer{channel: ch, chatID: "c1"}
+	return s, &last
+}
+
+func TestStreamerEmitsUsageOnFinalize(t *testing.T) {
+	s, last := newCaptureStreamer()
+	s.SetTurnUsage(100, 40)
+
+	// sendLocked with empty messageID takes the create branch, which attaches
+	// usage from the streamer's stored counts.
+	s.mu.Lock()
+	err := s.sendLocked(context.Background(), "answer", nil)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("sendLocked: %v", err)
+	}
+	if _, ok := (*last)[PayloadKeyUsage]; !ok {
+		t.Fatalf("expected usage in payload, got %+v", *last)
+	}
 }
