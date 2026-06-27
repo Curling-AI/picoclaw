@@ -45,6 +45,7 @@ type Config struct {
 	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
 	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`
 	Tools     ToolsConfig     `json:"tools"               yaml:",inline"`
+	Messages  MessagesConfig  `json:"messages,omitempty"  yaml:"-"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
 	Devices   DevicesConfig   `json:"devices"             yaml:"-"`
 	Voice     VoiceConfig     `json:"voice"               yaml:"-"`
@@ -434,6 +435,8 @@ type AgentDefaults struct {
 	ContextWindow             int                `json:"context_window,omitempty"         env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_WINDOW"`
 	Temperature               *float64           `json:"temperature,omitempty"            env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
 	MaxToolIterations         int                `json:"max_tool_iterations"              env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	TimeoutSeconds            int                `json:"timeout_seconds,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_TIMEOUT_SECONDS"` // wall-clock timeout per agent run (0 = use default 600s)
+	VerboseDefault            string             `json:"verbose_default,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_VERBOSE_DEFAULT"` // timeout-summary verbosity: "off", "on", "full"
 	SummarizeMessageThreshold int                `json:"summarize_message_threshold"      env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"`
 	SummarizeTokenPercent     int                `json:"summarize_token_percent"          env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`
 	MaxMediaSize              int                `json:"max_media_size,omitempty"         env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
@@ -1045,6 +1048,48 @@ type ExecConfig struct {
 	TimeoutSeconds      int      `                                 json:"timeout_seconds"       env:"PICOCLAW_TOOLS_EXEC_TIMEOUT_SECONDS"` // 0 means use default (60s)
 }
 
+// LoopDetectorsConfig toggles the individual loop-detection strategies.
+type LoopDetectorsConfig struct {
+	GenericRepeat       bool `json:"generic_repeat"`
+	KnownPollNoProgress bool `json:"known_poll_no_progress"`
+	PingPong            bool `json:"ping_pong"`
+	ToolFrequency       bool `json:"tool_frequency"`
+	ArgumentDrift       bool `json:"argument_drift"`
+}
+
+// LoopDetectionConfig configures the per-run guardrail that detects repetitive
+// tool-call loops and escalates through warning/block/abort signals.
+type LoopDetectionConfig struct {
+	Enabled                       bool                `json:"enabled"`
+	HistorySize                   int                 `json:"history_size"`
+	WarningThreshold              int                 `json:"warning_threshold"`
+	CriticalThreshold             int                 `json:"critical_threshold"`
+	GlobalCircuitBreakerThreshold int                 `json:"global_circuit_breaker_threshold"`
+	Detectors                     LoopDetectorsConfig `json:"detectors"`
+}
+
+// Validate checks that loop detection thresholds are strictly increasing when enabled.
+func (c *LoopDetectionConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.WarningThreshold <= 0 || c.CriticalThreshold <= 0 || c.GlobalCircuitBreakerThreshold <= 0 {
+		return fmt.Errorf("loop detection thresholds must be positive when enabled")
+	}
+	if c.WarningThreshold >= c.CriticalThreshold {
+		return fmt.Errorf("warning_threshold (%d) must be less than critical_threshold (%d)", c.WarningThreshold, c.CriticalThreshold)
+	}
+	if c.CriticalThreshold >= c.GlobalCircuitBreakerThreshold {
+		return fmt.Errorf("critical_threshold (%d) must be less than global_circuit_breaker_threshold (%d)", c.CriticalThreshold, c.GlobalCircuitBreakerThreshold)
+	}
+	return nil
+}
+
+// MessagesConfig controls user-facing message behavior.
+type MessagesConfig struct {
+	SuppressToolErrors bool `json:"suppress_tool_errors" env:"PICOCLAW_MESSAGES_SUPPRESS_TOOL_ERRORS"`
+}
+
 type SkillsToolsConfig struct {
 	ToolConfig `                       yaml:"-"                    envPrefix:"PICOCLAW_TOOLS_SKILLS_"`
 	Registries SkillsRegistriesConfig `yaml:"registries,omitempty"                                    json:"registries"`
@@ -1092,31 +1137,32 @@ type ToolsConfig struct {
 	// FilterMinLength is the minimum content length required for filtering.
 	// Content shorter than this will be returned unchanged for performance.
 	// Default: 8
-	FilterMinLength int                `json:"filter_min_length" yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
-	Web             WebToolsConfig     `json:"web"               yaml:"web,omitempty"`
-	Cron            CronToolsConfig    `json:"cron"              yaml:"-"`
-	Exec            ExecConfig         `json:"exec"              yaml:"-"`
-	Skills          SkillsToolsConfig  `json:"skills"            yaml:"skills,omitempty"`
-	MediaCleanup    MediaCleanupConfig `json:"media_cleanup"     yaml:"-"`
-	MCP             MCPConfig          `json:"mcp"               yaml:"-"`
-	AppendFile      ToolConfig         `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
-	EditFile        ToolConfig         `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
-	FindSkills      ToolConfig         `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
-	I2C             ToolConfig         `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
-	InstallSkill    ToolConfig         `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
-	ListDir         ToolConfig         `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
-	LoadImage       ToolConfig         `json:"load_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
-	Message         MessageToolsConfig `json:"message"           yaml:"-"`
-	ReadFile        ReadFileToolConfig `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
-	Serial          ToolConfig         `json:"serial"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
-	SendFile        ToolConfig         `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
-	SendTTS         ToolConfig         `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
-	Spawn           ToolConfig         `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
-	SpawnStatus     ToolConfig         `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
-	SPI             ToolConfig         `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
-	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
-	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
-	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+	FilterMinLength int                 `json:"filter_min_length" yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
+	Web             WebToolsConfig      `json:"web"               yaml:"web,omitempty"`
+	Cron            CronToolsConfig     `json:"cron"              yaml:"-"`
+	Exec            ExecConfig          `json:"exec"              yaml:"-"`
+	Skills          SkillsToolsConfig   `json:"skills"            yaml:"skills,omitempty"`
+	LoopDetection   LoopDetectionConfig `json:"loop_detection"   yaml:"-"`
+	MediaCleanup    MediaCleanupConfig  `json:"media_cleanup"     yaml:"-"`
+	MCP             MCPConfig           `json:"mcp"               yaml:"-"`
+	AppendFile      ToolConfig          `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
+	EditFile        ToolConfig          `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
+	FindSkills      ToolConfig          `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
+	I2C             ToolConfig          `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
+	InstallSkill    ToolConfig          `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
+	ListDir         ToolConfig          `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
+	LoadImage       ToolConfig          `json:"load_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
+	Message         MessageToolsConfig  `json:"message"           yaml:"-"`
+	ReadFile        ReadFileToolConfig  `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
+	Serial          ToolConfig          `json:"serial"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
+	SendFile        ToolConfig          `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
+	SendTTS         ToolConfig          `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
+	Spawn           ToolConfig          `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
+	SpawnStatus     ToolConfig          `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
+	SPI             ToolConfig          `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
+	Subagent        ToolConfig          `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
+	WebFetch        ToolConfig          `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WriteFile       ToolConfig          `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
 // IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
@@ -1523,6 +1569,11 @@ func LoadConfig(path string) (*Config, error) {
 
 	cfg.Session.ApplyDmScope()
 	cfg.Session.DeriveDmScope()
+
+	// Validate loop detection thresholds (no-op when disabled).
+	if err = cfg.Tools.LoopDetection.Validate(); err != nil {
+		return nil, fmt.Errorf("tools.loop_detection: %w", err)
+	}
 
 	return cfg, nil
 }

@@ -32,6 +32,8 @@ func DefaultConfig() *Config {
 				MaxTokens:                 32768,
 				Temperature:               nil, // nil means use provider default
 				MaxToolIterations:         50,
+				TimeoutSeconds:            600, // 10-minute wall-clock timeout per agent run
+				VerboseDefault:            "off",
 				SummarizeMessageThreshold: 20,
 				SummarizeTokenPercent:     75,
 				SteeringMode:              "one-at-a-time",
@@ -395,6 +397,20 @@ func DefaultConfig() *Config {
 				EnableDenyPatterns: true,
 				AllowRemote:        true,
 				TimeoutSeconds:     60,
+			},
+			LoopDetection: LoopDetectionConfig{
+				Enabled:                       false, // disabled by default for zero-risk rollout
+				HistorySize:                   30,
+				WarningThreshold:              10,
+				CriticalThreshold:             20,
+				GlobalCircuitBreakerThreshold: 30,
+				Detectors: LoopDetectorsConfig{
+					GenericRepeat:       true,
+					KnownPollNoProgress: true,
+					PingPong:            true,
+					ToolFrequency:       true,
+					ArgumentDrift:       true,
+				},
 			},
 			Skills: SkillsToolsConfig{
 				ToolConfig: ToolConfig{
