@@ -90,7 +90,16 @@ DONE (each builds + tests green, CGO off):
 
 TODO product-critical (hard) — REMAINING, with evidence gathered this session:
 
-1. 1c228bd8 summarization config — CONFIRMED REAL CONTRACT GAP (not yet done).
+1. ✅ 403ef204 — 1c228bd8 summarization config DONE. Added max_history_messages /
+   summarization_threshold_percent / keep_last_messages to AgentDefaults (exact product json
+   tags); NewAgentInstance resolves them over the legacy summarize_* fields (legacy honored only
+   when new key unset). max_history_messages==0 disables the message-count trigger (token threshold
+   at 90% still guards). Wired into legacy context manager: maybeSummarize skips the count trigger
+   when 0; summarizeSession keeps configurable KeepLastMessages (was hardcoded 4). Updated the
+   upstream default-threshold test for the new contract. pkg/config + pkg/agent green.
+   (original gap analysis kept below for reference)
+
+   1c228bd8 summarization config — CONFIRMED REAL CONTRACT GAP (now resolved above).
    Product serializes agents.defaults.{max_history_messages, summarization_threshold_percent,
    keep_last_messages} (gateway_ops.go:636-638, 839-846; k8s/config.go:55-57). Upstream
    AgentDefaults instead has summarize_message_threshold (default 20) + summarize_token_percent
