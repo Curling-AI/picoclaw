@@ -66,9 +66,17 @@ DONE (each builds + tests green, CGO off):
 - ✅ edc655a7 — c5b80cdd+24467e7e S3 Mountpoint write fallback in fileutil.WriteFileAtomic.
 - ✅ 6292d594 — 1c228bd8 (loader part) skill loader symlinks + name fallback.
 
-TODO product-critical (hard): 8196e467 state_dir; 1c2935be session RecordStore/TranscriptFile;
-dd7d1b20+38916498 guardrails/loop_detection; aaf42b2d (core) subagent survival;
-d03b1c98+971ac51c+282bd4e9 empty-response tool summary; 1c228bd8 (summarization config part).
+- ✅ aeb852ad — 8196e467 state_dir (AgentDefaults.StateDir + Config.StateDirPath()).
+- ✅ 6c339ede — 1c2935be session: thin ListSessionRecords()+DeleteSession() over upstream's
+  Session (which already has Key/Created/Updated); NO heavy transcript/lifecycle re-port needed.
+  KEY FINDING: upstream's session model carries the metadata the product needs.
+
+TODO product-critical (hard): dd7d1b20+38916498 guardrails/loop_detection (re-wire onto pipeline,
+preserve config structs verbatim — product serializes them); aaf42b2d (core) subagent survival
+(context.WithoutCancel + SessionWriteCallback); d03b1c98+971ac51c+282bd4e9 empty-response tool
+summary; 1c228bd8 (summarization config part: MaxHistoryMessages/SummarizationThreshold/KeepLast).
+NOTE: upstream session Save uses its own temp+rename (not fileutil.WriteFileAtomic), so sessions
+on S3 still need either WriteFileAtomic routing or state_dir kept off-S3.
 TODO migrate-to-upstream (validate & adopt): 1cedb667, 455b05e1, 3526e655, 54fab2e0, fa4f46f3, ec104c89, 4794367a.
 TODO re-port simple: a3d95a63, e3e8d03a (deny removals); 6b0f535e (dynamic bot name).
 TODO last/optional: TUI (657d06cd + aaf42b2d TUI half).
