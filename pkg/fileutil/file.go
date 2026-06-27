@@ -50,6 +50,32 @@ import (
 //	// Public readable file
 //	err := utils.WriteFileAtomic("public.txt", data, 0o644)
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if err := writeFileAtomicStrict(path, data, perm); err != nil {
+		// S3-backed filesystems (e.g. AWS S3 Mountpoint) do not support the
+		// temp-file + rename + chmod pattern and fail with EPERM/EINVAL/ENOSYS.
+		// Fall back to a direct write so mutable state stored on S3 (sessions,
+		// cron, agent state) keeps working. Normal filesystems keep the atomic
+		// guarantee from writeFileAtomicStrict above.
+		if directErr := writeFileDirect(path, data, perm); directErr != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFileDirect writes data in a single non-atomic write. Used as the S3
+// Mountpoint fallback for WriteFileAtomic (Mountpoint applies its configured
+// --file-mode and tolerates create-with-mode but rejects rename/chmod).
+func writeFileDirect(path string, data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+	return os.WriteFile(path, data, perm)
+}
+
+// writeFileAtomicStrict writes data using the temp-file + fsync + rename
+// pattern. Atomic on POSIX/Windows; fails on S3 Mountpoint (see WriteFileAtomic).
+func writeFileAtomicStrict(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
