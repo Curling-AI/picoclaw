@@ -27,14 +27,28 @@ Goal: fork = upstream HEAD + preserved Curling-AI customizations, validated with
 | 2d880c71 | `NewAgentLoopWithRegistry` (shared registry) | main.go:89-90,164 | ✅ RESOLVED — upstream `agent_inject.go:26 GetRegistry()` already covers it. NO fork change; product-side: use `NewAgentLoop(...)` + `agentLoop.GetRegistry()` at re-import | done |
 | d03b1c98 + 971ac51c + 282bd4e9 | empty-response → tool summary | server.go:545 returns string as final ChatEvent | absent (buildToolSummary fork-only) | moderate-hard |
 
-### 🟢 MIGRATE-TO-UPSTREAM — upstream already does it; validate & drop fork version
-- 1cedb667 context_window agent-default (upstream config.go:433) — product uses it directly; validate default.
-- 455b05e1 ProviderRegistry → upstream instance.go per-candidate provider config.
-- 3526e655 per-request timeout → upstream WithRequestTimeout.
-- 54fab2e0 per-model cooldown → upstream StableKey/ModelKey.
-- fa4f46f3 user-stop → upstream agent_stop.go (`/stop`); add free-text intent shim if needed.
-- ec104c89 exec-guard path regex → upstream token-boundary/domain heuristics (superset).
-- 4794367a sandbox home-dir → upstream AllowReadOutsideWorkspace config (hard: redesign-to-config).
+### 🟢 MIGRATE-TO-UPSTREAM — VALIDATED (Explore evidence pass). Drop fork versions; no fork change.
+All confirmed present in upstream with file:line evidence:
+- ✅ 1cedb667 context_window — EQUIVALENT. config.go:434 field → instance.go:34/~168/283 wired →
+  consumed by context budget + summarization. Product's context_window key flows through.
+- ✅ 455b05e1 ProviderRegistry — SUPERSET. model_list has per-entry provider/api_base/api_key/
+  request_timeout/rpm (config.go:772-810); instance.go candidateProviders map +
+  populateCandidateProvidersFromNames resolve a distinct provider per fallback candidate.
+- ✅ 3526e655 per-request timeout — EQUIVALENT. ModelConfig.RequestTimeout (config.go:791) →
+  factory_provider.go NewHTTPProviderWith...RequestTimeout / bedrock.WithRequestTimeout.
+- ✅ 54fab2e0 per-model cooldown — SUPERSET. providers/cooldown.go CooldownTracker +
+  ratelimiter.go RateLimiterRegistry + ModelConfig.RPM → FallbackCandidate.RPM.
+- ✅ ec104c89 exec-guard path heuristics — SUPERSET. shell.go has 40+ deny patterns, path-traversal
+  regex (~1169), URL-scheme exemptions, isShellTokenBoundary/looksLikeDomain/localPathExists
+  (~1228-1238), EvalSymlinks. Far beyond the fork's regexes.
+- ✅ 4794367a read-outside-workspace — EQUIVALENT. AgentDefaults.AllowReadOutsideWorkspace
+  (config.go:429) enforced at instance.go:87 + tools/fs/filesystem.go validatePathWithAllowPaths.
+- ⚠️ fa4f46f3 user-stop — PARTIAL. /stop slash command EQUIVALENT (commands/cmd_stop.go +
+  agent/agent_stop.go StopActiveTurn). GAP: no FREE-TEXT stop-intent detection (upstream only
+  matches the slash command). The fork's free-text patterns are ENGLISH-only ("stop"/"cancel"/
+  "abort") — low value for a PT-BR product (users type "pare"/"cancela"). DECISION: do NOT port the
+  English patterns; /stop covers explicit stop. If desired later, add PT-BR free-text intent as a
+  product-side enhancement. Not product-critical.
 
 ### 🟡 RE-PORT simple / RECONCILE
 - a3d95a63 (remove rm -rf deny) + e3e8d03a (remove sudo deny) — trivial line deletes; allowlist-bypass already upstream.
@@ -129,11 +143,21 @@ TODO product-critical (hard) — REMAINING, with evidence gathered this session:
    loop. Defer alongside (2) or do with fresh budget + careful response-path study.
 NOTE: upstream session Save uses its own temp+rename (not fileutil.WriteFileAtomic), so sessions
 on S3 still need either WriteFileAtomic routing or state_dir kept off-S3.
-TODO migrate-to-upstream (validate & adopt): 1cedb667, 455b05e1, 3526e655, 54fab2e0, fa4f46f3, ec104c89, 4794367a.
+- ✅ MIGRATE-TO-UPSTREAM all VALIDATED (Explore evidence pass, see green section above):
+  1cedb667/455b05e1/3526e655/54fab2e0/ec104c89/4794367a are EQUIVALENT or SUPERSET in upstream —
+  no fork change needed. fa4f46f3 user-stop: /stop covered; free-text intent is an optional PT-BR
+  product-side enhancement (English fork patterns not ported — low value for PT-BR).
 - ✅ 1ef3d927 — a3d95a63+e3e8d03a exec-guard: removed rm -rf and sudo deny patterns
   (mkfs etc. still denied; allowlist-bypass already upstream).
-TODO re-port simple: 6b0f535e (dynamic bot name -> upstream pkg/commands/cmd_start.go).
-TODO last/optional: TUI (657d06cd + aaf42b2d TUI half).
+- ✅ 48abf385 — 6b0f535e dynamic bot name: AgentDefaults.Name + /start welcome uses it (fallback
+  "PicoClaw"). Telegram-specific GetMe() override dropped (handler now channel-agnostic).
+NOTE: upstream session Save uses its own temp+rename (not fileutil.WriteFileAtomic), so sessions
+on S3 still need either WriteFileAtomic routing or state_dir kept off-S3.
+
+REMAINING (all deferred to task 5 / fresh budget — e2e-dependent or optional):
+- aaf42b2d subagent survival (e2e), d03b1c98+ empty-response summary (e2e) — see items 2/3 above.
+- TUI (657d06cd + aaf42b2d TUI half) — last/optional; product doesn't use it.
+- fa4f46f3 free-text stop — optional PT-BR enhancement.
 
 ## Known PRE-EXISTING test failures on clean upstream HEAD (NOT regressions)
 On macOS, these fail on the clean upstream baseline (temp dirs under /var/folders,
