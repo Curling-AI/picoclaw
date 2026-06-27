@@ -71,10 +71,26 @@ DONE (each builds + tests green, CGO off):
   Session (which already has Key/Created/Updated); NO heavy transcript/lifecycle re-port needed.
   KEY FINDING: upstream's session model carries the metadata the product needs.
 
-TODO product-critical (hard): dd7d1b20+38916498 guardrails/loop_detection (re-wire onto pipeline,
-preserve config structs verbatim — product serializes them); aaf42b2d (core) subagent survival
-(context.WithoutCancel + SessionWriteCallback); d03b1c98+971ac51c+282bd4e9 empty-response tool
-summary; 1c228bd8 (summarization config part: MaxHistoryMessages/SummarizationThreshold/KeepLast).
+- ✅ a837f31c — dd7d1b20+38916498 guardrails CONFIG: LoopDetectionConfig (+Validate) /
+  LoopDetectorsConfig (5 toggles) / MessagesConfig / AgentDefaults.TimeoutSeconds+VerboseDefault.
+  Upstream has no DisallowUnknownFields, so the product's loop_detection/messages keys were being
+  silently dropped — structs added so they deserialize. LoadConfig validates thresholds.
+- ✅ b25eaf07 — dd7d1b20+38916498 guardrails WIRING: LoopDetector (5 detectors, Warning→Block→Abort)
+  on turnState, Record() at ExecuteTools per-tool-call site. Block=inject nudge into working
+  messages; Abort=publish buildLoopAbortSummary (reads ts.toolExecutions []ToolExecutionRecord) +
+  allResponsesHandled+ToolControlBreak. suppress_tool_errors hides non-mutating-tool errors at the
+  ForUser publish path. Full pkg/agent + pkg/config suites green.
+  DEFERRED (low-risk, documented): wall-clock run-timeout ENFORCEMENT (TimeoutSeconds/VerboseDefault)
+  NOT re-wired into the new turn coordinator. Evidence it's safe to defer: the product does NOT
+  serialize timeout_seconds/verbose_default (gateway_ops.go writes only loop_detection + messages),
+  and upstream MaxIterations already bounds runaway loops. Config fields kept for schema fidelity.
+  The fork's buildTimeoutSummary/buildStopSummary/isStopMessage/buildFallbackErrorReply were NOT
+  ported here (timeout summary belongs to the deferred enforcement; stop-intent belongs to the
+  separate fa4f46f3 user-stop MIGRATE item — upstream already has agent_stop.go).
+
+TODO product-critical (hard): aaf42b2d (core) subagent survival (context.WithoutCancel +
+SessionWriteCallback); d03b1c98+971ac51c+282bd4e9 empty-response tool summary;
+1c228bd8 (summarization config part: MaxHistoryMessages/SummarizationThreshold/KeepLast).
 NOTE: upstream session Save uses its own temp+rename (not fileutil.WriteFileAtomic), so sessions
 on S3 still need either WriteFileAtomic routing or state_dir kept off-S3.
 TODO migrate-to-upstream (validate & adopt): 1cedb667, 455b05e1, 3526e655, 54fab2e0, fa4f46f3, ec104c89, 4794367a.
