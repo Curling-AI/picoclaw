@@ -26,6 +26,7 @@ func DefaultConfig() *Config {
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
 				Workspace:                 workspacePath,
+				StateDir:                  "~/.picoclaw/state",
 				RestrictToWorkspace:       true,
 				Provider:                  "",
 				MaxTokens:                 32768,

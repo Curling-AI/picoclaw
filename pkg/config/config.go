@@ -422,6 +422,7 @@ type ToolFeedbackConfig struct {
 
 type AgentDefaults struct {
 	Workspace                 string             `json:"workspace"                        env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	StateDir                  string             `json:"state_dir,omitempty"              env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
 	RestrictToWorkspace       bool               `json:"restrict_to_workspace"            env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
 	AllowReadOutsideWorkspace bool               `json:"allow_read_outside_workspace"     env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
 	Provider                  string             `json:"provider"                         env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
@@ -1677,6 +1678,18 @@ func SaveConfig(path string, cfg *Config) error {
 
 func (c *Config) WorkspacePath() string {
 	return expandHome(c.Agents.Defaults.Workspace)
+}
+
+// StateDirPath returns the directory for mutable runtime state (sessions, cron,
+// agent state). Kept separate from the workspace so it can live off S3-backed
+// storage, since S3 Mountpoint does not support the append/rename patterns
+// those stores use. Defaults to ~/.picoclaw/state.
+func (c *Config) StateDirPath() string {
+	if c.Agents.Defaults.StateDir != "" {
+		return expandHome(c.Agents.Defaults.StateDir)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".picoclaw", "state")
 }
 
 func expandHome(path string) string {
