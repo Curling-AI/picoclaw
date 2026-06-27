@@ -422,6 +422,7 @@ type ToolFeedbackConfig struct {
 }
 
 type AgentDefaults struct {
+	Name                      string   `json:"name,omitempty"                   env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
 	Workspace                 string   `json:"workspace"                        env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
 	StateDir                  string   `json:"state_dir,omitempty"              env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
 	RestrictToWorkspace       bool     `json:"restrict_to_workspace"            env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
