@@ -20,6 +20,21 @@ import (
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
 
+// isDirEntry reports whether entry is a directory, following symlinks. The
+// skills CLI (`npx skills add`) installs skills as symlinks, and
+// os.DirEntry.IsDir() returns false for a symlink even when its target is a
+// directory, so fall back to os.Stat (which follows symlinks).
+func isDirEntry(basePath string, entry os.DirEntry) bool {
+	if entry.IsDir() {
+		return true
+	}
+	if entry.Type()&os.ModeSymlink != 0 {
+		info, err := os.Stat(filepath.Join(basePath, entry.Name()))
+		return err == nil && info.IsDir()
+	}
+	return false
+}
+
 const (
 	MaxNameLength        = 64
 	MaxDescriptionLength = 1024
@@ -107,7 +122,7 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 			return
 		}
 		for _, d := range dirs {
-			if !d.IsDir() {
+			if !isDirEntry(dir, d) {
 				continue
 			}
 			skillFile := filepath.Join(dir, d.Name(), "SKILL.md")
@@ -122,7 +137,11 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 			metadata := sl.getSkillMetadata(skillFile)
 			if metadata != nil {
 				info.Description = metadata.Description
-				info.Name = metadata.Name
+				// Fall back to the directory name when the metadata name is
+				// invalid (e.g. contains spaces) instead of skipping the skill.
+				if namePattern.MatchString(metadata.Name) {
+					info.Name = metadata.Name
+				}
 			}
 			if err := info.validate(); err != nil {
 				slog.Warn("invalid skill from "+source, "name", info.Name, "error", err)
