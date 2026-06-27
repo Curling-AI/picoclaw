@@ -122,6 +122,13 @@ func (p *Pipeline) ExecuteTools(
 	messages := exec.messages
 	handledAttachments := make([]providers.Attachment, 0)
 
+	// Loop-detection guardrail: build once per turn (nil when disabled) so it
+	// accumulates tool-call patterns across all iterations of this turn.
+	if !ts.loopDetectorInit {
+		ts.loopDetector = NewLoopDetector(al.cfg.Tools.LoopDetection)
+		ts.loopDetectorInit = true
+	}
+
 toolLoop:
 	for i, tc := range normalizedToolCalls {
 		if ts.hardAbortRequested() {
@@ -676,6 +683,11 @@ toolLoop:
 		shouldSendForUser := !toolResult.Silent &&
 			toolResult.ForUser != "" &&
 			(ts.opts.SendResponse || toolResult.ResponseHandled)
+		// Optionally hide errors from non-mutating tools (messages.suppress_tool_errors).
+		if shouldSendForUser && toolResult.IsError &&
+			shouldSuppressToolErrorForUser(toolName, al.cfg.Messages.SuppressToolErrors) {
+			shouldSendForUser = false
+		}
 		if shouldSendForUser {
 			al.bus.PublishOutbound(ctx, outboundMessageForTurn(ts, toolResult.ForUser))
 			logger.DebugCF("agent", "Sent tool result to user",
@@ -718,6 +730,35 @@ toolLoop:
 			ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
 			ts.recordPersistedMessage(toolResultMsg)
 			ts.ingestMessage(turnCtx, al, toolResultMsg)
+		}
+
+		// Loop-detection guardrail: evaluate the recorded tool call.
+		if ts.loopDetector != nil {
+			switch ts.loopDetector.Record(toolName, toolArgs, contentForLLM) {
+			case LoopSignalBlock:
+				// Inject an ephemeral nudge so the next LLM iteration changes course.
+				messages = append(messages, providers.Message{
+					Role:    "user",
+					Content: "[System] Repetitive loop detected for " + toolName + ". Try a different approach.",
+				})
+			case LoopSignalAbort:
+				// Circuit breaker tripped: deliver a summary and end the turn.
+				summary := buildLoopAbortSummary(ts.toolExecutions, "circuit breaker")
+				ts.setFinalContent(summary)
+				if ts.opts.SendResponse {
+					al.bus.PublishOutbound(ctx, outboundMessageForTurn(ts, summary))
+				}
+				logger.WarnCF("agent", "Loop detector abort — circuit breaker tripped",
+					map[string]any{
+						"agent_id":  ts.agent.ID,
+						"tool":      toolName,
+						"iteration": iteration,
+					})
+				exec.messages = messages
+				exec.allResponsesHandled = true
+				ts.setPhase(TurnPhaseCompleted)
+				return ToolControlBreak
+			}
 		}
 
 		if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {

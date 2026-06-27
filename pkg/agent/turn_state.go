@@ -208,6 +208,12 @@ type turnState struct {
 	startedAt    time.Time
 	finalContent string
 
+	// Loop-detection guardrail: constructed lazily once per turn in ExecuteTools
+	// and accumulates tool-call patterns across iterations. Accessed only on the
+	// turn's own goroutine, so no locking. nil when detection is disabled.
+	loopDetector     *LoopDetector
+	loopDetectorInit bool
+
 	followUps []bus.InboundMessage
 
 	gracefulInterrupt     bool

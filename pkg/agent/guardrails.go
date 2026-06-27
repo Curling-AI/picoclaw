@@ -1,0 +1,406 @@
+package agent
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
+)
+
+// LoopSignal indicates what action the caller should take after recording a tool call.
+type LoopSignal int
+
+const (
+	LoopSignalNone    LoopSignal = iota // No issue detected
+	LoopSignalWarning                   // Possible loop, log a warning
+	LoopSignalBlock                     // Likely loop, inject a nudge message
+	LoopSignalAbort                     // Circuit breaker tripped, abort run
+)
+
+// pollToolNames lists tools whose output should be tracked for no-progress detection.
+var pollToolNames = map[string]bool{
+	"exec":       true,
+	"read_file":  true,
+	"list_dir":   true,
+	"web_fetch":  true,
+	"web_search": true,
+}
+
+// loopHistoryEntry records a single tool invocation for the rolling window.
+type loopHistoryEntry struct {
+	Tool       string
+	ArgsKey    string
+	OutputHash string
+}
+
+// driftState tracks consecutive argument growth for a single tool.
+type driftState struct {
+	prevArgsLen       int
+	consecutiveGrowth int
+}
+
+// LoopDetector tracks tool call patterns within a single agent run to detect
+// repetitive loops that waste tokens without making progress. It is constructed
+// once per turn and Record is called after each tool execution.
+type LoopDetector struct {
+	cfg               config.LoopDetectionConfig
+	history           []loopHistoryEntry
+	patternCounts     map[string]int // key: "tool:argsKey"
+	pollOutputCounts  map[string]int // key: "tool:argsKey:outputHash" — same-output repetitions
+	lastTool          string
+	prevLastTool      string
+	pingPongCounts    map[string]int         // key: "toolA->toolB"
+	toolFreqCounts    map[string]int         // key: toolName
+	driftTrackers     map[string]*driftState // key: toolName
+	detectedLoopCount int
+}
+
+// NewLoopDetector creates a LoopDetector from config. Returns nil if disabled,
+// so the zero-overhead path is a nil receiver on Record.
+func NewLoopDetector(cfg config.LoopDetectionConfig) *LoopDetector {
+	if !cfg.Enabled {
+		return nil
+	}
+	return &LoopDetector{
+		cfg:              cfg,
+		history:          make([]loopHistoryEntry, 0, cfg.HistorySize),
+		patternCounts:    make(map[string]int),
+		pollOutputCounts: make(map[string]int),
+		pingPongCounts:   make(map[string]int),
+		toolFreqCounts:   make(map[string]int),
+		driftTrackers:    make(map[string]*driftState),
+	}
+}
+
+// Record processes a tool call and returns a signal indicating the severity of any detected loop.
+func (ld *LoopDetector) Record(toolName string, args map[string]any, output string) LoopSignal {
+	if ld == nil {
+		return LoopSignalNone
+	}
+
+	argsKey := normalizeArgs(args)
+	outputHash := hashOutput(output)
+
+	entry := loopHistoryEntry{
+		Tool:       toolName,
+		ArgsKey:    argsKey,
+		OutputHash: outputHash,
+	}
+
+	// Maintain rolling window
+	ld.history = append(ld.history, entry)
+	if len(ld.history) > ld.cfg.HistorySize {
+		ld.history = ld.history[1:]
+	}
+
+	worst := LoopSignalNone
+
+	// 1. Generic repeat detector
+	if ld.cfg.Detectors.GenericRepeat {
+		if sig := ld.detectGenericRepeat(toolName, argsKey); sig > worst {
+			worst = sig
+		}
+	}
+
+	// 2. Known poll no-progress detector
+	if ld.cfg.Detectors.KnownPollNoProgress {
+		if sig := ld.detectPollNoProgress(toolName, argsKey, outputHash); sig > worst {
+			worst = sig
+		}
+	}
+
+	// 3. Ping-pong detector
+	if ld.cfg.Detectors.PingPong {
+		if sig := ld.detectPingPong(toolName); sig > worst {
+			worst = sig
+		}
+	}
+
+	// 4. Tool frequency detector
+	if ld.cfg.Detectors.ToolFrequency {
+		if sig := ld.detectToolFrequency(toolName); sig > worst {
+			worst = sig
+		}
+	}
+
+	// 5. Argument drift detector
+	if ld.cfg.Detectors.ArgumentDrift {
+		if sig := ld.detectArgumentDrift(toolName, argsKey); sig > worst {
+			worst = sig
+		}
+	}
+
+	// Update tool tracking for ping-pong (after detection so current call doesn't affect it)
+	ld.prevLastTool = ld.lastTool
+	ld.lastTool = toolName
+
+	return worst
+}
+
+// detectGenericRepeat checks if the same (tool, args) tuple has been called too many times.
+func (ld *LoopDetector) detectGenericRepeat(toolName, argsKey string) LoopSignal {
+	key := toolName + ":" + argsKey
+	ld.patternCounts[key]++
+	count := ld.patternCounts[key]
+
+	if count >= ld.cfg.GlobalCircuitBreakerThreshold {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Circuit breaker: generic repeat", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalAbort
+	}
+	if count >= ld.cfg.CriticalThreshold {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Critical: generic repeat", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalBlock
+	}
+	if count >= ld.cfg.WarningThreshold {
+		logger.WarnCF("guardrails", "Warning: generic repeat", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalWarning
+	}
+	return LoopSignalNone
+}
+
+// detectPollNoProgress checks if a poll-like tool keeps returning the same output.
+func (ld *LoopDetector) detectPollNoProgress(toolName, argsKey, outputHash string) LoopSignal {
+	if !pollToolNames[toolName] {
+		return LoopSignalNone
+	}
+
+	sameKey := toolName + ":" + argsKey + ":" + outputHash
+	diffKey := toolName + ":" + argsKey + ":*"
+
+	// Check if output changed compared to last same-tool call
+	prevHash := ""
+	for i := len(ld.history) - 2; i >= 0; i-- {
+		if ld.history[i].Tool == toolName && ld.history[i].ArgsKey == argsKey {
+			prevHash = ld.history[i].OutputHash
+			break
+		}
+	}
+
+	if prevHash != "" && prevHash != outputHash {
+		// Output changed — reset the same-output counter
+		delete(ld.pollOutputCounts, sameKey)
+		ld.pollOutputCounts[diffKey] = 0
+		return LoopSignalNone
+	}
+
+	ld.pollOutputCounts[sameKey]++
+	count := ld.pollOutputCounts[sameKey]
+
+	if count >= ld.cfg.GlobalCircuitBreakerThreshold {
+		ld.detectedLoopCount++
+		return LoopSignalAbort
+	}
+	if count >= ld.cfg.CriticalThreshold {
+		ld.detectedLoopCount++
+		return LoopSignalBlock
+	}
+	if count >= ld.cfg.WarningThreshold {
+		return LoopSignalWarning
+	}
+	return LoopSignalNone
+}
+
+// detectPingPong checks for A→B→A→B alternation patterns.
+func (ld *LoopDetector) detectPingPong(toolName string) LoopSignal {
+	if ld.lastTool == "" || ld.prevLastTool == "" {
+		return LoopSignalNone
+	}
+
+	// Detect A→B→A pattern (current = A, last = B, prevLast = A)
+	if toolName == ld.prevLastTool && toolName != ld.lastTool {
+		key := ld.prevLastTool + "->" + ld.lastTool
+		ld.pingPongCounts[key]++
+		count := ld.pingPongCounts[key]
+
+		if count >= ld.cfg.GlobalCircuitBreakerThreshold/2 {
+			ld.detectedLoopCount++
+			return LoopSignalAbort
+		}
+		if count >= ld.cfg.CriticalThreshold/2 {
+			ld.detectedLoopCount++
+			return LoopSignalBlock
+		}
+		if count >= ld.cfg.WarningThreshold/2 {
+			return LoopSignalWarning
+		}
+	}
+
+	return LoopSignalNone
+}
+
+// detectToolFrequency counts calls per tool name regardless of arguments.
+// Uses 1.5x the configured thresholds since same-tool-different-args is a weaker signal.
+func (ld *LoopDetector) detectToolFrequency(toolName string) LoopSignal {
+	ld.toolFreqCounts[toolName]++
+	count := ld.toolFreqCounts[toolName]
+
+	warnAt := ld.cfg.WarningThreshold + ld.cfg.WarningThreshold/2
+	blockAt := ld.cfg.CriticalThreshold + ld.cfg.CriticalThreshold/2
+	abortAt := ld.cfg.GlobalCircuitBreakerThreshold + ld.cfg.GlobalCircuitBreakerThreshold/2
+
+	if count >= abortAt {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Circuit breaker: tool frequency", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalAbort
+	}
+	if count >= blockAt {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Critical: tool frequency", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalBlock
+	}
+	if count >= warnAt {
+		logger.WarnCF("guardrails", "Warning: tool frequency", map[string]any{
+			"tool": toolName, "count": count,
+		})
+		return LoopSignalWarning
+	}
+	return LoopSignalNone
+}
+
+// detectArgumentDrift tracks if len(normalizeArgs(args)) is monotonically increasing
+// for consecutive calls to the same tool. Resets when args length stays the same or shrinks.
+func (ld *LoopDetector) detectArgumentDrift(toolName, argsKey string) LoopSignal {
+	ds, ok := ld.driftTrackers[toolName]
+	if !ok {
+		ds = &driftState{}
+		ld.driftTrackers[toolName] = ds
+	}
+
+	argsLen := len(argsKey)
+	if argsLen > ds.prevArgsLen {
+		ds.consecutiveGrowth++
+	} else {
+		ds.consecutiveGrowth = 0
+	}
+	ds.prevArgsLen = argsLen
+
+	count := ds.consecutiveGrowth
+
+	if count >= ld.cfg.GlobalCircuitBreakerThreshold {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Circuit breaker: argument drift", map[string]any{
+			"tool": toolName, "growth": count,
+		})
+		return LoopSignalAbort
+	}
+	if count >= ld.cfg.CriticalThreshold {
+		ld.detectedLoopCount++
+		logger.WarnCF("guardrails", "Critical: argument drift", map[string]any{
+			"tool": toolName, "growth": count,
+		})
+		return LoopSignalBlock
+	}
+	if count >= ld.cfg.WarningThreshold {
+		logger.WarnCF("guardrails", "Warning: argument drift", map[string]any{
+			"tool": toolName, "growth": count,
+		})
+		return LoopSignalWarning
+	}
+	return LoopSignalNone
+}
+
+// normalizeArgs produces a deterministic string representation of tool arguments.
+func normalizeArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return "{}"
+	}
+
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	ordered := make([]any, 0, len(keys)*2)
+	for _, k := range keys {
+		ordered = append(ordered, k, args[k])
+	}
+
+	data, err := json.Marshal(ordered)
+	if err != nil {
+		return fmt.Sprintf("%v", args)
+	}
+	return string(data)
+}
+
+// hashOutput returns a short hash of tool output for comparison.
+func hashOutput(output string) string {
+	h := sha256.Sum256([]byte(output))
+	return fmt.Sprintf("%x", h[:8])
+}
+
+// buildLoopAbortSummary constructs a user-facing message when the loop circuit
+// breaker fires. It reads the turn's ToolExecutionRecord log (upstream's per-turn
+// tool log), the closest analog to the fork's toolCallEntry slice.
+func buildLoopAbortSummary(log []ToolExecutionRecord, pattern string) string {
+	var sb strings.Builder
+
+	sb.WriteString("I detected a repetitive loop and stopped to avoid wasting resources. ")
+
+	if pattern != "" {
+		sb.WriteString(fmt.Sprintf("Pattern: %s. ", pattern))
+	}
+
+	if len(log) > 0 {
+		succeeded := 0
+		failed := 0
+		for _, e := range log {
+			if e.Success {
+				succeeded++
+			} else {
+				failed++
+			}
+		}
+		sb.WriteString(fmt.Sprintf("I made %d tool calls (%d succeeded, %d failed) before stopping.", len(log), succeeded, failed))
+
+		// Show the last few unique tools called
+		seen := map[string]bool{}
+		var lastTools []string
+		for i := len(log) - 1; i >= 0 && len(lastTools) < 3; i-- {
+			if !seen[log[i].Name] {
+				seen[log[i].Name] = true
+				lastTools = append(lastTools, log[i].Name)
+			}
+		}
+		if len(lastTools) > 0 {
+			sb.WriteString(fmt.Sprintf(" Last tools used: %s.", strings.Join(lastTools, ", ")))
+		}
+	}
+
+	sb.WriteString("\n\nPlease try rephrasing your request or breaking it into smaller steps.")
+	return sb.String()
+}
+
+// nonMutatingTools lists read-only tools whose errors may be hidden from the user
+// when messages.suppress_tool_errors is enabled.
+var nonMutatingTools = map[string]bool{
+	"read_file":  true,
+	"list_dir":   true,
+	"web_search": true,
+	"web_fetch":  true,
+}
+
+// shouldSuppressToolErrorForUser returns true if errors from non-mutating tools
+// should be hidden from the user when suppress_tool_errors is enabled.
+func shouldSuppressToolErrorForUser(toolName string, suppress bool) bool {
+	if !suppress {
+		return false
+	}
+	return nonMutatingTools[toolName]
+}
