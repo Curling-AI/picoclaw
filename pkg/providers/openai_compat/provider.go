@@ -801,8 +801,18 @@ func parseStreamResponse(
 		finishReason = "stop"
 	}
 
+	// Fallback: some models (e.g. Ollama qwen2.5) embed tool-call JSON in the
+	// text content instead of the structured tool_calls field. Extract them.
+	content := textContent.String()
+	if len(toolCalls) == 0 && content != "" {
+		if extracted := protocoltypes.ExtractToolCallsFromText(content); len(extracted) > 0 {
+			toolCalls = extracted
+			content = protocoltypes.StripToolCallsFromText(content)
+		}
+	}
+
 	return &LLMResponse{
-		Content:          textContent.String(),
+		Content:          content,
 		ReasoningContent: reasoningContent.String(),
 		Reasoning:        reasoning.String(),
 		ReasoningDetails: reasoningDetails,
