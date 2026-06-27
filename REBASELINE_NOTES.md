@@ -88,9 +88,36 @@ DONE (each builds + tests green, CGO off):
   ported here (timeout summary belongs to the deferred enforcement; stop-intent belongs to the
   separate fa4f46f3 user-stop MIGRATE item — upstream already has agent_stop.go).
 
-TODO product-critical (hard): aaf42b2d (core) subagent survival (context.WithoutCancel +
-SessionWriteCallback); d03b1c98+971ac51c+282bd4e9 empty-response tool summary;
-1c228bd8 (summarization config part: MaxHistoryMessages/SummarizationThreshold/KeepLast).
+TODO product-critical (hard) — REMAINING, with evidence gathered this session:
+
+1. 1c228bd8 summarization config — CONFIRMED REAL CONTRACT GAP (not yet done).
+   Product serializes agents.defaults.{max_history_messages, summarization_threshold_percent,
+   keep_last_messages} (gateway_ops.go:636-638, 839-846; k8s/config.go:55-57). Upstream
+   AgentDefaults instead has summarize_message_threshold (default 20) + summarize_token_percent
+   (default 75) — DIFFERENT json keys, so the product's keys are silently dropped (no
+   DisallowUnknownFields), same failure mode as loop_detection. NEEDS: add the 3 fork fields with
+   exact json tags AND wire them into upstream's summarization path (ContextManager.Compact /
+   wherever summarize_message_threshold + summarize_token_percent are consumed). RISK: this
+   remaps EXISTING, working upstream summarization (different defaults) — must preserve upstream
+   behavior when the new keys are unset (fall back to summarize_message_threshold/percent). Do with
+   care + a test asserting both old and new keys resolve correctly. Moderate.
+
+2. aaf42b2d (core) subagent survival — RE-SCOPED by evidence. The PRODUCT's survival fix (90f4adc)
+   is ENTIRELY product-side (internal/picoclaw/server.go postLifecycleIdleTTL keeps the gRPC stream
+   open 5min after lifecycle end; wsbridge.go; static/js/picoclaw.js) — it consumes whatever events
+   picoclaw emits; it does NOT call picoclaw-side WithoutCancel/SessionWriteCallback APIs. Upstream
+   picoclaw HAS the building blocks (subturn.go:336 context.WithTimeout(context.Background()) detaches
+   child ctx; turnState.critical/parentEnded; KindAgentSubTurnOrphan event for late results) but per
+   investigation is an incomplete WIP: parentEnded is never set on GRACEFUL parent exit (only on hard
+   abort via Finish()), and detached results become orphan events rather than persisted. WHETHER the
+   product needs the fork mechanism depends on event-flow behavior that is only verifiable END-TO-END
+   (spawn sub-agent → end parent → does result reach the gateway stream as the product expects?).
+   DECISION: defer to task 5 (re-import + e2e). Do NOT blind-port hundreds of lines of lifecycle code
+   onto a different turn architecture without an e2e signal. High risk.
+
+3. d03b1c98+971ac51c+282bd4e9 empty-response → tool summary — moderate-hard, touches the response
+   path (server.go:545 returns string as final ChatEvent). Best validated with the product in the
+   loop. Defer alongside (2) or do with fresh budget + careful response-path study.
 NOTE: upstream session Save uses its own temp+rename (not fileutil.WriteFileAtomic), so sessions
 on S3 still need either WriteFileAtomic routing or state_dir kept off-S3.
 TODO migrate-to-upstream (validate & adopt): 1cedb667, 455b05e1, 3526e655, 54fab2e0, fa4f46f3, ec104c89, 4794367a.
