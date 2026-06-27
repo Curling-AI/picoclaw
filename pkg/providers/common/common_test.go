@@ -72,6 +72,24 @@ func TestSerializeMessages_PlainText(t *testing.T) {
 	}
 }
 
+func TestSerializeMessages_ToolResultNameFromToolCall(t *testing.T) {
+	// Gemini's OpenAI-compatible endpoint rejects an empty function_response.name.
+	// The tool result message must carry the name of its originating tool call.
+	messages := []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Function: &FunctionCall{Name: "read_file"}}}},
+		{Role: "tool", ToolCallID: "call_1", Content: "file contents"},
+	}
+	result := SerializeMessages(messages)
+
+	data, _ := json.Marshal(result)
+	var msgs []map[string]any
+	json.Unmarshal(data, &msgs)
+
+	if msgs[1]["name"] != "read_file" {
+		t.Errorf("tool message name not derived from tool call, got %v", msgs[1]["name"])
+	}
+}
+
 func TestSerializeMessages_WithMedia(t *testing.T) {
 	messages := []Message{
 		{Role: "user", Content: "describe this", Media: []string{"data:image/png;base64,abc123"}},

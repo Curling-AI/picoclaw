@@ -72,6 +72,7 @@ func NewHTTPClient(proxy string) *http.Client {
 type openaiMessage struct {
 	Role             string           `json:"role"`
 	Content          string           `json:"content"`
+	Name             string           `json:"name,omitempty"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	ToolCalls        []openaiToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string           `json:"tool_call_id,omitempty"`
@@ -94,13 +95,38 @@ type openaiFunctionCall struct {
 //   - Converts messages with Media to multipart content format (text + image_url parts)
 //   - Preserves ToolCallID, ToolCalls, and ReasoningContent for all messages
 func SerializeMessages(messages []Message) []any {
+	// Gemini's OpenAI-compatible endpoint requires a non-empty `name` on tool
+	// result messages (function_response.name). Derive it from the matching
+	// assistant tool call so every tool message carries its tool name,
+	// regardless of which pipeline site produced it.
+	toolNameByID := make(map[string]string)
+	for _, m := range messages {
+		for _, tc := range m.ToolCalls {
+			name := ""
+			if tc.Function != nil {
+				name = tc.Function.Name
+			}
+			if name == "" {
+				name = tc.Name
+			}
+			if tc.ID != "" && name != "" {
+				toolNameByID[tc.ID] = name
+			}
+		}
+	}
+
 	out := make([]any, 0, len(messages))
 	for _, m := range messages {
 		toolCalls := serializeToolCalls(m.ToolCalls)
+		toolName := ""
+		if m.Role == "tool" {
+			toolName = toolNameByID[m.ToolCallID]
+		}
 		if len(m.Media) == 0 {
 			out = append(out, openaiMessage{
 				Role:             m.Role,
 				Content:          m.Content,
+				Name:             toolName,
 				ReasoningContent: m.ReasoningContent,
 				ToolCalls:        toolCalls,
 				ToolCallID:       m.ToolCallID,
