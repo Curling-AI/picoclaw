@@ -144,8 +144,10 @@ func TestShellTool_DangerousCommand(t *testing.T) {
 
 	ctx := context.Background()
 	args := map[string]any{
-		"action":  "run",
-		"command": "rm -rf /",
+		"action": "run",
+		// rm -rf and sudo are intentionally allowed (agents run in isolated
+		// per-tenant pods); mkfs remains denied as a still-dangerous command.
+		"command": "mkfs /dev/sda",
 	}
 
 	result := tool.Execute(ctx, args)

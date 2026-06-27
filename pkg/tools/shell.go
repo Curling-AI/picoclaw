@@ -50,7 +50,6 @@ type ExecTool struct {
 
 var (
 	defaultDenyPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`),
 		regexp.MustCompile(`\bdel\s+/[fq]\b`),
 		regexp.MustCompile(`\brmdir\s+/s\b`),
 		// Match disk wiping commands (must be followed by space/args)
@@ -69,15 +68,11 @@ var (
 		regexp.MustCompile("`[^`]+`"),
 		regexp.MustCompile(`\|\s*sh\b`),
 		regexp.MustCompile(`\|\s*bash\b`),
-		regexp.MustCompile(`;\s*rm\s+-[rf]`),
-		regexp.MustCompile(`&&\s*rm\s+-[rf]`),
-		regexp.MustCompile(`\|\|\s*rm\s+-[rf]`),
 		regexp.MustCompile(`<<\s*EOF`),
 		regexp.MustCompile(`\$\(\s*cat\s+`),
 		regexp.MustCompile(`\$\(\s*curl\s+`),
 		regexp.MustCompile(`\$\(\s*wget\s+`),
 		regexp.MustCompile(`\$\(\s*which\s+`),
-		regexp.MustCompile(`\bsudo\b`),
 		regexp.MustCompile(`\bchmod\s+[0-7]{3,4}\b`),
 		regexp.MustCompile(`\bchown\b`),
 		regexp.MustCompile(`\bpkill\b`),
