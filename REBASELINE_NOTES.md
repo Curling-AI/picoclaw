@@ -78,8 +78,18 @@ summary; 1c228bd8 (summarization config part: MaxHistoryMessages/SummarizationTh
 NOTE: upstream session Save uses its own temp+rename (not fileutil.WriteFileAtomic), so sessions
 on S3 still need either WriteFileAtomic routing or state_dir kept off-S3.
 TODO migrate-to-upstream (validate & adopt): 1cedb667, 455b05e1, 3526e655, 54fab2e0, fa4f46f3, ec104c89, 4794367a.
-TODO re-port simple: a3d95a63, e3e8d03a (deny removals); 6b0f535e (dynamic bot name).
+- ✅ 1ef3d927 — a3d95a63+e3e8d03a exec-guard: removed rm -rf and sudo deny patterns
+  (mkfs etc. still denied; allowlist-bypass already upstream).
+TODO re-port simple: 6b0f535e (dynamic bot name -> upstream pkg/commands/cmd_start.go).
 TODO last/optional: TUI (657d06cd + aaf42b2d TUI half).
+
+## Known PRE-EXISTING test failures on clean upstream HEAD (NOT regressions)
+On macOS, these fail on the clean upstream baseline (temp dirs under /var/folders,
+a symlink the path guard does not resolve) — verified by stashing local changes:
+- pkg/tools TestShellTool_RelativePathWithSlashAllowed
+- pkg/tools TestShellTool_DevNullAllowed
+- pkg/tools TestShellTool_FileURISandboxing
+When running task 4 (picoclaw test suite), exclude/expect these.
 
 ## Execution order
 1. ✅ Branch from upstream HEAD; green baseline (product subset, CGO off).
