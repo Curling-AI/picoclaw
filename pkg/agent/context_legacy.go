@@ -84,7 +84,10 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 	tokenEstimate := m.estimateTokens(newHistory)
 	threshold := agent.ContextWindow * agent.SummarizeTokenPercent / 100
 
-	if len(newHistory) > agent.SummarizeMessageThreshold || tokenEstimate > threshold {
+	// A zero message threshold disables the message-count trigger; the token
+	// threshold still guards against context overflow.
+	msgTrigger := agent.SummarizeMessageThreshold > 0 && len(newHistory) > agent.SummarizeMessageThreshold
+	if msgTrigger || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := m.summarizing.LoadOrStore(summarizeKey, true); !loading {
 			go func() {
@@ -176,11 +179,16 @@ func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey
 	history := agent.Sessions.GetHistory(sessionKey)
 	summary := agent.Sessions.GetSummary(sessionKey)
 
-	if len(history) <= 4 {
+	keepLast := agent.KeepLastMessages
+	if keepLast <= 0 {
+		keepLast = 4
+	}
+
+	if len(history) <= keepLast {
 		return
 	}
 
-	safeCut := findSafeBoundary(history, len(history)-4)
+	safeCut := findSafeBoundary(history, len(history)-keepLast)
 	if safeCut <= 0 {
 		return
 	}

@@ -52,6 +52,38 @@ func TestLoopDetectionConfig_Validate(t *testing.T) {
 	}
 }
 
+// The product serializes these summarization keys into agents.defaults; they
+// must deserialize into the typed fields verbatim (upstream uses different keys).
+func TestSummarizationConfig_DeserializesProductKeys(t *testing.T) {
+	raw := `{"agents":{"defaults":{
+		"max_history_messages": 50,
+		"summarization_threshold_percent": 80,
+		"keep_last_messages": 8
+	}}}`
+	var cfg Config
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	d := cfg.Agents.Defaults
+	if d.MaxHistoryMessages != 50 || d.SummarizationThresholdPercent != 80 || d.KeepLastMessages != 8 {
+		t.Fatalf("summarization keys not parsed: %+v", d)
+	}
+}
+
+func TestDefaultConfig_SummarizationDefaults(t *testing.T) {
+	d := DefaultConfig().Agents.Defaults
+	// Fork 1c228bd8: message-count trigger disabled, 90% token threshold, keep 6.
+	if d.MaxHistoryMessages != 0 {
+		t.Errorf("MaxHistoryMessages default = %d, want 0 (disabled)", d.MaxHistoryMessages)
+	}
+	if d.SummarizationThresholdPercent != 90 {
+		t.Errorf("SummarizationThresholdPercent default = %d, want 90", d.SummarizationThresholdPercent)
+	}
+	if d.KeepLastMessages != 6 {
+		t.Errorf("KeepLastMessages default = %d, want 6", d.KeepLastMessages)
+	}
+}
+
 func TestDefaultConfig_LoopDetectionDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 	ld := cfg.Tools.LoopDetection

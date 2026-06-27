@@ -34,9 +34,15 @@ func DefaultConfig() *Config {
 				MaxToolIterations:         50,
 				TimeoutSeconds:            600, // 10-minute wall-clock timeout per agent run
 				VerboseDefault:            "off",
-				SummarizeMessageThreshold: 20,
-				SummarizeTokenPercent:     75,
-				SteeringMode:              "one-at-a-time",
+				SummarizeMessageThreshold: 0,  // legacy; superseded by MaxHistoryMessages (0 = msg-count trigger disabled)
+				SummarizeTokenPercent:     75, // legacy fallback; superseded by SummarizationThresholdPercent
+				// Memory management (fork 1c228bd8): avoid premature summarization on
+				// large-context models — disable the message-count trigger by default and
+				// summarize at 90% of the context window, keeping the last 6 messages.
+				MaxHistoryMessages:            0,
+				SummarizationThresholdPercent: 90,
+				KeepLastMessages:              6,
+				SteeringMode:                  "one-at-a-time",
 				ToolFeedback: ToolFeedbackConfig{
 					Enabled:          false,
 					MaxArgsLength:    300,

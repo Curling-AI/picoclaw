@@ -34,6 +34,7 @@ type AgentInstance struct {
 	ContextWindow             int
 	SummarizeMessageThreshold int
 	SummarizeTokenPercent     int
+	KeepLastMessages          int
 	Provider                  providers.LLMProvider
 	Sessions                  session.SessionStore
 	ContextBuilder            *ContextBuilder
@@ -187,14 +188,29 @@ func NewAgentInstance(
 	thinkingLevel := parseThinkingLevel(thinkingLevelStr)
 	thinkingLevelConfigured := isConfiguredThinkingLevel(thinkingLevelStr)
 
-	summarizeMessageThreshold := defaults.SummarizeMessageThreshold
+	// Memory-management thresholds. The product serializes max_history_messages /
+	// summarization_threshold_percent / keep_last_messages; these supersede the
+	// legacy summarize_* fields. max_history_messages == 0 disables the
+	// message-count trigger (the token-percent threshold still guards overflow),
+	// matching the fork's behavior that avoids premature summarization on
+	// large-context models. The legacy summarize_message_threshold is honored only
+	// when max_history_messages is unset.
+	summarizeMessageThreshold := defaults.MaxHistoryMessages
 	if summarizeMessageThreshold == 0 {
-		summarizeMessageThreshold = 20
+		summarizeMessageThreshold = defaults.SummarizeMessageThreshold
 	}
 
-	summarizeTokenPercent := defaults.SummarizeTokenPercent
+	summarizeTokenPercent := defaults.SummarizationThresholdPercent
+	if summarizeTokenPercent == 0 {
+		summarizeTokenPercent = defaults.SummarizeTokenPercent
+	}
 	if summarizeTokenPercent == 0 {
 		summarizeTokenPercent = 75
+	}
+
+	keepLastMessages := defaults.KeepLastMessages
+	if keepLastMessages <= 0 {
+		keepLastMessages = 4
 	}
 
 	// Resolve fallback candidates
@@ -267,6 +283,7 @@ func NewAgentInstance(
 		ContextWindow:             contextWindow,
 		SummarizeMessageThreshold: summarizeMessageThreshold,
 		SummarizeTokenPercent:     summarizeTokenPercent,
+		KeepLastMessages:          keepLastMessages,
 		Provider:                  provider,
 		Sessions:                  sessions,
 		ContextBuilder:            contextBuilder,

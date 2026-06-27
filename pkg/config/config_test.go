@@ -1740,14 +1740,19 @@ func TestLoadConfig_HooksProcessConfig(t *testing.T) {
 	}
 }
 
-// TestDefaultConfig_SessionDimensions verifies the default session dimensions
-// TestDefaultConfig_SummarizationThresholds verifies summarization defaults
+// TestDefaultConfig_SummarizationThresholds verifies summarization defaults.
+// The legacy summarize_* fields are superseded by the memory-management fields
+// (max_history_messages / summarization_threshold_percent / keep_last_messages);
+// see fork 1c228bd8. The message-count trigger is disabled by default to avoid
+// premature summarization on large-context models — the legacy
+// SummarizeMessageThreshold therefore defaults to 0, and SummarizeTokenPercent
+// remains 75 only as a fallback (SummarizationThresholdPercent=90 wins).
 func TestDefaultConfig_SummarizationThresholds(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Agents.Defaults.SummarizeMessageThreshold != 20 {
+	if cfg.Agents.Defaults.SummarizeMessageThreshold != 0 {
 		t.Errorf(
-			"SummarizeMessageThreshold = %d, want 20",
+			"SummarizeMessageThreshold = %d, want 0 (superseded by MaxHistoryMessages)",
 			cfg.Agents.Defaults.SummarizeMessageThreshold,
 		)
 	}
