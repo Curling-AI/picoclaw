@@ -138,50 +138,132 @@ func TestExtractFrontmatter(t *testing.T) {
 	}
 }
 
-func TestListSkills_FollowsSymlinks(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create a real skill directory (the symlink target)
-	realSkillDir := filepath.Join(tmpDir, "real-skills", "my-skill")
-	require.NoError(t, os.MkdirAll(realSkillDir, 0755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(realSkillDir, "SKILL.md"),
-		[]byte("---\nname: my-skill\ndescription: A test skill via symlink\n---\n# Content"),
-		0644,
-	))
-
-	// Create the global skills dir with a symlink to the real skill
-	globalSkillsDir := filepath.Join(tmpDir, "global-skills")
-	require.NoError(t, os.MkdirAll(globalSkillsDir, 0755))
-	require.NoError(t, os.Symlink(realSkillDir, filepath.Join(globalSkillsDir, "my-skill")))
-
-	loader := NewSkillsLoader(filepath.Join(tmpDir, "workspace"), globalSkillsDir, "")
-	skills := loader.ListSkills()
-
-	require.Len(t, skills, 1, "should discover skill via symlink")
-	assert.Equal(t, "my-skill", skills[0].Name)
-	assert.Equal(t, "global", skills[0].Source)
-	assert.Equal(t, "A test skill via symlink", skills[0].Description)
+// createSkillDir creates a skill directory with a SKILL.md file containing the given frontmatter.
+func createSkillDir(t *testing.T, base, dirName, name, description string) {
+	t.Helper()
+	dir := filepath.Join(base, dirName)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	content := "---\nname: " + name + "\ndescription: " + description + "\n---\n\n# " + name
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644))
 }
 
-func TestListSkills_FallsBackToDirNameForInvalidMetadataName(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestListSkillsWorkspaceOverridesGlobal(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
 
-	// Create a skill with a name containing spaces in the metadata
-	skillDir := filepath.Join(tmpDir, "skills", "skill-development")
-	require.NoError(t, os.MkdirAll(skillDir, 0755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(skillDir, "SKILL.md"),
-		[]byte("---\nname: Skill Development\ndescription: A skill with spaces in name\n---\n# Content"),
-		0644,
-	))
+	createSkillDir(t, filepath.Join(ws, "skills"), "my-skill", "my-skill", "workspace version")
+	createSkillDir(t, global, "my-skill", "my-skill", "global version")
 
-	loader := NewSkillsLoader(filepath.Join(tmpDir, "workspace"), filepath.Join(tmpDir, "skills"), "")
-	skills := loader.ListSkills()
+	sl := NewSkillsLoader(ws, global, "")
+	skills := sl.ListSkills()
 
-	require.Len(t, skills, 1, "should discover skill with invalid metadata name")
-	assert.Equal(t, "skill-development", skills[0].Name, "should fall back to directory name")
-	assert.Equal(t, "A skill with spaces in name", skills[0].Description)
+	assert.Len(t, skills, 1)
+	assert.Equal(t, "workspace", skills[0].Source)
+	assert.Equal(t, "workspace version", skills[0].Description)
+}
+
+func TestListSkillsGlobalOverridesBuiltin(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+	builtin := filepath.Join(tmp, "builtin")
+
+	createSkillDir(t, global, "my-skill", "my-skill", "global version")
+	createSkillDir(t, builtin, "my-skill", "my-skill", "builtin version")
+
+	sl := NewSkillsLoader(ws, global, builtin)
+	skills := sl.ListSkills()
+
+	assert.Len(t, skills, 1)
+	assert.Equal(t, "global", skills[0].Source)
+	assert.Equal(t, "global version", skills[0].Description)
+}
+
+func TestListSkillsMetadataNameDedup(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+
+	// Different directory names but same metadata name
+	createSkillDir(t, filepath.Join(ws, "skills"), "dir-a", "shared-name", "workspace version")
+	createSkillDir(t, global, "dir-b", "shared-name", "global version")
+
+	sl := NewSkillsLoader(ws, global, "")
+	skills := sl.ListSkills()
+
+	assert.Len(t, skills, 1)
+	assert.Equal(t, "shared-name", skills[0].Name)
+	assert.Equal(t, "workspace", skills[0].Source)
+}
+
+func TestListSkillsMultipleDistinctSkills(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+	builtin := filepath.Join(tmp, "builtin")
+
+	createSkillDir(t, filepath.Join(ws, "skills"), "skill-a", "skill-a", "desc a")
+	createSkillDir(t, global, "skill-b", "skill-b", "desc b")
+	createSkillDir(t, builtin, "skill-c", "skill-c", "desc c")
+
+	sl := NewSkillsLoader(ws, global, builtin)
+	skills := sl.ListSkills()
+
+	assert.Len(t, skills, 3)
+	names := map[string]string{}
+	for _, s := range skills {
+		names[s.Name] = s.Source
+	}
+	assert.Equal(t, "workspace", names["skill-a"])
+	assert.Equal(t, "global", names["skill-b"])
+	assert.Equal(t, "builtin", names["skill-c"])
+}
+
+func TestListSkillsInvalidSkillSkipped(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+
+	// Invalid name (underscore)
+	createSkillDir(t, filepath.Join(ws, "skills"), "bad_skill", "bad_skill", "desc")
+	// Valid skill
+	createSkillDir(t, global, "good-skill", "good-skill", "desc")
+
+	sl := NewSkillsLoader(ws, global, "")
+	skills := sl.ListSkills()
+
+	assert.Len(t, skills, 1)
+	assert.Equal(t, "good-skill", skills[0].Name)
+}
+
+func TestListSkillsEmptyAndNonexistentDirs(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	emptyDir := filepath.Join(tmp, "empty")
+	require.NoError(t, os.MkdirAll(emptyDir, 0o755))
+
+	sl := NewSkillsLoader(ws, emptyDir, filepath.Join(tmp, "nonexistent"))
+	skills := sl.ListSkills()
+
+	assert.Empty(t, skills)
+}
+
+func TestListSkillsDirWithoutSkillMD(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+
+	// Directory exists but has no SKILL.md
+	require.NoError(t, os.MkdirAll(filepath.Join(global, "no-skillmd"), 0o755))
+	// Valid skill alongside
+	createSkillDir(t, global, "real-skill", "real-skill", "desc")
+
+	sl := NewSkillsLoader(ws, global, "")
+	skills := sl.ListSkills()
+
+	assert.Len(t, skills, 1)
+	assert.Equal(t, "real-skill", skills[0].Name)
 }
 
 func TestStripFrontmatter(t *testing.T) {
@@ -243,4 +325,95 @@ func TestStripFrontmatter(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestSkillRootsTrimsWhitespaceAndDedups(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+	builtin := filepath.Join(tmp, "builtin")
+
+	sl := NewSkillsLoader(workspace, "  "+global+"  ", "\t"+builtin+"\n")
+	roots := sl.SkillRoots()
+
+	assert.Equal(t, []string{
+		filepath.Join(workspace, "skills"),
+		global,
+		builtin,
+	}, roots)
+}
+
+func TestGetSkillMetadata_UsesMarkdownParagraphWhenNoFrontmatter(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "workspace", "skills", "plain-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+
+	content := "# Plain Skill\n\nThis is parsed from markdown paragraph.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644))
+
+	sl := &SkillsLoader{}
+	meta := sl.getSkillMetadata(filepath.Join(skillDir, "SKILL.md"))
+	require.NotNil(t, meta)
+	assert.Equal(t, "plain-skill", meta.Name)
+	assert.Equal(t, "This is parsed from markdown paragraph.", meta.Description)
+}
+
+func TestGetSkillMetadata_FrontmatterOverridesMarkdown(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "workspace", "skills", "plain-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+
+	content := "---\nname: frontmatter-skill\ndescription: frontmatter description\n---\n\n# Plain Skill\n\nBody description.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644))
+
+	sl := &SkillsLoader{}
+	meta := sl.getSkillMetadata(filepath.Join(skillDir, "SKILL.md"))
+	require.NotNil(t, meta)
+	assert.Equal(t, "frontmatter-skill", meta.Name)
+	assert.Equal(t, "frontmatter description", meta.Description)
+}
+
+func TestGetSkillMetadata_YAMLMultilineDescription(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "workspace", "skills", "plain-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+
+	content := "---\nname: frontmatter-skill\ndescription: |\n  line 1: with colon\n  line 2\n---\n\n# Plain Skill\n\nBody description.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644))
+
+	sl := &SkillsLoader{}
+	meta := sl.getSkillMetadata(filepath.Join(skillDir, "SKILL.md"))
+	require.NotNil(t, meta)
+	assert.Equal(t, "frontmatter-skill", meta.Name)
+	assert.Equal(t, "line 1: with colon\nline 2", meta.Description)
+}
+
+func TestGetSkillMetadata_InvalidHeadingNameFallsBackToDirName(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "workspace", "skills", "valid-name")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+
+	content := "# Invalid Heading Name\n\nBody description.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644))
+
+	sl := &SkillsLoader{}
+	meta := sl.getSkillMetadata(filepath.Join(skillDir, "SKILL.md"))
+	require.NotNil(t, meta)
+	assert.Equal(t, "valid-name", meta.Name)
+	assert.Equal(t, "Body description.", meta.Description)
+}
+
+func TestGetSkillMetadata_IgnoresHTMLCommentBlocks(t *testing.T) {
+	tmp := t.TempDir()
+	skillDir := filepath.Join(tmp, "workspace", "skills", "biomed-skill")
+	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+
+	content := "<!--\n# COPYRIGHT NOTICE\n# This file is part of the \"Universal Biomedical Skills\" project.\n# Copyright (c) 2026 MD BABU MIA, PhD <md.babu.mia@mssm.edu>\n# All Rights Reserved.\n#\n# This code is proprietary and confidential.\n# Unauthorized copying of this file, via any medium is strictly prohibited.\n#\n# Provenance: Authenticated by MD BABU MIA\n\n-->\n\n# Biomed Skill\n\nSummarize biomedical papers.\n"
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644))
+
+	sl := &SkillsLoader{}
+	meta := sl.getSkillMetadata(filepath.Join(skillDir, "SKILL.md"))
+	require.NotNil(t, meta)
+	assert.Equal(t, "biomed-skill", meta.Name)
+	assert.Equal(t, "Summarize biomedical papers.", meta.Description)
 }

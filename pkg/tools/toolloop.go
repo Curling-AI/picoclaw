@@ -10,7 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
+	"runtime/debug"
+	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -19,12 +20,16 @@ import (
 
 // ToolLoopConfig configures the tool execution loop.
 type ToolLoopConfig struct {
-	Provider       providers.LLMProvider
-	Model          string
-	Tools          *ToolRegistry
-	MaxIterations  int
-	TimeoutSeconds int // wall-clock timeout; 0 = no timeout
-	LLMOptions     map[string]any
+	Provider      providers.LLMProvider
+	Model         string
+	Tools         *ToolRegistry
+	MaxIterations int
+	LLMOptions    map[string]any
+
+	// MediaResolver resolves media:// refs in messages before each LLM call.
+	// This is optional and is mainly used by subagent legacy fallback execution
+	// so subagents can reuse the same multimodal media handling as the main loop.
+	MediaResolver func(messages []providers.Message) []providers.Message
 }
 
 // ToolLoopResult contains the result of running the tool loop.
@@ -41,12 +46,6 @@ func RunToolLoop(
 	messages []providers.Message,
 	channel, chatID string,
 ) (*ToolLoopResult, error) {
-	if config.TimeoutSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(config.TimeoutSeconds)*time.Second)
-		defer cancel()
-	}
-
 	iteration := 0
 	var finalContent string
 
@@ -70,8 +69,27 @@ func RunToolLoop(
 		if llmOpts == nil {
 			llmOpts = map[string]any{}
 		}
-		// 3. Call LLM
-		response, err := config.Provider.Chat(ctx, messages, providerToolDefs, config.Model, llmOpts)
+
+		// 3. Resolve media:// refs and Call LLM.
+		// Tools like load_image produce media:// refs in their result messages.
+		// Without this step, the LLM would receive raw "media://uuid" strings
+		// instead of base64-encoded image data URLs.
+		//
+		// We build a separate callMessages slice so that:
+		//   (a) the resolver output is used for the LLM call only,
+		//   (b) the original `messages` slice keeps the unresolved refs for
+		//       subsequent iterations — the resolver is idempotent but working
+		//       on the original avoids double-encoding issues.
+		//
+		// On iteration 1 the initial user messages typically have no media://
+		// refs (they come from plain text), so this is effectively a no-op;
+		// it becomes relevant from iteration 2 onward when tool results may
+		// contain media refs.
+		callMessages := messages
+		if config.MediaResolver != nil && iteration > 1 {
+			callMessages = config.MediaResolver(messages)
+		}
+		response, err := config.Provider.Chat(ctx, callMessages, providerToolDefs, config.Model, llmOpts)
 		if err != nil {
 			logger.ErrorCF("toolloop", "LLM call failed",
 				map[string]any{
@@ -115,7 +133,11 @@ func RunToolLoop(
 			Content: response.Content,
 		}
 		for _, tc := range normalizedToolCalls {
-			argumentsJSON, _ := json.Marshal(tc.Arguments)
+			argumentsJSON, err := json.Marshal(tc.Arguments)
+			if err != nil {
+				logger.Warnf("toolloop: failed to marshal tool call arguments for %s: %v", tc.Name, err)
+				argumentsJSON = []byte("{}")
+			}
 			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, providers.ToolCall{
 				ID:        tc.ID,
 				Type:      "function",
@@ -129,38 +151,65 @@ func RunToolLoop(
 		}
 		messages = append(messages, assistantMsg)
 
-		// 7. Execute tool calls
-		for _, tc := range normalizedToolCalls {
-			argsJSON, _ := json.Marshal(tc.Arguments)
-			argsPreview := utils.Truncate(string(argsJSON), 200)
-			logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
-				map[string]any{
-					"tool":      tc.Name,
-					"iteration": iteration,
-				})
+		// 7. Execute tool calls in parallel
+		type indexedResult struct {
+			result *ToolResult
+			tc     providers.ToolCall
+		}
 
-			// Execute tool (no async callback for subagents - they run independently)
-			var toolResult *ToolResult
-			if config.Tools != nil {
-				toolResult = config.Tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, channel, chatID, nil)
-			} else {
-				toolResult = ErrorResult("No tools available")
-			}
+		results := make([]indexedResult, len(normalizedToolCalls))
+		var wg sync.WaitGroup
 
-			// Determine content for LLM
-			contentForLLM := toolResult.ForLLM
-			if contentForLLM == "" && toolResult.Err != nil {
-				contentForLLM = toolResult.Err.Error()
-			}
+		for i, tc := range normalizedToolCalls {
+			results[i].tc = tc
 
-			// Add tool result message
-			toolResultMsg := providers.Message{
+			wg.Add(1)
+			go func(idx int, tc providers.ToolCall) {
+				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						logger.ErrorCF("toolloop", "tool execution goroutine panic recovered",
+							map[string]any{
+								"tool":  tc.Name,
+								"panic": fmt.Sprintf("%v", r),
+								"stack": string(debug.Stack()),
+							})
+						results[idx].result = ErrorResult(fmt.Sprintf("internal panic in tool %s", tc.Name))
+					}
+				}()
+
+				argsJSON, _ := json.Marshal(tc.Arguments)
+				argsPreview := utils.Truncate(string(argsJSON), 200)
+				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
+					map[string]any{
+						"tool":      tc.Name,
+						"iteration": iteration,
+					})
+
+				var toolResult *ToolResult
+				if config.Tools != nil {
+					toolResult = config.Tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, channel, chatID, nil)
+				} else {
+					toolResult = ErrorResult("No tools available")
+				}
+				results[idx].result = toolResult
+			}(i, tc)
+		}
+		wg.Wait()
+
+		// Append results in original order
+		for _, r := range results {
+			contentForLLM := r.result.ContentForLLM()
+
+			toolMsg := providers.Message{
 				Role:       "tool",
 				Content:    contentForLLM,
-				Name:       tc.Name,
-				ToolCallID: tc.ID,
+				ToolCallID: r.tc.ID,
 			}
-			messages = append(messages, toolResultMsg)
+			if len(r.result.Media) > 0 && !r.result.ResponseHandled {
+				toolMsg.Media = append(toolMsg.Media, r.result.Media...)
+			}
+			messages = append(messages, toolMsg)
 		}
 	}
 

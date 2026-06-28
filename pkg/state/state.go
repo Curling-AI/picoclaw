@@ -3,11 +3,13 @@ package state
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // State represents the persistent state for a workspace.
@@ -38,7 +40,12 @@ func NewManager(workspace string) *Manager {
 	oldStateFile := filepath.Join(workspace, "state.json")
 
 	// Create state directory if it doesn't exist
-	os.MkdirAll(stateDir, 0o755)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		logger.WarnCF("state", "failed to create state directory", map[string]any{
+			"dir":   stateDir,
+			"error": err.Error(),
+		})
+	}
 
 	sm := &Manager{
 		workspace: workspace,
@@ -52,19 +59,32 @@ func NewManager(workspace string) *Manager {
 		if data, err := os.ReadFile(oldStateFile); err == nil {
 			if err := json.Unmarshal(data, sm.state); err == nil {
 				// Migrate to new location
-				sm.saveAtomic()
-				log.Printf("[INFO] state: migrated state from %s to %s", oldStateFile, stateFile)
+				if err := sm.saveAtomic(); err != nil {
+					logger.WarnCF("state", "failed to save state", map[string]any{
+						"error": err.Error(),
+					})
+				}
+				logger.InfoCF("state", "migrated state", map[string]any{
+					"from": oldStateFile,
+					"to":   stateFile,
+				})
 			}
 		}
 	} else {
 		// Load from new location
-		sm.load()
+		if err := sm.load(); err != nil {
+			logger.WarnCF("state", "failed to load state", map[string]any{
+				"error": err.Error(),
+			})
+		}
 	}
 
 	return sm
 }
 
-// SetLastChannel updates the last channel and saves the state.
+// SetLastChannel atomically updates the last channel and saves the state.
+// This method uses a temp file + rename pattern for atomic writes,
+// ensuring that the state file is never corrupted even if the process crashes.
 func (sm *Manager) SetLastChannel(channel string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -73,7 +93,7 @@ func (sm *Manager) SetLastChannel(channel string) error {
 	sm.state.LastChannel = channel
 	sm.state.Timestamp = time.Now()
 
-	// Save state
+	// Atomic save using temp file + rename
 	if err := sm.saveAtomic(); err != nil {
 		return fmt.Errorf("failed to save state atomically: %w", err)
 	}
@@ -90,7 +110,7 @@ func (sm *Manager) SetLastChatID(chatID string) error {
 	sm.state.LastChatID = chatID
 	sm.state.Timestamp = time.Now()
 
-	// Save state
+	// Atomic save using temp file + rename
 	if err := sm.saveAtomic(); err != nil {
 		return fmt.Errorf("failed to save state atomically: %w", err)
 	}
@@ -119,26 +139,23 @@ func (sm *Manager) GetTimestamp() time.Time {
 	return sm.state.Timestamp
 }
 
-// saveAtomic saves the state to disk.
-// S3 Mountpoint and similar filesystems do not support temp file patterns
-// (rename, or read-back of just-written files). Since S3 PUT operations
-// are inherently atomic and the caller holds the mutex, we write directly
-// to the target file.
+// saveAtomic performs an atomic save using temp file + rename.
+// This ensures that the state file is never corrupted:
+// 1. Write to a temp file
+// 2. Sync to disk (critical for SD cards/flash storage)
+// 3. Rename temp file to target (atomic on POSIX systems)
+// 4. If rename fails, cleanup the temp file
 //
 // Must be called with the lock held.
 func (sm *Manager) saveAtomic() error {
-	// Marshal state to JSON
+	// Use unified atomic write utility with explicit sync for flash storage reliability.
+	// Using 0o600 (owner read/write only) for secure default permissions.
 	data, err := json.MarshalIndent(sm.state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Write directly to state file (S3 PUT is atomic)
-	if err := os.WriteFile(sm.stateFile, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write state file: %w", err)
-	}
-
-	return nil
+	return fileutil.WriteFileAtomic(sm.stateFile, data, 0o600)
 }
 
 // load loads the state from disk.

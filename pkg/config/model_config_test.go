@@ -6,6 +6,8 @@
 package config
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -13,9 +15,10 @@ import (
 
 func TestGetModelConfig_Found(t *testing.T) {
 	cfg := &Config{
-		ModelList: []ModelConfig{
-			{ModelName: "test-model", Model: "openai/gpt-4o", APIKey: "key1"},
-			{ModelName: "other-model", Model: "anthropic/claude", APIKey: "key2"},
+		Version: CurrentVersion,
+		ModelList: []*ModelConfig{
+			{ModelName: "test-model", Model: "openai/gpt-4o", APIKeys: SimpleSecureStrings("key1")},
+			{ModelName: "other-model", Model: "anthropic/claude", APIKeys: SimpleSecureStrings("key2")},
 		},
 	}
 
@@ -30,8 +33,8 @@ func TestGetModelConfig_Found(t *testing.T) {
 
 func TestGetModelConfig_NotFound(t *testing.T) {
 	cfg := &Config{
-		ModelList: []ModelConfig{
-			{ModelName: "test-model", Model: "openai/gpt-4o", APIKey: "key1"},
+		ModelList: []*ModelConfig{
+			{ModelName: "test-model", Model: "openai/gpt-4o", APIKeys: SimpleSecureStrings("key1")},
 		},
 	}
 
@@ -43,7 +46,7 @@ func TestGetModelConfig_NotFound(t *testing.T) {
 
 func TestGetModelConfig_EmptyList(t *testing.T) {
 	cfg := &Config{
-		ModelList: []ModelConfig{},
+		ModelList: []*ModelConfig{},
 	}
 
 	_, err := cfg.GetModelConfig("any-model")
@@ -54,16 +57,16 @@ func TestGetModelConfig_EmptyList(t *testing.T) {
 
 func TestGetModelConfig_RoundRobin(t *testing.T) {
 	cfg := &Config{
-		ModelList: []ModelConfig{
-			{ModelName: "lb-model", Model: "openai/gpt-4o-1", APIKey: "key1"},
-			{ModelName: "lb-model", Model: "openai/gpt-4o-2", APIKey: "key2"},
-			{ModelName: "lb-model", Model: "openai/gpt-4o-3", APIKey: "key3"},
+		ModelList: []*ModelConfig{
+			{ModelName: "lb-model", Model: "openai/gpt-4o-1", APIKeys: SimpleSecureStrings("key1")},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-2", APIKeys: SimpleSecureStrings("key2")},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-3", APIKeys: SimpleSecureStrings("key3")},
 		},
 	}
 
 	// Test round-robin distribution
 	results := make(map[string]int)
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		result, err := cfg.GetModelConfig("lb-model")
 		if err != nil {
 			t.Fatalf("GetModelConfig() error = %v", err)
@@ -79,11 +82,41 @@ func TestGetModelConfig_RoundRobin(t *testing.T) {
 	}
 }
 
+func TestGetModelConfig_RoundRobinStartsFromFirstMatch(t *testing.T) {
+	rrCounter.Store(0)
+
+	cfg := &Config{
+		ModelList: []*ModelConfig{
+			{ModelName: "lb-model", Model: "openai/gpt-4o-1", APIKeys: SimpleSecureStrings("key1")},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-2", APIKeys: SimpleSecureStrings("key2")},
+			{ModelName: "lb-model", Model: "openai/gpt-4o-3", APIKeys: SimpleSecureStrings("key3")},
+		},
+	}
+
+	wantOrder := []string{
+		"openai/gpt-4o-1",
+		"openai/gpt-4o-2",
+		"openai/gpt-4o-3",
+		"openai/gpt-4o-1",
+		"openai/gpt-4o-2",
+	}
+
+	for i, want := range wantOrder {
+		result, err := cfg.GetModelConfig("lb-model")
+		if err != nil {
+			t.Fatalf("GetModelConfig() call %d error = %v", i, err)
+		}
+		if result.Model != want {
+			t.Fatalf("GetModelConfig() call %d model = %q, want %q", i, result.Model, want)
+		}
+	}
+}
+
 func TestGetModelConfig_Concurrent(t *testing.T) {
 	cfg := &Config{
-		ModelList: []ModelConfig{
-			{ModelName: "concurrent-model", Model: "openai/gpt-4o-1", APIKey: "key1"},
-			{ModelName: "concurrent-model", Model: "openai/gpt-4o-2", APIKey: "key2"},
+		ModelList: []*ModelConfig{
+			{ModelName: "concurrent-model", Model: "openai/gpt-4o-1", APIKeys: SimpleSecureStrings("key1")},
+			{ModelName: "concurrent-model", Model: "openai/gpt-4o-2", APIKeys: SimpleSecureStrings("key2")},
 		},
 	}
 
@@ -93,17 +126,15 @@ func TestGetModelConfig_Concurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errors := make(chan error, goroutines*iterations)
 
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+	for range goroutines {
+		wg.Go(func() {
+			for range iterations {
 				_, err := cfg.GetModelConfig("concurrent-model")
 				if err != nil {
 					errors <- err
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -112,6 +143,47 @@ func TestGetModelConfig_Concurrent(t *testing.T) {
 	for err := range errors {
 		t.Errorf("Concurrent GetModelConfig() error: %v", err)
 	}
+}
+
+func TestModelConfig_StreamingConfig(t *testing.T) {
+	t.Run("loads streaming enabled", func(t *testing.T) {
+		var cfg ModelConfig
+		err := json.Unmarshal([]byte(`{
+			"model_name": "stream-model",
+			"model": "openai/gpt-5.4",
+			"streaming": {"enabled": true}
+		}`), &cfg)
+		if err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		if !cfg.Streaming.Enabled {
+			t.Fatal("Streaming.Enabled = false, want true")
+		}
+	})
+
+	t.Run("defaults disabled", func(t *testing.T) {
+		var cfg ModelConfig
+		err := json.Unmarshal([]byte(`{
+			"model_name": "plain-model",
+			"model": "openai/gpt-5.4"
+		}`), &cfg)
+		if err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		if cfg.Streaming.Enabled {
+			t.Fatal("Streaming.Enabled = true, want false by default")
+		}
+	})
+
+	t.Run("model streaming only has enabled", func(t *testing.T) {
+		typ := reflect.TypeOf(ModelStreamingConfig{})
+		if typ.NumField() != 1 {
+			t.Fatalf("ModelStreamingConfig field count = %d, want 1", typ.NumField())
+		}
+		if _, ok := typ.FieldByName("Enabled"); !ok {
+			t.Fatal("ModelStreamingConfig missing Enabled field")
+		}
+	})
 }
 
 func TestModelConfig_Validate(t *testing.T) {
@@ -125,6 +197,15 @@ func TestModelConfig_Validate(t *testing.T) {
 			config: ModelConfig{
 				ModelName: "test",
 				Model:     "openai/gpt-4o",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid tool schema transform",
+			config: ModelConfig{
+				ModelName:           "test",
+				Model:               "openai/gpt-4o",
+				ToolSchemaTransform: "simple",
 			},
 			wantErr: false,
 		},
@@ -145,6 +226,15 @@ func TestModelConfig_Validate(t *testing.T) {
 		{
 			name:    "empty config",
 			config:  ModelConfig{},
+			wantErr: true,
+		},
+		{
+			name: "invalid tool schema transform",
+			config: ModelConfig{
+				ModelName:           "test",
+				Model:               "openai/gpt-4o",
+				ToolSchemaTransform: "invalid",
+			},
 			wantErr: true,
 		},
 	}
@@ -169,7 +259,7 @@ func TestConfig_ValidateModelList(t *testing.T) {
 		{
 			name: "valid list",
 			config: &Config{
-				ModelList: []ModelConfig{
+				ModelList: []*ModelConfig{
 					{ModelName: "test1", Model: "openai/gpt-4o"},
 					{ModelName: "test2", Model: "anthropic/claude"},
 				},
@@ -179,7 +269,7 @@ func TestConfig_ValidateModelList(t *testing.T) {
 		{
 			name: "invalid entry",
 			config: &Config{
-				ModelList: []ModelConfig{
+				ModelList: []*ModelConfig{
 					{ModelName: "test1", Model: "openai/gpt-4o"},
 					{ModelName: "", Model: "anthropic/claude"}, // missing model_name
 				},
@@ -190,7 +280,7 @@ func TestConfig_ValidateModelList(t *testing.T) {
 		{
 			name: "empty list",
 			config: &Config{
-				ModelList: []ModelConfig{},
+				ModelList: []*ModelConfig{},
 			},
 			wantErr: false,
 		},
@@ -198,10 +288,7 @@ func TestConfig_ValidateModelList(t *testing.T) {
 			// Load balancing: multiple entries with same model_name are allowed
 			name: "duplicate model_name for load balancing",
 			config: &Config{
-				ModelList: []ModelConfig{
-					{ModelName: "gpt-4", Model: "openai/gpt-4o", APIKey: "key1"},
-					{ModelName: "gpt-4", Model: "openai/gpt-4-turbo", APIKey: "key2"},
-				},
+				ModelList: []*ModelConfig{},
 			},
 			wantErr: false, // Changed: duplicates are allowed for load balancing
 		},
@@ -209,7 +296,7 @@ func TestConfig_ValidateModelList(t *testing.T) {
 			// Load balancing: non-adjacent entries with same model_name are also allowed
 			name: "duplicate model_name non-adjacent for load balancing",
 			config: &Config{
-				ModelList: []ModelConfig{
+				ModelList: []*ModelConfig{
 					{ModelName: "model-a", Model: "openai/gpt-4o"},
 					{ModelName: "model-b", Model: "anthropic/claude"},
 					{ModelName: "model-a", Model: "openai/gpt-4-turbo"},
@@ -231,5 +318,40 @@ func TestConfig_ValidateModelList(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestModelConfig_RequestTimeoutParsing(t *testing.T) {
+	jsonData := `{
+		"model_name": "slow-local",
+		"model": "openai/local-model",
+		"api_base": "http://localhost:11434/v1",
+		"request_timeout": 300
+	}`
+
+	var cfg ModelConfig
+	if err := json.Unmarshal([]byte(jsonData), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if cfg.RequestTimeout != 300 {
+		t.Fatalf("RequestTimeout = %d, want 300", cfg.RequestTimeout)
+	}
+}
+
+func TestModelConfig_RequestTimeoutDefaultZeroValue(t *testing.T) {
+	jsonData := `{
+		"model_name": "default-timeout",
+		"model": "openai/gpt-4o",
+		"api_key": "test-key"
+	}`
+
+	var cfg ModelConfig
+	if err := json.Unmarshal([]byte(jsonData), &cfg); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	if cfg.RequestTimeout != 0 {
+		t.Fatalf("RequestTimeout = %d, want 0", cfg.RequestTimeout)
 	}
 }

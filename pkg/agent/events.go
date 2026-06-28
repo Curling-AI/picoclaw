@@ -1,37 +1,59 @@
-// PicoClaw - Ultra-lightweight personal AI agent
-// License: MIT
-
 package agent
 
-import "time"
+import (
+	"time"
 
-// EventType identifies the kind of agent lifecycle event.
-type EventType int
-
-const (
-	EventThinking     EventType = iota // LLM call started
-	EventToolStart                     // Tool execution starting
-	EventToolComplete                  // Tool execution done
-	EventToolError                     // Tool execution failed
-	EventResponse                      // Final text response ready
-	EventCompacting                    // Context compaction in progress
-	EventStopped                       // User stop signal processed
-	EventSubagentSpawned               // Subagent started
-	EventSubagentCompleted             // Subagent finished successfully
-	EventSubagentFailed                // Subagent failed or was cancelled
+	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 )
 
-// AgentEvent carries details about an agent lifecycle event.
-type AgentEvent struct {
-	Type      EventType
-	ToolName  string
-	ToolArgs  map[string]any
-	Content   string
-	IsError   bool
-	Iteration int
-	Duration  time.Duration
+// HookMeta contains correlation fields shared by agent hook requests and
+// runtime events emitted from turn processing.
+type HookMeta struct {
+	AgentID      string
+	TurnID       string
+	ParentTurnID string
+	SessionKey   string
+	Iteration    int
+	TracePath    string
+	Source       string
+	turnContext  *TurnContext
 }
 
-// EventHandler is a callback invoked for agent lifecycle events.
-// Implementations must be safe for concurrent use.
-type EventHandler func(event AgentEvent)
+// EventKind is the legacy in-agent event kind alias kept for tests and
+// compatibility shims on top of the runtime event bus.
+type EventKind = runtimeevents.Kind
+
+const (
+	EventKindTurnStart              EventKind = runtimeevents.KindAgentTurnStart
+	EventKindTurnEnd                EventKind = runtimeevents.KindAgentTurnEnd
+	EventKindLLMRequest             EventKind = runtimeevents.KindAgentLLMRequest
+	EventKindLLMDelta               EventKind = runtimeevents.KindAgentLLMDelta
+	EventKindLLMResponse            EventKind = runtimeevents.KindAgentLLMResponse
+	EventKindLLMRetry               EventKind = runtimeevents.KindAgentLLMRetry
+	EventKindContextCompress        EventKind = runtimeevents.KindAgentContextCompress
+	EventKindSessionSummarize       EventKind = runtimeevents.KindAgentSessionSummarize
+	EventKindToolExecStart          EventKind = runtimeevents.KindAgentToolExecStart
+	EventKindToolExecEnd            EventKind = runtimeevents.KindAgentToolExecEnd
+	EventKindToolExecSkipped        EventKind = runtimeevents.KindAgentToolExecSkipped
+	EventKindSteeringInjected       EventKind = runtimeevents.KindAgentSteeringInjected
+	EventKindFollowUpQueued         EventKind = runtimeevents.KindAgentFollowUpQueued
+	EventKindInterruptReceived      EventKind = runtimeevents.KindAgentInterruptReceived
+	EventKindSubTurnSpawn           EventKind = runtimeevents.KindAgentSubTurnSpawn
+	EventKindSubTurnEnd             EventKind = runtimeevents.KindAgentSubTurnEnd
+	EventKindSubTurnResultDelivered EventKind = runtimeevents.KindAgentSubTurnResultDelivered
+	EventKindSubTurnOrphan          EventKind = runtimeevents.KindAgentSubTurnOrphan
+	EventKindError                  EventKind = runtimeevents.KindAgentError
+)
+
+// EventMeta is the legacy name for hook metadata.
+type EventMeta = HookMeta
+
+// Event is the legacy agent event envelope exposed by SubscribeEvents and a
+// handful of tests. Runtime code publishes pkg/events.Event internally.
+type Event struct {
+	Kind    EventKind
+	Time    time.Time
+	Meta    EventMeta
+	Context *TurnContext
+	Payload any
+}

@@ -5,16 +5,27 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  integration:
+    name: Integration Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
+
+      - name: Run Docker-backed integration suites
+        run: bash ./scripts/run-integration-tests.sh
+
+  build:
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - name: Build
+      - name: Build core binaries
         run: make build-all

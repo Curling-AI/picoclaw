@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -81,7 +82,7 @@ func TestSetLastChatID(t *testing.T) {
 	}
 }
 
-func TestOverwriteState(t *testing.T) {
+func TestAtomicity_NoCorruptionOnInterrupt(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "state-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -96,12 +97,23 @@ func TestOverwriteState(t *testing.T) {
 		t.Fatalf("SetLastChannel failed: %v", err)
 	}
 
-	// Verify initial state
-	if sm.GetLastChannel() != "initial-channel" {
-		t.Errorf("Expected channel 'initial-channel', got '%s'", sm.GetLastChannel())
+	// Simulate a crash scenario by manually creating a corrupted temp file
+	tempFile := filepath.Join(tmpDir, "state", "state.json.tmp")
+	err = os.WriteFile(tempFile, []byte("corrupted data"), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
 	}
 
-	// Overwrite with new state
+	// Verify that the original state is still intact
+	lastChannel := sm.GetLastChannel()
+	if lastChannel != "initial-channel" {
+		t.Errorf("Expected channel 'initial-channel' after corrupted temp file, got '%s'", lastChannel)
+	}
+
+	// Clean up the temp file manually
+	os.Remove(tempFile)
+
+	// Now do a proper save
 	err = sm.SetLastChannel("new-channel")
 	if err != nil {
 		t.Fatalf("SetLastChannel failed: %v", err)
@@ -110,18 +122,6 @@ func TestOverwriteState(t *testing.T) {
 	// Verify the new state was saved
 	if sm.GetLastChannel() != "new-channel" {
 		t.Errorf("Expected channel 'new-channel', got '%s'", sm.GetLastChannel())
-	}
-
-	// Verify no temp files left behind
-	stateDir := filepath.Join(tmpDir, "state")
-	entries, err := os.ReadDir(stateDir)
-	if err != nil {
-		t.Fatalf("Failed to read state dir: %v", err)
-	}
-	for _, entry := range entries {
-		if filepath.Ext(entry.Name()) == ".tmp" {
-			t.Errorf("Unexpected temp file found: %s", entry.Name())
-		}
 	}
 }
 
@@ -136,7 +136,7 @@ func TestConcurrentAccess(t *testing.T) {
 
 	// Test concurrent writes
 	done := make(chan bool, 10)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		go func(idx int) {
 			channel := fmt.Sprintf("channel-%d", idx)
 			sm.SetLastChannel(channel)
@@ -145,7 +145,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines to complete
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 
@@ -213,5 +213,34 @@ func TestNewManager_EmptyWorkspace(t *testing.T) {
 
 	if !sm.GetTimestamp().IsZero() {
 		t.Error("Expected zero timestamp for new state")
+	}
+}
+
+func TestNewManager_MkdirFailureDoesNotCrash(t *testing.T) {
+	if os.Getenv("BE_CRASHER") == "1" {
+		tmpDir := os.Getenv("CRASH_DIR")
+
+		statePath := filepath.Join(tmpDir, "state")
+		if err := os.WriteFile(statePath, []byte("I'm a file, not a folder"), 0o644); err != nil {
+			fmt.Printf("setup failed: %v", err)
+			os.Exit(0)
+		}
+
+		NewManager(tmpDir)
+		os.Exit(0)
+	}
+
+	tmpDir, err := os.MkdirTemp("", "state-crash-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestNewManager_MkdirFailureDoesNotCrash")
+	cmd.Env = append(os.Environ(), "BE_CRASHER=1", "CRASH_DIR="+tmpDir)
+
+	err = cmd.Run()
+	if err != nil {
+		t.Fatalf("NewManager should not crash when state dir creation fails, got: %v", err)
 	}
 }

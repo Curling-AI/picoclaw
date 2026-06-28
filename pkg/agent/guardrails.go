@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -20,15 +19,6 @@ const (
 	LoopSignalWarning                   // Possible loop, log a warning
 	LoopSignalBlock                     // Likely loop, inject a nudge message
 	LoopSignalAbort                     // Circuit breaker tripped, abort run
-)
-
-// VerbosityLevel controls how much detail is included in error/timeout summaries.
-type VerbosityLevel string
-
-const (
-	VerbosityOff  VerbosityLevel = "off"
-	VerbosityOn   VerbosityLevel = "on"
-	VerbosityFull VerbosityLevel = "full"
 )
 
 // pollToolNames lists tools whose output should be tracked for no-progress detection.
@@ -54,7 +44,8 @@ type driftState struct {
 }
 
 // LoopDetector tracks tool call patterns within a single agent run to detect
-// repetitive loops that waste tokens without making progress.
+// repetitive loops that waste tokens without making progress. It is constructed
+// once per turn and Record is called after each tool execution.
 type LoopDetector struct {
 	cfg               config.LoopDetectionConfig
 	history           []loopHistoryEntry
@@ -62,13 +53,14 @@ type LoopDetector struct {
 	pollOutputCounts  map[string]int // key: "tool:argsKey:outputHash" — same-output repetitions
 	lastTool          string
 	prevLastTool      string
-	pingPongCounts    map[string]int // key: "toolA->toolB"
-	toolFreqCounts    map[string]int           // key: toolName
-	driftTrackers     map[string]*driftState   // key: toolName
+	pingPongCounts    map[string]int         // key: "toolA->toolB"
+	toolFreqCounts    map[string]int         // key: toolName
+	driftTrackers     map[string]*driftState // key: toolName
 	detectedLoopCount int
 }
 
-// NewLoopDetector creates a LoopDetector from config. Returns nil if disabled.
+// NewLoopDetector creates a LoopDetector from config. Returns nil if disabled,
+// so the zero-overhead path is a nil receiver on Record.
 func NewLoopDetector(cfg config.LoopDetectionConfig) *LoopDetector {
 	if !cfg.Enabled {
 		return nil
@@ -353,66 +345,10 @@ func hashOutput(output string) string {
 	return fmt.Sprintf("%x", h[:8])
 }
 
-// buildTimeoutSummary constructs a user-facing message when a run times out.
-func buildTimeoutSummary(log []toolCallEntry, activeToolName string, elapsed time.Duration, verbosity VerbosityLevel) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("I had to stop after %.0f seconds because the time limit was reached. ", elapsed.Seconds()))
-
-	if len(log) == 0 {
-		sb.WriteString("No tool calls were completed before the timeout.")
-		return sb.String()
-	}
-
-	succeeded := 0
-	failed := 0
-	for _, e := range log {
-		if e.IsError {
-			failed++
-		} else {
-			succeeded++
-		}
-	}
-
-	sb.WriteString(fmt.Sprintf("I completed %d tool calls (%d succeeded, %d failed) before timing out.", len(log), succeeded, failed))
-
-	if activeToolName != "" {
-		sb.WriteString(fmt.Sprintf(" The tool '%s' was running when the timeout hit.", activeToolName))
-	}
-
-	if verbosity == VerbosityOn || verbosity == VerbosityFull {
-		// Show recent errors
-		var recentErrors []toolCallEntry
-		for i := len(log) - 1; i >= 0 && len(recentErrors) < 3; i-- {
-			if log[i].IsError {
-				recentErrors = append(recentErrors, log[i])
-			}
-		}
-		if len(recentErrors) > 0 {
-			sb.WriteString("\n\nRecent errors:")
-			for _, e := range recentErrors {
-				sb.WriteString(fmt.Sprintf("\n- %s: %s", e.Name, e.Content))
-			}
-		}
-	}
-
-	if verbosity == VerbosityFull {
-		sb.WriteString("\n\nFull tool call log:")
-		for i, e := range log {
-			status := "ok"
-			if e.IsError {
-				status = "ERROR"
-			}
-			sb.WriteString(fmt.Sprintf("\n  %d. %s [%s]: %s", i+1, e.Name, status, e.Content))
-		}
-	}
-
-	sb.WriteString("\n\nHow would you like me to proceed?")
-	return sb.String()
-}
-
-// buildLoopAbortSummary constructs a user-facing message when the loop circuit breaker fires.
-func buildLoopAbortSummary(log []toolCallEntry, pattern string) string {
+// buildLoopAbortSummary constructs a user-facing message when the loop circuit
+// breaker fires. It reads the turn's ToolExecutionRecord log (upstream's per-turn
+// tool log), the closest analog to the fork's toolCallEntry slice.
+func buildLoopAbortSummary(log []ToolExecutionRecord, pattern string) string {
 	var sb strings.Builder
 
 	sb.WriteString("I detected a repetitive loop and stopped to avoid wasting resources. ")
@@ -425,10 +361,10 @@ func buildLoopAbortSummary(log []toolCallEntry, pattern string) string {
 		succeeded := 0
 		failed := 0
 		for _, e := range log {
-			if e.IsError {
-				failed++
-			} else {
+			if e.Success {
 				succeeded++
+			} else {
+				failed++
 			}
 		}
 		sb.WriteString(fmt.Sprintf("I made %d tool calls (%d succeeded, %d failed) before stopping.", len(log), succeeded, failed))
@@ -451,51 +387,13 @@ func buildLoopAbortSummary(log []toolCallEntry, pattern string) string {
 	return sb.String()
 }
 
-// buildFallbackErrorReply produces a concise error message from the last failing tool call.
-func buildFallbackErrorReply(lastErr toolCallEntry) string {
-	return fmt.Sprintf("The %s tool failed: %s\n\nPlease check the input and try again.", lastErr.Name, lastErr.Content)
-}
-
-// stopPatterns lists keywords that indicate the user wants to abort the current run.
-var stopPatterns = []string{
-	"stop", "cancel", "abort", "halt",
-	"don't do this", "dont do this",
-	"stop that", "never mind", "nevermind",
-}
-
-// isStopMessage returns true if the message content matches a user stop intent.
-func isStopMessage(content string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(content))
-	if normalized == "" {
-		return false
-	}
-	for _, pattern := range stopPatterns {
-		if normalized == pattern || strings.HasPrefix(normalized, pattern+" ") {
-			return true
-		}
-	}
-	return false
-}
-
-// buildStopSummary constructs a user-facing message when a run is stopped by the user.
-func buildStopSummary(log []toolCallEntry) string {
-	var sb strings.Builder
-	sb.WriteString("Stopped by user request. ")
-	if len(log) > 0 {
-		succeeded := 0
-		failed := 0
-		for _, e := range log {
-			if e.IsError {
-				failed++
-			} else {
-				succeeded++
-			}
-		}
-		sb.WriteString(fmt.Sprintf("Completed %d tool calls (%d succeeded, %d failed) before stopping.",
-			len(log), succeeded, failed))
-	}
-	sb.WriteString("\n\nWhat would you like me to do instead?")
-	return sb.String()
+// nonMutatingTools lists read-only tools whose errors may be hidden from the user
+// when messages.suppress_tool_errors is enabled.
+var nonMutatingTools = map[string]bool{
+	"read_file":  true,
+	"list_dir":   true,
+	"web_search": true,
+	"web_fetch":  true,
 }
 
 // shouldSuppressToolErrorForUser returns true if errors from non-mutating tools
@@ -504,12 +402,5 @@ func shouldSuppressToolErrorForUser(toolName string, suppress bool) bool {
 	if !suppress {
 		return false
 	}
-	// Only suppress errors from read-only/non-mutating tools
-	nonMutating := map[string]bool{
-		"read_file":  true,
-		"list_dir":   true,
-		"web_search": true,
-		"web_fetch":  true,
-	}
-	return nonMutating[toolName]
+	return nonMutatingTools[toolName]
 }

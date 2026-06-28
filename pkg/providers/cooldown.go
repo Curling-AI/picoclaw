@@ -10,9 +10,7 @@ const (
 	defaultFailureWindow = 24 * time.Hour
 )
 
-// CooldownTracker manages per-model cooldown state for the fallback chain.
-// Keys are model-specific (e.g. "openai/gpt-4") so that one failing model
-// doesn't block other models on the same provider.
+// CooldownTracker manages per-provider cooldown state for the fallback chain.
 // Thread-safe via sync.RWMutex. In-memory only (resets on restart).
 type CooldownTracker struct {
 	mu            sync.RWMutex
