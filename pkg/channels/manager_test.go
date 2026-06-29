@@ -1565,6 +1565,55 @@ func TestPreSend_StaleToolFeedbackDoesNotConsumeStreamActiveMarker(t *testing.T)
 	}
 }
 
+// TestPreSend_ToolResultSurvivesStreamTombstone guards the live-tool-result
+// path: a tool_result published right after an iteration's streaming finalize
+// (which leaves a streamActive marker + tombstone) must NOT be dropped, so the
+// structured web UI can fill in each tool card's output live. A thought in the
+// same state IS dropped — the exemption is specific to fresh tool activity.
+func TestPreSend_ToolResultSurvivesStreamTombstone(t *testing.T) {
+	m := newTestManager()
+	m.streamActive.Store("test:123", true)
+	m.streamAuxiliaryTombstones.Store("test:123", time.Now())
+
+	ch := &mockChannel{}
+
+	toolResult := testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "123",
+		Content: `{"id":"tc1","output":"42"}`,
+		Context: bus.InboundContext{
+			Channel: "test",
+			ChatID:  "123",
+			Raw: map[string]string{
+				"message_kind": "tool_result",
+			},
+		},
+	})
+
+	_, handled := m.preSend(context.Background(), "test", toolResult, ch)
+	if handled {
+		t.Fatal("tool_result must NOT be dropped by the stream tombstone; it is fresh current-turn activity")
+	}
+
+	thought := testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "123",
+		Content: "thinking...",
+		Context: bus.InboundContext{
+			Channel: "test",
+			ChatID:  "123",
+			Raw: map[string]string{
+				"message_kind": "thought",
+			},
+		},
+	})
+
+	_, handled = m.preSend(context.Background(), "test", thought, ch)
+	if !handled {
+		t.Fatal("a stale thought under an active tombstone should still be dropped")
+	}
+}
+
 func TestPreSend_StaleThoughtDoesNotConsumeStreamActiveMarker(t *testing.T) {
 	m := newTestManager()
 	m.streamActive.Store("test:123", true)
