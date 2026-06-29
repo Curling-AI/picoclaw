@@ -339,6 +339,24 @@ toolLoop:
 						ts.ingestMessage(turnCtx, al, toolResultMsg)
 					}
 
+					// Surface the tool result to structured-interim web channels
+					// (pico/grpc) so the UI can show each result as it lands, not
+					// only after the whole turn. Truncated to keep the live frame
+					// small; the full result is in history. (seucaranguejo fork)
+					if (ts.channel == "pico" || ts.channel == "grpc") && ts.opts.AllowInterimPicoPublish && al != nil && al.bus != nil {
+						if rc := strings.TrimSpace(contentForLLM); rc != "" {
+							if len(rc) > 2000 {
+								rc = rc[:2000] + "…"
+							}
+							resCtx, resCancel := context.WithTimeout(turnCtx, 3*time.Second)
+							_ = al.bus.PublishOutbound(resCtx, outboundMessageForTurnWithOptions(ts, rc, outboundTurnMessageOptions{
+								kind: messageKindToolResult,
+								raw:  map[string]string{metadataKeyToolCallID: tc.ID},
+							}))
+							resCancel()
+						}
+					}
+
 					if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
 						exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 					}
