@@ -509,11 +509,15 @@ func (p *Pipeline) CallLLM(
 		exec.response.ReasoningDetails = nil
 	}
 	reasoningContent := responseReasoningContent(exec.response)
-	shouldPublishPicoToolCallInterim := ts.channel == "pico" && len(exec.response.ToolCalls) > 0
+	// The web gRPC gateway ("grpc") consumes the same structured interim
+	// publishing as the native pico web channel so it can show reasoning and
+	// tool calls live (seucaranguejo fork).
+	structuredInterimChannel := ts.channel == "pico" || ts.channel == "grpc"
+	shouldPublishPicoToolCallInterim := structuredInterimChannel && len(exec.response.ToolCalls) > 0
 	if shouldPublishPicoToolCallInterim {
 		// Pico tool-call turns publish their reasoning/content/tool summary as a
 		// structured sequence after the tool-call payload is normalized below.
-	} else if ts.channel == "pico" {
+	} else if structuredInterimChannel {
 		if exec.streamingPublisher != nil && exec.streamingPublisher.ReasoningPublished() {
 			if err := exec.streamingPublisher.FinalizeReasoning(turnCtx, reasoningContent); err != nil {
 				logger.WarnCF("agent", "Failed to finalize streamed pico reasoning", map[string]any{
