@@ -89,6 +89,9 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	maxMediaSize := pipeline.Cfg.Agents.Defaults.GetMaxMediaSize()
 	finalContent := exec.finalContent
 
+	// wrapUpNudged ensures the approaching-limit warning is injected only once.
+	wrapUpNudged := false
+
 	for ts.currentIteration() < ts.agent.MaxIterations || len(exec.pendingMessages) > 0 || func() bool {
 		graceful, _ := ts.gracefulInterruptRequested()
 		return graceful
@@ -101,6 +104,21 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		iteration := ts.currentIteration() + 1
 		ts.setIteration(iteration)
 		ts.setPhase(TurnPhaseRunning)
+
+		// Tool-budget warning: when ~20% of the iteration budget remains, nudge
+		// the model to wrap up gracefully BEFORE the hard max_tool_iterations cut
+		// (which otherwise truncates mid-task with a generic message). Injected
+		// once, as an in-context steering message.
+		if !wrapUpNudged && ts.agent.MaxIterations > 0 {
+			if budget := ts.agent.MaxIterations - iteration; budget > 0 && budget <= ts.agent.MaxIterations/5 {
+				wrapUpNudged = true
+				pendingMessages = append(pendingMessages, providers.Message{
+					Role: "user",
+					Content: fmt.Sprintf("[System] Tool-budget warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
+						iteration, ts.agent.MaxIterations, budget),
+				})
+			}
+		}
 
 		if iteration > 1 {
 			// For subsequent iterations, read from exec.pendingMessages which
