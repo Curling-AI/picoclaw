@@ -191,10 +191,15 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 		toolCalls,
 		al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength(),
 	)
+	// On flat chat channels we suppress the assistant's narration when it merely
+	// repeats the tool-call explanation (it would show twice). The structured web
+	// UI (grpc) renders the narration as its own bubble and the explanation only
+	// inside the collapsed tool card, so there they serve different roles — keep
+	// the narration so it streams live. (seucaranguejo fork)
 	duplicateToolCallContent := len(visibleToolCalls) > 0 &&
 		utils.ToolCallExplanationDuplicatesContent(content, toolCalls)
 
-	if strings.TrimSpace(content) != "" && !duplicateToolCallContent {
+	if strings.TrimSpace(content) != "" && (ts.channel == "grpc" || !duplicateToolCallContent) {
 		pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
 		err := al.bus.PublishOutbound(
 			pubCtx,
