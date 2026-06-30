@@ -410,7 +410,12 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 	// streaming finalize leaves a tombstone, which would otherwise eat the
 	// tool_result published right after that iteration's tools run) and must
 	// reach the structured UI so it can fill in each tool card's output live.
-	if isAuxiliaryMessage && !isToolCalls && !isToolResult {
+	// Structured web channels (grpc/pico) render a full transcript in order and
+	// WANT every interim (reasoning/thought, narration, …), so don't drop any
+	// auxiliary there — the tombstone suppression is meant for flat chat channels
+	// where a late thought after the final answer looks bad. (seucaranguejo fork)
+	structuredChannel := name == "grpc" || name == "pico"
+	if isAuxiliaryMessage && !isToolCalls && !isToolResult && !structuredChannel {
 		if _, loaded := m.streamActive.Load(streamKey); loaded {
 			return nil, true
 		}
