@@ -1170,6 +1170,18 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			if home, err := os.UserHomeDir(); err == nil {
 				cmd = strings.ReplaceAll(cmd, "~", filepath.FromSlash(home))
 			}
+		} else {
+			// Expand $PWD/$HOME/~ to their real values before the path check so a
+			// path built from them (e.g. `"file://$PWD/scripts/x.html"`) is
+			// validated against the resolved path inside the workspace, not a
+			// literal "/$PWD/..." that looks like an escape. (seucaranguejo fork)
+			cmd = strings.ReplaceAll(cmd, "${PWD}", cwd)
+			cmd = strings.ReplaceAll(cmd, "$PWD", cwd)
+			if home, err := os.UserHomeDir(); err == nil {
+				cmd = strings.ReplaceAll(cmd, "${HOME}", home)
+				cmd = strings.ReplaceAll(cmd, "$HOME", home)
+				cmd = strings.ReplaceAll(cmd, "~/", home+"/")
+			}
 		}
 
 		matchIndices := absolutePathPattern.FindAllStringIndex(cmd, -1)
