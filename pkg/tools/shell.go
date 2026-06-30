@@ -49,49 +49,27 @@ type ExecTool struct {
 }
 
 var (
+	// MINI FOOTGUN LIST (seucaranguejo fork). Each agent runs in an isolated,
+	// ephemeral per-tenant Kubernetes pod, which IS the security boundary — so a
+	// regex command deny-list adds ~no security (trivially bypassable: rm -r -f,
+	// $IFS, base64, sub-shells) and mostly causes friction by blocking normal dev
+	// commands ($(...), ${...}, heredocs, chmod, kill, git push, npm install -g,
+	// apt, docker, …). We therefore keep ONLY a handful of patterns for commands
+	// that are destructive to the pod/host itself and never legitimately needed.
+	// Real confinement is the pod (FS isolation, resource limits) + egress policy,
+	// not string matching. Continues the policy of commit 1ef3d927 (rm -rf, sudo).
 	defaultDenyPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`\bdel\s+/[fq]\b`),
-		regexp.MustCompile(`\brmdir\s+/s\b`),
-		// Match disk wiping commands (must be followed by space/args)
-		regexp.MustCompile(
-			`(^|[^-\w])\b(format|mkfs|diskpart)\b\s`,
-		),
+		// Fork bomb — resource-exhausts the pod.
+		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
+		// Disk-wiping/formatting commands.
+		regexp.MustCompile(`(^|[^-\w])\b(format|mkfs|diskpart)\b\s`),
 		regexp.MustCompile(`\bdd\s+if=`),
-		// Block writes to block devices (all common naming schemes).
+		// Writes to block devices (all common naming schemes).
 		regexp.MustCompile(
 			`>\s*/dev/(sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|loop\d|dm-\d|md\d|sr\d|nbd\d)`,
 		),
+		// Power-state changes.
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
-		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
-		regexp.MustCompile(`\$\([^)]+\)`),
-		regexp.MustCompile(`\$\{[^}]+\}`),
-		regexp.MustCompile("`[^`]+`"),
-		regexp.MustCompile(`\|\s*sh\b`),
-		regexp.MustCompile(`\|\s*bash\b`),
-		regexp.MustCompile(`<<\s*EOF`),
-		regexp.MustCompile(`\$\(\s*cat\s+`),
-		regexp.MustCompile(`\$\(\s*curl\s+`),
-		regexp.MustCompile(`\$\(\s*wget\s+`),
-		regexp.MustCompile(`\$\(\s*which\s+`),
-		regexp.MustCompile(`\bchmod\s+[0-7]{3,4}\b`),
-		regexp.MustCompile(`\bchown\b`),
-		regexp.MustCompile(`\bpkill\b`),
-		regexp.MustCompile(`\bkillall\b`),
-		regexp.MustCompile(`\bkill\b`),
-		regexp.MustCompile(`\bcurl\b.*\|\s*(sh|bash)`),
-		regexp.MustCompile(`\bwget\b.*\|\s*(sh|bash)`),
-		regexp.MustCompile(`\bnpm\s+install\s+-g\b`),
-		regexp.MustCompile(`\bpip\s+install\s+--user\b`),
-		regexp.MustCompile(`\bapt\s+(install|remove|purge)\b`),
-		regexp.MustCompile(`\byum\s+(install|remove)\b`),
-		regexp.MustCompile(`\bdnf\s+(install|remove)\b`),
-		regexp.MustCompile(`\bdocker\s+run\b`),
-		regexp.MustCompile(`\bdocker\s+exec\b`),
-		regexp.MustCompile(`\bgit\s+push\b`),
-		regexp.MustCompile(`\bgit\s+force\b`),
-		regexp.MustCompile(`\bssh\b.*@`),
-		regexp.MustCompile(`\beval\b`),
-		regexp.MustCompile(`\bsource\s+.*\.sh\b`),
 	}
 
 	// windowsDenyPatterns contains PowerShell-specific deny patterns that only
