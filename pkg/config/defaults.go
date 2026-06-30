@@ -435,8 +435,14 @@ func DefaultConfig() *Config {
 						BaseURL: "https://github.com",
 						Param:   map[string]any{},
 					},
+					&SkillRegistryConfig{
+						Name:    "skillssh",
+						Enabled: true,
+						BaseURL: "https://skills.sh",
+						Param:   map[string]any{},
+					},
 				},
-				MaxConcurrentSearches: 2,
+				MaxConcurrentSearches: 3,
 				SearchCache: SearchCacheConfig{
 					MaxSize:    50,
 					TTLSeconds: 300,
