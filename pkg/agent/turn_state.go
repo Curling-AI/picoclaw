@@ -139,6 +139,11 @@ type turnExecution struct {
 	allResponsesHandled bool
 	streamingPublisher  *streamingChunkPublisher
 	streamingFallback   bool
+	// streamingPublishedContent records whether configured streaming already
+	// delivered visible assistant text this call. It survives the publisher
+	// being niled at finalize/cancel, so later code (e.g. the pico tool-call
+	// interim) can avoid re-publishing the same narration.
+	streamingPublishedContent bool
 	suppressReasoning   bool
 	callMessages        []providers.Message
 	providerToolDefs    []providers.ToolDefinition

@@ -40,6 +40,11 @@ type LLMResponse struct {
 type StreamChunk struct {
 	Content          string
 	ReasoningContent string
+	// ToolCalls carries an in-progress snapshot of the tool calls being
+	// assembled during streaming (cumulative; Function.Arguments may be a
+	// partial JSON fragment). Empty unless the provider streams tool-call
+	// deltas. Lets a UI show a tool call evolving instead of a generic spinner.
+	ToolCalls []ToolCall
 }
 
 type ReasoningDetail struct {

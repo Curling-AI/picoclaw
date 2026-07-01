@@ -23,6 +23,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 ) (*providers.LLMResponse, bool, error) {
 	exec.streamingPublisher = nil
 	exec.streamingFallback = false
+	exec.streamingPublishedContent = false
 	if !p.configuredStreamingEligible(ts, exec) {
 		return nil, false, nil
 	}
@@ -74,6 +75,43 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		}
 		lastChunkAt = now
 	}
+	// Throttle in-progress tool-call updates: publish immediately when the set
+	// of tool names changes (so the card appears fast), then at most ~100ms
+	// while arguments stream in. The final tool calls are published once the
+	// response is assembled, so dropping the last few fragments is harmless.
+	var lastToolPublishAt time.Time
+	var lastToolSig string
+	lastCappedArgs := -1
+	publishToolProgress := func(calls []providers.ToolCall) {
+		if p.al == nil || len(calls) == 0 {
+			return
+		}
+		sig := toolCallNameSignature(calls)
+		// Capped-args total: once the arguments exceed the publish cap the
+		// snapshot stops changing, so skip the identical tail (avoids dozens of
+		// redundant capped updates on a large write_file).
+		capped := 0
+		for _, c := range calls {
+			if c.Function != nil {
+				n := len(c.Function.Arguments)
+				if n > maxToolCallProgressArgsLen {
+					n = maxToolCallProgressArgsLen
+				}
+				capped += n
+			}
+		}
+		if sig == lastToolSig && capped == lastCappedArgs {
+			return
+		}
+		now := time.Now()
+		if sig == lastToolSig && now.Sub(lastToolPublishAt) < 100*time.Millisecond {
+			return
+		}
+		lastToolSig = sig
+		lastCappedArgs = capped
+		lastToolPublishAt = now
+		p.al.publishPicoToolCallProgress(ctx, ts, exec.llmModelName, calls)
+	}
 	var response *providers.LLMResponse
 	var streamErr error
 	if eventProvider, ok := exec.activeProvider.(providers.StreamingEventProvider); ok {
@@ -90,6 +128,9 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 				}
 				if strings.TrimSpace(chunk.Content) != "" {
 					publisher.Update(ctx, chunk.Content)
+				}
+				if len(chunk.ToolCalls) > 0 {
+					publishToolProgress(chunk.ToolCalls)
 				}
 			},
 		)
@@ -160,6 +201,9 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 
 	if response != nil {
 		exec.streamingPublisher = publisher
+		// Capture now — the publisher gets niled at finalize/cancel before the
+		// tool-call interim decides whether to re-publish the narration.
+		exec.streamingPublishedContent = publisher.Published()
 	}
 
 	return response, true, nil
@@ -327,11 +371,17 @@ func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecutio
 }
 
 func (p *Pipeline) channelStreamingConfig(channelName string) (config.StreamingConfig, bool) {
-	if p == nil || p.Cfg == nil || p.Cfg.Channels == nil {
+	if p == nil || p.Cfg == nil {
 		return config.StreamingConfig{}, false
 	}
-	ch := p.Cfg.Channels[channelName]
+	ch := p.Cfg.Channels[channelName] // reading a nil map is safe (yields nil)
 	if ch == nil {
+		// grpc/pico are the internal structured (web/API) channels: they aren't
+		// in the user's channel list but fully support token/tool streaming.
+		// Default them to enabled so the web UI gets live streaming. (fork)
+		if channelName == "grpc" || channelName == "pico" {
+			return config.StreamingConfig{Enabled: true}, true
+		}
 		return config.StreamingConfig{}, false
 	}
 	decoded, err := ch.GetDecoded()
@@ -366,6 +416,19 @@ func streamingConfigFromDecodedSettings(decoded any) (config.StreamingConfig, bo
 	}
 	streaming, ok := field.Interface().(config.StreamingConfig)
 	return streaming, ok
+}
+
+// toolCallNameSignature returns a stable key for the set of tool-call names in
+// a streaming snapshot, used to detect when a new tool card should appear.
+func toolCallNameSignature(calls []providers.ToolCall) string {
+	var b strings.Builder
+	for _, c := range calls {
+		if c.Function != nil {
+			b.WriteString(c.Function.Name)
+		}
+		b.WriteByte('|')
+	}
+	return b.String()
 }
 
 type streamingChunkPublisher struct {

@@ -719,6 +719,30 @@ func parseStreamResponse(
 			}
 		}
 
+		// Surface an in-progress snapshot so a UI can show the tool call
+		// evolving (name first, then arguments filling in). Arguments are the
+		// raw accumulated fragment so far — likely not yet valid JSON.
+		if onChunk != nil && len(choice.Delta.ToolCalls) > 0 {
+			snapshot := make([]ToolCall, 0, len(activeTools))
+			for i := 0; i < len(activeTools); i++ {
+				acc, ok := activeTools[i]
+				if !ok {
+					continue
+				}
+				snapshot = append(snapshot, ToolCall{
+					ID:   acc.id,
+					Type: "function",
+					Function: &FunctionCall{
+						Name:      acc.name,
+						Arguments: acc.argsJSON.String(),
+					},
+				})
+			}
+			if len(snapshot) > 0 {
+				onChunk(StreamChunk{ToolCalls: snapshot})
+			}
+		}
+
 		if choice.FinishReason != nil {
 			finishReason = *choice.FinishReason
 		}

@@ -658,6 +658,7 @@ func (p *Pipeline) CallLLM(
 		ts.ingestMessage(turnCtx, al, assistantMsg)
 	}
 	if shouldPublishPicoToolCallInterim {
+		contentStreamed := exec.streamingPublishedContent
 		al.publishPicoToolCallInterim(
 			turnCtx,
 			ts,
@@ -665,6 +666,7 @@ func (p *Pipeline) CallLLM(
 			reasoningContent,
 			exec.response.Content,
 			assistantMsg.ToolCalls,
+			contentStreamed,
 		)
 	}
 

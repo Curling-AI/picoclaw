@@ -1571,6 +1571,50 @@ func TestProviderChatStreamEvents_EmitsReasoningBeforeContentFromSameEvent(t *te
 	}
 }
 
+func TestProviderChatStreamEvents_EmitsToolCallProgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Chunk 1: tool name + id, empty arguments. Chunk 2: arguments fragment.
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"write_file\",\"arguments\":\"\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	var snapshots [][]ToolCall
+	out, err := p.ChatStreamEvents(
+		t.Context(),
+		[]Message{{Role: "user", Content: "write a file"}},
+		nil,
+		"gpt-4o",
+		nil,
+		func(chunk StreamChunk) {
+			if len(chunk.ToolCalls) > 0 {
+				snapshots = append(snapshots, chunk.ToolCalls)
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if len(snapshots) < 2 {
+		t.Fatalf("expected >=2 tool-call snapshots, got %d", len(snapshots))
+	}
+	// First snapshot: name is known so a card can appear immediately.
+	if first := snapshots[0][0]; first.Function == nil || first.Function.Name != "write_file" {
+		t.Fatalf("first snapshot = %+v, want function name write_file", first.Function)
+	}
+	// Last snapshot: arguments accumulated to the full fragment.
+	if last := snapshots[len(snapshots)-1][0]; last.Function == nil || last.Function.Arguments != `{"path":"a.txt"}` {
+		t.Fatalf("last snapshot args = %q, want %q", last.Function.Arguments, `{"path":"a.txt"}`)
+	}
+	// Final response still carries the assembled tool call.
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("out.ToolCalls = %+v, want one call_1", out.ToolCalls)
+	}
+}
+
 func TestProviderChatStream_ParsesMultilineSSEEvent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

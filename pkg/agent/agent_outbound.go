@@ -153,6 +153,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	reasoningContent string,
 	content string,
 	toolCalls []providers.ToolCall,
+	contentAlreadyStreamed bool,
 ) {
 	if ts == nil || ts.chatID == "" || al == nil || al.bus == nil {
 		return
@@ -199,7 +200,10 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	duplicateToolCallContent := len(visibleToolCalls) > 0 &&
 		utils.ToolCallExplanationDuplicatesContent(content, toolCalls)
 
-	if strings.TrimSpace(content) != "" && (ts.channel == "grpc" || !duplicateToolCallContent) {
+	// When configured streaming already delivered this narration live (and the
+	// web client finalized it into a permanent bubble), re-publishing it here
+	// would render the same text a second time.
+	if strings.TrimSpace(content) != "" && !contentAlreadyStreamed && (ts.channel == "grpc" || !duplicateToolCallContent) {
 		pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
 		err := al.bus.PublishOutbound(
 			pubCtx,
@@ -253,6 +257,61 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			"error":   err.Error(),
 		})
 	}
+}
+
+// maxToolCallProgressArgsLen bounds the partial-argument payload sent on each
+// in-progress tool-call update so a large argument (e.g. a file body) doesn't
+// re-transmit its full accumulated text on every streamed fragment.
+const maxToolCallProgressArgsLen = 4096
+
+// publishPicoToolCallProgress publishes an in-progress snapshot of the tool
+// calls currently being assembled during streaming, so the structured web UI
+// can show a tool card evolving (name first, arguments filling in) instead of a
+// generic spinner. The final, normalized tool calls are still published once by
+// publishPicoToolCallInterim; the web client reconciles by tool-call id.
+func (al *AgentLoop) publishPicoToolCallProgress(
+	ctx context.Context,
+	ts *turnState,
+	modelName string,
+	toolCalls []providers.ToolCall,
+) {
+	if ts == nil || ts.chatID == "" || al == nil || al.bus == nil {
+		return
+	}
+	// Only the structured web (grpc) UI renders an evolving tool card; flat
+	// messaging channels would just be spammed with partial updates.
+	if ts.channel != "grpc" || !ts.opts.AllowInterimPicoPublish {
+		return
+	}
+
+	snapshot := make([]providers.ToolCall, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		if tc.Function == nil || strings.TrimSpace(tc.Function.Name) == "" {
+			continue // wait until the function name is known before showing a card
+		}
+		fn := *tc.Function
+		if len(fn.Arguments) > maxToolCallProgressArgsLen {
+			fn.Arguments = fn.Arguments[:maxToolCallProgressArgsLen]
+		}
+		snapshot = append(snapshot, providers.ToolCall{ID: tc.ID, Type: "function", Function: &fn})
+	}
+	if len(snapshot) == 0 {
+		return
+	}
+
+	rawToolCalls, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+
+	msg := outboundMessageForTurnWithOptions(ts, "", outboundTurnMessageOptions{
+		kind:      messageKindToolCalls,
+		modelName: modelName,
+		raw:       map[string]string{metadataKeyToolCalls: string(rawToolCalls)},
+	})
+	pubCtx, pubCancel := context.WithTimeout(ctx, 2*time.Second)
+	_ = al.bus.PublishOutbound(pubCtx, msg)
+	pubCancel()
 }
 
 func (al *AgentLoop) handleReasoning(
