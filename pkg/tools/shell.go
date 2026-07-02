@@ -1225,7 +1225,12 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 		// Web URL schemes whose path components (starting with //) should be exempt
 		// from workspace sandbox checks. file: is intentionally excluded so that
 		// file:// URIs are still validated against the workspace boundary.
-		webSchemes := []string{"http:", "https:", "ftp:", "ftps:", "sftp:", "ssh:", "git:"}
+		webSchemes := []string{
+			"http:", "https:", "ftp:", "ftps:", "sftp:", "ssh:", "git:",
+			// Network protocols curl and other tools reach over //host — not
+			// filesystem paths. (seucaranguejo fork)
+			"smtp:", "smtps:", "imap:", "imaps:", "pop3:", "pop3s:", "ws:", "wss:",
+		}
 
 		// On Windows, expand ~ and PowerShell environment variables ($env:VAR) before path checking
 		if runtime.GOOS == "windows" {
