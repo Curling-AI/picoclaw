@@ -95,6 +95,10 @@ var (
 	// absolutePathPattern matches absolute file paths in commands (Unix and Windows).
 	absolutePathPattern = regexp.MustCompile(`[A-Za-z]:\\[^\\\"']+|/[^\s\"']+`)
 
+	// heredocStartPattern finds heredoc operators (<<WORD, << 'WORD', <<-"WORD").
+	// Used by stripHeredocBodies. (seucaranguejo fork)
+	heredocStartPattern = regexp.MustCompile(`<<-?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))`)
+
 	// safePaths are kernel pseudo-devices that are always safe to reference in
 	// commands, regardless of workspace restriction. They contain no user data
 	// and cannot cause destructive writes.
@@ -1112,6 +1116,67 @@ func expandPowerShellEnvVars(cmd string) string {
 	})
 }
 
+// stripHeredocBodies blanks heredoc bodies (from the line after <<WORD to the
+// terminator line) so the workspace path scan sees only real command text —
+// argv, redirect targets and the heredoc operator line itself all remain.
+// Replaced bytes become spaces, keeping every other match position stable.
+// Note this trusts heredoc content as data; a command that EXECUTES its stdin
+// (bash <<EOF) can reference outside paths unseen — accepted: this guard is
+// an accident net, the pod sandbox is the boundary. (seucaranguejo fork)
+func stripHeredocBodies(cmd string) string {
+	locs := heredocStartPattern.FindAllStringSubmatchIndex(cmd, -1)
+	if len(locs) == 0 {
+		return cmd
+	}
+	out := []byte(cmd)
+	for _, m := range locs {
+		word := ""
+		for g := 1; g <= 3; g++ {
+			if m[2*g] >= 0 {
+				word = cmd[m[2*g]:m[2*g+1]]
+				break
+			}
+		}
+		if word == "" {
+			continue
+		}
+		// Body starts after the next newline following the operator.
+		bodyStart := strings.IndexByte(cmd[m[1]:], '\n')
+		if bodyStart < 0 {
+			continue
+		}
+		bodyStart = m[1] + bodyStart + 1
+		// Find the terminator: a line that is exactly the word (allowing
+		// leading tabs for <<-).
+		end := len(cmd)
+		for i := bodyStart; i <= len(cmd); {
+			lineEnd := strings.IndexByte(cmd[i:], '\n')
+			var line string
+			next := len(cmd)
+			if lineEnd >= 0 {
+				line = cmd[i : i+lineEnd]
+				next = i + lineEnd + 1
+			} else {
+				line = cmd[i:]
+			}
+			if strings.TrimLeft(line, "\t") == word {
+				end = i
+				break
+			}
+			if lineEnd < 0 {
+				break
+			}
+			i = next
+		}
+		for i := bodyStart; i < end && i < len(out); i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	return string(out)
+}
+
 func (t *ExecTool) guardCommand(command, cwd string) string {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
@@ -1184,10 +1249,28 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 		}
 
-		matchIndices := absolutePathPattern.FindAllStringIndex(cmd, -1)
+		// Heredoc bodies are stdin DATA, not filesystem references — writing
+		// HTML/CSS via `cat > file << 'EOF'` would otherwise trip the scanner
+		// on content like `/*`, `</style>` or `/>`. Redirect targets and argv
+		// stay in the scanned text. (seucaranguejo fork)
+		scanCmd := stripHeredocBodies(cmd)
+
+		matchIndices := absolutePathPattern.FindAllStringIndex(scanCmd, -1)
 
 		for _, loc := range matchIndices {
-			raw := cmd[loc[0]:loc[1]]
+			raw := scanCmd[loc[0]:loc[1]]
+
+			// Markup, not paths: CSS comment openers (`/*`), self-closing tag
+			// ends (`/>`), and anything directly after '<' (closing tags like
+			// `</style>`) — HTML/JS written inline (python -c, node -e) hits
+			// these constantly. Real absolute paths never start this way.
+			// (seucaranguejo fork)
+			if strings.HasPrefix(raw, "/*") || raw == "/>" || raw == "/" {
+				continue
+			}
+			if loc[0] > 0 && scanCmd[loc[0]-1] == '<' {
+				continue
+			}
 
 			// Skip URL path components that look like they're from web URLs.
 			// When a URL like "https://github.com" is parsed, the regex captures
@@ -1195,7 +1278,7 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			// Use the exact match position (loc[0]) so that duplicate //path substrings
 			// in the same command are each evaluated at their own position.
 			if strings.HasPrefix(raw, "//") && loc[0] > 0 {
-				before := cmd[:loc[0]]
+				before := scanCmd[:loc[0]]
 				isWebURL := false
 
 				for _, scheme := range webSchemes {
@@ -1222,16 +1305,16 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			if loc[0] > 0 && raw[0] == '/' {
 				// Find the token immediately before the "/".
 				j := loc[0] - 1
-				for j >= 0 && !isShellTokenBoundary(cmd[j]) {
+				for j >= 0 && !isShellTokenBoundary(scanCmd[j]) {
 					j--
 				}
-				token := cmd[j+1 : loc[0]]
+				token := scanCmd[j+1 : loc[0]]
 				if looksLikeDomain(token) && !localPathExists(cwd, token) {
 					continue
 				}
 			}
 
-			p, err := commandPathAbs(commandPathTextFromMatch(cmd, loc[0], loc[1]), cwdPath)
+			p, err := commandPathAbs(commandPathTextFromMatch(scanCmd, loc[0], loc[1]), cwdPath)
 			if err != nil {
 				continue
 			}

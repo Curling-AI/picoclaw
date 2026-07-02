@@ -1938,3 +1938,38 @@ func TestShellTool_SchemelessURLDetection(t *testing.T) {
 		}
 	}
 }
+
+// TestShellTool_HeredocHTMLBodyAllowed verifies that writing HTML/CSS via a
+// quoted heredoc is not tripped by markup that looks path-ish (/*, </style>,
+// />), while a real escaping path outside the heredoc still blocks.
+// (seucaranguejo fork — reduces friction writing artifacts/index.html.)
+func TestShellTool_HeredocHTMLBodyAllowed(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool, err := NewExecTool(tmpDir, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+	html := "cat > artifacts/index.html << 'HTMLEOF'\n" +
+		"<style>\n/* comment */\nnav { position: fixed; }\n.x { background: radial-gradient(circle, rgba(1,2,3,.08) 0%, transparent 70%); }\n</style>\n" +
+		"<link href=\"https://fonts.googleapis.com/css2?family=Inter\" rel=\"stylesheet\" />\n" +
+		"HTMLEOF"
+	result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": html})
+	if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
+		t.Errorf("heredoc HTML body should not trip the workspace guard, got: %s", result.ForLLM)
+	}
+}
+
+// TestShellTool_HeredocDoesNotHideEscapingRedirect verifies the heredoc strip
+// doesn't blind the guard to a real escaping path on the command line.
+func TestShellTool_HeredocDoesNotHideEscapingRedirect(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool, err := NewExecTool(tmpDir, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+	cmd := "cat > /etc/evil.html << 'EOF'\n<p>hi</p>\nEOF"
+	result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+	if !result.IsError || !strings.Contains(result.ForLLM, "path outside working dir") {
+		t.Errorf("escaping redirect target must still block, got: %s", result.ForLLM)
+	}
+}
