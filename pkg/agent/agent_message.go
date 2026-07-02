@@ -44,6 +44,17 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
+	return al.ProcessDirectWithMedia(ctx, content, sessionKey, channel, chatID, nil)
+}
+
+// ProcessDirectWithMedia is ProcessDirectWithChannel plus media attachments:
+// local file paths carried on the inbound message, flowing through the same
+// media pipeline channel messages use (images become vision inputs).
+func (al *AgentLoop) ProcessDirectWithMedia(
+	ctx context.Context,
+	content, sessionKey, channel, chatID string,
+	media []string,
+) (string, error) {
 	if err := al.ensureHooksInitialized(ctx); err != nil {
 		return "", err
 	}
@@ -59,6 +70,7 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 			SenderID: "cron",
 		},
 		Content:    content,
+		Media:      media,
 		SessionKey: sessionKey,
 	}
 
