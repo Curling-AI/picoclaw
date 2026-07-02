@@ -1960,3 +1960,17 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return true
 	}
 }
+
+// KnownNativeTools returns every tool name IsToolEnabled recognizes — the
+// config-gated native tool universe. Keep in sync with the switch above; used
+// by management UIs to enumerate toggles instead of hardcoding the list.
+// (seucaranguejo fork)
+func KnownNativeTools() []string {
+	return []string{
+		"web", "cron", "exec", "skills", "media_cleanup",
+		"append_file", "edit_file", "find_skills",
+		"i2c", "install_skill", "list_dir", "load_image", "message",
+		"read_file", "serial", "spawn", "spawn_status", "spi", "subagent",
+		"web_fetch", "send_file", "send_tts", "write_file", "mcp",
+	}
+}
