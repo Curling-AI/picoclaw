@@ -285,11 +285,13 @@ func registerSharedTools(
 			}
 		}
 
-		// Spawn and spawn_status tools share a SubagentManager.
-		// Construct it when either tool is enabled (both require subagent).
+		// spawn (async), subagent (sync) and spawn_status share a
+		// SubagentManager; each tool is gated by its own config flag, and the
+		// manager is constructed when any of them is enabled.
 		spawnEnabled := cfg.Tools.IsToolEnabled("spawn")
 		spawnStatusEnabled := cfg.Tools.IsToolEnabled("spawn_status")
-		if (spawnEnabled || spawnStatusEnabled) && cfg.Tools.IsToolEnabled("subagent") {
+		subagentEnabled := cfg.Tools.IsToolEnabled("subagent")
+		if spawnEnabled || spawnStatusEnabled || subagentEnabled {
 			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
 			subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
 
@@ -375,8 +377,10 @@ func registerSharedTools(
 				})
 
 				agent.Tools.Register(spawnTool)
-
-				// Also register the synchronous subagent tool
+			}
+			if subagentEnabled {
+				// Synchronous variant: runs the sub-task inline and returns
+				// the result in the same turn.
 				subagentTool := tools.NewSubagentTool(subagentManager)
 				subagentTool.SetSpawner(NewSubTurnSpawner(al))
 				agent.Tools.Register(subagentTool)
@@ -384,8 +388,6 @@ func registerSharedTools(
 			if spawnStatusEnabled {
 				agent.Tools.Register(tools.NewSpawnStatusTool(subagentManager))
 			}
-		} else if (spawnEnabled || spawnStatusEnabled) && !cfg.Tools.IsToolEnabled("subagent") {
-			logger.WarnCF("agent", "spawn/spawn_status tools require subagent to be enabled", nil)
 		}
 
 		// Register delegate tool for multi-agent setups.
