@@ -1102,7 +1102,13 @@ func (r *sandboxFs) WriteFile(path string, data []byte) error {
 
 		// Use atomic write pattern with explicit sync for flash storage reliability.
 		// Using 0o600 (owner read/write only) for secure default permissions.
+		// The temp file must live in the TARGET's directory: a subdir can be a
+		// separate mount (e.g. artifacts/ as its own volume), and rename(2)
+		// cannot cross devices (EXDEV — "invalid cross-device link").
 		tmpRelPath := fmt.Sprintf(".tmp-%d-%d", os.Getpid(), time.Now().UnixNano())
+		if dir != "." && dir != "/" {
+			tmpRelPath = filepath.Join(dir, tmpRelPath)
+		}
 
 		tmpFile, err := root.OpenFile(tmpRelPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
@@ -1135,7 +1141,11 @@ func (r *sandboxFs) WriteFile(path string, data []byte) error {
 		}
 
 		// Sync directory to ensure rename is durable
-		if dirFile, err := root.Open("."); err == nil {
+		syncDir := dir
+		if syncDir == "" || syncDir == "/" {
+			syncDir = "."
+		}
+		if dirFile, err := root.Open(syncDir); err == nil {
 			_ = dirFile.Sync()
 			_ = dirFile.Close()
 		}
