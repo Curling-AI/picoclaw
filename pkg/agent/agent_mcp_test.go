@@ -269,7 +269,11 @@ func TestAgentHasDiscoverableMCPServers(t *testing.T) {
 	}
 }
 
-func TestEnsureMCPInitialized_LoadFailureSetsInitErr(t *testing.T) {
+// A failed MCP server load (e.g. an unauthorized connector) must be non-fatal:
+// ensureMCPInitialized runs at the top of Run() and on every direct turn, so a
+// propagated error would kill the agent loop / abort every message. The agent
+// must keep serving without the MCP tools.
+func TestEnsureMCPInitialized_LoadFailureIsNonFatal(t *testing.T) {
 	al, cfg, _, _, cleanup := newTestAgentLoop(t)
 	defer cleanup()
 	defer al.Close()
@@ -287,29 +291,18 @@ func TestEnsureMCPInitialized_LoadFailureSetsInitErr(t *testing.T) {
 	}
 
 	err := al.ensureMCPInitialized(context.Background())
-	if err == nil {
-		t.Fatal("ensureMCPInitialized() error = nil, want load failure")
+	if err != nil {
+		t.Fatalf("ensureMCPInitialized() error = %q, want nil (load failure must be non-fatal)", err.Error())
 	}
-	if !strings.Contains(err.Error(), "failed to load MCP servers") {
-		t.Fatalf("ensureMCPInitialized() error = %q, want wrapped load failure", err.Error())
-	}
-
-	initErr := al.mcp.getInitErr()
-	if initErr == nil {
-		t.Fatal("getInitErr() = nil, want cached load failure")
-	}
-	if !strings.Contains(initErr.Error(), "failed to load MCP servers") {
-		t.Fatalf("getInitErr() = %q, want wrapped load failure", initErr.Error())
+	if initErr := al.mcp.getInitErr(); initErr != nil {
+		t.Fatalf("getInitErr() = %q, want nil (load failure must not be cached as fatal)", initErr.Error())
 	}
 	if al.mcp.getManager() != nil {
 		t.Fatal("expected MCP manager to remain nil after load failure")
 	}
 
-	err = al.ensureMCPInitialized(context.Background())
-	if err == nil {
-		t.Fatal("second ensureMCPInitialized() error = nil, want cached load failure")
-	}
-	if !strings.Contains(err.Error(), "failed to load MCP servers") {
-		t.Fatalf("second ensureMCPInitialized() error = %q, want wrapped load failure", err.Error())
+	// Idempotent: a second call still succeeds without MCP tools.
+	if err := al.ensureMCPInitialized(context.Background()); err != nil {
+		t.Fatalf("second ensureMCPInitialized() error = %q, want nil", err.Error())
 	}
 }

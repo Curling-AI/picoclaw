@@ -116,8 +116,14 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		}
 
 		if err := mcpManager.LoadFromMCPConfig(ctx, mcpCfg, workspacePath); err != nil {
-			al.mcp.setInitErr(fmt.Errorf("failed to load MCP servers: %w", err))
-			logger.WarnCF("agent", "Failed to load MCP servers, MCP tools will not be available",
+			// A failed MCP connection (e.g. an unauthorized connector returning
+			// 401) must NOT be fatal. ensureMCPInitialized runs at the top of
+			// Run() and on every direct turn, so propagating this error would
+			// kill the agent loop / abort every message — one broken connector
+			// would silently brick the whole assistant. Degrade gracefully:
+			// warn, drop MCP tools, and let the agent keep serving. We do NOT
+			// setInitErr here, so callers proceed without MCP.
+			logger.WarnCF("agent", "Failed to load MCP servers, continuing without MCP tools",
 				map[string]any{
 					"error": err.Error(),
 				})
