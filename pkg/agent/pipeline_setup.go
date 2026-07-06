@@ -49,69 +49,87 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	if !ts.opts.NoHistory {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
-			logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
-				map[string]any{"session_key": ts.sessionKey})
-			if err := p.ContextManager.Compact(ctx, &CompactRequest{
-				SessionKey: ts.sessionKey,
-				Reason:     ContextCompressReasonProactive,
-				Budget:     ts.agent.ContextWindow,
-			}); err != nil {
-				logger.WarnCF("agent", "Proactive compact failed", map[string]any{
-					"session_key": ts.sessionKey,
-					"error":       err.Error(),
-				})
+			rebuild := func(trimmedHistory []providers.Message) []providers.Message {
+				rebuildPromptReq := promptBuildRequestForTurn(
+					ts,
+					trimmedHistory,
+					summary,
+					ts.userMessage,
+					ts.media,
+					cfg,
+				)
+				rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
+				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
+				rebuiltCurrentTurnStart := len(rebuilt)
+				if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
+					rebuiltCurrentTurnStart = len(rebuilt) - 1
+				}
+				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, rebuiltCurrentTurnStart)
 			}
-			ts.refreshRestorePointFromSession(ts.agent)
-			if resp, err := p.ContextManager.Assemble(ctx, &AssembleRequest{
-				SessionKey: ts.sessionKey,
-				Budget:     ts.agent.ContextWindow,
-				MaxTokens:  ts.agent.MaxTokens,
-			}); err == nil && resp != nil {
-				history = resp.History
-				summary = resp.Summary
-			}
-			originalHistoryCount := len(history)
-			var fit bool
-			history, messages, fit = trimHistoryToFitContextWindow(
-				history,
-				func(trimmedHistory []providers.Message) []providers.Message {
-					rebuildPromptReq := promptBuildRequestForTurn(
-						ts,
-						trimmedHistory,
-						summary,
-						ts.userMessage,
-						ts.media,
-						cfg,
-					)
-					rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
-					rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
-					rebuiltCurrentTurnStart := len(rebuilt)
-					if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
-						rebuiltCurrentTurnStart = len(rebuilt) - 1
-					}
-					return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, rebuiltCurrentTurnStart)
-				},
-				ts.agent.ContextWindow,
-				toolDefs,
-				ts.agent.MaxTokens,
-			)
-			if dropped := originalHistoryCount - len(history); dropped > 0 {
-				logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
-					"session_key":     ts.sessionKey,
-					"dropped_msgs":    dropped,
-					"remaining_msgs":  len(history),
-					"context_window":  ts.agent.ContextWindow,
-					"max_tokens":      ts.agent.MaxTokens,
-					"still_overlimit": !fit,
-				})
-			} else if !fit {
-				logger.WarnCF("agent", "Context still exceeds budget "+
-					"after proactive compaction rebuild", map[string]any{
+			if !compactionCanHelp(rebuild, ts.agent.ContextWindow, toolDefs, ts.agent.MaxTokens) {
+				// Even an empty-history prompt exceeds the budget: the overflow
+				// is structural (context_window/max_tokens misconfigured, or an
+				// oversized tool set / system prompt), not conversational.
+				// Compacting would permanently destroy session history without
+				// fixing anything — and doing it on every turn grinds the
+				// session down to nothing. Proceed with the request as built:
+				// a lenient provider caps output; a strict one rejects exactly
+				// as it would have after the wipe.
+				logger.ErrorCF("agent", "Context budget exceeded even with empty history — skipping compaction (check context_window/max_tokens)", map[string]any{
 					"session_key":    ts.sessionKey,
-					"history_msgs":   len(history),
 					"context_window": ts.agent.ContextWindow,
 					"max_tokens":     ts.agent.MaxTokens,
+					"tool_defs":      len(toolDefs),
 				})
+			} else {
+				logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
+					map[string]any{"session_key": ts.sessionKey})
+				if err := p.ContextManager.Compact(ctx, &CompactRequest{
+					SessionKey: ts.sessionKey,
+					Reason:     ContextCompressReasonProactive,
+					Budget:     ts.agent.ContextWindow,
+				}); err != nil {
+					logger.WarnCF("agent", "Proactive compact failed", map[string]any{
+						"session_key": ts.sessionKey,
+						"error":       err.Error(),
+					})
+				}
+				ts.refreshRestorePointFromSession(ts.agent)
+				if resp, err := p.ContextManager.Assemble(ctx, &AssembleRequest{
+					SessionKey: ts.sessionKey,
+					Budget:     ts.agent.ContextWindow,
+					MaxTokens:  ts.agent.MaxTokens,
+				}); err == nil && resp != nil {
+					history = resp.History
+					summary = resp.Summary
+				}
+				originalHistoryCount := len(history)
+				var fit bool
+				history, messages, fit = trimHistoryToFitContextWindow(
+					history,
+					rebuild,
+					ts.agent.ContextWindow,
+					toolDefs,
+					ts.agent.MaxTokens,
+				)
+				if dropped := originalHistoryCount - len(history); dropped > 0 {
+					logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
+						"session_key":     ts.sessionKey,
+						"dropped_msgs":    dropped,
+						"remaining_msgs":  len(history),
+						"context_window":  ts.agent.ContextWindow,
+						"max_tokens":      ts.agent.MaxTokens,
+						"still_overlimit": !fit,
+					})
+				} else if !fit {
+					logger.WarnCF("agent", "Context still exceeds budget "+
+						"after proactive compaction rebuild", map[string]any{
+						"session_key":    ts.sessionKey,
+						"history_msgs":   len(history),
+						"context_window": ts.agent.ContextWindow,
+						"max_tokens":     ts.agent.MaxTokens,
+					})
+				}
 			}
 		}
 	}

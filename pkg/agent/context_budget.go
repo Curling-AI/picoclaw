@@ -116,6 +116,24 @@ func isOverContextBudget(
 	return total > contextWindow
 }
 
+// compactionCanHelp reports whether dropping conversation history could
+// possibly bring the request under the context budget. build must be the same
+// prompt builder used for trimming; invoked with nil history it yields only
+// the irreducible parts of the request — system prompt, summary and the
+// active turn. When even that plus tool definitions and the max_tokens output
+// reserve exceeds the window, the overflow is structural (misconfigured
+// context_window/max_tokens, or an oversized tool set / system prompt):
+// compacting history cannot fix it, and persisting a history cut would
+// destroy conversation data for nothing.
+func compactionCanHelp(
+	build func([]providers.Message) []providers.Message,
+	contextWindow int,
+	toolDefs []providers.ToolDefinition,
+	maxTokens int,
+) bool {
+	return !isOverContextBudget(contextWindow, build(nil), toolDefs, maxTokens)
+}
+
 // trimHistoryToFitContextWindow rebuilds the prompt from progressively newer
 // history slices until it fits within the context window. Oldest complete turns
 // are dropped first so tool-call sequences remain intact.

@@ -175,6 +175,18 @@ func NewAgentInstance(
 		// forceCompression handles any overshoot.
 		contextWindow = maxTokens * 4
 	}
+	// The context budget check reserves max_tokens in full out of the window.
+	// When max_tokens crowds the window the prompt budget approaches zero and
+	// every turn triggers history compaction; the runtime guard
+	// (compactionCanHelp) prevents data loss, but the configuration is still
+	// broken — surface it loudly at boot.
+	if maxTokens >= contextWindow {
+		logger.ErrorCF("agent", "max_tokens >= context_window: output reserve leaves no prompt budget — set context_window to the model's TOTAL window and max_tokens to a sane output cap", map[string]any{
+			"agent_id":       agentID,
+			"max_tokens":     maxTokens,
+			"context_window": contextWindow,
+		})
+	}
 
 	temperature := 0.7
 	if defaults.Temperature != nil {

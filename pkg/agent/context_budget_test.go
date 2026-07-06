@@ -905,3 +905,47 @@ func TestTrimHistoryToFitContextWindow_ClearsSingleOversizedTurn(t *testing.T) {
 		t.Fatalf("messages len = %d, want 0", len(messages))
 	}
 }
+
+// --- compactionCanHelp ---------------------------------------------------
+
+func TestCompactionCanHelp(t *testing.T) {
+	// build simulates the prompt builder: an irreducible system prompt plus
+	// whatever history it is given.
+	build := func(history []providers.Message) []providers.Message {
+		msgs := []providers.Message{{Role: "system", Content: strings.Repeat("s", 250)}} // ~104 tokens
+		return append(msgs, history...)
+	}
+
+	// Empty-history prompt + output reserve fit the window: dropping history
+	// can bring an oversized request under budget.
+	if !compactionCanHelp(build, 1000, nil, 100) {
+		t.Error("expected compactionCanHelp=true when the empty-history prompt fits the budget")
+	}
+
+	// Output reserve crowds out the window (the 2026-07 prod incident shape:
+	// max_tokens ~= context_window): even an empty-history prompt is over
+	// budget, so compaction cannot help and must not run.
+	if compactionCanHelp(build, 1000, nil, 990) {
+		t.Error("expected compactionCanHelp=false when reserve+prompt exceed the window with empty history")
+	}
+}
+
+func TestCompactionCanHelp_ToolDefsCount(t *testing.T) {
+	build := func(history []providers.Message) []providers.Message {
+		return append([]providers.Message{{Role: "system", Content: "sys"}}, history...)
+	}
+	defs := []providers.ToolDefinition{{
+		Type: "function",
+		Function: providers.ToolFunctionDefinition{
+			Name:        "big_tool",
+			Description: strings.Repeat("d", 2500), // ~1000 tokens of tool defs
+		},
+	}}
+
+	if compactionCanHelp(build, 1000, defs, 100) {
+		t.Error("expected compactionCanHelp=false when tool defs alone exceed the prompt budget")
+	}
+	if !compactionCanHelp(build, 5000, defs, 100) {
+		t.Error("expected compactionCanHelp=true with a window large enough for tool defs + reserve")
+	}
+}
