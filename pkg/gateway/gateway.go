@@ -446,6 +446,11 @@ func setupAndStartServices(
 		MaxAge:   time.Duration(cfg.Tools.MediaCleanup.MaxAge) * time.Minute,
 		Interval: time.Duration(cfg.Tools.MediaCleanup.Interval) * time.Minute,
 	})
+	if dir := media.DurableDirFromEnv(); dir != "" {
+		if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
+			runningServices.MediaStore = fms.WithDurableDir(dir)
+		}
+	}
 	if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
 		fms.Start()
 	}
@@ -694,6 +699,11 @@ func restartServices(
 		MaxAge:   time.Duration(cfg.Tools.MediaCleanup.MaxAge) * time.Minute,
 		Interval: time.Duration(cfg.Tools.MediaCleanup.Interval) * time.Minute,
 	})
+	if dir := media.DurableDirFromEnv(); dir != "" {
+		if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
+			runningServices.MediaStore = fms.WithDurableDir(dir)
+		}
+	}
 	if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
 		fms.Start()
 	}
