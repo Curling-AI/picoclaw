@@ -15,7 +15,10 @@ import (
 func TestWriteFileTempInTargetDir(t *testing.T) {
 	root := t.TempDir()
 	fsys := buildFs(root, true, nil)
-	if err := fsys.WriteFile(filepath.Join(root, "artifacts", "site", "index.html"), []byte("<html></html>")); err != nil {
+	if err := fsys.WriteFile(
+		filepath.Join(root, "artifacts", "site", "index.html"),
+		[]byte("<html></html>"),
+	); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	b, err := os.ReadFile(filepath.Join(root, "artifacts", "site", "index.html"))

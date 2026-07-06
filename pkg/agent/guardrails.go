@@ -367,7 +367,9 @@ func buildLoopAbortSummary(log []ToolExecutionRecord, pattern string) string {
 				failed++
 			}
 		}
-		sb.WriteString(fmt.Sprintf("I made %d tool calls (%d succeeded, %d failed) before stopping.", len(log), succeeded, failed))
+		sb.WriteString(
+			fmt.Sprintf("I made %d tool calls (%d succeeded, %d failed) before stopping.", len(log), succeeded, failed),
+		)
 
 		// Show the last few unique tools called
 		seen := map[string]bool{}

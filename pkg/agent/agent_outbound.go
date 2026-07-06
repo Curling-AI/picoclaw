@@ -203,7 +203,8 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	// When configured streaming already delivered this narration live (and the
 	// web client finalized it into a permanent bubble), re-publishing it here
 	// would render the same text a second time.
-	if strings.TrimSpace(content) != "" && !contentAlreadyStreamed && (ts.channel == "grpc" || !duplicateToolCallContent) {
+	if strings.TrimSpace(content) != "" && !contentAlreadyStreamed &&
+		(ts.channel == "grpc" || !duplicateToolCallContent) {
 		pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
 		err := al.bus.PublishOutbound(
 			pubCtx,

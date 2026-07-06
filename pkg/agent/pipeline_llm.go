@@ -349,22 +349,54 @@ func (p *Pipeline) CallLLM(
 				},
 			)
 
-			if retry == 0 && !constants.IsInternalChannel(ts.channel) {
-				al.bus.PublishOutbound(ctx, outboundMessageForTurn(
-					ts,
-					"Context window exceeded. Compressing history and retrying...",
-				))
+			// Guard: when even an empty-history prompt (system + summary +
+			// active turn + tool defs + output reserve) exceeds the local
+			// budget, dropping persisted history cannot fix the overflow —
+			// it would permanently destroy conversation data for nothing.
+			// Skip the destructive compaction and retry with only the
+			// non-destructive in-request trim below. See compactionCanHelp.
+			guardSkills := ts.activeSkills
+			if ts.agent.ContextBuilder != nil {
+				guardSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForContext(ts.activeSkills)
 			}
+			_, guardTail := splitHistoryForActiveTurn(exec.history, ts.persistedMessagesSnapshot())
+			guardBuild := func(trimmedHistory []providers.Message) []providers.Message {
+				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), guardTail...)
+				req := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
+				req.ActiveSkills = append([]string(nil), guardSkills...)
+				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
+				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail))
+			}
+			if !compactionCanHelp(guardBuild, ts.agent.ContextWindow, exec.providerToolDefs, ts.agent.MaxTokens) {
+				logger.ErrorCF(
+					"agent",
+					"Context error retry: budget exceeded even with empty history — skipping destructive compaction (check context_window/max_tokens)",
+					map[string]any{
+						"session_key":    ts.sessionKey,
+						"retry":          retry,
+						"context_window": ts.agent.ContextWindow,
+						"max_tokens":     ts.agent.MaxTokens,
+						"tool_defs":      len(exec.providerToolDefs),
+					},
+				)
+			} else {
+				if retry == 0 && !constants.IsInternalChannel(ts.channel) {
+					al.bus.PublishOutbound(ctx, outboundMessageForTurn(
+						ts,
+						"Context window exceeded. Compressing history and retrying...",
+					))
+				}
 
-			if compactErr := p.ContextManager.Compact(ctx, &CompactRequest{
-				SessionKey: ts.sessionKey,
-				Reason:     ContextCompressReasonRetry,
-				Budget:     ts.agent.ContextWindow,
-			}); compactErr != nil {
-				logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
-					"session_key": ts.sessionKey,
-					"error":       compactErr.Error(),
-				})
+				if compactErr := p.ContextManager.Compact(ctx, &CompactRequest{
+					SessionKey: ts.sessionKey,
+					Reason:     ContextCompressReasonRetry,
+					Budget:     ts.agent.ContextWindow,
+				}); compactErr != nil {
+					logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
+						"session_key": ts.sessionKey,
+						"error":       compactErr.Error(),
+					})
+				}
 			}
 			ts.refreshRestorePointFromSession(ts.agent)
 			if asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
