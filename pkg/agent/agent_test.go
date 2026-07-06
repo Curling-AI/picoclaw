@@ -6266,9 +6266,9 @@ func TestRun_PicoPublishesAssistantContentDuringToolCallsWithoutFinalDuplicate(t
 		t.Fatalf("PublishInbound() error = %v", err)
 	}
 
-	outputs := make([]bus.OutboundMessage, 0, 3)
+	outputs := make([]bus.OutboundMessage, 0, 4)
 	deadline := time.After(2 * time.Second)
-	for len(outputs) < 3 {
+	for len(outputs) < 4 {
 		select {
 		case outbound := <-msgBus.OutboundChan():
 			outputs = append(outputs, outbound)
@@ -6286,8 +6286,16 @@ func TestRun_PicoPublishesAssistantContentDuringToolCallsWithoutFinalDuplicate(t
 	if !strings.Contains(outputs[1].Context.Raw[metadataKeyToolCalls], "tool_limit_test_tool") {
 		t.Fatalf("second outbound tool_calls = %q, want tool name", outputs[1].Context.Raw[metadataKeyToolCalls])
 	}
-	if outputs[2].Content != "final model text" {
-		t.Fatalf("third outbound content = %q, want %q", outputs[2].Content, "final model text")
+	// Structured-interim channels (pico/grpc) also receive each tool result
+	// live (7678a918/6a6ac122) so the UI can fill tool cards as they land.
+	if outputs[2].Context.Raw[metadataKeyMessageKind] != messageKindToolResult {
+		t.Fatalf("third outbound = %+v, want tool_result message", outputs[2])
+	}
+	if outputs[2].Content != "tool limit test result" {
+		t.Fatalf("third outbound content = %q, want tool result", outputs[2].Content)
+	}
+	if outputs[3].Content != "final model text" {
+		t.Fatalf("fourth outbound content = %q, want %q", outputs[3].Content, "final model text")
 	}
 
 	runCancel()
@@ -6404,7 +6412,7 @@ func TestRun_PicoToolFeedbackSuppressesDuplicateInterimAssistantContent(t *testi
 
 	outputs := make([]bus.OutboundMessage, 0, 3)
 	deadline := time.After(2 * time.Second)
-	for len(outputs) < 2 {
+	for len(outputs) < 3 {
 		select {
 		case outbound := <-msgBus.OutboundChan():
 			outputs = append(outputs, outbound)
@@ -6422,8 +6430,13 @@ func TestRun_PicoToolFeedbackSuppressesDuplicateInterimAssistantContent(t *testi
 	if !strings.Contains(outputs[0].Context.Raw[metadataKeyToolCalls], "tool_limit_test_tool") {
 		t.Fatalf("first outbound tool_calls = %q, want tool name", outputs[0].Context.Raw[metadataKeyToolCalls])
 	}
-	if outputs[1].Content != "final model text" {
-		t.Fatalf("second outbound content = %q, want %q", outputs[1].Content, "final model text")
+	// Structured-interim channels (pico/grpc) also receive each tool result
+	// live (7678a918/6a6ac122) so the UI can fill tool cards as they land.
+	if outputs[1].Context.Raw[metadataKeyMessageKind] != messageKindToolResult {
+		t.Fatalf("second outbound = %+v, want tool_result message", outputs[1])
+	}
+	if outputs[2].Content != "final model text" {
+		t.Fatalf("third outbound content = %q, want %q", outputs[2].Content, "final model text")
 	}
 
 	runCancel()
