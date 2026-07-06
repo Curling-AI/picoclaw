@@ -162,7 +162,10 @@ func TestShellTool_DangerousCommand(t *testing.T) {
 	}
 }
 
-func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
+// kill is intentionally NOT denied: agents legitimately manage their own
+// processes (e.g. pkill a dev server before restarting it), and the pod is
+// the real confinement boundary — see the defaultDenyPatterns comment.
+func TestShellTool_KillAllowed(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	if err != nil {
 		t.Errorf("unable to configure exec tool: %s", err)
@@ -171,15 +174,12 @@ func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
 	ctx := context.Background()
 	args := map[string]any{
 		"action":  "run",
-		"command": "kill 12345",
+		"command": "kill -0 $$",
 	}
 
 	result := tool.Execute(ctx, args)
-	if !result.IsError {
-		t.Errorf("Expected kill command to be blocked")
-	}
-	if !strings.Contains(result.ForLLM, "blocked") && !strings.Contains(result.ForUser, "blocked") {
-		t.Errorf("Expected blocked message, got ForLLM: %s, ForUser: %s", result.ForLLM, result.ForUser)
+	if strings.Contains(result.ForLLM, "blocked") || strings.Contains(result.ForUser, "blocked") {
+		t.Errorf("kill must not trip the safety guard, got ForLLM: %s, ForUser: %s", result.ForLLM, result.ForUser)
 	}
 }
 

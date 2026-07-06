@@ -131,7 +131,7 @@ func (m *mockInvalidInstallRegistry) DownloadAndInstall(
 	}
 	if err := os.WriteFile(
 		filepath.Join(targetDir, "SKILL.md"),
-		[]byte("---\nname: bad_skill\ndescription: invalid name\n---\n# Invalid\n"),
+		[]byte("---\nname: broken-skill\n---\n"),
 		0o600,
 	); err != nil {
 		return nil, err

@@ -35,6 +35,23 @@ func setGithubBaseURL(cfg *config.Config, baseURL string) {
 	cfg.Tools.Skills.Registries.Set("github", registryCfg)
 }
 
+// disableRegistriesExcept turns off every skills registry except the named
+// ones. The search handler fans out to ALL enabled registries (clawhub,
+// github, skills.sh); tests mock only their own registry, so any other one
+// left enabled leaks live network results into the assertions.
+func disableRegistriesExcept(cfg *config.Config, keep ...string) {
+	kept := make(map[string]bool, len(keep))
+	for _, k := range keep {
+		kept[k] = true
+	}
+	for _, reg := range cfg.Tools.Skills.Registries {
+		if reg == nil || kept[reg.Name] {
+			continue
+		}
+		reg.Enabled = false
+	}
+}
+
 func TestHandleListSkills(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -661,6 +678,7 @@ func TestHandleSearchSkills(t *testing.T) {
 	defer server.Close()
 
 	setClawHubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "clawhub")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -739,6 +757,7 @@ func TestHandleSearchSkillsUsesGitHubResultVersionInURL(t *testing.T) {
 	defer server.Close()
 
 	setGithubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "github")
 	clawHubRegistry, _ := cfg.Tools.Skills.Registries.Get("clawhub")
 	clawHubRegistry.Enabled = false
 	cfg.Tools.Skills.Registries.Set("clawhub", clawHubRegistry)
@@ -792,6 +811,7 @@ func TestHandleSearchSkillsGitHubRateLimitDegradesGracefully(t *testing.T) {
 	defer server.Close()
 
 	setGithubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "github")
 	clawHubRegistry, _ := cfg.Tools.Skills.Registries.Get("clawhub")
 	clawHubRegistry.Enabled = false
 	cfg.Tools.Skills.Registries.Set("clawhub", clawHubRegistry)
@@ -876,6 +896,7 @@ func TestHandleSearchSkillsPagination(t *testing.T) {
 	defer server.Close()
 
 	setClawHubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "clawhub")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -1034,6 +1055,7 @@ func TestHandleInstallSkill(t *testing.T) {
 	defer server.Close()
 
 	setClawHubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "clawhub")
 	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
 		t.Fatalf("SaveConfig() error = %v", saveErr)
 	}
@@ -1323,6 +1345,7 @@ func TestHandleInstallSkillTracksGitHubURLInstallsAsInstalled(t *testing.T) {
 	defer server.Close()
 
 	setGithubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "github")
 	clawHubRegistry, _ := cfg.Tools.Skills.Registries.Get("clawhub")
 	clawHubRegistry.Enabled = false
 	cfg.Tools.Skills.Registries.Set("clawhub", clawHubRegistry)
@@ -1422,6 +1445,7 @@ func TestHandleSearchSkillsMarksDirectoryCollisionAsInstalled(t *testing.T) {
 	defer server.Close()
 
 	setClawHubBaseURL(cfg, server.URL)
+	disableRegistriesExcept(cfg, "clawhub")
 	githubRegistry, _ := cfg.Tools.Skills.Registries.Get("github")
 	githubRegistry.Enabled = false
 	cfg.Tools.Skills.Registries.Set("github", githubRegistry)
