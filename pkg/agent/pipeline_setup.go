@@ -75,12 +75,16 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				// session down to nothing. Proceed with the request as built:
 				// a lenient provider caps output; a strict one rejects exactly
 				// as it would have after the wipe.
-				logger.ErrorCF("agent", "Context budget exceeded even with empty history — skipping compaction (check context_window/max_tokens)", map[string]any{
-					"session_key":    ts.sessionKey,
-					"context_window": ts.agent.ContextWindow,
-					"max_tokens":     ts.agent.MaxTokens,
-					"tool_defs":      len(toolDefs),
-				})
+				logger.ErrorCF(
+					"agent",
+					"Context budget exceeded even with empty history — skipping compaction (check context_window/max_tokens)",
+					map[string]any{
+						"session_key":    ts.sessionKey,
+						"context_window": ts.agent.ContextWindow,
+						"max_tokens":     ts.agent.MaxTokens,
+						"tool_defs":      len(toolDefs),
+					},
+				)
 			} else {
 				logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
 					map[string]any{"session_key": ts.sessionKey})

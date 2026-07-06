@@ -15,7 +15,11 @@ func TestListSkills_FollowsSymlinks(t *testing.T) {
 	if err := os.MkdirAll(realSkill, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(realSkill, "SKILL.md"), []byte("# my-skill\n\nA test skill.\n"), 0o644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(realSkill, "SKILL.md"),
+		[]byte("# my-skill\n\nA test skill.\n"),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 

@@ -368,13 +368,17 @@ func (p *Pipeline) CallLLM(
 				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail))
 			}
 			if !compactionCanHelp(guardBuild, ts.agent.ContextWindow, exec.providerToolDefs, ts.agent.MaxTokens) {
-				logger.ErrorCF("agent", "Context error retry: budget exceeded even with empty history — skipping destructive compaction (check context_window/max_tokens)", map[string]any{
-					"session_key":    ts.sessionKey,
-					"retry":          retry,
-					"context_window": ts.agent.ContextWindow,
-					"max_tokens":     ts.agent.MaxTokens,
-					"tool_defs":      len(exec.providerToolDefs),
-				})
+				logger.ErrorCF(
+					"agent",
+					"Context error retry: budget exceeded even with empty history — skipping destructive compaction (check context_window/max_tokens)",
+					map[string]any{
+						"session_key":    ts.sessionKey,
+						"retry":          retry,
+						"context_window": ts.agent.ContextWindow,
+						"max_tokens":     ts.agent.MaxTokens,
+						"tool_defs":      len(exec.providerToolDefs),
+					},
+				)
 			} else {
 				if retry == 0 && !constants.IsInternalChannel(ts.channel) {
 					al.bus.PublishOutbound(ctx, outboundMessageForTurn(

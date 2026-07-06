@@ -36,7 +36,12 @@ func TestLoopDetectionConfig_Validate(t *testing.T) {
 		t.Errorf("disabled config should validate: %v", err)
 	}
 	// Strictly increasing thresholds are required when enabled.
-	ok := &LoopDetectionConfig{Enabled: true, WarningThreshold: 10, CriticalThreshold: 20, GlobalCircuitBreakerThreshold: 30}
+	ok := &LoopDetectionConfig{
+		Enabled:                       true,
+		WarningThreshold:              10,
+		CriticalThreshold:             20,
+		GlobalCircuitBreakerThreshold: 30,
+	}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("valid config rejected: %v", err)
 	}

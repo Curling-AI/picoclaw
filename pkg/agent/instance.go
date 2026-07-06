@@ -181,11 +181,15 @@ func NewAgentInstance(
 	// (compactionCanHelp) prevents data loss, but the configuration is still
 	// broken — surface it loudly at boot.
 	if maxTokens >= contextWindow {
-		logger.ErrorCF("agent", "max_tokens >= context_window: output reserve leaves no prompt budget — set context_window to the model's TOTAL window and max_tokens to a sane output cap", map[string]any{
-			"agent_id":       agentID,
-			"max_tokens":     maxTokens,
-			"context_window": contextWindow,
-		})
+		logger.ErrorCF(
+			"agent",
+			"max_tokens >= context_window: output reserve leaves no prompt budget — set context_window to the model's TOTAL window and max_tokens to a sane output cap",
+			map[string]any{
+				"agent_id":       agentID,
+				"max_tokens":     maxTokens,
+				"context_window": contextWindow,
+			},
+		)
 	}
 
 	temperature := 0.7

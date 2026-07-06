@@ -97,7 +97,9 @@ var (
 
 	// heredocStartPattern finds heredoc operators (<<WORD, << 'WORD', <<-"WORD").
 	// Used by stripHeredocBodies. (seucaranguejo fork)
-	heredocStartPattern = regexp.MustCompile(`<<-?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))`)
+	heredocStartPattern = regexp.MustCompile(
+		`<<-?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))`,
+	)
 
 	// safePaths are kernel pseudo-devices that are always safe to reference in
 	// commands, regardless of workspace restriction. They contain no user data
@@ -197,7 +199,11 @@ func (t *ExecTool) Description() string {
 	if wd == "" {
 		wd = "your workspace"
 	}
-	return fmt.Sprintf(`Execute shell commands. Commands already run in %s by default — do NOT prefix with "cd %s &&"; just use paths relative to it (or absolute). The shell session persists between calls (env vars and any directory change carry over). Use background=true for long-running commands (returns sessionId). Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`, wd, wd)
+	return fmt.Sprintf(
+		`Execute shell commands. Commands already run in %s by default — do NOT prefix with "cd %s &&"; just use paths relative to it (or absolute). The shell session persists between calls (env vars and any directory change carry over). Use background=true for long-running commands (returns sessionId). Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`,
+		wd,
+		wd,
+	)
 }
 
 //nolint:dupl // Tool parameter schemas intentionally use similar JSON-schema map literals.

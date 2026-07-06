@@ -114,8 +114,12 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				wrapUpNudged = true
 				pendingMessages = append(pendingMessages, providers.Message{
 					Role: "user",
-					Content: fmt.Sprintf("[System] Tool-budget warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
-						iteration, ts.agent.MaxIterations, budget),
+					Content: fmt.Sprintf(
+						"[System] Tool-budget warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
+						iteration,
+						ts.agent.MaxIterations,
+						budget,
+					),
 				})
 			}
 		}

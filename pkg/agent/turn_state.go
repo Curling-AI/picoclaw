@@ -144,14 +144,14 @@ type turnExecution struct {
 	// being niled at finalize/cancel, so later code (e.g. the pico tool-call
 	// interim) can avoid re-publishing the same narration.
 	streamingPublishedContent bool
-	suppressReasoning   bool
-	callMessages        []providers.Message
-	providerToolDefs    []providers.ToolDefinition
-	llmModel            string
-	llmModelName        string
-	llmOpts             map[string]any
-	gracefulTerminal    bool
-	useNativeSearch     bool
+	suppressReasoning         bool
+	callMessages              []providers.Message
+	providerToolDefs          []providers.ToolDefinition
+	llmModel                  string
+	llmModelName              string
+	llmOpts                   map[string]any
+	gracefulTerminal          bool
+	useNativeSearch           bool
 
 	// Phase tracking
 	phase LLMPhase

@@ -422,36 +422,36 @@ type ToolFeedbackConfig struct {
 }
 
 type AgentDefaults struct {
-	Name                      string   `json:"name,omitempty"                   env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
-	Workspace                 string   `json:"workspace"                        env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	StateDir                  string   `json:"state_dir,omitempty"              env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
-	RestrictToWorkspace       bool     `json:"restrict_to_workspace"            env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
-	AllowReadOutsideWorkspace bool     `json:"allow_read_outside_workspace"     env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
-	Provider                  string   `json:"provider"                         env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
-	ModelName                 string   `json:"model_name"                       env:"PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME"`
+	Name                      string   `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
+	Workspace                 string   `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	StateDir                  string   `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
+	RestrictToWorkspace       bool     `json:"restrict_to_workspace"           env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
+	AllowReadOutsideWorkspace bool     `json:"allow_read_outside_workspace"    env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
+	Provider                  string   `json:"provider"                        env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
+	ModelName                 string   `json:"model_name"                      env:"PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME"`
 	ModelFallbacks            []string `json:"model_fallbacks,omitempty"`
-	ImageModel                string   `json:"image_model,omitempty"            env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
+	ImageModel                string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks       []string `json:"image_model_fallbacks,omitempty"`
-	MaxTokens                 int      `json:"max_tokens"                       env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
-	ContextWindow             int      `json:"context_window,omitempty"         env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_WINDOW"`
-	Temperature               *float64 `json:"temperature,omitempty"            env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
-	MaxToolIterations         int      `json:"max_tool_iterations"              env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
-	TimeoutSeconds            int      `json:"timeout_seconds,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_TIMEOUT_SECONDS"`             // wall-clock timeout per agent run (0 = use default 600s)
-	VerboseDefault            string   `json:"verbose_default,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_VERBOSE_DEFAULT"`             // timeout-summary verbosity: "off", "on", "full"
-	SummarizeMessageThreshold int      `json:"summarize_message_threshold"      env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"` // legacy; superseded by MaxHistoryMessages
-	SummarizeTokenPercent     int      `json:"summarize_token_percent"          env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`     // legacy; superseded by SummarizationThresholdPercent
+	MaxTokens                 int      `json:"max_tokens"                      env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
+	ContextWindow             int      `json:"context_window,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_WINDOW"`
+	Temperature               *float64 `json:"temperature,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
+	MaxToolIterations         int      `json:"max_tool_iterations"             env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	TimeoutSeconds            int      `json:"timeout_seconds,omitempty"       env:"PICOCLAW_AGENTS_DEFAULTS_TIMEOUT_SECONDS"`             // wall-clock timeout per agent run (0 = use default 600s)
+	VerboseDefault            string   `json:"verbose_default,omitempty"       env:"PICOCLAW_AGENTS_DEFAULTS_VERBOSE_DEFAULT"`             // timeout-summary verbosity: "off", "on", "full"
+	SummarizeMessageThreshold int      `json:"summarize_message_threshold"     env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"` // legacy; superseded by MaxHistoryMessages
+	SummarizeTokenPercent     int      `json:"summarize_token_percent"         env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`     // legacy; superseded by SummarizationThresholdPercent
 	// Memory management: controls when summarization triggers and how much history to keep.
 	// MaxHistoryMessages: max messages before summarization triggers (0 = message-count trigger disabled, token threshold still applies).
 	MaxHistoryMessages int `json:"max_history_messages,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_HISTORY_MESSAGES"`
 	// SummarizationThresholdPercent: percentage of ContextWindow that triggers summarization (default 90).
 	SummarizationThresholdPercent int `json:"summarization_threshold_percent,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZATION_THRESHOLD_PERCENT"`
 	// KeepLastMessages: number of recent messages to keep after summarization (default 6).
-	KeepLastMessages     int                `json:"keep_last_messages,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_KEEP_LAST_MESSAGES"`
+	KeepLastMessages     int                `json:"keep_last_messages,omitempty"     env:"PICOCLAW_AGENTS_DEFAULTS_KEEP_LAST_MESSAGES"`
 	MaxMediaSize         int                `json:"max_media_size,omitempty"         env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
 	Routing              *RoutingConfig     `json:"routing,omitempty"`
 	SteeringMode         string             `json:"steering_mode,omitempty"          env:"PICOCLAW_AGENTS_DEFAULTS_STEERING_MODE"`      // "one-at-a-time" (default) or "all"
 	MaxParallelTurns     int                `json:"max_parallel_turns,omitempty"     env:"PICOCLAW_AGENTS_DEFAULTS_MAX_PARALLEL_TURNS"` // Max concurrent turns (0 or 1 = sequential)
-	SubTurn              SubTurnConfig      `json:"subturn"                                                                                      envPrefix:"PICOCLAW_AGENTS_DEFAULTS_SUBTURN_"`
+	SubTurn              SubTurnConfig      `json:"subturn"                                                                                envPrefix:"PICOCLAW_AGENTS_DEFAULTS_SUBTURN_"`
 	ToolFeedback         ToolFeedbackConfig `json:"tool_feedback,omitempty"`
 	SplitOnMarker        bool               `json:"split_on_marker"                  env:"PICOCLAW_AGENTS_DEFAULTS_SPLIT_ON_MARKER"` // split messages on <|[SPLIT]|> marker
 	ContextManager       string             `json:"context_manager,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER"`
@@ -1085,10 +1085,18 @@ func (c *LoopDetectionConfig) Validate() error {
 		return fmt.Errorf("loop detection thresholds must be positive when enabled")
 	}
 	if c.WarningThreshold >= c.CriticalThreshold {
-		return fmt.Errorf("warning_threshold (%d) must be less than critical_threshold (%d)", c.WarningThreshold, c.CriticalThreshold)
+		return fmt.Errorf(
+			"warning_threshold (%d) must be less than critical_threshold (%d)",
+			c.WarningThreshold,
+			c.CriticalThreshold,
+		)
 	}
 	if c.CriticalThreshold >= c.GlobalCircuitBreakerThreshold {
-		return fmt.Errorf("critical_threshold (%d) must be less than global_circuit_breaker_threshold (%d)", c.CriticalThreshold, c.GlobalCircuitBreakerThreshold)
+		return fmt.Errorf(
+			"critical_threshold (%d) must be less than global_circuit_breaker_threshold (%d)",
+			c.CriticalThreshold,
+			c.GlobalCircuitBreakerThreshold,
+		)
 	}
 	return nil
 }
@@ -1150,7 +1158,7 @@ type ToolsConfig struct {
 	Cron            CronToolsConfig     `json:"cron"              yaml:"-"`
 	Exec            ExecConfig          `json:"exec"              yaml:"-"`
 	Skills          SkillsToolsConfig   `json:"skills"            yaml:"skills,omitempty"`
-	LoopDetection   LoopDetectionConfig `json:"loop_detection"   yaml:"-"`
+	LoopDetection   LoopDetectionConfig `json:"loop_detection"    yaml:"-"`
 	MediaCleanup    MediaCleanupConfig  `json:"media_cleanup"     yaml:"-"`
 	MCP             MCPConfig           `json:"mcp"               yaml:"-"`
 	AppendFile      ToolConfig          `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
