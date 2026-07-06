@@ -55,6 +55,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		channel:   ts.channel,
 		chatID:    ts.chatID,
 		modelName: exec.llmModelName,
+		ts:        ts,
 	}
 
 	logger.DebugCF("agent", "configured streaming enabled", map[string]any{
@@ -439,6 +440,7 @@ type streamingChunkPublisher struct {
 	published          bool
 	reasoningPublished bool
 	err                error
+	ts                 *turnState
 }
 
 func (p *streamingChunkPublisher) Update(ctx context.Context, accumulated string) {
@@ -507,6 +509,11 @@ func (p *streamingChunkPublisher) Finalize(ctx context.Context, content string, 
 	}
 	if setter, ok := p.streamer.(interface{ SetModelName(modelName string) }); ok {
 		setter.SetModelName(p.modelName)
+	}
+	if usage := p.ts.GetLastUsage(); usage != nil {
+		if setter, ok := p.streamer.(interface{ SetTurnUsage(in, out int) }); ok {
+			setter.SetTurnUsage(usage.PromptTokens, usage.CompletionTokens)
+		}
 	}
 	var err error
 	if streamer, ok := p.streamer.(bus.ContextUsageStreamer); ok {
