@@ -206,7 +206,6 @@ func (t *ExecTool) Description() string {
 	)
 }
 
-//nolint:dupl // Tool parameter schemas intentionally use similar JSON-schema map literals.
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -214,7 +213,7 @@ func (t *ExecTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"run", "list", "poll", "read", "write", "kill", "send-keys"},
-				"description": "Action: run (execute command), list (show sessions), poll (check status), read (get output), write (send input), kill (terminate), send-keys (send keys to PTY)",
+				"description": "Action: run (execute command), list (show sessions), poll (check status), read (get output), write (send input), kill (terminate), send-keys (send keys to PTY). Defaults to run when command is provided.",
 			},
 			"command": map[string]any{
 				"type":        "string",
@@ -249,14 +248,21 @@ func (t *ExecTool) Parameters() map[string]any {
 				"description": "Timeout in seconds (0 = no timeout)",
 			},
 		},
-		"required": []string{"action"},
+		// action is not required: it defaults to "run" when a command is
+		// present — models call exec with just {"command": "..."} often enough
+		// (19x in 48h of prod logs) that rejecting it wastes an iteration.
+		"required": []string{},
 	}
 }
 
 func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	action, _ := args["action"].(string)
 	if action == "" {
-		return ErrorResult("action is required")
+		if cmd, _ := args["command"].(string); cmd != "" {
+			action = "run"
+		} else {
+			return ErrorResult("action is required (or pass \"command\" to imply action=run)")
+		}
 	}
 
 	switch action {

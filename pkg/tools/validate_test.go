@@ -463,3 +463,82 @@ func TestValidateToolArgs_RealSchemas(t *testing.T) {
 		})
 	}
 }
+
+// --- coerceToolArgs -------------------------------------------------------
+
+// Models frequently send numbers and booleans as strings; unambiguous cases
+// must be coerced instead of costing the agent an iteration (observed in
+// prod: {"projectId": "39679"} against an integer schema).
+func TestCoerceToolArgs(t *testing.T) {
+	schema := map[string]any{
+		"properties": map[string]any{
+			"projectId": map[string]any{"type": "integer"},
+			"ratio":     map[string]any{"type": "number"},
+			"active":    map[string]any{"type": "boolean"},
+			"name":      map[string]any{"type": "string"},
+			"nested": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"count": map[string]any{"type": "integer"},
+				},
+			},
+			"ids": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "integer"},
+			},
+		},
+	}
+	args := map[string]any{
+		"projectId": "39679",
+		"ratio":     " 0.5 ",
+		"active":    "True",
+		"name":      "keep-me",
+		"nested":    map[string]any{"count": "7"},
+		"ids":       []any{"1", "2"},
+	}
+
+	coerceToolArgs(schema, args)
+
+	if v, ok := args["projectId"].(int64); !ok || v != 39679 {
+		t.Errorf("projectId = %v (%T), want int64 39679", args["projectId"], args["projectId"])
+	}
+	if v, ok := args["ratio"].(float64); !ok || v != 0.5 {
+		t.Errorf("ratio = %v (%T), want 0.5", args["ratio"], args["ratio"])
+	}
+	if v, ok := args["active"].(bool); !ok || !v {
+		t.Errorf("active = %v (%T), want true", args["active"], args["active"])
+	}
+	if args["name"] != "keep-me" {
+		t.Errorf("string properties must not be touched, got %v", args["name"])
+	}
+	nested := args["nested"].(map[string]any)
+	if v, ok := nested["count"].(int64); !ok || v != 7 {
+		t.Errorf("nested.count = %v (%T), want int64 7", nested["count"], nested["count"])
+	}
+	ids := args["ids"].([]any)
+	if v, ok := ids[1].(int64); !ok || v != 2 {
+		t.Errorf("ids[1] = %v (%T), want int64 2", ids[1], ids[1])
+	}
+
+	if err := validateToolArgs(schema, args); err != nil {
+		t.Errorf("coerced args must validate, got %v", err)
+	}
+}
+
+func TestCoerceToolArgs_AmbiguousLeftForValidation(t *testing.T) {
+	schema := map[string]any{
+		"properties": map[string]any{
+			"projectId": map[string]any{"type": "integer"},
+		},
+	}
+	args := map[string]any{"projectId": "not-a-number"}
+
+	coerceToolArgs(schema, args)
+
+	if args["projectId"] != "not-a-number" {
+		t.Errorf("non-numeric string must be left untouched, got %v", args["projectId"])
+	}
+	if err := validateToolArgs(schema, args); err == nil {
+		t.Error("expected validation to still reject the unparseable value")
+	}
+}

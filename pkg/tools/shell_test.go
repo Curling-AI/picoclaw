@@ -2024,3 +2024,35 @@ func TestShellTool_CustomAllowDoesNotBecomeStrictAllowlist(t *testing.T) {
 		t.Fatalf("custom allow patterns should not become a strict allowlist, got: %q", got)
 	}
 }
+
+// exec called with only {"command": ...} implies action=run — models omit
+// the action often enough (19x in 48h of prod logs) that rejecting it just
+// wastes an agent iteration.
+func TestShellTool_CommandImpliesRunAction(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Errorf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"command": "echo implied-run",
+	})
+	if result.IsError {
+		t.Fatalf("expected implied run to execute, got error: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "implied-run") {
+		t.Errorf("output = %q, want echoed text", result.ForLLM)
+	}
+}
+
+func TestShellTool_NoActionNoCommandStillErrors(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Errorf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{})
+	if !result.IsError {
+		t.Error("expected error when neither action nor command is given")
+	}
+}
