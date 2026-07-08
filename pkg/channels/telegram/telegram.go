@@ -154,6 +154,26 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
+	// Fail fast on a bad token instead of letting long polling retry a 401
+	// forever (observed in prod: getUpdates 401 every 8s, for days, while the
+	// channel looked "started"). A failed Start surfaces as channel status so
+	// the owner can fix the token.
+	if _, err := c.bot.GetMe(c.ctx); err != nil {
+		c.cancel()
+		return fmt.Errorf("telegram: bot token check failed: %w", err)
+	}
+
+	// Long polling and webhooks are mutually exclusive: a webhook left over
+	// from a previous integration of the same bot makes every getUpdates call
+	// return 409 Conflict, forever (observed in prod: 20k+ errors in 48h).
+	// This channel only does polling, so a lingering webhook is always stale
+	// — clear it. Best-effort: a failure here just leaves today's behavior.
+	if err := c.bot.DeleteWebhook(c.ctx, &telego.DeleteWebhookParams{}); err != nil {
+		logger.WarnCF("telegram", "Failed to clear stale webhook before polling", map[string]any{
+			"error": err.Error(),
+		})
+	}
+
 	updates, err := c.bot.UpdatesViaLongPolling(c.ctx, &telego.GetUpdatesParams{
 		Timeout: 30,
 	})

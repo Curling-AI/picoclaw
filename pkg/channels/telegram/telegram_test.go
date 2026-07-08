@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1748,4 +1749,81 @@ func testMediaGroupMessage(mediaGroupID string) telego.Message {
 		},
 		MediaGroupID: mediaGroupID,
 	}
+}
+
+// --- Start circuit breaker ----------------------------------------------------
+
+// A revoked/invalid token must fail Start immediately (channel shows as
+// errored) instead of long-polling a 401 every 8s forever.
+func TestStart_InvalidTokenFailsFast(t *testing.T) {
+	var getUpdatesCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			atomic.AddInt32(&getUpdatesCalls, 1)
+			_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
+		}
+	}))
+	defer server.Close()
+
+	ch, err := NewTelegramChannel(
+		&config.Channel{Type: config.ChannelTelegram, Enabled: true},
+		&config.TelegramSettings{
+			Token:   *config.NewSecureString(testToken),
+			BaseURL: server.URL,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	err = ch.Start(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token check failed")
+	assert.Zero(t, atomic.LoadInt32(&getUpdatesCalls), "must not start polling with a bad token")
+}
+
+// A stale webhook (from a previous integration of the same bot) makes every
+// getUpdates return 409 forever — Start must clear it before polling.
+func TestStart_ClearsStaleWebhookBeforePolling(t *testing.T) {
+	var webhookDeleted atomic.Bool
+	var polledAfterDelete atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"t","username":"test_bot"}}`))
+		case strings.HasSuffix(r.URL.Path, "/deleteWebhook"):
+			webhookDeleted.Store(true)
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			if webhookDeleted.Load() {
+				polledAfterDelete.Store(true)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		}
+	}))
+	defer server.Close()
+
+	ch, err := NewTelegramChannel(
+		&config.Channel{Type: config.ChannelTelegram, Enabled: true},
+		&config.TelegramSettings{
+			Token:   *config.NewSecureString(testToken),
+			BaseURL: server.URL,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, ch.Start(context.Background()))
+	defer func() { _ = ch.Stop(context.Background()) }()
+
+	assert.True(t, webhookDeleted.Load(), "expected deleteWebhook before polling")
+	require.Eventually(t, polledAfterDelete.Load, 3*time.Second, 50*time.Millisecond,
+		"expected polling to run after the webhook was cleared")
 }
