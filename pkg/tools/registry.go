@@ -272,8 +272,12 @@ func (r *ToolRegistry) ExecuteWithContext(
 		).WithError(fmt.Errorf("tool not found"))
 	}
 
-	// Validate arguments against the tool's declared schema.
-	if err := validateToolArgs(tool.Parameters(), args); err != nil {
+	// Validate arguments against the tool's declared schema, after coercing
+	// unambiguous typing slips (numeric strings, stringified booleans) so a
+	// recoverable call doesn't cost the agent a whole iteration.
+	schema := tool.Parameters()
+	coerceToolArgs(schema, args)
+	if err := validateToolArgs(schema, args); err != nil {
 		logger.WarnCF("tool", "Tool argument validation failed",
 			map[string]any{"tool": name, "error": err.Error()})
 		return ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", name, err)).

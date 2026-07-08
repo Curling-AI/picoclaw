@@ -3,7 +3,70 @@ package tools
 import (
 	"fmt"
 	"math"
+	"strconv"
+	"strings"
 )
+
+// coerceToolArgs fixes the most common LLM tool-call typing slips in place —
+// numeric values sent as strings ({"projectId": "39679"} against an integer
+// schema) and stringified booleans — so they don't burn a whole agent
+// iteration on a validation error. Only unambiguous conversions are applied;
+// anything else is left untouched for validateToolArgs to report.
+func coerceToolArgs(schema map[string]any, args map[string]any) {
+	props, ok := schema["properties"].(map[string]any)
+	if !ok || args == nil {
+		return
+	}
+	for key, val := range args {
+		propSchema, ok := props[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		typeName, _ := propSchema["type"].(string)
+		switch typeName {
+		case "integer":
+			if s, ok := val.(string); ok {
+				if n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil {
+					args[key] = n
+				}
+			}
+		case "number":
+			if s, ok := val.(string); ok {
+				if f, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+					args[key] = f
+				}
+			}
+		case "boolean":
+			if s, ok := val.(string); ok {
+				switch strings.TrimSpace(strings.ToLower(s)) {
+				case "true":
+					args[key] = true
+				case "false":
+					args[key] = false
+				}
+			}
+		case "object":
+			if obj, ok := val.(map[string]any); ok {
+				coerceToolArgs(propSchema, obj)
+			}
+		case "array":
+			itemSchema, ok := propSchema["items"].(map[string]any)
+			if !ok {
+				continue
+			}
+			arr, ok := val.([]any)
+			if !ok {
+				continue
+			}
+			wrapper := map[string]any{"properties": map[string]any{"item": itemSchema}}
+			for i, elem := range arr {
+				cell := map[string]any{"item": elem}
+				coerceToolArgs(wrapper, cell)
+				arr[i] = cell["item"]
+			}
+		}
+	}
+}
 
 // validateToolArgs validates args against a JSON Schema-like map.
 // schema is expected to have optional keys: "properties", "required", "additionalProperties".
