@@ -630,7 +630,11 @@ func (p *Pipeline) CallLLM(
 		// "model returned an empty response" fallback. Observed in prod with
 		// reasoning models (thinking emitted, zero visible text): retry the
 		// call once before giving up — the glitch is rarely deterministic.
+		// Never retry after streaming already delivered visible text (same
+		// rule as the stream-error fallback): the user saw output, and a
+		// retry would produce a duplicated answer.
 		if responseContent == "" && !exec.gracefulTerminal &&
+			!exec.streamingPublishedContent &&
 			exec.emptyResponseRetries < maxEmptyResponseRetries {
 			exec.emptyResponseRetries++
 			cancelConfiguredStreamingLLM(turnCtx, exec)
