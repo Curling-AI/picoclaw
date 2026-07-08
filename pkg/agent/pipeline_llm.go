@@ -19,6 +19,11 @@ import (
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
 // Returns Control indicating what the coordinator should do next.
+// maxEmptyResponseRetries caps same-turn retries for empty (no content, no
+// tool calls) LLM responses. One retry recovers the transient reasoning-only
+// glitch; more would just stall visibly silent turns.
+const maxEmptyResponseRetries = 1
+
 func (p *Pipeline) CallLLM(
 	ctx context.Context,
 	turnCtx context.Context,
@@ -618,6 +623,27 @@ func (p *Pipeline) CallLLM(
 					"steering_count": len(steerMsgs),
 				})
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
+			return ControlContinue, nil
+		}
+
+		// A response with no content AND no tool calls gives the user the
+		// "model returned an empty response" fallback. Observed in prod with
+		// reasoning models (thinking emitted, zero visible text): retry the
+		// call once before giving up — the glitch is rarely deterministic.
+		// Never retry after streaming already delivered visible text (same
+		// rule as the stream-error fallback): the user saw output, and a
+		// retry would produce a duplicated answer.
+		if responseContent == "" && !exec.gracefulTerminal &&
+			!exec.streamingPublishedContent &&
+			exec.emptyResponseRetries < maxEmptyResponseRetries {
+			exec.emptyResponseRetries++
+			cancelConfiguredStreamingLLM(turnCtx, exec)
+			logger.WarnCF("agent", "LLM returned empty response (no content, no tool calls); retrying", map[string]any{
+				"agent_id":      ts.agent.ID,
+				"iteration":     iteration,
+				"retry":         exec.emptyResponseRetries,
+				"has_reasoning": exec.response.ReasoningContent != "",
+			})
 			return ControlContinue, nil
 		}
 
