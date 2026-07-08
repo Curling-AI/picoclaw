@@ -120,6 +120,11 @@ type turnExecution struct {
 	summary          string
 	currentTurnStart int
 
+	// emptyResponseRetries counts same-turn retries after the model returned
+	// neither content nor tool calls (reasoning-only glitches on thinking
+	// models). Capped so a persistently silent model still ends the turn.
+	emptyResponseRetries int
+
 	// Turn output
 	finalContent string
 
