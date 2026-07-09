@@ -611,9 +611,6 @@ func (p *Pipeline) CallLLM(
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
 		responseContent := exec.response.Content
-		if responseContent == "" && exec.response.ReasoningContent != "" && ts.channel != "pico" {
-			responseContent = exec.response.ReasoningContent
-		}
 		if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
 			cancelConfiguredStreamingLLM(turnCtx, exec)
 			logger.InfoCF("agent", "Steering arrived after direct LLM response; continuing turn",
@@ -642,9 +639,21 @@ func (p *Pipeline) CallLLM(
 				"agent_id":      ts.agent.ID,
 				"iteration":     iteration,
 				"retry":         exec.emptyResponseRetries,
-				"has_reasoning": exec.response.ReasoningContent != "",
+				"has_reasoning": exec.response.ReasoningContent != "" || exec.response.Reasoning != "",
 			})
 			return ControlContinue, nil
+		}
+
+		// Retries exhausted and still no visible text: before falling back to
+		// the synthetic error message, salvage the thinking as the reply.
+		// Providers surface it either as reasoning_content (DeepSeek-style)
+		// or reasoning (OpenRouter/AI-Gateway-style); check both.
+		if responseContent == "" && ts.channel != "pico" {
+			if exec.response.ReasoningContent != "" {
+				responseContent = exec.response.ReasoningContent
+			} else if exec.response.Reasoning != "" {
+				responseContent = exec.response.Reasoning
+			}
 		}
 
 		exec.finalContent = responseContent

@@ -42,15 +42,21 @@ func (p *Pipeline) Finalize(
 	ts.setPhase(TurnPhaseFinalizing)
 	ts.setFinalContent(finalContent)
 	if !ts.opts.NoHistory {
-		finalMsg := providers.Message{
-			Role:             "assistant",
-			Content:          finalContent,
-			ModelName:        exec.llmModelName,
-			ReasoningContent: responseReasoningContent(exec.response),
+		// Coordinator-synthesized fallback text (empty-response/tool-limit
+		// boilerplate) is shown to the user but kept OUT of session history:
+		// persisted fallbacks read as the model's own prior replies and make
+		// it reproduce the failure on every following turn of the session.
+		if !exec.finalIsFallback {
+			finalMsg := providers.Message{
+				Role:             "assistant",
+				Content:          finalContent,
+				ModelName:        exec.llmModelName,
+				ReasoningContent: responseReasoningContent(exec.response),
+			}
+			ts.agent.Sessions.AddFullMessage(ts.sessionKey, finalMsg)
+			ts.recordPersistedMessage(finalMsg)
+			ts.ingestMessage(turnCtx, al, finalMsg)
 		}
-		ts.agent.Sessions.AddFullMessage(ts.sessionKey, finalMsg)
-		ts.recordPersistedMessage(finalMsg)
-		ts.ingestMessage(turnCtx, al, finalMsg)
 		if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
 			al.emitEvent(
 				runtimeevents.KindAgentError,

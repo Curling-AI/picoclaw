@@ -240,6 +240,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			// Ensure empty response falls back to DefaultResponse
 			if finalContent == "" {
 				finalContent = ts.opts.DefaultResponse
+				exec.finalIsFallback = true
 			}
 			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
 			if finalizeErr != nil {
@@ -288,9 +289,12 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 	if finalContent == "" {
 		if ts.currentIteration() >= ts.agent.MaxIterations && ts.agent.MaxIterations > 0 {
+			// The tool-limit fallback stays in history on purpose: next turn
+			// the model should know the previous turn ran out of iterations.
 			finalContent = toolLimitResponse
 		} else {
 			finalContent = ts.opts.DefaultResponse
+			exec.finalIsFallback = true
 		}
 	}
 
