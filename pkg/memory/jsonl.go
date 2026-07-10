@@ -339,44 +339,24 @@ func isMainSessionAlias(alias string) bool {
 // ResolveSessionKey returns the canonical session key for a candidate key.
 // It short-circuits direct canonical keys when possible, then scans metadata
 // once to resolve aliases or canonical metadata keys.
+//
+// The scan goes through ListSessionMetas (meta cache) rather than reading
+// files directly: callers resolve keys once per listed session, so a raw
+// directory scan here turned session listings into O(n²) EFS reads —
+// observed in prod as ~9k file reads and 5.5s per ListSessions RPC with 96
+// sessions, unchanged by the per-key meta cache.
 func (s *JSONLStore) ResolveSessionKey(_ context.Context, sessionKey string) (string, bool, error) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
 		return "", false, nil
 	}
 
-	hasDirectSession := s.sessionExists(sessionKey)
-	if hasDirectSession && shouldShortCircuitSessionResolve(sessionKey) {
+	if shouldShortCircuitSessionResolve(sessionKey) && s.sessionExists(sessionKey) {
 		return sessionKey, true, nil
 	}
 
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return "", false, fmt.Errorf("memory: read sessions dir: %w", err)
-	}
-
 	var directMetaMatch string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
-			continue
-		}
-
-		data, readErr := os.ReadFile(filepath.Join(s.dir, entry.Name()))
-		if readErr != nil {
-			log.Printf("memory: skipping unreadable meta %s: %v", entry.Name(), readErr)
-			continue
-		}
-
-		var meta SessionMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
-			log.Printf("memory: skipping corrupt meta %s: %v", entry.Name(), err)
-			continue
-		}
-
-		if meta.Key == "" {
-			continue
-		}
-
+	for _, meta := range s.ListSessionMetas() {
 		if meta.Key == sessionKey {
 			directMetaMatch = meta.Key
 		}
@@ -392,7 +372,9 @@ func (s *JSONLStore) ResolveSessionKey(_ context.Context, sessionKey string) (st
 		return directMetaMatch, true, nil
 	}
 
-	if hasDirectSession {
+	// Only fall back to a filesystem stat when the metas didn't answer —
+	// the common caller (session listing) always matches a meta above.
+	if s.sessionExists(sessionKey) {
 		return sessionKey, true, nil
 	}
 
