@@ -57,6 +57,13 @@ type CronStore struct {
 
 type JobHandler func(job *CronJob) (string, error)
 
+// maxConcurrentJobs bounds how many cron jobs execute at once. Jobs run in
+// their own goroutines so one long-running job cannot dam the schedule
+// (observed in prod: a 6h34min one-shot job blocked the entire cron service
+// — morning jobs fired hours late and users saw their assistant as frozen).
+// The bound keeps a burst of due jobs from stampeding the LLM provider.
+const maxConcurrentJobs = 4
+
 type CronService struct {
 	storePath string
 	store     *CronStore
@@ -66,6 +73,7 @@ type CronService struct {
 	stopChan  chan struct{}
 	wakeChan  chan struct{}
 	gronx     *gronx.Gronx
+	execSlots chan struct{}
 }
 
 func NewCronService(storePath string, onJob JobHandler) *CronService {
@@ -74,6 +82,7 @@ func NewCronService(storePath string, onJob JobHandler) *CronService {
 		onJob:     onJob,
 		gronx:     gronx.New(),
 		wakeChan:  make(chan struct{}),
+		execSlots: make(chan struct{}, maxConcurrentJobs),
 	}
 	// Initialize and load store on creation
 	cs.loadStore()
@@ -205,9 +214,16 @@ func (cs *CronService) checkJobs() {
 
 	cs.mu.Unlock()
 
-	// Execute jobs outside lock.
+	// Execute jobs outside the lock, each in its own goroutine so the
+	// scheduler loop keeps ticking while jobs run. Self-overlap of a single
+	// job is impossible by construction: its NextRunAtMS is cleared above and
+	// only recomputed after executeJobByID completes.
 	for _, jobID := range dueJobIDs {
-		cs.executeJobByID(jobID)
+		go func(id string) {
+			cs.execSlots <- struct{}{}
+			defer func() { <-cs.execSlots }()
+			cs.executeJobByID(id)
+		}(jobID)
 	}
 }
 
@@ -298,6 +314,10 @@ func (cs *CronService) executeJobByID(jobID string) {
 	if err := cs.saveStoreUnsafe(); err != nil {
 		log.Printf("[cron] failed to save store: %v", err)
 	}
+
+	// Jobs complete asynchronously now: the scheduler loop may be sleeping on
+	// a stale horizon that predates this job's freshly computed next run.
+	cs.notify()
 }
 
 func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int64 {
