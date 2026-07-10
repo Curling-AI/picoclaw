@@ -65,6 +65,15 @@ type SessionMeta struct {
 type JSONLStore struct {
 	dir   string
 	locks [numLockShards]sync.Mutex
+
+	// metaCache holds the decoded .meta.json per sanitized session key.
+	// This process is the only writer of the session directory, so a
+	// write-through cache is sound — and necessary: on network filesystems
+	// (EFS) every meta read is a ~10-25ms round trip, and listing sessions
+	// reads every meta. With ~100 sessions that made each listing cost
+	// seconds; with the cache it costs one ReadDir.
+	metaMu    sync.RWMutex
+	metaCache map[string]SessionMeta
 }
 
 // NewJSONLStore creates a new JSONL-backed store rooted at dir.
@@ -73,7 +82,7 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory: create directory: %w", err)
 	}
-	return &JSONLStore{dir: dir}, nil
+	return &JSONLStore{dir: dir, metaCache: make(map[string]SessionMeta)}, nil
 }
 
 // sessionLock returns a mutex for the given session key.
@@ -105,12 +114,45 @@ func sanitizeKey(key string) string {
 	return s
 }
 
+// copyMeta returns a value whose mutable fields (Scope, Aliases) do not
+// share backing storage with the original, so cached metas can't be
+// corrupted by caller mutations (and vice versa).
+func copyMeta(m SessionMeta) SessionMeta {
+	m.Scope = cloneRawJSON(m.Scope)
+	if m.Aliases != nil {
+		m.Aliases = append([]string(nil), m.Aliases...)
+	}
+	return m
+}
+
+func (s *JSONLStore) cachedMeta(sanitized string) (SessionMeta, bool) {
+	s.metaMu.RLock()
+	meta, ok := s.metaCache[sanitized]
+	s.metaMu.RUnlock()
+	if !ok {
+		return SessionMeta{}, false
+	}
+	return copyMeta(meta), true
+}
+
+func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
+	s.metaMu.Lock()
+	s.metaCache[sanitized] = copyMeta(meta)
+	s.metaMu.Unlock()
+}
+
 // readMeta loads the metadata file for a session.
 // Returns a zero-value sessionMeta if the file does not exist.
 func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
+	sanitized := sanitizeKey(key)
+	if meta, ok := s.cachedMeta(sanitized); ok {
+		return meta, nil
+	}
 	data, err := os.ReadFile(s.metaPath(key))
 	if os.IsNotExist(err) {
-		return SessionMeta{Key: key}, nil
+		meta := SessionMeta{Key: key}
+		s.storeCachedMeta(sanitized, meta)
+		return meta, nil
 	}
 	if err != nil {
 		return SessionMeta{}, fmt.Errorf("memory: read meta: %w", err)
@@ -123,6 +165,7 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	if meta.Key == "" {
 		meta.Key = key
 	}
+	s.storeCachedMeta(sanitized, meta)
 	return meta, nil
 }
 
@@ -136,7 +179,11 @@ func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 	if err != nil {
 		return fmt.Errorf("memory: encode meta: %w", err)
 	}
-	return fileutil.WriteFileAtomic(s.metaPath(key), data, 0o644)
+	if err := fileutil.WriteFileAtomic(s.metaPath(key), data, 0o644); err != nil {
+		return err
+	}
+	s.storeCachedMeta(sanitizeKey(key), meta)
+	return nil
 }
 
 func cloneRawJSON(data json.RawMessage) json.RawMessage {
@@ -866,6 +913,11 @@ func (s *JSONLStore) ListSessions() []string {
 // timestamps; callers listing sessions must NOT recover those via GetHistory
 // — that reads and parses every session's full JSONL, which on EFS with
 // ~100 sessions costs seconds per listing.
+//
+// The directory listing stays authoritative for WHICH sessions exist, but
+// each meta's content is served from the write-through cache when present —
+// on EFS the per-file reads, not the ReadDir, are what made every listing
+// cost seconds.
 func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -874,6 +926,13 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 	var metas []SessionMeta
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
+			continue
+		}
+		sanitized := strings.TrimSuffix(entry.Name(), ".meta.json")
+		if meta, ok := s.cachedMeta(sanitized); ok {
+			if meta.Key != "" {
+				metas = append(metas, meta)
+			}
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
@@ -885,6 +944,7 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 			continue
 		}
 		if meta.Key != "" {
+			s.storeCachedMeta(sanitized, meta)
 			metas = append(metas, meta)
 		}
 	}

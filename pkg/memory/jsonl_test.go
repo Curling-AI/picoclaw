@@ -1247,3 +1247,87 @@ func BenchmarkGetHistory_1000(b *testing.B) {
 		_, _ = store.GetHistory(ctx, "bench")
 	}
 }
+
+// The meta cache must serve listings without re-reading files: on EFS each
+// meta read is a network round trip and listings read every meta. The test
+// corrupts the on-disk metas after a first listing and expects the cached
+// values to keep serving.
+func TestJSONLStore_ListSessionMetasServedFromCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.AddMessage(ctx, "s1", "user", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddMessage(ctx, "s2", "user", "b"); err != nil {
+		t.Fatal(err)
+	}
+
+	first := store.ListSessionMetas()
+	if len(first) != 2 {
+		t.Fatalf("first listing len = %d, want 2", len(first))
+	}
+
+	// Corrupt every meta file on disk; a cache-backed listing must not notice.
+	metaFiles, err := filepath.Glob(filepath.Join(dir, "*.meta.json"))
+	if err != nil || len(metaFiles) != 2 {
+		t.Fatalf("meta files = %v (err=%v)", metaFiles, err)
+	}
+	for _, f := range metaFiles {
+		if wErr := os.WriteFile(f, []byte("{corrupted"), 0o644); wErr != nil {
+			t.Fatal(wErr)
+		}
+	}
+
+	second := store.ListSessionMetas()
+	if len(second) != 2 {
+		t.Fatalf("cached listing len = %d, want 2 (served from cache)", len(second))
+	}
+	counts := map[string]int{}
+	for _, m := range second {
+		counts[m.Key] = m.Count
+	}
+	if counts["s1"] != 1 || counts["s2"] != 1 {
+		t.Errorf("cached counts = %v, want s1:1 s2:1", counts)
+	}
+}
+
+// Metas returned to callers must not share mutable state with the cache.
+func TestJSONLStore_CachedMetaIsIsolatedFromCallerMutation(t *testing.T) {
+	store, err := NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.UpsertSessionMeta(ctx, "s1", []byte(`{"channel":"web"}`), []string{"alias-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.GetSessionMeta(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Aliases) != 1 || len(got.Scope) == 0 {
+		t.Fatalf("unexpected meta: %+v", got)
+	}
+	got.Aliases[0] = "mutated"
+	got.Scope[0] = 'X'
+
+	again, err := store.GetSessionMeta(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Aliases[0] != "alias-a" {
+		t.Errorf("cache aliases corrupted by caller mutation: %v", again.Aliases)
+	}
+	if again.Scope[0] == 'X' {
+		t.Errorf("cache scope corrupted by caller mutation: %s", again.Scope)
+	}
+}
