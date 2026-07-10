@@ -1306,7 +1306,8 @@ func TestJSONLStore_CachedMetaIsIsolatedFromCallerMutation(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	if upsertErr := store.UpsertSessionMeta(ctx, "s1", []byte(`{"channel":"web"}`), []string{"alias-a"}); upsertErr != nil {
+	upsertErr := store.UpsertSessionMeta(ctx, "s1", []byte(`{"channel":"web"}`), []string{"alias-a"})
+	if upsertErr != nil {
 		t.Fatal(upsertErr)
 	}
 
