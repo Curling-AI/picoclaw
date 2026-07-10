@@ -365,3 +365,86 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+// A long-running job must not dam the schedule: jobs execute concurrently,
+// so a later-due job fires while an earlier slow job is still running.
+// (Observed in prod: a 6h34min one-shot job blocked the whole cron service
+// and morning jobs fired hours late.)
+func TestCronService_SlowJobDoesNotBlockSchedule(t *testing.T) {
+	slowRelease := make(chan struct{})
+	fastRan := make(chan struct{}, 1)
+
+	handler := func(job *CronJob) (string, error) {
+		switch job.Name {
+		case "SlowJob":
+			<-slowRelease
+		case "FastJob":
+			fastRan <- struct{}{}
+		}
+		return "ok", nil
+	}
+
+	cs, path := setupService(handler)
+	defer os.Remove(path)
+
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer cs.Stop()
+	defer close(slowRelease)
+
+	slowAt := time.Now().Add(50 * time.Millisecond).UnixMilli()
+	if _, err := cs.AddJob("SlowJob", CronSchedule{Kind: "at", AtMS: &slowAt}, "", "", ""); err != nil {
+		t.Fatalf("AddJob slow: %v", err)
+	}
+	fastAt := time.Now().Add(150 * time.Millisecond).UnixMilli()
+	if _, err := cs.AddJob("FastJob", CronSchedule{Kind: "at", AtMS: &fastAt}, "", "", ""); err != nil {
+		t.Fatalf("AddJob fast: %v", err)
+	}
+
+	// FastJob must run while SlowJob is still blocked on slowRelease.
+	select {
+	case <-fastRan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("FastJob did not run while SlowJob was still executing")
+	}
+}
+
+// A recurring job that completes while the scheduler sleeps on a stale
+// horizon must wake the loop, so its next occurrence fires on time.
+func TestCronService_CompletionReschedulesLoop(t *testing.T) {
+	var mu sync.Mutex
+	runs := 0
+
+	handler := func(job *CronJob) (string, error) {
+		mu.Lock()
+		runs++
+		mu.Unlock()
+		return "ok", nil
+	}
+
+	cs, path := setupService(handler)
+	defer os.Remove(path)
+
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer cs.Stop()
+
+	everyMS := int64(200)
+	if _, err := cs.AddJob("Recurring", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "", ""); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		if runs >= 2 {
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("recurring job did not fire at least twice — completion did not reschedule the loop")
+}
