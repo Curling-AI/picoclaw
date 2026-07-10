@@ -2,6 +2,8 @@ package session_test
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -319,5 +321,60 @@ func TestJSONLBackend_EnsureSessionMetadata_DoesNotOverwriteNonEmptyCanonicalHis
 	history := b.GetHistory(canonicalKey)
 	if len(history) != 1 || history[0].Content != "current canonical history" {
 		t.Fatalf("canonical history overwritten: %+v", history)
+	}
+}
+
+// ListSessionRecords must come from the meta files alone — reading every
+// session's full JSONL to count messages costs seconds on EFS with ~100
+// sessions. The test proves the meta-only path by deleting the .jsonl
+// message files and checking the records still carry correct counts.
+func TestJSONLBackend_ListSessionRecordsUsesMetaOnly(t *testing.T) {
+	dir := t.TempDir()
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	b := session.NewJSONLBackend(store)
+
+	b.AddMessage("s1", "user", "hello")
+	b.AddMessage("s1", "assistant", "hi")
+	b.AddMessage("s2", "user", "oi")
+	for _, key := range []string{"s1", "s2"} {
+		if err := b.Save(key); err != nil {
+			t.Fatalf("Save(%s): %v", key, err)
+		}
+	}
+
+	// Truncation must be reflected in the count (history length, not raw lines).
+	b.TruncateHistory("s1", 1)
+	if err := b.Save("s1"); err != nil {
+		t.Fatalf("Save after truncate: %v", err)
+	}
+
+	// Remove the message files: only the .meta.json files remain.
+	jsonls, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil || len(jsonls) == 0 {
+		t.Fatalf("expected .jsonl files, got %v (err=%v)", jsonls, err)
+	}
+	for _, f := range jsonls {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	records := b.ListSessionRecords()
+	counts := map[string]int{}
+	for _, r := range records {
+		counts[r.SessionKey] = r.MessageCount
+		if r.Updated.IsZero() {
+			t.Errorf("record %s has zero Updated timestamp", r.SessionKey)
+		}
+	}
+	if counts["s1"] != 1 {
+		t.Errorf("s1 count = %d, want 1 (after truncation)", counts["s1"])
+	}
+	if counts["s2"] != 1 {
+		t.Errorf("s2 count = %d, want 1", counts["s2"])
 	}
 }

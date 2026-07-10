@@ -853,16 +853,29 @@ func (s *JSONLStore) rewriteJSONL(
 
 // ListSessions returns all known session keys by reading .meta.json files.
 func (s *JSONLStore) ListSessions() []string {
+	metas := s.ListSessionMetas()
+	keys := make([]string, 0, len(metas))
+	for _, meta := range metas {
+		keys = append(keys, meta.Key)
+	}
+	return keys
+}
+
+// ListSessionMetas returns the persisted metadata of every session without
+// touching the message files. Meta files already carry the message count and
+// timestamps; callers listing sessions must NOT recover those via GetHistory
+// — that reads and parses every session's full JSONL, which on EFS with
+// ~100 sessions costs seconds per listing.
+func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil
 	}
-	var keys []string
+	var metas []SessionMeta
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
 			continue
 		}
-		// Read the meta file to get the original key
 		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
 			continue
@@ -872,10 +885,10 @@ func (s *JSONLStore) ListSessions() []string {
 			continue
 		}
 		if meta.Key != "" {
-			keys = append(keys, meta.Key)
+			metas = append(metas, meta)
 		}
 	}
-	return keys
+	return metas
 }
 
 func (s *JSONLStore) Close() error {

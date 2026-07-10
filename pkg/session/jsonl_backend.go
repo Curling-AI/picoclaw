@@ -190,3 +190,40 @@ func (b *JSONLBackend) Close() error {
 func (b *JSONLBackend) ListSessions() []string {
 	return b.store.ListSessions()
 }
+
+// ListSessionRecords returns per-session metadata straight from the persisted
+// meta files when the store supports it. Session listings render on every
+// gateway page view; deriving message counts via GetHistory instead would
+// read and parse every session's full JSONL (seconds on EFS with ~100
+// sessions, observed in prod as multi-second page loads).
+func (b *JSONLBackend) ListSessionRecords() []SessionRecord {
+	ml, ok := b.store.(interface{ ListSessionMetas() []memory.SessionMeta })
+	if !ok {
+		// Fallback for stores without meta listing: same cost as the old path.
+		keys := b.store.ListSessions()
+		records := make([]SessionRecord, 0, len(keys))
+		for _, key := range keys {
+			records = append(records, SessionRecord{
+				SessionKey:   key,
+				MessageCount: len(b.GetHistory(key)),
+			})
+		}
+		return records
+	}
+
+	metas := ml.ListSessionMetas()
+	records := make([]SessionRecord, 0, len(metas))
+	for _, m := range metas {
+		count := m.Count - m.Skip
+		if count < 0 {
+			count = 0
+		}
+		records = append(records, SessionRecord{
+			SessionKey:   m.Key,
+			MessageCount: count,
+			Created:      m.CreatedAt,
+			Updated:      m.UpdatedAt,
+		})
+	}
+	return records
+}
