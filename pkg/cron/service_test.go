@@ -41,7 +41,9 @@ func int64Ptr(v int64) *int64 {
 }
 
 func setupService(handler JobHandler) (*CronService, string) {
-	tmpFile := fmt.Sprintf("test_cron_%d.json", time.Now().UnixNano())
+	// System temp, not the package dir: interrupted or parallel runs would
+	// otherwise leave test_cron_*.json litter in the working tree.
+	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("test_cron_%d.json", time.Now().UnixNano()))
 	cs := NewCronService(tmpFile, handler)
 	return cs, tmpFile
 }
