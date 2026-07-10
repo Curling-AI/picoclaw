@@ -341,15 +341,15 @@ func TestJSONLBackend_ListSessionRecordsUsesMetaOnly(t *testing.T) {
 	b.AddMessage("s1", "assistant", "hi")
 	b.AddMessage("s2", "user", "oi")
 	for _, key := range []string{"s1", "s2"} {
-		if err := b.Save(key); err != nil {
-			t.Fatalf("Save(%s): %v", key, err)
+		if saveErr := b.Save(key); saveErr != nil {
+			t.Fatalf("Save(%s): %v", key, saveErr)
 		}
 	}
 
 	// Truncation must be reflected in the count (history length, not raw lines).
 	b.TruncateHistory("s1", 1)
-	if err := b.Save("s1"); err != nil {
-		t.Fatalf("Save after truncate: %v", err)
+	if saveErr := b.Save("s1"); saveErr != nil {
+		t.Fatalf("Save after truncate: %v", saveErr)
 	}
 
 	// Remove the message files: only the .meta.json files remain.
@@ -358,8 +358,8 @@ func TestJSONLBackend_ListSessionRecordsUsesMetaOnly(t *testing.T) {
 		t.Fatalf("expected .jsonl files, got %v (err=%v)", jsonls, err)
 	}
 	for _, f := range jsonls {
-		if err := os.Remove(f); err != nil {
-			t.Fatal(err)
+		if rmErr := os.Remove(f); rmErr != nil {
+			t.Fatal(rmErr)
 		}
 	}
 
