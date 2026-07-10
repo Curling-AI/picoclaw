@@ -1261,11 +1261,11 @@ func TestJSONLStore_ListSessionMetasServedFromCache(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	if err := store.AddMessage(ctx, "s1", "user", "a"); err != nil {
-		t.Fatal(err)
+	if addErr := store.AddMessage(ctx, "s1", "user", "a"); addErr != nil {
+		t.Fatal(addErr)
 	}
-	if err := store.AddMessage(ctx, "s2", "user", "b"); err != nil {
-		t.Fatal(err)
+	if addErr := store.AddMessage(ctx, "s2", "user", "b"); addErr != nil {
+		t.Fatal(addErr)
 	}
 
 	first := store.ListSessionMetas()
@@ -1306,8 +1306,8 @@ func TestJSONLStore_CachedMetaIsIsolatedFromCallerMutation(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	if err := store.UpsertSessionMeta(ctx, "s1", []byte(`{"channel":"web"}`), []string{"alias-a"}); err != nil {
-		t.Fatal(err)
+	if upsertErr := store.UpsertSessionMeta(ctx, "s1", []byte(`{"channel":"web"}`), []string{"alias-a"}); upsertErr != nil {
+		t.Fatal(upsertErr)
 	}
 
 	got, err := store.GetSessionMeta(ctx, "s1")
