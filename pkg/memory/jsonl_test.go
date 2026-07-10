@@ -1332,3 +1332,41 @@ func TestJSONLStore_CachedMetaIsIsolatedFromCallerMutation(t *testing.T) {
 		t.Errorf("cache scope corrupted by caller mutation: %s", again.Scope)
 	}
 }
+
+// ResolveSessionKey must scan metas via the cache, not the filesystem:
+// session listings resolve every listed key, so a raw directory scan here
+// meant O(n²) EFS reads per listing (~9k reads / 5.5s with 96 sessions).
+func TestJSONLStore_ResolveSessionKeyServedFromCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if upErr := store.UpsertSessionMeta(ctx, "agent:main:tg:1", nil, []string{"alias-1"}); upErr != nil {
+		t.Fatal(upErr)
+	}
+	if store.ListSessionMetas() == nil {
+		t.Fatal("expected metas after upsert")
+	}
+
+	metaFiles, globErr := filepath.Glob(filepath.Join(dir, "*.meta.json"))
+	if globErr != nil || len(metaFiles) == 0 {
+		t.Fatalf("meta files = %v (err=%v)", metaFiles, globErr)
+	}
+	for _, f := range metaFiles {
+		if wErr := os.WriteFile(f, []byte("{corrupted"), 0o644); wErr != nil {
+			t.Fatal(wErr)
+		}
+	}
+
+	resolved, found, resErr := store.ResolveSessionKey(ctx, "alias-1")
+	if resErr != nil {
+		t.Fatalf("ResolveSessionKey: %v", resErr)
+	}
+	if !found || resolved != "agent:main:tg:1" {
+		t.Fatalf("resolved = (%q, %v), want (agent:main:tg:1, true) from cache", resolved, found)
+	}
+}
