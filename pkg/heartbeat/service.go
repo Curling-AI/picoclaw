@@ -164,7 +164,9 @@ func (hs *HeartbeatService) executeHeartbeat() {
 
 	prompt := hs.buildPrompt()
 	if prompt == "" {
-		logger.InfoC("heartbeat", "No heartbeat prompt (HEARTBEAT.md empty or missing)")
+		// Not actionable: the default HEARTBEAT.md template has no user tasks,
+		// so every tick would emit an INF line on every pod. Keep it at debug.
+		logger.DebugC("heartbeat", "No heartbeat prompt (HEARTBEAT.md empty or missing)")
 		return
 	}
 
