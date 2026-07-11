@@ -440,6 +440,9 @@ func (cb *ContextBuilder) buildSkillsSummary(allowed []string) string {
 	var lines []string
 	lines = append(lines, "<skills>")
 	for _, s := range cb.skillsLoader.ListSkills() {
+		if s.Disabled {
+			continue
+		}
 		if _, ok := allowedSet[strings.ToLower(strings.TrimSpace(s.Name))]; !ok {
 			continue
 		}

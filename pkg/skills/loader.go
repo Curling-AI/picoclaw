@@ -50,6 +50,9 @@ type SkillInfo struct {
 	Path        string `json:"path"`
 	Source      string `json:"source"`
 	Description string `json:"description"`
+	// Disabled skills stay listed (for management UIs) but are omitted from
+	// the system prompt and refuse to load content.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 func (info SkillInfo) validate() error {
@@ -112,6 +115,7 @@ func NewSkillsLoader(workspace string, globalSkills string, builtinSkills string
 func (sl *SkillsLoader) ListSkills() []SkillInfo {
 	skills := make([]SkillInfo, 0)
 	seen := make(map[string]bool)
+	disabled := LoadDisabled(sl.workspaceSkills)
 
 	addSkills := func(dir, source string) {
 		if dir == "" {
@@ -130,9 +134,10 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 				continue
 			}
 			info := SkillInfo{
-				Name:   d.Name(),
-				Path:   skillFile,
-				Source: source,
+				Name:     d.Name(),
+				Path:     skillFile,
+				Source:   source,
+				Disabled: disabled[d.Name()],
 			}
 			metadata := sl.getSkillMetadata(skillFile)
 			if metadata != nil {
@@ -165,6 +170,12 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 
 func (sl *SkillsLoader) LoadSkill(name string) (string, bool) {
 	if err := ValidateSkillName(name); err != nil {
+		return "", false
+	}
+
+	// Disabled skills refuse to load — covers LoadSkillsForContext and the
+	// evolution/recall paths without each caller re-checking.
+	if LoadDisabled(sl.workspaceSkills)[name] {
 		return "", false
 	}
 
@@ -220,6 +231,9 @@ func (sl *SkillsLoader) BuildSkillsSummary() string {
 	var lines []string
 	lines = append(lines, "<skills>")
 	for _, s := range allSkills {
+		if s.Disabled {
+			continue
+		}
 		escapedName := escapeXML(s.Name)
 		escapedDesc := escapeXML(s.Description)
 		escapedPath := escapeXML(s.Path)
