@@ -297,6 +297,11 @@ func (cs *CronService) executeJobByID(jobID string) {
 			job.State.NextRunAtMS = nil
 			nextRunStr = "(disabled)"
 		}
+	} else if !job.Enabled {
+		// Pausado durante a execução (ou disparo manual de job pausado):
+		// não re-agenda — senão a pausa ganharia um next-run fantasma.
+		job.State.NextRunAtMS = nil
+		nextRunStr = "(paused)"
 	} else {
 		nextRun := cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
 		job.State.NextRunAtMS = nextRun
@@ -599,6 +604,31 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 	}
 
 	return nil
+}
+
+// RunNow dispara um job imediatamente, sem tocar em Enabled — "executar
+// agora" não deve des-pausar um job pausado (nem re-agendar: o pós-execução
+// respeita Enabled). Respeita o limite de execuções concorrentes.
+func (cs *CronService) RunNow(jobID string) bool {
+	cs.mu.Lock()
+	found := false
+	for i := range cs.store.Jobs {
+		if cs.store.Jobs[i].ID == jobID {
+			found = true
+			break
+		}
+	}
+	cs.mu.Unlock()
+	if !found {
+		return false
+	}
+
+	go func() {
+		cs.execSlots <- struct{}{}
+		defer func() { <-cs.execSlots }()
+		cs.executeJobByID(jobID)
+	}()
+	return true
 }
 
 func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
