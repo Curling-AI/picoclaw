@@ -105,28 +105,59 @@ func (ms *MemoryStore) AppendToday(content string) error {
 	return fileutil.WriteFileAtomic(todayFile, []byte(newContent), 0o600)
 }
 
-// GetRecentDailyNotes returns daily notes from the last N days.
-// Contents are joined with "---" separator.
+// dailyNotesBudget caps how many bytes of recent daily notes are injected
+// into the prompt. Notes are unbounded user/agent content; without a cap a
+// noisy writer (e.g. a 5-minute cron logging every run) inflates EVERY prompt
+// for 3 days straight — cost compounds. 16KB ≈ 4k tokens keeps genuine notes
+// intact (production p99 across agents is well under this) while bounding the
+// blast radius of pollution.
+const dailyNotesBudget = 16 * 1024
+
+// GetRecentDailyNotes returns daily notes from the last N days, newest first,
+// joined with "---" separators and capped at dailyNotesBudget bytes. When the
+// budget is hit, older content is dropped (a day may be partially included,
+// keeping its most recent entries — files are append-only so the tail is the
+// newest) and a truncation marker is appended.
 func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
-	var sb strings.Builder
-	first := true
+	var parts []string
+	budget := dailyNotesBudget
+	truncated := false
 
 	for i := range days {
+		if budget <= 0 {
+			truncated = true
+			break
+		}
 		date := time.Now().AddDate(0, 0, -i)
 		dateStr := date.Format("20060102") // YYYYMMDD
 		monthDir := dateStr[:6]            // YYYYMM
 		filePath := filepath.Join(ms.memoryDir, monthDir, dateStr+".md")
 
-		if data, err := os.ReadFile(filePath); err == nil {
-			if !first {
-				sb.WriteString("\n\n---\n\n")
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+		if len(data) > budget {
+			// Keep the newest tail of the day, cutting at an entry boundary
+			// ("## " header) when one exists inside the kept window.
+			tail := string(data[len(data)-budget:])
+			if idx := strings.Index(tail, "\n## "); idx >= 0 {
+				tail = tail[idx+1:]
 			}
-			sb.Write(data)
-			first = false
+			parts = append(parts, "[notas mais antigas deste dia truncadas]\n"+tail)
+			budget = 0
+			truncated = true
+		} else {
+			parts = append(parts, string(data))
+			budget -= len(data)
 		}
 	}
 
-	return sb.String()
+	out := strings.Join(parts, "\n\n---\n\n")
+	if truncated {
+		out += "\n\n[notas mais antigas omitidas — janela de notas limitada a 16KB]"
+	}
+	return out
 }
 
 // GetMemoryContext returns formatted memory context for the agent prompt.
