@@ -641,10 +641,23 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 
 	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, uuid.New().String())
 
+	// System note prepended to EVERY scheduled run: without it, agents dutifully
+	// log "nothing happened" to the daily notes on each tick — a 5-minute job
+	// wrote ~300 notes/day in production, and since the last 3 days of notes are
+	// injected into every prompt, cost compounds on itself. Job-level nudges
+	// proved insufficient (duplicated jobs bypass them), so the guidance is
+	// uniform here. Agents also use notes as a state store (watermarks), hence
+	// the explicit redirect to files.
+	message := fmt.Sprintf("[Scheduled run of cron job %q]\n%s\n\n"+
+		"(System note: this is a routine scheduled run. Do NOT record routine runs in the daily notes — "+
+		"run silently when there is nothing new. Persist state between runs (watermarks, last-seen ids) "+
+		"in a file under state/ or scripts/, never in the daily notes. Only write a note when the run "+
+		"produced a genuinely new fact the user would care about.)", job.Name, job.Payload.Message)
+
 	// Call agent with the job message
 	response, err := t.executor.ProcessDirectWithChannel(
 		ctx,
-		job.Payload.Message,
+		message,
 		sessionKey,
 		channel,
 		chatID,
