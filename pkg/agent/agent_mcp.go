@@ -149,10 +149,13 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			// below can bring servers up when the credential is fixed, and let
 			// the agent keep serving. We do NOT setInitErr here, so callers
 			// proceed without MCP.
-			logger.WarnCF("agent", "Failed to load MCP servers, continuing without MCP tools while retrying in background",
+			logger.WarnCF(
+				"agent",
+				"Failed to load MCP servers, continuing without MCP tools while retrying in background",
 				map[string]any{
 					"error": err.Error(),
-				})
+				},
+			)
 		}
 
 		// Register MCP tools for all agents
