@@ -297,8 +297,20 @@ func TestEnsureMCPInitialized_LoadFailureIsNonFatal(t *testing.T) {
 	if initErr := al.mcp.getInitErr(); initErr != nil {
 		t.Fatalf("getInitErr() = %q, want nil (load failure must not be cached as fatal)", initErr.Error())
 	}
-	if al.mcp.getManager() != nil {
-		t.Fatal("expected MCP manager to remain nil after load failure")
+	// The manager is kept alive (with zero servers) so the background retry
+	// loop can bring the server up once its credential/command is fixed.
+	manager := al.mcp.getManager()
+	if manager == nil {
+		t.Fatal("expected MCP manager to be kept for background retry after load failure")
+	}
+	if got := len(manager.GetServers()); got != 0 {
+		t.Fatalf("manager has %d servers after total load failure, want 0", got)
+	}
+	al.mcp.mu.Lock()
+	hasRetry := al.mcp.retryCancel != nil
+	al.mcp.mu.Unlock()
+	if !hasRetry {
+		t.Fatal("expected a background retry loop to be scheduled for the failed server")
 	}
 
 	// Idempotent: a second call still succeeds without MCP tools.

@@ -22,6 +22,10 @@ type mcpRuntime struct {
 	mu       sync.Mutex
 	manager  *mcp.Manager
 	initErr  error
+	// retryCancel stops the background reconnect loop for servers that failed
+	// at load time; reset/takeManager cancel it so a stale loop never touches
+	// a closed manager or a reloaded registry.
+	retryCancel context.CancelFunc
 }
 
 func (r *mcpRuntime) reset() *mcp.Manager {
@@ -30,8 +34,23 @@ func (r *mcpRuntime) reset() *mcp.Manager {
 	r.manager = nil
 	r.initErr = nil
 	r.initOnce = sync.Once{}
+	cancel := r.retryCancel
+	r.retryCancel = nil
 	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return manager
+}
+
+func (r *mcpRuntime) setRetryCancel(cancel context.CancelFunc) {
+	r.mu.Lock()
+	previous := r.retryCancel
+	r.retryCancel = cancel
+	r.mu.Unlock()
+	if previous != nil {
+		previous()
+	}
 }
 
 func (r *mcpRuntime) setManager(manager *mcp.Manager) {
@@ -55,9 +74,14 @@ func (r *mcpRuntime) getInitErr() error {
 
 func (r *mcpRuntime) takeManager() *mcp.Manager {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	manager := r.manager
 	r.manager = nil
+	cancel := r.retryCancel
+	r.retryCancel = nil
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return manager
 }
 
@@ -121,19 +145,17 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			// Run() and on every direct turn, so propagating this error would
 			// kill the agent loop / abort every message — one broken connector
 			// would silently brick the whole assistant. Degrade gracefully:
-			// warn, drop MCP tools, and let the agent keep serving. We do NOT
-			// setInitErr here, so callers proceed without MCP.
-			logger.WarnCF("agent", "Failed to load MCP servers, continuing without MCP tools",
+			// warn, keep the (empty) manager alive so the background retry loop
+			// below can bring servers up when the credential is fixed, and let
+			// the agent keep serving. We do NOT setInitErr here, so callers
+			// proceed without MCP.
+			logger.WarnCF(
+				"agent",
+				"Failed to load MCP servers, continuing without MCP tools while retrying in background",
 				map[string]any{
 					"error": err.Error(),
-				})
-			if closeErr := mcpManager.Close(); closeErr != nil {
-				logger.ErrorCF("agent", "Failed to close MCP manager",
-					map[string]any{
-						"error": closeErr.Error(),
-					})
-			}
-			return
+				},
+			)
 		}
 
 		// Register MCP tools for all agents
@@ -144,71 +166,9 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		agentCount := len(agentIDs)
 
 		for serverName, conn := range servers {
-			uniqueTools += len(conn.Tools)
-
-			// Determine whether this server's tools should be deferred (hidden).
-			// Per-server "deferred" field takes precedence over the global Discovery.Enabled.
-			serverCfg := mcpCfg.Servers[serverName]
-			registerAsHidden := serverIsDeferred(al.cfg.Tools.MCP.Discovery.Enabled, serverCfg)
-			registeredToolsByAgent := make(map[string]map[string]struct{}, len(agentIDs))
-
-			for _, tool := range conn.Tools {
-				for _, agentID := range agentIDs {
-					agent, ok := al.registry.GetAgent(agentID)
-					if !ok {
-						continue
-					}
-					if !agent.AllowsMCPServer(serverName) {
-						logger.DebugCF("agent", "Skipped MCP tool registration by agent mcpServers allowlist",
-							map[string]any{
-								"agent_id": agentID,
-								"server":   serverName,
-								"tool":     tool.Name,
-							})
-						continue
-					}
-
-					mcpTool := tools.NewMCPTool(mcpManager, serverName, tool)
-					toolName := mcpTool.Name()
-					mcpTool.SetWorkspace(agent.Workspace)
-					mcpTool.SetMaxInlineTextRunes(al.cfg.Tools.MCP.GetMaxInlineTextChars())
-					mcpTool.SetEventPublisher(al.runtimeEvents)
-
-					if registerAsHidden {
-						agent.Tools.RegisterHidden(mcpTool)
-					} else {
-						agent.Tools.Register(mcpTool)
-					}
-					if !toolRegistryIncludes(agent.Tools, toolName) {
-						continue
-					}
-
-					recordRegisteredMCPTool(registeredToolsByAgent, agentID, toolName)
-					totalRegistrations++
-					logger.DebugCF("agent", "Registered MCP tool",
-						map[string]any{
-							"agent_id": agentID,
-							"server":   serverName,
-							"tool":     tool.Name,
-							"name":     toolName,
-							"deferred": registerAsHidden,
-						})
-				}
-			}
-
-			for _, agentID := range agentIDs {
-				agent, ok := al.registry.GetAgent(agentID)
-				if !ok {
-					continue
-				}
-				registerMCPServerPromptContributor(
-					agentID,
-					agent,
-					serverName,
-					len(registeredToolsByAgent[agentID]),
-					registerAsHidden,
-				)
-			}
+			toolCount, registrations := al.registerMCPServerTools(mcpManager, mcpCfg, serverName, conn)
+			uniqueTools += toolCount
+			totalRegistrations += registrations
 		}
 		logger.InfoCF("agent", "MCP tools registered successfully",
 			map[string]any{
@@ -270,9 +230,131 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		}
 
 		al.mcp.setManager(mcpManager)
+
+		// Servers that failed to connect (expired OAuth grant, connector down)
+		// keep retrying in the background and register their tools once they
+		// come back — without this, a server that fails here stays without
+		// tools until the next process restart even after the user fixes the
+		// credential.
+		if pending := pendingMCPServers(mcpCfg, mcpManager); len(pending) > 0 {
+			logger.InfoCF("agent", "Scheduling background retry for MCP servers that failed to connect",
+				map[string]any{"servers": pending})
+			retryCtx, cancel := context.WithCancel(context.Background())
+			al.mcp.setRetryCancel(cancel)
+			go mcpManager.RetryPendingServers(retryCtx, mcpCfg, workspacePath, pending,
+				func(serverName string, conn *mcp.ServerConnection) {
+					toolCount, registrations := al.registerMCPServerTools(mcpManager, mcpCfg, serverName, conn)
+					logger.InfoCF("agent", "MCP tools registered after background retry",
+						map[string]any{
+							"server":              serverName,
+							"unique_tools":        toolCount,
+							"total_registrations": registrations,
+						})
+				})
+		}
 	})
 
 	return al.mcp.getInitErr()
+}
+
+// registerMCPServerTools registers one connected server's tools (and its
+// prompt contributor) on every agent that allows the server. It reads the
+// registry through GetRegistry so the background retry loop registers on
+// whatever registry is current. Returns the server's tool count and the number
+// of registrations made across agents.
+func (al *AgentLoop) registerMCPServerTools(
+	mcpManager *mcp.Manager,
+	mcpCfg config.MCPConfig,
+	serverName string,
+	conn *mcp.ServerConnection,
+) (int, int) {
+	registry := al.GetRegistry()
+	if registry == nil || conn == nil {
+		return 0, 0
+	}
+	agentIDs := registry.ListAgentIDs()
+
+	// Determine whether this server's tools should be deferred (hidden).
+	// Per-server "deferred" field takes precedence over the global Discovery.Enabled.
+	serverCfg := mcpCfg.Servers[serverName]
+	registerAsHidden := serverIsDeferred(mcpCfg.Discovery.Enabled, serverCfg)
+	registeredToolsByAgent := make(map[string]map[string]struct{}, len(agentIDs))
+	totalRegistrations := 0
+
+	for _, tool := range conn.Tools {
+		for _, agentID := range agentIDs {
+			agent, ok := registry.GetAgent(agentID)
+			if !ok {
+				continue
+			}
+			if !agent.AllowsMCPServer(serverName) {
+				logger.DebugCF("agent", "Skipped MCP tool registration by agent mcpServers allowlist",
+					map[string]any{
+						"agent_id": agentID,
+						"server":   serverName,
+						"tool":     tool.Name,
+					})
+				continue
+			}
+
+			mcpTool := tools.NewMCPTool(mcpManager, serverName, tool)
+			toolName := mcpTool.Name()
+			mcpTool.SetWorkspace(agent.Workspace)
+			mcpTool.SetMaxInlineTextRunes(mcpCfg.GetMaxInlineTextChars())
+			mcpTool.SetEventPublisher(al.runtimeEvents)
+
+			if registerAsHidden {
+				agent.Tools.RegisterHidden(mcpTool)
+			} else {
+				agent.Tools.Register(mcpTool)
+			}
+			if !toolRegistryIncludes(agent.Tools, toolName) {
+				continue
+			}
+
+			recordRegisteredMCPTool(registeredToolsByAgent, agentID, toolName)
+			totalRegistrations++
+			logger.DebugCF("agent", "Registered MCP tool",
+				map[string]any{
+					"agent_id": agentID,
+					"server":   serverName,
+					"tool":     tool.Name,
+					"name":     toolName,
+					"deferred": registerAsHidden,
+				})
+		}
+	}
+
+	for _, agentID := range agentIDs {
+		agent, ok := registry.GetAgent(agentID)
+		if !ok {
+			continue
+		}
+		registerMCPServerPromptContributor(
+			agentID,
+			agent,
+			serverName,
+			len(registeredToolsByAgent[agentID]),
+			registerAsHidden,
+		)
+	}
+
+	return len(conn.Tools), totalRegistrations
+}
+
+// pendingMCPServers lists enabled servers the manager has no live connection
+// for — the candidates for the background retry loop.
+func pendingMCPServers(mcpCfg config.MCPConfig, mcpManager *mcp.Manager) []string {
+	var pending []string
+	for name, serverCfg := range mcpCfg.Servers {
+		if !serverCfg.Enabled {
+			continue
+		}
+		if _, ok := mcpManager.GetServer(name); !ok {
+			pending = append(pending, name)
+		}
+	}
+	return pending
 }
 
 func registerMCPServerPromptContributor(
