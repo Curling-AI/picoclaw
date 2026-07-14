@@ -1087,6 +1087,23 @@ type CronToolsConfig struct {
 	ExecTimeoutMinutes    int      `json:"exec_timeout_minutes"    env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`
 	AllowCommand          bool     `json:"allow_command"           env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
 	CommandAllowedRemotes []string `json:"command_allowed_remotes" env:"PICOCLAW_TOOLS_CRON_COMMAND_ALLOWED_REMOTES"`
+	// MemoryRefreshEnabled seeds a self-managed daily job at boot (once, by
+	// name) that reviews recent conversations and refreshes durable memory in
+	// MEMORY.md — the agent-curated "keep memory fresh" pass. Off by default.
+	MemoryRefreshEnabled bool `json:"memory_refresh_enabled" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_ENABLED"`
+	// MemoryRefreshSchedule is the cron expression for that job (default 04:00).
+	MemoryRefreshSchedule string `json:"memory_refresh_schedule" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_SCHEDULE"`
+}
+
+// EffectiveMemoryRefreshSchedule returns the configured cron expr or the
+// default: twice a week (Mon & Thu at 04:00). Memory curation is deliberately
+// spaced, not daily — letting more signal accumulate between runs yields
+// higher-signal, more stable MEMORY.md edits and avoids daily rewrite churn.
+func (c CronToolsConfig) EffectiveMemoryRefreshSchedule() string {
+	if s := strings.TrimSpace(c.MemoryRefreshSchedule); s != "" {
+		return s
+	}
+	return "0 4 * * 1,4"
 }
 
 type ExecConfig struct {

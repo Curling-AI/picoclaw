@@ -871,9 +871,46 @@ func setupCronTool(
 			result := cronTool.ExecuteJob(context.Background(), job)
 			return result, nil
 		})
+		seedMemoryRefreshJob(cronService, cfg)
 	}
 
 	return cronService, nil
+}
+
+// memoryRefreshJobName is the stable name used to keep the seed idempotent.
+const memoryRefreshJobName = "memory-refresh"
+
+// seedMemoryRefreshJob adds a self-managed daily job (once, by name) that has
+// the agent review recent conversations and refresh durable memory in
+// MEMORY.md — the Hermes-style "keep memory fresh" pass. No-op when disabled or
+// when the job already exists (survives restarts via jobs.json on EFS).
+func seedMemoryRefreshJob(cronService *cron.CronService, cfg *config.Config) {
+	if cfg == nil || !cfg.Tools.Cron.MemoryRefreshEnabled {
+		return
+	}
+	for _, j := range cronService.ListJobs(true) {
+		if j.Name == memoryRefreshJobName {
+			return
+		}
+	}
+	prompt := "Curate your long-term memory. Read the newest conversation transcripts under " +
+		"sessions/ (only those changed since your last run — keep a last-processed watermark in a " +
+		"file under state/memory-refresh/). Extract durable facts, preferences, and decisions the " +
+		"user would want you to remember, and REWRITE the relevant `## ` sections of memory/MEMORY.md " +
+		"so it stays concise and current — do not blindly append (MEMORY.md is injected into every " +
+		"prompt). Do not touch the daily notes. If nothing durable is new, do nothing."
+	if _, err := cronService.AddJob(
+		memoryRefreshJobName,
+		cron.CronSchedule{Kind: "cron", Expr: cfg.Tools.Cron.EffectiveMemoryRefreshSchedule()},
+		prompt,
+		"", "",
+	); err != nil {
+		logger.WarnCF("cron", "Failed to seed memory-refresh job", map[string]any{"error": err.Error()})
+	} else {
+		logger.InfoCF("cron", "Seeded memory-refresh job", map[string]any{
+			"schedule": cfg.Tools.Cron.EffectiveMemoryRefreshSchedule(),
+		})
+	}
 }
 
 func createHeartbeatHandler(agentLoop *agent.AgentLoop) func(prompt, channel, chatID string) *tools.ToolResult {
