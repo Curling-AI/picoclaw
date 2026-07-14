@@ -442,6 +442,11 @@ func TestCronTool_GetReturnsFullJobPayload(t *testing.T) {
 	if got.State.NextRunAtMS == nil {
 		t.Fatal("get should include next run state")
 	}
+	// The get output surfaces where the reproducible script lives (scripts/<id>/run.sh)
+	// so a later chat session can find and edit it — the folder is named by the opaque id.
+	if !strings.Contains(result.ForLLM, "scripts/"+job.ID+"/run.sh") {
+		t.Fatalf("get should surface the reproducible script path: %s", result.ForLLM)
+	}
 }
 
 func TestCronTool_UpdateSchedulePreservesPayload(t *testing.T) {

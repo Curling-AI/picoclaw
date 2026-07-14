@@ -84,8 +84,10 @@ func (t *CronTool) Description() string {
 IMPORTANT: When user asks to be reminded or scheduled, you MUST call this tool. 
 Use 'at_seconds' for one-time reminders (e.g., 'remind me in 10 minutes' → at_seconds=600). 
 Use 'every_seconds' ONLY for recurring tasks (e.g., 'every 2 hours' → every_seconds=7200). 
-Use 'cron_expr' for complex recurring schedules. 
-Use 'command' to execute shell commands directly.`
+Use 'cron_expr' for complex recurring schedules.
+Use 'command' to execute shell commands directly.
+To CHANGE what a recurring job does, use 'list' then 'get' to find its id.
+Recurring jobs may keep a reproducible script at scripts/<id>/run.sh — read/edit that script to change the behavior.`
 }
 
 // Parameters returns the tool parameters schema
@@ -304,7 +306,29 @@ func (t *CronTool) getJob(ctx context.Context, args map[string]any) *ToolResult 
 		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
 	}
 
-	return SilentResult(formatCronJobJSON(job))
+	return SilentResult(formatCronJobJSONWithScript(job))
+}
+
+// formatCronJobJSONWithScript serializes a job PLUS the location of its
+// reproducible script. The scripts/<id>/ convention is otherwise only stated in
+// the scheduled-run wrapper, so a normal chat session ("change my daily report
+// cron") couldn't find the script — the folder is named by the opaque id. This
+// surfaces it as a first-class field so the agent can read/edit
+// scripts/<id>/run.sh to change what the job does. Stays valid JSON (extra
+// field is ignored by CronJob unmarshalers).
+func formatCronJobJSONWithScript(job *cron.CronJob) string {
+	view := struct {
+		*cron.CronJob
+		ReproducibleScriptPath string `json:"reproducible_script_path"`
+	}{
+		CronJob:                job,
+		ReproducibleScriptPath: fmt.Sprintf("scripts/%s/run.sh", job.ID),
+	}
+	data, err := json.Marshal(view)
+	if err != nil {
+		return formatCronJobJSON(job)
+	}
+	return string(data)
 }
 
 func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResult {
