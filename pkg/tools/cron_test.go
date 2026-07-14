@@ -442,6 +442,11 @@ func TestCronTool_GetReturnsFullJobPayload(t *testing.T) {
 	if got.State.NextRunAtMS == nil {
 		t.Fatal("get should include next run state")
 	}
+	// The get output surfaces where the reproducible script lives (scripts/<id>/run.sh)
+	// so a later chat session can find and edit it — the folder is named by the opaque id.
+	if !strings.Contains(result.ForLLM, "scripts/"+job.ID+"/run.sh") {
+		t.Fatalf("get should surface the reproducible script path: %s", result.ForLLM)
+	}
 }
 
 func TestCronTool_UpdateSchedulePreservesPayload(t *testing.T) {
@@ -1186,10 +1191,12 @@ func TestCronTool_ExecuteJobPublishesAgentResponse(t *testing.T) {
 		t.Fatalf("executor target = %s/%s, want telegram/chat-1", executor.lastChan, executor.lastChatID)
 	}
 	// A mensagem do job vai embrulhada na nota de sistema de runs agendadas
-	// (higiene de memória) — o conteúdo original precisa estar lá dentro.
+	// (higiene de memória + reprodutibilidade) — o conteúdo original precisa
+	// estar lá dentro, junto do caminho estável scripts/<job.ID>/run.sh.
 	if !strings.Contains(executor.lastPrompt, "send me a poem") ||
 		!strings.Contains(executor.lastPrompt, "Scheduled run of cron job") ||
-		!strings.Contains(executor.lastPrompt, "Do NOT record routine runs") {
+		!strings.Contains(executor.lastPrompt, "do NOT record routine runs") ||
+		!strings.Contains(executor.lastPrompt, "scripts/job-1/run.sh") {
 		t.Fatalf("prompt = %q, want mensagem original embrulhada na nota de sistema", executor.lastPrompt)
 	}
 	if executor.publishedResp != "generated reply" {
