@@ -477,3 +477,28 @@ func TestBuildMessages_TimeInTurnTailNotSystemPrefix(t *testing.T) {
 		t.Errorf("current message lost user text: %q", user.Content)
 	}
 }
+
+func TestSkillDiscovery_DefersCatalogToHint(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	ws := t.TempDir()
+	writeTurnProfileSkill(t, ws, "pdf-extract",
+		"---\nname: pdf-extract\ndescription: Extract text from PDF files\n---\n# pdf")
+
+	// Default (discovery off): full catalog inlined.
+	full := NewContextBuilder(ws)
+	m1 := full.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})
+	if !strings.Contains(m1[0].Content, "<skills>") || !strings.Contains(m1[0].Content, "Extract text from PDF") {
+		t.Fatalf("discovery off should inline the full catalog: %q", m1[0].Content)
+	}
+
+	// Discovery on: only a one-line hint, no per-skill <skills> block.
+	lean := NewContextBuilder(ws).WithSkillDiscovery(true)
+	m2 := lean.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})
+	sys := m2[0].Content
+	if strings.Contains(sys, "<skills>") || strings.Contains(sys, "Extract text from PDF") {
+		t.Fatalf("discovery on should NOT inline the catalog: %q", sys)
+	}
+	if !strings.Contains(sys, "skill_search") || !strings.Contains(sys, "1 installed skill") {
+		t.Fatalf("discovery on should show a skill_search hint with the count: %q", sys)
+	}
+}
