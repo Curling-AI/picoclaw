@@ -29,7 +29,7 @@ func (t *FindSkillsTool) Name() string {
 }
 
 func (t *FindSkillsTool) Description() string {
-	return "Search for installable skills from skill registries. Returns skill slugs, descriptions, versions, and relevance scores. Use this to discover skills before installing them with install_skill."
+	return "Search remote skill REGISTRIES for NEW, installable skills. Returns skill slugs, descriptions, versions, and relevance scores. Use this to discover skills before installing them with install_skill. (To find a skill you ALREADY have installed, use find_installed_skills instead.)"
 }
 
 func (t *FindSkillsTool) Parameters() map[string]any {

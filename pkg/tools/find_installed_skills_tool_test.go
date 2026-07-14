@@ -12,14 +12,14 @@ type stubSkillLister struct{ items []skills.SkillInfo }
 
 func (s stubSkillLister) ListSkills() []skills.SkillInfo { return s.items }
 
-func TestSkillSearchTool_RanksByQuery(t *testing.T) {
+func TestFindInstalledSkillsTool_RanksByQuery(t *testing.T) {
 	loader := stubSkillLister{items: []skills.SkillInfo{
 		{Name: "pdf-extract", Description: "Extract text and tables from PDFs", Path: "skills/pdf-extract/SKILL.md"},
 		{Name: "deck-builder", Description: "Build slide decks", Path: "skills/deck-builder/SKILL.md"},
 		{Name: "csv-report", Description: "Summarize CSV data into a report", Path: "skills/csv-report/SKILL.md"},
 		{Name: "disabled-one", Description: "should never appear", Path: "x", Disabled: true},
 	}}
-	tool := NewSkillSearchTool(loader, 2)
+	tool := NewFindInstalledSkillsTool(loader, 2)
 
 	res := tool.Execute(context.Background(), map[string]any{"query": "read a pdf document"})
 	if res.IsError {
@@ -36,8 +36,8 @@ func TestSkillSearchTool_RanksByQuery(t *testing.T) {
 	}
 }
 
-func TestSkillSearchTool_EmptyQueryAndNoSkills(t *testing.T) {
-	empty := NewSkillSearchTool(stubSkillLister{}, 5)
+func TestFindInstalledSkillsTool_EmptyQueryAndNoSkills(t *testing.T) {
+	empty := NewFindInstalledSkillsTool(stubSkillLister{}, 5)
 	if r := empty.Execute(context.Background(), map[string]any{"query": " "}); !r.IsError {
 		t.Fatal("empty query should error")
 	}

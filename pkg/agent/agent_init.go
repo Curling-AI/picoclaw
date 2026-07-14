@@ -285,13 +285,15 @@ func registerSharedTools(
 			}
 		}
 
-		// skill_search: on-demand LOCAL skill discovery. When enabled, the full
+		// find_installed_skills: on-demand LOCAL skill discovery. When enabled, the full
 		// skill catalog is deferred out of the system prompt (WithSkillDiscovery
 		// in instance.go) and the agent finds installed skills through this tool
 		// instead — keeps the prompt lean as the skill set grows.
 		if skills_enabled && cfg.Tools.Skills.Discovery.Enabled {
 			if loader := agent.ContextBuilder.SkillsLoader(); loader != nil {
-				agent.Tools.Register(tools.NewSkillSearchTool(loader, cfg.Tools.Skills.Discovery.MaxSearchResults))
+				agent.Tools.Register(
+					tools.NewFindInstalledSkillsTool(loader, cfg.Tools.Skills.Discovery.MaxSearchResults),
+				)
 			}
 		}
 

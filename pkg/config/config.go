@@ -1136,7 +1136,7 @@ type SkillsToolsConfig struct {
 	Registries SkillsRegistriesConfig `yaml:"registries,omitempty"                                    json:"registries"`
 	// Discovery defers the local skill catalog out of the system prompt: when
 	// enabled, only a one-line hint is injected and the agent pulls relevant
-	// skills via the skill_search tool (keeps the prompt lean as evolution and
+	// skills via the find_installed_skills tool (keeps the prompt lean as evolution and
 	// installs grow the skill set). Reuses ToolDiscoveryConfig (Enabled +
 	// MaxSearchResults; TTL/Use* are ignored — skills load via read_file).
 	Discovery ToolDiscoveryConfig `yaml:"-" json:"discovery,omitempty"`
