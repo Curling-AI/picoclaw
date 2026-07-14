@@ -106,8 +106,9 @@ func TestBM25Tokenize(t *testing.T) {
 		{"Hello World", []string{"hello", "world"}},
 		{"  spaces   everywhere  ", []string{"spaces", "everywhere"}},
 		{"punctuation... test!!!", []string{"punctuation", "test"}},
-		{"(parentheses) and-hyphens", []string{"parentheses", "and-hyphens"}}, // hyphens trimmed from edges
-		{"internal-hyphen is kept", []string{"internal-hyphen", "is", "kept"}},
+		// Identificadores compostos preservam o token inteiro E emitem as partes.
+		{"(parentheses) and-hyphens", []string{"parentheses", "and-hyphens", "and", "hyphens"}},
+		{"internal-hyphen is kept", []string{"internal-hyphen", "internal", "hyphen", "is", "kept"}},
 		{".,;?!", []string{}}, // Becomes empty after trim
 	}
 
@@ -232,4 +233,45 @@ func benchmarkBM25Corpus(size int) []testDoc {
 	}
 
 	return corpus
+}
+
+func TestBM25TokenizeSplitsIdentifiers(t *testing.T) {
+	cases := map[string][]string{
+		// snake_case: token composto preservado + partes
+		"mcp_skip_skip_file_write": {"mcp_skip_skip_file_write", "mcp", "skip", "skip", "file", "write"},
+		// camelCase
+		"createCalendarEvent": {"createcalendarevent", "create", "calendar", "event"},
+		// palavra simples: sem duplicação
+		"file": {"file"},
+		// acentos não separam palavras
+		"calendário": {"calendário"},
+		// separadores mistos
+		"create/update-file.name": {"create/update-file.name", "create", "update", "file", "name"},
+	}
+	for in, want := range cases {
+		got := bm25Tokenize(in)
+		if len(got) != len(want) {
+			t.Errorf("bm25Tokenize(%q) = %v, want %v", in, got, want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("bm25Tokenize(%q) = %v, want %v", in, got, want)
+				break
+			}
+		}
+	}
+}
+
+func TestNormalizeIdentifier(t *testing.T) {
+	for in, want := range map[string]string{
+		"skip_file_write": "skip_file_write",
+		"skip-file-write": "skip_file_write",
+		"skipFileWrite":   "skip_file_write",
+		"file":            "file",
+	} {
+		if got := NormalizeIdentifier(in); got != want {
+			t.Errorf("NormalizeIdentifier(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
