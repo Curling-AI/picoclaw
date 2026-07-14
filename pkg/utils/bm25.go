@@ -16,6 +16,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // ── Tuning defaults ───────────────────────────────────────────────────────────
@@ -230,16 +231,74 @@ func buildBM25Index[T any](corpus []T, textFunc func(T) string, k1, b float64) *
 }
 
 // bm25Tokenize splits s into lowercase tokens, stripping edge punctuation.
+// Identifier-like tokens (snake_case, kebab-case, camelCase, dotted/slashed
+// compounds) additionally emit their parts alongside the whole token — the
+// same treatment Lucene's word_delimiter applies to code identifiers. Without
+// this, a tool named "mcp_skip_skip_file_write" is a single opaque token that
+// no natural query ("file write") can ever match, and the literal query
+// "skip_file_write" misses it too (different compound). Both corpus and
+// queries pass through here, so the expansion is symmetric.
 func bm25Tokenize(s string) []string {
-	raw := strings.Fields(strings.ToLower(s))
-	out := raw[:0] // reuse backing array to avoid extra allocation
-	for _, t := range raw {
-		t = strings.Trim(t, ".,;:!?\"'()/\\-_")
-		if t != "" {
-			out = append(out, t)
+	fields := strings.Fields(s)
+	out := make([]string, 0, len(fields)*2)
+	for _, raw := range fields {
+		t := strings.Trim(raw, ".,;:!?\"'()/\\-_")
+		if t == "" {
+			continue
+		}
+		out = append(out, strings.ToLower(t))
+		if parts := splitIdentifier(t); len(parts) > 1 {
+			out = append(out, parts...)
 		}
 	}
 	return out
+}
+
+// NormalizeIdentifier lowercases an identifier-like string and joins its
+// parts with "_", collapsing separator and case variations: "skip_file_write",
+// "skip-file-write" and "skipFileWrite" all normalize to "skip_file_write".
+// Used for exact-name lookups over tool names.
+func NormalizeIdentifier(s string) string {
+	return strings.Join(splitIdentifier(s), "_")
+}
+
+// IdentifierParts returns the number of parts splitIdentifier finds in s —
+// callers use it to tell compound identifiers ("file_write") apart from plain
+// words ("file").
+func IdentifierParts(s string) int {
+	return len(splitIdentifier(s))
+}
+
+// splitIdentifier breaks an identifier-like token into lowercase parts on
+// non-alphanumeric separators and lower→upper camelCase boundaries. Unicode
+// letters count as word characters, so accented words ("calendário") stay
+// whole. Returns the lowercased parts; a plain word yields a single part.
+func splitIdentifier(token string) []string {
+	var parts []string
+	var b strings.Builder
+	flush := func() {
+		if b.Len() > 0 {
+			parts = append(parts, strings.ToLower(b.String()))
+			b.Reset()
+		}
+	}
+	var prev rune
+	for _, r := range token {
+		switch {
+		case unicode.IsUpper(r):
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) {
+				flush() // camelCase boundary
+			}
+			b.WriteRune(r)
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		default:
+			flush()
+		}
+		prev = r
+	}
+	flush()
+	return parts
 }
 
 // bm25Dedupe returns a new slice with duplicate tokens removed,

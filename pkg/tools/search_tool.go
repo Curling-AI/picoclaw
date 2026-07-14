@@ -143,17 +143,17 @@ func (t *BM25SearchTool) Execute(ctx context.Context, args map[string]any) *Tool
 	}
 
 	ranked := cached.engine.Search(query, t.maxSearchResults)
-	if len(ranked) == 0 {
-		logger.DebugCF("discovery", "BM25 search: no matches", map[string]any{"query": query})
-		return SilentResult("No tools found matching the query.")
-	}
-
 	results := make([]ToolSearchResult, len(ranked))
 	for i, r := range ranked {
 		results[i] = ToolSearchResult{
 			Name:        r.Document.Name,
 			Description: r.Document.Description,
 		}
+	}
+	results = promoteExactNameMatch(query, cached.docs, results, t.maxSearchResults)
+	if len(results) == 0 {
+		logger.DebugCF("discovery", "BM25 search: no matches", map[string]any{"query": query})
+		return SilentResult("No tools found matching the query.")
 	}
 
 	logger.InfoCF("discovery", "BM25 search completed", map[string]any{"query": query, "results": len(results)})
@@ -241,6 +241,47 @@ type searchDoc struct {
 // bm25CachedEngine wraps a BM25Engine with its corpus snapshot.
 type bm25CachedEngine struct {
 	engine *utils.BM25Engine[searchDoc]
+	docs   []searchDoc
+}
+
+// promoteExactNameMatch front-loads tools whose name contains the query as a
+// compound identifier. Agents often search by the exact tool name they saw in
+// docs or a prior session ("skip_file_write"), and pure BM25 can rank a
+// sibling that merely *mentions* that name in its description above the tool
+// itself (seen in prod). Only compound single-token queries qualify — plain
+// words ("file") keep pure BM25 ranking.
+func promoteExactNameMatch(
+	query string,
+	docs []searchDoc,
+	results []ToolSearchResult,
+	maxResults int,
+) []ToolSearchResult {
+	fields := strings.Fields(strings.TrimSpace(query))
+	if len(fields) != 1 || utils.IdentifierParts(fields[0]) < 2 {
+		return results
+	}
+	needle := utils.NormalizeIdentifier(fields[0])
+
+	var exact []ToolSearchResult
+	seen := map[string]bool{}
+	for _, d := range docs {
+		if strings.Contains(utils.NormalizeIdentifier(d.Name), needle) {
+			exact = append(exact, ToolSearchResult{Name: d.Name, Description: d.Description})
+			seen[d.Name] = true
+		}
+	}
+	if len(exact) == 0 {
+		return results
+	}
+	for _, r := range results {
+		if !seen[r.Name] {
+			exact = append(exact, r)
+		}
+	}
+	if len(exact) > maxResults {
+		exact = exact[:maxResults]
+	}
+	return exact
 }
 
 // snapshotToSearchDocs converts a HiddenToolSnapshot to BM25 searchDoc slice.
@@ -252,12 +293,15 @@ func snapshotToSearchDocs(snap HiddenToolSnapshot) []searchDoc {
 	return docs
 }
 
-// buildBM25Engine creates a BM25Engine from a slice of searchDocs.
+// buildBM25Engine creates a BM25Engine from a slice of searchDocs. The name
+// is repeated to weigh it above the description (poor man's field boost):
+// sibling tools share most description vocabulary ("project", "file"), so a
+// hit on the tool's own name must outrank a hit on a lookalike description.
 func buildBM25Engine(docs []searchDoc) *utils.BM25Engine[searchDoc] {
 	return utils.NewBM25Engine(
 		docs,
 		func(doc searchDoc) string {
-			return doc.Name + " " + doc.Description
+			return doc.Name + " " + doc.Name + " " + doc.Description
 		},
 	)
 }
@@ -289,7 +333,7 @@ func (t *BM25SearchTool) getOrBuildEngine() *bm25CachedEngine {
 		return nil
 	}
 
-	cached := &bm25CachedEngine{engine: buildBM25Engine(docs)}
+	cached := &bm25CachedEngine{engine: buildBM25Engine(docs), docs: docs}
 	t.cachedEngine = cached
 	t.cacheVersion = snap.Version
 	logger.DebugCF("discovery", "BM25 engine rebuilt", map[string]any{"docs": len(docs), "version": snap.Version})
@@ -316,16 +360,16 @@ func (r *ToolRegistry) SearchBM25(query string, maxSearchResults int) []ToolSear
 	}
 
 	ranked := buildBM25Engine(docs).Search(query, maxSearchResults)
-	if len(ranked) == 0 {
-		return nil
-	}
-
 	out := make([]ToolSearchResult, len(ranked))
 	for i, r := range ranked {
 		out[i] = ToolSearchResult{
 			Name:        r.Document.Name,
 			Description: r.Document.Description,
 		}
+	}
+	out = promoteExactNameMatch(query, docs, out, maxSearchResults)
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

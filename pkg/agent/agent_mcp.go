@@ -204,7 +204,11 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 
 			maxSearchResults := al.cfg.Tools.MCP.Discovery.MaxSearchResults
 			if maxSearchResults <= 0 {
-				maxSearchResults = 5 // Default value
+				// 8 by default: with several MCP servers a pod holds 40-60+
+				// hidden tools and same-family siblings crowd the ranking; 5
+				// slots left the wanted tool out in real sessions. Results are
+				// name+description only, so the extra context cost is small.
+				maxSearchResults = 8
 			}
 
 			logger.InfoCF("agent", "Initializing tool discovery", map[string]any{

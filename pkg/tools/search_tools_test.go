@@ -337,3 +337,86 @@ func TestPromoteTools_ConcurrentWithTickTTL(t *testing.T) {
 	}
 	<-done
 }
+
+// Regression for a real production case (cafe4398 session, 2026-07-13
+// 20:43-20:50): the agent needed 5+ searches to find mcp_skip_skip_file_write
+// because the tokenizer indexed each tool name as a single opaque token — the
+// search only saw descriptions, and sibling tools (plus gdrive) crowded the
+// top-5. Corpus shaped after the pod's real catalog (4 servers, skip families).
+func prodShapedCorpus() []searchDoc {
+	return []searchDoc{
+		{"mcp_skip_skip_file_write", "Write content to a file in the project working tree"},
+		{"mcp_skip_skip_file_read", "Read the contents of a file from the project"},
+		{"mcp_skip_skip_file_list", "List the files of the project"},
+		{"mcp_skip_skip_file_delete", "Delete a file from the project"},
+		{"mcp_skip_skip_file_patch", "Apply a search/replace patch to a project file"},
+		// The real description mentions skip_file_write — it was the only match
+		// for the literal query, returning the wrong tool.
+		{"mcp_skip_skip_project_apply_changes", "Apply pending changes created with skip_file_write and start a build"},
+		{"mcp_skip_skip_project_list", "List your projects"},
+		{"mcp_skip_skip_env_set", "Set an environment variable for the project"},
+		{"mcp_skip_skip_env_delete", "Delete an environment variable from the project"},
+		{"mcp_gdrive_create_file", "Create a new file in Google Drive with the given content"},
+		{"mcp_gdrive_read_file_content", "Read the content of a file stored in Google Drive"},
+		{"mcp_gdrive_copy_file", "Copy a file to a new location in Google Drive"},
+		{"mcp_gcalendar_create_event", "Create a new event in Google Calendar"},
+		{"mcp_excalidraw_create_view", "Create a new Excalidraw diagram view"},
+	}
+}
+
+func searchNames(t *testing.T, query string, topK int) []string {
+	t.Helper()
+	// Same pipeline as BM25SearchTool.Execute: BM25 ranking + exact-name lookup.
+	docs := prodShapedCorpus()
+	ranked := buildBM25Engine(docs).Search(query, topK)
+	results := make([]ToolSearchResult, len(ranked))
+	for i, r := range ranked {
+		results[i] = ToolSearchResult{Name: r.Document.Name, Description: r.Document.Description}
+	}
+	results = promoteExactNameMatch(query, docs, results, topK)
+	names := make([]string, len(results))
+	for i, r := range results {
+		names[i] = r.Name
+	}
+	t.Logf("query %q → %v", query, names)
+	return names
+}
+
+func TestBM25FindsToolByExactSnakeCaseName(t *testing.T) {
+	names := searchNames(t, "skip_file_write", 5)
+	if len(names) == 0 || names[0] != "mcp_skip_skip_file_write" {
+		t.Fatalf("literal name query must rank the tool itself first, got %v", names)
+	}
+}
+
+func TestBM25FindsToolByNameParts(t *testing.T) {
+	for _, query := range []string{
+		"skip file write create new file",
+		"skip file_write write file content",
+		"skip_file_write create new file content write",
+	} {
+		names := searchNames(t, query, 5)
+		found := false
+		for _, n := range names {
+			if n == "mcp_skip_skip_file_write" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("query %q (from prod) did not surface mcp_skip_skip_file_write in the top-5: %v", query, names)
+		}
+	}
+}
+
+func TestBM25FindsFilePatchByParts(t *testing.T) {
+	names := searchNames(t, "skip file_patch apply changes build project", 5)
+	found := false
+	for _, n := range names {
+		if n == "mcp_skip_skip_file_patch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("file_patch missing from the top-5: %v", names)
+	}
+}
