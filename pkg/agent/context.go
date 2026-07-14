@@ -26,7 +26,7 @@ type ContextBuilder struct {
 	skillsLoader   *skills.SkillsLoader
 	memory         *MemoryStore
 	splitOnMarker  bool
-	skillDiscovery bool // defer the skill catalog behind skill_search (lean prompt)
+	skillDiscovery bool // defer the skill catalog behind find_installed_skills (lean prompt)
 	agentDiscovery func(agentID string) []AgentDescriptor
 	promptRegistry *PromptRegistry
 
@@ -75,13 +75,13 @@ func (cb *ContextBuilder) WithSplitOnMarker(enabled bool) *ContextBuilder {
 // WithSkillDiscovery defers the skill catalog: instead of listing every skill's
 // name+description in the system prompt (linear token cost, worst exactly when
 // evolution keeps creating skills), the prompt carries only a one-line hint and
-// the agent pulls relevant skills on demand via the skill_search tool.
+// the agent pulls relevant skills on demand via the find_installed_skills tool.
 func (cb *ContextBuilder) WithSkillDiscovery(enabled bool) *ContextBuilder {
 	cb.skillDiscovery = enabled
 	return cb
 }
 
-// SkillsLoader exposes the builder's loader so tools (e.g. skill_search) can
+// SkillsLoader exposes the builder's loader so tools (e.g. find_installed_skills) can
 // enumerate installed skills without constructing a second loader.
 func (cb *ContextBuilder) SkillsLoader() *skills.SkillsLoader {
 	return cb.skillsLoader
@@ -294,7 +294,7 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	// Skills. Default: inline the catalog (names+descriptions), AI reads full
 	// content with read_file. With skill discovery on, the catalog is deferred —
 	// only a one-line hint sits in the prompt and the agent pulls relevant skills
-	// via skill_search, keeping the prompt lean regardless of skill count.
+	// via find_installed_skills, keeping the prompt lean regardless of skill count.
 	if opts.IncludeSkillCatalog && cb.skillDiscovery {
 		if hint := cb.skillDiscoveryHint(opts.AllowedSkills); hint != "" {
 			add(PromptPart{
@@ -460,7 +460,7 @@ func (cb *ContextBuilder) buildSystemPromptForRequest(
 }
 
 // skillDiscoveryHint replaces the full skill catalog with a one-line pointer to
-// the skill_search tool when discovery is on. Returns "" when there are no
+// the find_installed_skills tool when discovery is on. Returns "" when there are no
 // enabled skills (nothing to advertise).
 func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
 	if cb.skillsLoader == nil {
@@ -484,7 +484,7 @@ func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
 	}
 	return fmt.Sprintf(
 		"# Skills\n\nYou have %d installed skill(s) that extend your capabilities. "+
-			"They are not listed here to keep this prompt lean — call the skill_search tool "+
+			"They are not listed here to keep this prompt lean — call the find_installed_skills tool "+
 			"with a natural-language description of what you need to find the relevant one(s), "+
 			"then read the returned SKILL.md with read_file.",
 		count,

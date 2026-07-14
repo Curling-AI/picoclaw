@@ -498,7 +498,7 @@ func TestSkillDiscovery_DefersCatalogToHint(t *testing.T) {
 	if strings.Contains(sys, "<skills>") || strings.Contains(sys, "Extract text from PDF") {
 		t.Fatalf("discovery on should NOT inline the catalog: %q", sys)
 	}
-	if !strings.Contains(sys, "skill_search") || !strings.Contains(sys, "1 installed skill") {
-		t.Fatalf("discovery on should show a skill_search hint with the count: %q", sys)
+	if !strings.Contains(sys, "find_installed_skills") || !strings.Contains(sys, "1 installed skill") {
+		t.Fatalf("discovery on should show a find_installed_skills hint with the count: %q", sys)
 	}
 }

@@ -11,43 +11,44 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-// SkillSearchToolName is the on-demand local-skill discovery tool. It exists so
+// FindInstalledSkillsToolName is the on-demand local-skill discovery tool. It exists so
 // the full skill catalog can be deferred out of the system prompt (kept lean),
 // mirroring the MCP tool_search deferral: the agent describes what it needs and
 // gets back the relevant installed skills instead of every skill's summary
 // riding in every prompt.
-const SkillSearchToolName = "skill_search"
+const FindInstalledSkillsToolName = "find_installed_skills"
 
 // skillLister is the subset of *skills.SkillsLoader the tool needs (eases tests).
 type skillLister interface {
 	ListSkills() []skills.SkillInfo
 }
 
-// SkillSearchTool ranks the assistant's installed skills against a natural
+// FindInstalledSkillsTool ranks the assistant's installed skills against a natural
 // language query using BM25 over each skill's name+description.
-type SkillSearchTool struct {
+type FindInstalledSkillsTool struct {
 	loader     skillLister
 	maxResults int
 }
 
-// NewSkillSearchTool builds the tool over a skills loader. maxResults <= 0
+// NewFindInstalledSkillsTool builds the tool over a skills loader. maxResults <= 0
 // defaults to 5.
-func NewSkillSearchTool(loader skillLister, maxResults int) *SkillSearchTool {
+func NewFindInstalledSkillsTool(loader skillLister, maxResults int) *FindInstalledSkillsTool {
 	if maxResults <= 0 {
 		maxResults = 5
 	}
-	return &SkillSearchTool{loader: loader, maxResults: maxResults}
+	return &FindInstalledSkillsTool{loader: loader, maxResults: maxResults}
 }
 
-func (t *SkillSearchTool) Name() string { return SkillSearchToolName }
+func (t *FindInstalledSkillsTool) Name() string { return FindInstalledSkillsToolName }
 
-func (t *SkillSearchTool) Description() string {
-	return "Search your installed skills on-demand with a natural-language description of the task. " +
-		"Returns the matching skills' name, description, and SKILL.md location — read that file with " +
-		"read_file to use the skill. Use this instead of expecting every skill to be listed upfront."
+func (t *FindInstalledSkillsTool) Description() string {
+	return "Find an ALREADY-INSTALLED skill to use, by a natural-language description of the task. " +
+		"Returns matching skills' name, description, and SKILL.md location — read that file with " +
+		"read_file to use the skill. Your installed skills are not all listed in the prompt, so search " +
+		"here first. (To discover and INSTALL new skills from remote registries, use find_skills instead.)"
 }
 
-func (t *SkillSearchTool) PromptMetadata() PromptMetadata {
+func (t *FindInstalledSkillsTool) PromptMetadata() PromptMetadata {
 	return PromptMetadata{
 		Layer:  ToolPromptLayerCapability,
 		Slot:   ToolPromptSlotTooling,
@@ -55,7 +56,7 @@ func (t *SkillSearchTool) PromptMetadata() PromptMetadata {
 	}
 }
 
-func (t *SkillSearchTool) Parameters() map[string]any {
+func (t *FindInstalledSkillsTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -82,7 +83,7 @@ type skillSearchResult struct {
 	Location    string `json:"location"`
 }
 
-func (t *SkillSearchTool) Execute(_ context.Context, args map[string]any) *ToolResult {
+func (t *FindInstalledSkillsTool) Execute(_ context.Context, args map[string]any) *ToolResult {
 	query, ok := args["query"].(string)
 	if !ok || strings.TrimSpace(query) == "" {
 		return ErrorResult("Missing or invalid 'query' argument. Must be a non-empty string.")
@@ -117,7 +118,8 @@ func (t *SkillSearchTool) Execute(_ context.Context, args map[string]any) *ToolR
 			Location:    r.Document.Location,
 		}
 	}
-	logger.InfoCF("discovery", "skill_search completed", map[string]any{"query": query, "results": len(results)})
+	logger.InfoCF("discovery", "find_installed_skills completed",
+		map[string]any{"query": query, "results": len(results)})
 
 	body, err := json.Marshal(results)
 	if err != nil {
