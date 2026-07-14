@@ -285,6 +285,16 @@ func registerSharedTools(
 			}
 		}
 
+		// skill_search: on-demand LOCAL skill discovery. When enabled, the full
+		// skill catalog is deferred out of the system prompt (WithSkillDiscovery
+		// in instance.go) and the agent finds installed skills through this tool
+		// instead — keeps the prompt lean as the skill set grows.
+		if skills_enabled && cfg.Tools.Skills.Discovery.Enabled {
+			if loader := agent.ContextBuilder.SkillsLoader(); loader != nil {
+				agent.Tools.Register(tools.NewSkillSearchTool(loader, cfg.Tools.Skills.Discovery.MaxSearchResults))
+			}
+		}
+
 		// spawn (async), subagent (sync) and spawn_status share a
 		// SubagentManager; each tool is gated by its own config flag, and the
 		// manager is constructed when any of them is enabled.

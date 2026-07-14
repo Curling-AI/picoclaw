@@ -26,6 +26,7 @@ type ContextBuilder struct {
 	skillsLoader   *skills.SkillsLoader
 	memory         *MemoryStore
 	splitOnMarker  bool
+	skillDiscovery bool // defer the skill catalog behind skill_search (lean prompt)
 	agentDiscovery func(agentID string) []AgentDescriptor
 	promptRegistry *PromptRegistry
 
@@ -69,6 +70,21 @@ func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuil
 func (cb *ContextBuilder) WithSplitOnMarker(enabled bool) *ContextBuilder {
 	cb.splitOnMarker = enabled
 	return cb
+}
+
+// WithSkillDiscovery defers the skill catalog: instead of listing every skill's
+// name+description in the system prompt (linear token cost, worst exactly when
+// evolution keeps creating skills), the prompt carries only a one-line hint and
+// the agent pulls relevant skills on demand via the skill_search tool.
+func (cb *ContextBuilder) WithSkillDiscovery(enabled bool) *ContextBuilder {
+	cb.skillDiscovery = enabled
+	return cb
+}
+
+// SkillsLoader exposes the builder's loader so tools (e.g. skill_search) can
+// enumerate installed skills without constructing a second loader.
+func (cb *ContextBuilder) SkillsLoader() *skills.SkillsLoader {
+	return cb.skillsLoader
 }
 
 func (cb *ContextBuilder) WithAgentDiscovery(
@@ -275,34 +291,52 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 		})
 	}
 
-	// Skills - show summary, AI can read full content with read_file tool
-	skillsSummary := ""
-	if opts.IncludeSkillCatalog {
-		skillsSummary = cb.buildSkillsSummary(opts.AllowedSkills)
-	}
-	if skillsSummary != "" {
-		skillIntro := "The following skills extend your capabilities."
-		readFileAllowed := promptAllowsTool(
-			PromptBuildRequest{AllowedTools: opts.AllowedTools},
-			"read_file",
-		)
-		if opts.IncludeToolUseRule && readFileAllowed {
-			skillIntro += " To use a skill, read its SKILL.md file using the read_file tool."
+	// Skills. Default: inline the catalog (names+descriptions), AI reads full
+	// content with read_file. With skill discovery on, the catalog is deferred —
+	// only a one-line hint sits in the prompt and the agent pulls relevant skills
+	// via skill_search, keeping the prompt lean regardless of skill count.
+	if opts.IncludeSkillCatalog && cb.skillDiscovery {
+		if hint := cb.skillDiscoveryHint(opts.AllowedSkills); hint != "" {
+			add(PromptPart{
+				ID:      "capability.skill_catalog",
+				Layer:   PromptLayerCapability,
+				Slot:    PromptSlotSkillCatalog,
+				Source:  PromptSource{ID: PromptSourceSkillCatalog, Name: "skill:index"},
+				Title:   "skill catalog",
+				Content: hint,
+				Stable:  true,
+				Cache:   PromptCacheEphemeral,
+			})
 		}
-		add(PromptPart{
-			ID:     "capability.skill_catalog",
-			Layer:  PromptLayerCapability,
-			Slot:   PromptSlotSkillCatalog,
-			Source: PromptSource{ID: PromptSourceSkillCatalog, Name: "skill:index"},
-			Title:  "skill catalog",
-			Content: fmt.Sprintf(`# Skills
+	} else {
+		skillsSummary := ""
+		if opts.IncludeSkillCatalog {
+			skillsSummary = cb.buildSkillsSummary(opts.AllowedSkills)
+		}
+		if skillsSummary != "" {
+			skillIntro := "The following skills extend your capabilities."
+			readFileAllowed := promptAllowsTool(
+				PromptBuildRequest{AllowedTools: opts.AllowedTools},
+				"read_file",
+			)
+			if opts.IncludeToolUseRule && readFileAllowed {
+				skillIntro += " To use a skill, read its SKILL.md file using the read_file tool."
+			}
+			add(PromptPart{
+				ID:     "capability.skill_catalog",
+				Layer:  PromptLayerCapability,
+				Slot:   PromptSlotSkillCatalog,
+				Source: PromptSource{ID: PromptSourceSkillCatalog, Name: "skill:index"},
+				Title:  "skill catalog",
+				Content: fmt.Sprintf(`# Skills
 
 %s
 
 %s`, skillIntro, skillsSummary),
-			Stable: true,
-			Cache:  PromptCacheEphemeral,
-		})
+				Stable: true,
+				Cache:  PromptCacheEphemeral,
+			})
+		}
 	}
 
 	// Memory context
@@ -423,6 +457,38 @@ func (cb *ContextBuilder) buildSystemPromptForRequest(
 		blocks = append(blocks, promptContentBlock(part, cacheControlForPromptPart(part)))
 	}
 	return staticPrompt, blocks
+}
+
+// skillDiscoveryHint replaces the full skill catalog with a one-line pointer to
+// the skill_search tool when discovery is on. Returns "" when there are no
+// enabled skills (nothing to advertise).
+func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
+	if cb.skillsLoader == nil {
+		return ""
+	}
+	allowedSet := cleanAllowedSet(allowed)
+	count := 0
+	for _, s := range cb.skillsLoader.ListSkills() {
+		if s.Disabled {
+			continue
+		}
+		if len(allowedSet) > 0 {
+			if _, ok := allowedSet[strings.ToLower(strings.TrimSpace(s.Name))]; !ok {
+				continue
+			}
+		}
+		count++
+	}
+	if count == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"# Skills\n\nYou have %d installed skill(s) that extend your capabilities. "+
+			"They are not listed here to keep this prompt lean — call the skill_search tool "+
+			"with a natural-language description of what you need to find the relevant one(s), "+
+			"then read the returned SKILL.md with read_file.",
+		count,
+	)
 }
 
 func (cb *ContextBuilder) buildSkillsSummary(allowed []string) string {
