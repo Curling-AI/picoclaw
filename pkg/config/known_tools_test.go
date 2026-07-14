@@ -37,6 +37,8 @@ func setNativeToolEnabled(t *ToolsConfig, name string, v bool) {
 		t.EditFile.Enabled = v
 	case "find_skills":
 		t.FindSkills.Enabled = v
+	case "recall":
+		t.Recall.Enabled = v
 	case "i2c":
 		t.I2C.Enabled = v
 	case "install_skill":
