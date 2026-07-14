@@ -422,13 +422,9 @@ type ToolFeedbackConfig struct {
 }
 
 type AgentDefaults struct {
-	Name      string `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
-	Workspace string `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	StateDir  string `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
-	// RecentNotesDays is how many days of recent daily notes are injected into
-	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
-	// recall tool for daily notes — keeps the prompt lean.
-	RecentNotesDays           *int     `json:"recent_notes_days,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
+	Name                      string   `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
+	Workspace                 string   `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	StateDir                  string   `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
 	RestrictToWorkspace       bool     `json:"restrict_to_workspace"           env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
 	AllowReadOutsideWorkspace bool     `json:"allow_read_outside_workspace"    env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
 	Provider                  string   `json:"provider"                        env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
@@ -463,6 +459,10 @@ type AgentDefaults struct {
 	TurnProfile          TurnProfileConfig  `json:"turn_profile,omitempty"`
 	MaxLLMRetries        int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
 	LLMRetryBackoffSecs  int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
+	// RecentNotesDays is how many days of recent daily notes are injected into
+	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
+	// recall tool for daily notes — keeps the prompt lean.
+	RecentNotesDays *int `json:"recent_notes_days,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
 }
 
 const DefaultMaxMediaSize = 20 * 1024 * 1024 // 20 MB

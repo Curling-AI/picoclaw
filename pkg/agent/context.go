@@ -354,6 +354,19 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 
 	// Memory context
 	memoryContext := cb.memory.GetMemoryContext(cb.recentNotesDays)
+	// When daily notes are deferred out of the prompt (recentNotesDays == 0),
+	// nudge the agent that they're still reachable — otherwise it's blind to
+	// recent context and episodic detail it can no longer see passively.
+	if cb.recentNotesDays == 0 {
+		hint := "Your recent daily notes are not shown above to keep this prompt lean. Past daily notes " +
+			"and episodic details from earlier conversations remain searchable with the recall tool " +
+			"(by topic or by date) — use it whenever you need context beyond your long-term memory."
+		if memoryContext == "" {
+			memoryContext = hint
+		} else {
+			memoryContext += "\n\n---\n\n" + hint
+		}
+	}
 	if memoryContext != "" {
 		add(PromptPart{
 			ID:      "context.memory",

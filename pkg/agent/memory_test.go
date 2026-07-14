@@ -111,6 +111,10 @@ func TestWithRecentNotesDays_GatesPromptInjection(t *testing.T) {
 	if strings.Contains(sys, "yesterday we shipped") || strings.Contains(sys, "Recent Daily Notes") {
 		t.Fatalf("recentNotesDays=0 should keep daily notes out of the prompt: %q", sys)
 	}
+	// With notes deferred, the prompt must nudge the agent toward the recall tool.
+	if !strings.Contains(sys, "recall tool") {
+		t.Fatalf("recentNotesDays=0 should nudge the agent about the recall tool: %q", sys)
+	}
 
 	full := NewContextBuilder(ws) // default 3
 	sysFull := full.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})[0].Content
