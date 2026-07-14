@@ -459,9 +459,12 @@ func DefaultConfig() *Config {
 					Enabled: false,
 				},
 				Discovery: ToolDiscoveryConfig{
-					Enabled:          false,
-					TTL:              5,
-					MaxSearchResults: 5,
+					Enabled: false,
+					TTL:     5,
+					// 8: with several MCP servers an agent holds 40-60+ hidden
+					// tools and same-family siblings crowd the ranking; 5 slots
+					// left the wanted tool out in real sessions.
+					MaxSearchResults: 8,
 					UseBM25:          true,
 					UseRegex:         false,
 				},
