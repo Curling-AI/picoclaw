@@ -480,6 +480,9 @@ func DefaultConfig() *Config {
 			FindSkills: ToolConfig{
 				Enabled: true,
 			},
+			Recall: ToolConfig{
+				Enabled: true,
+			},
 			I2C: ToolConfig{
 				Enabled: false, // Hardware tool - Linux only
 			},

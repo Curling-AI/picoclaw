@@ -1212,6 +1212,7 @@ type ToolsConfig struct {
 	AppendFile      ToolConfig          `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
 	EditFile        ToolConfig          `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
 	FindSkills      ToolConfig          `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
+	Recall          ToolConfig          `json:"recall"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_RECALL_"`
 	I2C             ToolConfig          `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
 	InstallSkill    ToolConfig          `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
 	ListDir         ToolConfig          `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
@@ -1980,6 +1981,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.EditFile.Enabled
 	case "find_skills":
 		return t.FindSkills.Enabled
+	case "recall":
+		return t.Recall.Enabled
 	case "i2c":
 		return t.I2C.Enabled
 	case "install_skill":
@@ -2024,7 +2027,7 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 func KnownNativeTools() []string {
 	return []string{
 		"web", "cron", "exec", "skills", "media_cleanup",
-		"append_file", "edit_file", "find_skills",
+		"append_file", "edit_file", "find_skills", "recall",
 		"i2c", "install_skill", "list_dir", "load_image", "message",
 		"read_file", "serial", "spawn", "spawn_status", "spi", "subagent",
 		"web_fetch", "send_file", "send_tts", "write_file", "mcp",
