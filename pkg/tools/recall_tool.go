@@ -42,9 +42,11 @@ func NewRecallTool(workspace string, maxResults int) *RecallTool {
 func (t *RecallTool) Name() string { return RecallToolName }
 
 func (t *RecallTool) Description() string {
-	return "Search your long-term memory and daily notes for relevant past facts. The prompt only " +
-		"carries the last few days of notes, so use this to recall anything older or beyond that window. " +
-		"Returns the most relevant memory entries with their source file and date."
+	return "Search your own memory — long-term facts (MEMORY.md) and the daily notes, which hold the " +
+		"EPISODIC record of what happened in past conversations (decisions, events, what you did on a " +
+		"given day). The prompt only shows recent notes, so use this to recall anything older or beyond " +
+		"that window. Query by topic (\"the postgres incident\") OR by date (\"2026-07-12\", \"20260712\") " +
+		"to see what happened then. Returns the most relevant entries with their date and a snippet."
 }
 
 func (t *RecallTool) PromptMetadata() PromptMetadata {
@@ -60,8 +62,9 @@ func (t *RecallTool) Parameters() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"query": map[string]any{
-				"type":        "string",
-				"description": "Natural-language description of the fact or context you want to recall.",
+				"type": "string",
+				"description": "What to recall: a topic/description of the fact or context, or a date " +
+					"(YYYY-MM-DD or YYYYMMDD) to retrieve what happened that day.",
 			},
 		},
 		"required": []string{"query"},
@@ -92,8 +95,11 @@ func (t *RecallTool) Execute(_ context.Context, args map[string]any) *ToolResult
 		return SilentResult("No memory to search yet.")
 	}
 
+	// Index the entry's date (both 20260712 and 2026-07-12 forms) alongside its
+	// text so date queries match — the BM25 identifier tokenizer splits the
+	// hyphenated form into 2026/07/12 parts, so either query form hits.
 	engine := utils.NewBM25Engine(docs, func(d recallDoc) string {
-		return d.Heading + " " + d.Body
+		return d.Source + " " + hyphenatedDate(d.Source) + " " + d.Heading + " " + d.Body
 	})
 	ranked := engine.Search(query, t.maxResults)
 	if len(ranked) == 0 {
@@ -195,6 +201,20 @@ func splitMemorySections(content, source string) []recallDoc {
 		}
 	}
 	return docs
+}
+
+// hyphenatedDate turns an 8-digit YYYYMMDD source into "YYYY-MM-DD" so date
+// queries in either form match. Non-date sources (e.g. "MEMORY.md") yield "".
+func hyphenatedDate(source string) string {
+	if len(source) != 8 {
+		return ""
+	}
+	for _, r := range source {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return source[0:4] + "-" + source[4:6] + "-" + source[6:8]
 }
 
 func fileExists(p string) bool {

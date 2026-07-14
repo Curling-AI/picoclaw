@@ -60,3 +60,32 @@ func TestSplitMemorySections(t *testing.T) {
 		t.Fatalf("flat file should index as one headingless doc: %#v", flat)
 	}
 }
+
+func TestRecallTool_SearchByDate(t *testing.T) {
+	ws := t.TempDir()
+	writeRecallFile(t, ws, "memory/202601/20260112.md",
+		"# 2026-01-12\n\n## Postgres incident\n\nConnection limits raised.\n")
+	writeRecallFile(t, ws, "memory/202607/20260712.md",
+		"# 2026-07-12\n\n## Deploy\n\nShipped the caching work.\n")
+
+	tool := NewRecallTool(ws, 3)
+	// Hyphenated date query hits the note from that day.
+	res := tool.Execute(context.Background(), map[string]any{"query": "2026-01-12"})
+	if res.IsError || !strings.Contains(res.ForLLM, "Postgres incident") {
+		t.Fatalf("date query 2026-01-12 should surface that day's note: %s", res.ForLLM)
+	}
+	// Compact form works too.
+	res2 := tool.Execute(context.Background(), map[string]any{"query": "20260712"})
+	if res2.IsError || !strings.Contains(res2.ForLLM, "Deploy") {
+		t.Fatalf("date query 20260712 should surface that day's note: %s", res2.ForLLM)
+	}
+}
+
+func TestHyphenatedDate(t *testing.T) {
+	if got := hyphenatedDate("20260712"); got != "2026-07-12" {
+		t.Fatalf("hyphenatedDate = %q, want 2026-07-12", got)
+	}
+	if got := hyphenatedDate("MEMORY.md"); got != "" {
+		t.Fatalf("non-date source should yield empty, got %q", got)
+	}
+}
