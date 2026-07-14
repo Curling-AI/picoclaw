@@ -100,13 +100,15 @@ func TestSingleSystemMessage(t *testing.T) {
 				t.Errorf("last message should be user, got %s", msgs[len(msgs)-1].Role)
 			}
 
-			// System message must contain identity (static) and time (dynamic)
+			// System message must contain identity (static) and the date (dynamic,
+			// day granularity — the precise time rides in the turn tail to keep
+			// the cache prefix stable).
 			sys := msgs[0].Content
 			if !strings.Contains(sys, "picoclaw") {
 				t.Error("system message missing identity")
 			}
-			if !strings.Contains(sys, "Current Time") {
-				t.Error("system message missing dynamic time context")
+			if !strings.Contains(sys, "Current Date") {
+				t.Error("system message missing dynamic date context")
 			}
 
 			// Summary handling

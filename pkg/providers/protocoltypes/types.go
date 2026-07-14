@@ -1,6 +1,9 @@
 package protocoltypes
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type ToolCall struct {
 	ID               string         `json:"id"`
@@ -58,6 +61,44 @@ type UsageInfo struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedPromptTokens is the subset of PromptTokens served from the
+	// provider's prompt cache (billed at a fraction of the input rate). Parsed
+	// from the OpenAI-style prompt_tokens_details.cached_tokens and the
+	// Anthropic-style cache_read_input_tokens. Zero when the provider reports
+	// no cache reuse. Included in PromptTokens, not additive.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+}
+
+// UnmarshalJSON reads the flat token counts plus the cached-token count, which
+// providers nest differently: OpenAI/openai-compat under
+// prompt_tokens_details.cached_tokens, Anthropic-style gateways as a top-level
+// cache_read_input_tokens. Either populates CachedPromptTokens.
+func (u *UsageInfo) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		CachedPromptTokens  int `json:"cached_prompt_tokens"`
+		CacheReadInputToken int `json:"cache_read_input_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	u.PromptTokens = raw.PromptTokens
+	u.CompletionTokens = raw.CompletionTokens
+	u.TotalTokens = raw.TotalTokens
+	switch {
+	case raw.CachedPromptTokens > 0:
+		u.CachedPromptTokens = raw.CachedPromptTokens
+	case raw.PromptTokensDetails != nil && raw.PromptTokensDetails.CachedTokens > 0:
+		u.CachedPromptTokens = raw.PromptTokensDetails.CachedTokens
+	case raw.CacheReadInputToken > 0:
+		u.CachedPromptTokens = raw.CacheReadInputToken
+	}
+	return nil
 }
 
 // CacheControl marks a content block for LLM-side prefix caching.

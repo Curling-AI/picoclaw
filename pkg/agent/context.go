@@ -805,11 +805,18 @@ func formatCurrentSenderLine(senderID, senderDisplayName string) string {
 func (cb *ContextBuilder) buildDynamicContext(
 	channel, chatID, senderID, senderDisplayName string,
 ) string {
-	now := time.Now().Format("2006-01-02 15:04 (Monday)")
+	// Date only (day granularity): this block sits in the system prompt, which
+	// is the cache prefix for the whole request. A minute-precision clock here
+	// changed the prefix every minute and invalidated the cached conversation
+	// history between turns — on a mostly-input workload that is the dominant
+	// cost. The precise time lives in the turn tail instead (buildTurnTimeHint),
+	// after the history, where it costs nothing to cache. Runtime/session/sender
+	// are stable, so they stay in the prefix.
+	today := time.Now().Format("2006-01-02 (Monday)")
 	rt := fmt.Sprintf("%s %s, Go %s", runtime.GOOS, runtime.GOARCH, runtime.Version())
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "## Current Time\n%s\n\n## Runtime\n%s", now, rt)
+	fmt.Fprintf(&sb, "## Current Date\n%s\n\n## Runtime\n%s", today, rt)
 
 	if channel != "" && chatID != "" {
 		fmt.Fprintf(&sb, "\n\n## Current Session\nChannel: %s\nChat ID: %s", channel, chatID)
@@ -1012,15 +1019,33 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 
 	// Add current user message. Media-only turns must still be preserved so
 	// multimodal providers receive the uploaded image even when the user sends
-	// no accompanying text.
+	// no accompanying text. The precise clock is prepended here — the turn tail,
+	// after the cached history — so the agent still knows the time without the
+	// minute changing invalidating the history prefix. It is added only to the
+	// assembled request, never to persisted history, so replayed turns stay
+	// byte-stable. Suppressed system prompt means no picoclaw context at all,
+	// including the time hint.
 	if strings.TrimSpace(req.CurrentMessage) != "" || len(req.Media) > 0 {
-		messages = append(messages, userPromptMessage(req.CurrentMessage, req.Media))
+		content := req.CurrentMessage
+		// Only prefix the time onto a real text message; a media-only turn stays
+		// clean (the agent still has the date in the system prompt).
+		if !req.SuppressDefaultSystemPrompt && strings.TrimSpace(content) != "" {
+			content = buildTurnTimeHint() + content
+		}
+		messages = append(messages, userPromptMessage(content, req.Media))
 	}
 	if len(messages) == 0 {
 		messages = append(messages, userPromptMessage("", nil))
 	}
 
 	return messages
+}
+
+// buildTurnTimeHint returns a one-line precise-time preamble for the current
+// turn's user message. Kept out of the system prompt so it never invalidates
+// the cached prefix (see buildDynamicContext).
+func buildTurnTimeHint() string {
+	return fmt.Sprintf("[Current time: %s]\n\n", time.Now().Format("15:04 (Monday)"))
 }
 
 func sanitizeHistoryForProvider(history []providers.Message) []providers.Message {

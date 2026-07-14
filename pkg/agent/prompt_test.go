@@ -103,7 +103,9 @@ func TestBuildMessagesFromPrompt_IncludesSystemPromptOverlay(t *testing.T) {
 	if !strings.Contains(messages[0].Content, "Use child-only system instructions.") {
 		t.Fatalf("system prompt missing overlay: %q", messages[0].Content)
 	}
-	if messages[1].Role != "user" || messages[1].Content != "do child task" {
+	// The turn's precise time is prepended to the current message (turn tail),
+	// not the cached system prefix — so the exact user text follows the hint.
+	if messages[1].Role != "user" || !strings.HasSuffix(messages[1].Content, "do child task") {
 		t.Fatalf("messages[1] = %#v, want user task", messages[1])
 	}
 }
@@ -445,5 +447,33 @@ func TestContextBuilder_CollectsRegisteredPromptContributors(t *testing.T) {
 	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
 	if !strings.Contains(messages[0].Content, "registered contributor prompt") {
 		t.Fatalf("system prompt missing contributor content: %q", messages[0].Content)
+	}
+}
+
+func TestBuildMessages_TimeInTurnTailNotSystemPrefix(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	cb := NewContextBuilder(t.TempDir())
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	if len(messages) < 2 {
+		t.Fatalf("messages len = %d, want >= 2", len(messages))
+	}
+	system := messages[0]
+	user := messages[len(messages)-1]
+
+	// The cacheable system prefix carries only the date (day granularity), never
+	// a minute-precision clock — a minute change must not invalidate the prefix.
+	if !strings.Contains(system.Content, "## Current Date") {
+		t.Errorf("system prompt missing Current Date block: %q", system.Content)
+	}
+	if strings.Contains(system.Content, "## Current Time") {
+		t.Errorf("system prompt still carries minute-precision time (breaks cache): %q", system.Content)
+	}
+	// The precise time rides in the turn tail (current user message).
+	if !strings.HasPrefix(user.Content, "[Current time:") {
+		t.Errorf("current message missing time hint: %q", user.Content)
+	}
+	if !strings.HasSuffix(user.Content, "hello") {
+		t.Errorf("current message lost user text: %q", user.Content)
 	}
 }
