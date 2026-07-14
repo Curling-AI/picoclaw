@@ -75,3 +75,46 @@ func TestGetRecentDailyNotesCapsPollutedDay(t *testing.T) {
 		t.Fatalf("o corte deveria cair numa fronteira de entrada: %q", out[tailStart:tailStart+40])
 	}
 }
+
+func TestGetMemoryContext_RecentDaysWindow(t *testing.T) {
+	ms := NewMemoryStore(t.TempDir())
+	if err := ms.WriteLongTerm("durable fact about the user"); err != nil {
+		t.Fatalf("WriteLongTerm: %v", err)
+	}
+	if err := ms.AppendToday("something that happened today"); err != nil {
+		t.Fatalf("AppendToday: %v", err)
+	}
+
+	// days > 0: long-term + recent notes both injected.
+	withNotes := ms.GetMemoryContext(3)
+	if !strings.Contains(withNotes, "durable fact") || !strings.Contains(withNotes, "something that happened today") {
+		t.Fatalf("days=3 should include long-term and recent notes: %q", withNotes)
+	}
+
+	// days == 0: only long-term; daily notes deferred to the recall tool.
+	leanCtx := ms.GetMemoryContext(0)
+	if !strings.Contains(leanCtx, "durable fact") {
+		t.Fatalf("days=0 should still include long-term memory: %q", leanCtx)
+	}
+	if strings.Contains(leanCtx, "something that happened today") || strings.Contains(leanCtx, "Recent Daily Notes") {
+		t.Fatalf("days=0 must NOT inject daily notes: %q", leanCtx)
+	}
+}
+
+func TestWithRecentNotesDays_GatesPromptInjection(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	ws := t.TempDir()
+	NewMemoryStore(ws).AppendToday("yesterday we shipped the caching work")
+
+	lean := NewContextBuilder(ws).WithRecentNotesDays(0)
+	sys := lean.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})[0].Content
+	if strings.Contains(sys, "yesterday we shipped") || strings.Contains(sys, "Recent Daily Notes") {
+		t.Fatalf("recentNotesDays=0 should keep daily notes out of the prompt: %q", sys)
+	}
+
+	full := NewContextBuilder(ws) // default 3
+	sysFull := full.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})[0].Content
+	if !strings.Contains(sysFull, "yesterday we shipped") {
+		t.Fatalf("default should inject recent daily notes: %q", sysFull)
+	}
+}

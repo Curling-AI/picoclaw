@@ -22,13 +22,14 @@ import (
 )
 
 type ContextBuilder struct {
-	workspace      string
-	skillsLoader   *skills.SkillsLoader
-	memory         *MemoryStore
-	splitOnMarker  bool
-	skillDiscovery bool // defer the skill catalog behind find_installed_skills (lean prompt)
-	agentDiscovery func(agentID string) []AgentDescriptor
-	promptRegistry *PromptRegistry
+	workspace       string
+	skillsLoader    *skills.SkillsLoader
+	memory          *MemoryStore
+	splitOnMarker   bool
+	skillDiscovery  bool // defer the skill catalog behind find_installed_skills (lean prompt)
+	recentNotesDays int  // days of daily notes injected into the prompt (0 = rely on recall)
+	agentDiscovery  func(agentID string) []AgentDescriptor
+	promptRegistry  *PromptRegistry
 
 	// Cache for system prompt to avoid rebuilding on every call.
 	// This fixes issue #607: repeated reprocessing of the entire context.
@@ -81,6 +82,17 @@ func (cb *ContextBuilder) WithSkillDiscovery(enabled bool) *ContextBuilder {
 	return cb
 }
 
+// WithRecentNotesDays sets how many days of recent daily notes are injected into
+// the system prompt. 0 injects none — the recall tool then supplies daily notes
+// on demand, keeping the prompt lean.
+func (cb *ContextBuilder) WithRecentNotesDays(days int) *ContextBuilder {
+	if days < 0 {
+		days = 0
+	}
+	cb.recentNotesDays = days
+	return cb
+}
+
 // SkillsLoader exposes the builder's loader so tools (e.g. find_installed_skills) can
 // enumerate installed skills without constructing a second loader.
 func (cb *ContextBuilder) SkillsLoader() *skills.SkillsLoader {
@@ -130,10 +142,11 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 	globalSkillsDir := filepath.Join(getGlobalConfigDir(), "skills")
 
 	return &ContextBuilder{
-		workspace:      workspace,
-		skillsLoader:   skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
-		memory:         NewMemoryStore(workspace),
-		promptRegistry: NewPromptRegistry(),
+		workspace:       workspace,
+		skillsLoader:    skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
+		memory:          NewMemoryStore(workspace),
+		promptRegistry:  NewPromptRegistry(),
+		recentNotesDays: 3, // upstream default; instance.go overrides from config
 	}
 }
 
@@ -340,7 +353,7 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	}
 
 	// Memory context
-	memoryContext := cb.memory.GetMemoryContext()
+	memoryContext := cb.memory.GetMemoryContext(cb.recentNotesDays)
 	if memoryContext != "" {
 		add(PromptPart{
 			ID:      "context.memory",

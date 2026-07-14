@@ -422,9 +422,13 @@ type ToolFeedbackConfig struct {
 }
 
 type AgentDefaults struct {
-	Name                      string   `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
-	Workspace                 string   `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	StateDir                  string   `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
+	Name      string `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
+	Workspace string `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	StateDir  string `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
+	// RecentNotesDays is how many days of recent daily notes are injected into
+	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
+	// recall tool for daily notes — keeps the prompt lean.
+	RecentNotesDays           *int     `json:"recent_notes_days,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
 	RestrictToWorkspace       bool     `json:"restrict_to_workspace"           env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
 	AllowReadOutsideWorkspace bool     `json:"allow_read_outside_workspace"    env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
 	Provider                  string   `json:"provider"                        env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
@@ -468,6 +472,19 @@ func (d *AgentDefaults) GetMaxMediaSize() int {
 		return d.MaxMediaSize
 	}
 	return DefaultMaxMediaSize
+}
+
+// GetRecentNotesDays returns how many days of recent daily notes to inject into
+// the prompt: 3 when unset (upstream default), 0 (none) when explicitly set to
+// a non-positive value.
+func (d *AgentDefaults) GetRecentNotesDays() int {
+	if d.RecentNotesDays == nil {
+		return 3
+	}
+	if *d.RecentNotesDays < 0 {
+		return 0
+	}
+	return *d.RecentNotesDays
 }
 
 // GetToolFeedbackMaxArgsLength returns the max visible text length for tool argument previews.

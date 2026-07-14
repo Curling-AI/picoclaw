@@ -160,11 +160,16 @@ func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
 	return out
 }
 
-// GetMemoryContext returns formatted memory context for the agent prompt.
-// Includes long-term memory and recent daily notes.
-func (ms *MemoryStore) GetMemoryContext() string {
+// GetMemoryContext returns formatted memory context for the agent prompt:
+// long-term memory plus the last recentDays of daily notes. recentDays <= 0
+// injects no daily notes — the recall tool then supplies them on demand, which
+// keeps the prompt lean.
+func (ms *MemoryStore) GetMemoryContext(recentDays int) string {
 	longTerm := ms.ReadLongTerm()
-	recentNotes := ms.GetRecentDailyNotes(3)
+	recentNotes := ""
+	if recentDays > 0 {
+		recentNotes = ms.GetRecentDailyNotes(recentDays)
+	}
 
 	if longTerm == "" && recentNotes == "" {
 		return ""
