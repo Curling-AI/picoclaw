@@ -44,7 +44,7 @@ func TestSeedMemoryRefreshJob_EnabledSeedsOnceIdempotent(t *testing.T) {
 	}
 	// The seeded job carries the daily default schedule.
 	for _, j := range cs.ListJobs(true) {
-		if j.Name == memoryRefreshJobName && j.Schedule.Expr != "0 4 * * *" {
+		if j.Name == memoryRefreshJobName && j.Schedule.Expr != "0 4 * * 1,4" {
 			t.Fatalf("unexpected schedule: %q", j.Schedule.Expr)
 		}
 	}

@@ -1078,13 +1078,15 @@ type CronToolsConfig struct {
 	MemoryRefreshSchedule string `json:"memory_refresh_schedule" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_SCHEDULE"`
 }
 
-// EffectiveMemoryRefreshSchedule returns the configured cron expr or a daily
-// 04:00 default.
+// EffectiveMemoryRefreshSchedule returns the configured cron expr or the
+// default: twice a week (Mon & Thu at 04:00). Memory curation is deliberately
+// spaced, not daily — letting more signal accumulate between runs yields
+// higher-signal, more stable MEMORY.md edits and avoids daily rewrite churn.
 func (c CronToolsConfig) EffectiveMemoryRefreshSchedule() string {
 	if s := strings.TrimSpace(c.MemoryRefreshSchedule); s != "" {
 		return s
 	}
-	return "0 4 * * *"
+	return "0 4 * * 1,4"
 }
 
 type ExecConfig struct {
