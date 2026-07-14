@@ -459,6 +459,10 @@ type AgentDefaults struct {
 	TurnProfile          TurnProfileConfig  `json:"turn_profile,omitempty"`
 	MaxLLMRetries        int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
 	LLMRetryBackoffSecs  int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
+	// RecentNotesDays is how many days of recent daily notes are injected into
+	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
+	// recall tool for daily notes — keeps the prompt lean.
+	RecentNotesDays *int `json:"recent_notes_days,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
 }
 
 const DefaultMaxMediaSize = 20 * 1024 * 1024 // 20 MB
@@ -468,6 +472,19 @@ func (d *AgentDefaults) GetMaxMediaSize() int {
 		return d.MaxMediaSize
 	}
 	return DefaultMaxMediaSize
+}
+
+// GetRecentNotesDays returns how many days of recent daily notes to inject into
+// the prompt: 3 when unset (upstream default), 0 (none) when explicitly set to
+// a non-positive value.
+func (d *AgentDefaults) GetRecentNotesDays() int {
+	if d.RecentNotesDays == nil {
+		return 3
+	}
+	if *d.RecentNotesDays < 0 {
+		return 0
+	}
+	return *d.RecentNotesDays
 }
 
 // GetToolFeedbackMaxArgsLength returns the max visible text length for tool argument previews.
