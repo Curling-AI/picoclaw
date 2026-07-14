@@ -1186,10 +1186,12 @@ func TestCronTool_ExecuteJobPublishesAgentResponse(t *testing.T) {
 		t.Fatalf("executor target = %s/%s, want telegram/chat-1", executor.lastChan, executor.lastChatID)
 	}
 	// A mensagem do job vai embrulhada na nota de sistema de runs agendadas
-	// (higiene de memória) — o conteúdo original precisa estar lá dentro.
+	// (higiene de memória + reprodutibilidade) — o conteúdo original precisa
+	// estar lá dentro, junto do caminho estável scripts/<job.ID>/run.sh.
 	if !strings.Contains(executor.lastPrompt, "send me a poem") ||
 		!strings.Contains(executor.lastPrompt, "Scheduled run of cron job") ||
-		!strings.Contains(executor.lastPrompt, "Do NOT record routine runs") {
+		!strings.Contains(executor.lastPrompt, "do NOT record routine runs") ||
+		!strings.Contains(executor.lastPrompt, "scripts/job-1/run.sh") {
 		t.Fatalf("prompt = %q, want mensagem original embrulhada na nota de sistema", executor.lastPrompt)
 	}
 	if executor.publishedResp != "generated reply" {

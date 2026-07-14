@@ -641,18 +641,30 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 
 	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, uuid.New().String())
 
-	// System note prepended to EVERY scheduled run: without it, agents dutifully
-	// log "nothing happened" to the daily notes on each tick — a 5-minute job
-	// wrote ~300 notes/day in production, and since the last 3 days of notes are
-	// injected into every prompt, cost compounds on itself. Job-level nudges
-	// proved insufficient (duplicated jobs bypass them), so the guidance is
-	// uniform here. Agents also use notes as a state store (watermarks), hence
-	// the explicit redirect to files.
+	// System note prepended to EVERY scheduled run. Two purposes:
+	//
+	//  1. Anti-pollution: without it, agents dutifully log "nothing happened" to
+	//     the daily notes on each tick — a 5-minute job wrote ~300 notes/day in
+	//     production, and since the last 3 days of notes are injected into every
+	//     prompt, cost compounds on itself. Job-level nudges proved insufficient
+	//     (duplicated jobs bypass them), so the guidance is uniform here.
+	//
+	//  2. Reproducibility: a cron job re-derives the same task from scratch on
+	//     every tick — expensive and non-deterministic. The note steers the agent
+	//     to capture the task as a reusable script under scripts/<job.ID>/ on the
+	//     first (setup) run and just execute it afterwards. job.ID is stable
+	//     (job.Name is a mutable 30-char truncation), so the path is a durable
+	//     per-job key the agent discovers by file existence.
 	message := fmt.Sprintf("[Scheduled run of cron job %q]\n%s\n\n"+
-		"(System note: this is a routine scheduled run. Do NOT record routine runs in the daily notes — "+
-		"run silently when there is nothing new. Persist state between runs (watermarks, last-seen ids) "+
-		"in a file under state/ or scripts/, never in the daily notes. Only write a note when the run "+
-		"produced a genuinely new fact the user would care about.)", job.Name, job.Payload.Message)
+		"(System note: this is a routine scheduled run.\n"+
+		"• Reproducibility: check whether scripts/%s/run.sh exists. If it does NOT, this is the "+
+		"setup run — build a reproducible script there that captures this task end-to-end, then run "+
+		"it. If it DOES, just run it and report only what changed since last time; do not re-derive "+
+		"the task. Keep state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
+		"• Notes: do NOT record routine runs in the daily notes — run silently when there is nothing "+
+		"new. Only write a note when the run produced a genuinely new fact the user would care about; "+
+		"never use the daily notes as a state store.)",
+		job.Name, job.Payload.Message, job.ID, job.ID)
 
 	// Call agent with the job message
 	response, err := t.executor.ProcessDirectWithChannel(
