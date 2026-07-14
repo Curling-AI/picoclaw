@@ -111,7 +111,11 @@ func (t *SkillSearchTool) Execute(_ context.Context, args map[string]any) *ToolR
 
 	results := make([]skillSearchResult, len(ranked))
 	for i, r := range ranked {
-		results[i] = skillSearchResult{Name: r.Document.Name, Description: r.Document.Description, Location: r.Document.Location}
+		results[i] = skillSearchResult{
+			Name:        r.Document.Name,
+			Description: r.Document.Description,
+			Location:    r.Document.Location,
+		}
 	}
 	logger.InfoCF("discovery", "skill_search completed", map[string]any{"query": query, "results": len(results)})
 

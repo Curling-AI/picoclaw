@@ -14,8 +14,8 @@ func (s stubSkillLister) ListSkills() []skills.SkillInfo { return s.items }
 
 func TestSkillSearchTool_RanksByQuery(t *testing.T) {
 	loader := stubSkillLister{items: []skills.SkillInfo{
-		{Name: "pdf-extract", Description: "Extract text and tables from PDF files", Path: "skills/pdf-extract/SKILL.md"},
-		{Name: "deck-builder", Description: "Build slide decks and presentations", Path: "skills/deck-builder/SKILL.md"},
+		{Name: "pdf-extract", Description: "Extract text and tables from PDFs", Path: "skills/pdf-extract/SKILL.md"},
+		{Name: "deck-builder", Description: "Build slide decks", Path: "skills/deck-builder/SKILL.md"},
 		{Name: "csv-report", Description: "Summarize CSV data into a report", Path: "skills/csv-report/SKILL.md"},
 		{Name: "disabled-one", Description: "should never appear", Path: "x", Disabled: true},
 	}}
@@ -37,10 +37,11 @@ func TestSkillSearchTool_RanksByQuery(t *testing.T) {
 }
 
 func TestSkillSearchTool_EmptyQueryAndNoSkills(t *testing.T) {
-	if r := NewSkillSearchTool(stubSkillLister{}, 5).Execute(context.Background(), map[string]any{"query": " "}); !r.IsError {
+	empty := NewSkillSearchTool(stubSkillLister{}, 5)
+	if r := empty.Execute(context.Background(), map[string]any{"query": " "}); !r.IsError {
 		t.Fatal("empty query should error")
 	}
-	if r := NewSkillSearchTool(stubSkillLister{}, 5).Execute(context.Background(), map[string]any{"query": "anything"}); r.IsError {
+	if r := empty.Execute(context.Background(), map[string]any{"query": "anything"}); r.IsError {
 		t.Fatalf("no skills should be silent, not error: %s", r.ForLLM)
 	}
 }
