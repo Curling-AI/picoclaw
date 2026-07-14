@@ -338,11 +338,11 @@ func TestPromoteTools_ConcurrentWithTickTTL(t *testing.T) {
 	<-done
 }
 
-// Regressão do caso real de prod (sessão cafe4398, 2026-07-13 20:43–20:50):
-// o agente precisou de 5+ buscas para achar mcp_skip_skip_file_write porque o
-// tokenizador indexava cada nome de tool como um token único e opaco — a
-// busca só via as descrições, e as irmãs (e o gdrive) roubavam o top-5.
-// Corpus modelado no catálogo real do pod (4 servidores, famílias skip).
+// Regression for a real production case (cafe4398 session, 2026-07-13
+// 20:43-20:50): the agent needed 5+ searches to find mcp_skip_skip_file_write
+// because the tokenizer indexed each tool name as a single opaque token — the
+// search only saw descriptions, and sibling tools (plus gdrive) crowded the
+// top-5. Corpus shaped after the pod's real catalog (4 servers, skip families).
 func prodShapedCorpus() []searchDoc {
 	return []searchDoc{
 		{"mcp_skip_skip_file_write", "Write content to a file in the project working tree"},
@@ -350,8 +350,8 @@ func prodShapedCorpus() []searchDoc {
 		{"mcp_skip_skip_file_list", "List the files of the project"},
 		{"mcp_skip_skip_file_delete", "Delete a file from the project"},
 		{"mcp_skip_skip_file_patch", "Apply a search/replace patch to a project file"},
-		// A descrição real cita skip_file_write — era a única a casar com a
-		// busca literal, devolvendo a tool errada.
+		// The real description mentions skip_file_write — it was the only match
+		// for the literal query, returning the wrong tool.
 		{"mcp_skip_skip_project_apply_changes", "Apply pending changes created with skip_file_write and start a build"},
 		{"mcp_skip_skip_project_list", "List your projects"},
 		{"mcp_skip_skip_env_set", "Set an environment variable for the project"},
@@ -366,7 +366,7 @@ func prodShapedCorpus() []searchDoc {
 
 func searchNames(t *testing.T, query string, topK int) []string {
 	t.Helper()
-	// Mesmo pipeline do BM25SearchTool.Execute: ranking BM25 + lookup por nome.
+	// Same pipeline as BM25SearchTool.Execute: BM25 ranking + exact-name lookup.
 	docs := prodShapedCorpus()
 	ranked := buildBM25Engine(docs).Search(query, topK)
 	results := make([]ToolSearchResult, len(ranked))
@@ -385,7 +385,7 @@ func searchNames(t *testing.T, query string, topK int) []string {
 func TestBM25FindsToolByExactSnakeCaseName(t *testing.T) {
 	names := searchNames(t, "skip_file_write", 5)
 	if len(names) == 0 || names[0] != "mcp_skip_skip_file_write" {
-		t.Fatalf("busca literal pelo nome deve trazer a própria tool em 1º, veio %v", names)
+		t.Fatalf("literal name query must rank the tool itself first, got %v", names)
 	}
 }
 
@@ -403,7 +403,7 @@ func TestBM25FindsToolByNameParts(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("query %q (real de prod) não trouxe mcp_skip_skip_file_write no top-5: %v", query, names)
+			t.Errorf("query %q (from prod) did not surface mcp_skip_skip_file_write in the top-5: %v", query, names)
 		}
 	}
 }
@@ -417,6 +417,6 @@ func TestBM25FindsFilePatchByParts(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("file_patch fora do top-5: %v", names)
+		t.Errorf("file_patch missing from the top-5: %v", names)
 	}
 }
