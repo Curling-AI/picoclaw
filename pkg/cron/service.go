@@ -29,6 +29,11 @@ type CronPayload struct {
 	Command string `json:"command,omitempty"`
 	Channel string `json:"channel,omitempty"`
 	To      string `json:"to,omitempty"`
+	// Model, when set, routes this job's agent turn to a dedicated model
+	// (agents.defaults.cron_model) instead of the main one. Platform-set only
+	// (e.g. the seeded memory-refresh job); the agent-facing cron tool leaves
+	// it empty.
+	Model string `json:"model,omitempty"`
 }
 
 type CronJobState struct {
@@ -435,6 +440,18 @@ func (cs *CronService) AddJob(
 	message string,
 	channel, to string,
 ) (*CronJob, error) {
+	return cs.AddJobWithModel(name, schedule, message, channel, to, "")
+}
+
+// AddJobWithModel is AddJob plus a platform-fixed model override for the job's
+// agent turn (Payload.Model). Kept separate so the agent-facing cron tool can
+// only reach the no-model AddJob and never pick its own model.
+func (cs *CronService) AddJobWithModel(
+	name string,
+	schedule CronSchedule,
+	message string,
+	channel, to, model string,
+) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -453,6 +470,7 @@ func (cs *CronService) AddJob(
 			Message: message,
 			Channel: channel,
 			To:      to,
+			Model:   model,
 		},
 		State: CronJobState{
 			NextRunAtMS: cs.computeNextRun(&schedule, now),

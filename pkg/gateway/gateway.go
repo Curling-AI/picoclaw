@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -888,28 +889,45 @@ func seedMemoryRefreshJob(cronService *cron.CronService, cfg *config.Config) {
 	if cfg == nil || !cfg.Tools.Cron.MemoryRefreshEnabled {
 		return
 	}
-	for _, j := range cronService.ListJobs(true) {
-		if j.Name == memoryRefreshJobName {
-			return
-		}
-	}
+	schedule := cfg.Tools.Cron.EffectiveMemoryRefreshSchedule()
+	model := strings.TrimSpace(cfg.Tools.Cron.MemoryRefreshModel)
 	prompt := "Curate your long-term memory. Read the newest conversation transcripts under " +
 		"sessions/ (only those changed since your last run — keep a last-processed watermark in a " +
 		"file under state/memory-refresh/). Extract durable facts, preferences, and decisions the " +
 		"user would want you to remember, and REWRITE the relevant `## ` sections of memory/MEMORY.md " +
 		"so it stays concise and current — do not blindly append (MEMORY.md is injected into every " +
 		"prompt). Do not touch the daily notes. If nothing durable is new, do nothing."
-	if _, err := cronService.AddJob(
+
+	// Reconcile, don't just create: the seed used to be create-only, so jobs
+	// seeded before the schedule/model changed keep stale values on EFS. Bring
+	// an existing job up to the current schedule + model in place.
+	for _, j := range cronService.ListJobs(true) {
+		if j.Name != memoryRefreshJobName {
+			continue
+		}
+		if j.Schedule.Expr == schedule && j.Payload.Model == model {
+			return
+		}
+		updated := j
+		updated.Schedule = cron.CronSchedule{Kind: "cron", Expr: schedule}
+		updated.Payload.Model = model
+		if err := cronService.UpdateJob(&updated); err != nil {
+			logger.WarnCF("cron", "Failed to reconcile memory-refresh job", map[string]any{"error": err.Error()})
+		} else {
+			logger.InfoCF("cron", "Reconciled memory-refresh job", map[string]any{"schedule": schedule, "model": model})
+		}
+		return
+	}
+
+	if _, err := cronService.AddJobWithModel(
 		memoryRefreshJobName,
-		cron.CronSchedule{Kind: "cron", Expr: cfg.Tools.Cron.EffectiveMemoryRefreshSchedule()},
+		cron.CronSchedule{Kind: "cron", Expr: schedule},
 		prompt,
-		"", "",
+		"", "", model,
 	); err != nil {
 		logger.WarnCF("cron", "Failed to seed memory-refresh job", map[string]any{"error": err.Error()})
 	} else {
-		logger.InfoCF("cron", "Seeded memory-refresh job", map[string]any{
-			"schedule": cfg.Tools.Cron.EffectiveMemoryRefreshSchedule(),
-		})
+		logger.InfoCF("cron", "Seeded memory-refresh job", map[string]any{"schedule": schedule, "model": model})
 	}
 }
 

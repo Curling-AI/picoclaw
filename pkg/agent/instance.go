@@ -45,6 +45,7 @@ type AgentInstance struct {
 	MCPServerAllowlist        map[string]struct{}
 	Candidates                []providers.FallbackCandidate
 	ImageCandidates           []providers.FallbackCandidate
+	CronCandidates            []providers.FallbackCandidate
 
 	// Router is non-nil when model routing is configured and the light model
 	// was successfully resolved. It scores each incoming message and decides
@@ -249,12 +250,22 @@ func NewAgentInstance(
 		defaults.ImageModel,
 		defaults.ImageModelFallbacks,
 	)
+	cronCandidates := resolveModelCandidates(
+		cfg,
+		defaults.Provider,
+		defaults.CronModel,
+		defaults.CronModelFallbacks,
+	)
 
 	candidateProviders := make(map[string]providers.LLMProvider)
 	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
 	if strings.TrimSpace(defaults.ImageModel) != "" {
 		imageNames := append([]string{defaults.ImageModel}, defaults.ImageModelFallbacks...)
 		populateCandidateProvidersFromNames(cfg, workspace, imageNames, candidateProviders)
+	}
+	if strings.TrimSpace(defaults.CronModel) != "" {
+		cronNames := append([]string{defaults.CronModel}, defaults.CronModelFallbacks...)
+		populateCandidateProvidersFromNames(cfg, workspace, cronNames, candidateProviders)
 	}
 
 	// Model routing setup: pre-resolve light model candidates at creation time
@@ -322,6 +333,7 @@ func NewAgentInstance(
 		MCPServerAllowlist:        agentMCPServerAllowlist,
 		Candidates:                candidates,
 		ImageCandidates:           imageCandidates,
+		CronCandidates:            cronCandidates,
 		Router:                    router,
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,

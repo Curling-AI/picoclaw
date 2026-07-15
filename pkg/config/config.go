@@ -432,6 +432,11 @@ type AgentDefaults struct {
 	ModelFallbacks            []string `json:"model_fallbacks,omitempty"`
 	ImageModel                string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks       []string `json:"image_model_fallbacks,omitempty"`
+	// CronModel routes cron jobs that opt in (Payload.Model set) to a dedicated
+	// model instead of the main one — e.g. a cheaper/deeper model for the
+	// memory-refresh curation pass. Platform-fixed; not settable by the agent.
+	CronModel                 string   `json:"cron_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_CRON_MODEL"`
+	CronModelFallbacks        []string `json:"cron_model_fallbacks,omitempty"`
 	MaxTokens                 int      `json:"max_tokens"                      env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
 	ContextWindow             int      `json:"context_window,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_WINDOW"`
 	Temperature               *float64 `json:"temperature,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
@@ -1093,6 +1098,9 @@ type CronToolsConfig struct {
 	MemoryRefreshEnabled bool `json:"memory_refresh_enabled" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_ENABLED"`
 	// MemoryRefreshSchedule is the cron expression for that job (default 04:00).
 	MemoryRefreshSchedule string `json:"memory_refresh_schedule" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_SCHEDULE"`
+	// MemoryRefreshModel, when set, runs the memory-refresh job on this model
+	// (via agents.defaults.cron_model routing) instead of the main one.
+	MemoryRefreshModel string `json:"memory_refresh_model" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_MODEL"`
 }
 
 // EffectiveMemoryRefreshSchedule returns the configured cron expr or the
