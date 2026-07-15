@@ -118,7 +118,11 @@ func (c mcpServerPromptContributor) ContributePrompt(
 			names = names[:maxDeferredToolNamesInPrompt]
 		}
 		content += fmt.Sprintf(
-			" Its tool names: `%s`%s. To call one, first unlock it by searching its name with the tool-discovery tool.",
+			" Its tool names: `%s`%s. IMPORTANT: these names are NOT in your callable"+
+				" tool list — you cannot invoke them directly. To use one, your immediate"+
+				" next action MUST be a real tool-discovery search call for its name (that"+
+				" unlocks it for your next turn); never reply with only a sentence saying"+
+				" you will search.",
 			strings.Join(names, "`, `"),
 			suffix,
 		)
