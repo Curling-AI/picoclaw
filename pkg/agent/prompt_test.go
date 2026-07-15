@@ -325,7 +325,8 @@ func TestContextBuilder_MCPServerContributorListsDeferredToolNames(t *testing.T)
 	for _, want := range []string{
 		"`mcp_slack_read_channel`",
 		"`mcp_slack_send_message`",
-		"unlock it by searching its name",
+		"NOT in your callable",
+		"immediate next action MUST be a real tool-discovery search call",
 	} {
 		if !strings.Contains(system.Content, want) {
 			t.Fatalf("system prompt missing %q: %q", want, system.Content)
