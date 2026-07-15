@@ -36,6 +36,41 @@ func TestSaveStore_FilePermissions(t *testing.T) {
 	}
 }
 
+// AddJobWithModel carries a platform-fixed per-job model (e.g. the
+// memory-refresh curation model); the agent-facing AddJob must never set one.
+func TestAddJobWithModel_ModelPlumbing(t *testing.T) {
+	cs := NewCronService(filepath.Join(t.TempDir(), "cron", "jobs.json"), nil)
+	sched := CronSchedule{Kind: "cron", Expr: "0 4 * * *"}
+
+	withModel, err := cs.AddJobWithModel("memory-refresh", sched, "curate", "", "", "deepseek/deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("AddJobWithModel: %v", err)
+	}
+	if withModel.Payload.Model != "deepseek/deepseek-v4-flash" {
+		t.Errorf("Payload.Model = %q, want the fixed model", withModel.Payload.Model)
+	}
+
+	plain, err := cs.AddJob("user-job", sched, "do thing", "", "")
+	if err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if plain.Payload.Model != "" {
+		t.Errorf("plain AddJob set Payload.Model=%q; agent-facing jobs must not pick a model", plain.Payload.Model)
+	}
+
+	// Reconciliation path: UpdateJob can change schedule + model in place.
+	upd := *withModel
+	upd.Schedule = CronSchedule{Kind: "cron", Expr: "0 5 * * 1"}
+	upd.Payload.Model = ""
+	if err := cs.UpdateJob(&upd); err != nil {
+		t.Fatalf("UpdateJob: %v", err)
+	}
+	got, ok := cs.GetJob(withModel.ID)
+	if !ok || got.Payload.Model != "" || got.Schedule.Expr != "0 5 * * 1" {
+		t.Errorf("UpdateJob did not reconcile schedule/model: %+v", got)
+	}
+}
+
 func int64Ptr(v int64) *int64 {
 	return &v
 }

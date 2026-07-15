@@ -664,6 +664,13 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	}
 
 	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, uuid.New().String())
+	// A job with a fixed Model runs on agents.defaults.cron_model. The pipeline
+	// reads the intent off the session-key prefix (the only per-turn signal it
+	// already has), so encode it here. Keep "agent:cronmodel-" in sync with
+	// agent.CronModelSessionPrefix.
+	if strings.TrimSpace(job.Payload.Model) != "" {
+		sessionKey = fmt.Sprintf("agent:cronmodel-%s-%s", job.ID, uuid.New().String())
+	}
 
 	// System note prepended to EVERY scheduled run. Two purposes:
 	//

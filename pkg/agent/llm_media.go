@@ -192,3 +192,70 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 
 	return nil
 }
+
+// CronModelSessionPrefix marks a cron-job turn that must run on
+// agents.defaults.cron_model. cron's ExecuteJob encodes it in the session key
+// (the only per-turn signal the pipeline already carries) — keep in sync with
+// the literal in pkg/tools/cron.go.
+const CronModelSessionPrefix = "agent:cronmodel-"
+
+// routeCronModelTurn swaps the active model to the agent's pre-built
+// CronCandidates for cron jobs whose session key carries CronModelSessionPrefix
+// (i.e. the job opted in via Payload.Model). Mirrors routeMediaTurn's swap, but
+// keyed on the session key rather than media presence — cron curation turns
+// carry no media.
+func (p *Pipeline) routeCronModelTurn(ts *turnState, exec *turnExecution) error {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil {
+		return nil
+	}
+	if !strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) || len(ts.agent.CronCandidates) == 0 {
+		return nil
+	}
+
+	targetCandidates := append([]providers.FallbackCandidate(nil), ts.agent.CronCandidates...)
+	targetModelName := strings.TrimSpace(p.Cfg.Agents.Defaults.CronModel)
+
+	targetModel := resolvedCandidateModel(targetCandidates, targetModelName)
+	targetProvider := exec.activeProvider
+	firstCandidate := targetCandidates[0]
+	if provider, err := providerForFallbackCandidate(
+		ts.agent,
+		ts.agent.Provider,
+		targetCandidates,
+		firstCandidate.Provider,
+		firstCandidate.Model,
+	); err != nil {
+		return err
+	} else if provider != nil {
+		targetProvider = provider
+	}
+
+	resolvedModelName := resolvedCandidateModelName(targetCandidates, targetModelName)
+	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
+		exec.activeModel == targetModel &&
+		exec.llmModelName == resolvedModelName {
+		return nil
+	}
+
+	exec.activeCandidates = targetCandidates
+	exec.activeModel = targetModel
+	exec.activeProvider = targetProvider
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		targetCandidates,
+		targetModel,
+		p.Cfg.Agents.Defaults.Provider,
+	)
+	exec.llmModelName = resolvedModelName
+	exec.usedLight = false
+
+	logger.InfoCF("agent", "Cron model routing selected model", map[string]any{
+		"agent_id":    ts.agent.ID,
+		"model":       exec.activeModel,
+		"model_name":  exec.llmModelName,
+		"session_key": ts.sessionKey,
+	})
+
+	return nil
+}

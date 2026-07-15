@@ -72,6 +72,9 @@ func (p *Pipeline) CallLLM(
 	if err := p.routeMediaTurn(ts, exec); err != nil {
 		return ControlBreak, err
 	}
+	if err := p.routeCronModelTurn(ts, exec); err != nil {
+		return ControlBreak, err
+	}
 
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,
