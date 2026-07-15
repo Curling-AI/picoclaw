@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -338,7 +339,7 @@ func (al *AgentLoop) registerMCPServerTools(
 			agentID,
 			agent,
 			serverName,
-			len(registeredToolsByAgent[agentID]),
+			sortedToolNames(registeredToolsByAgent[agentID]),
 			registerAsHidden,
 		)
 	}
@@ -361,20 +362,36 @@ func pendingMCPServers(mcpCfg config.MCPConfig, mcpManager *mcp.Manager) []strin
 	return pending
 }
 
+// sortedToolNames flattens a registered-tools set into a sorted slice —
+// deterministic order keeps the contributed prompt part stable across
+// restarts (it is cacheable).
+func sortedToolNames(set map[string]struct{}) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func registerMCPServerPromptContributor(
 	agentID string,
 	agent *AgentInstance,
 	serverName string,
-	toolCount int,
+	toolNames []string,
 	registerAsHidden bool,
 ) {
-	if agent == nil || agent.ContextBuilder == nil || toolCount <= 0 {
+	if agent == nil || agent.ContextBuilder == nil || len(toolNames) == 0 {
 		return
 	}
 	if err := agent.ContextBuilder.RegisterPromptContributor(mcpServerPromptContributor{
 		serverName: serverName,
-		toolCount:  toolCount,
+		toolCount:  len(toolNames),
 		deferred:   registerAsHidden,
+		toolNames:  toolNames,
 	}); err != nil {
 		logger.WarnCF("agent", "Failed to register MCP prompt contributor",
 			map[string]any{

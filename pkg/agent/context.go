@@ -240,7 +240,7 @@ func formatToolDiscoveryRule(useBM25, useRegex bool) string {
 	}
 
 	return fmt.Sprintf(
-		`5. **Tool Discovery** - Your visible tools are limited to save memory, but a vast hidden library exists. If you lack the right tool for a task, BEFORE giving up, you MUST search using the %s tool. Do not refuse a request unless the search returns nothing. Found tools will temporarily unlock for your next turn.`,
+		`5. **Tool Discovery** - Your visible tools are limited to save memory, but a vast hidden library exists — each connected MCP server lists its hidden tool names in your context. If you lack the right tool for a task, BEFORE giving up, you MUST search using the %s tool. Searches return only the top matches, NOT the whole library: if the tool you need is not in the results, search again with a more specific query (e.g. the exact tool name). Do not refuse a request unless repeated searches turn up nothing. Found tools will temporarily unlock for your next turn.`,
 		strings.Join(toolNames, " or "),
 	)
 }

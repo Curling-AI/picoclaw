@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -300,6 +301,87 @@ func TestContextBuilder_CollectsMCPServerContributor(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("system parts missing MCP prompt metadata")
+	}
+}
+
+// A deferred server must enumerate its tool NAMES: the bare count leaves the
+// model unable to know a hidden tool exists, so it treats the last search
+// result as the whole universe and wrongly refuses requests it could serve.
+func TestContextBuilder_MCPServerContributorListsDeferredToolNames(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	cb := NewContextBuilder(t.TempDir())
+	err := cb.RegisterPromptContributor(mcpServerPromptContributor{
+		serverName: "slack",
+		toolCount:  2,
+		deferred:   true,
+		toolNames:  []string{"mcp_slack_read_channel", "mcp_slack_send_message"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterPromptContributor() error = %v", err)
+	}
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	system := messages[0]
+	for _, want := range []string{
+		"`mcp_slack_read_channel`",
+		"`mcp_slack_send_message`",
+		"unlock it by searching its name",
+	} {
+		if !strings.Contains(system.Content, want) {
+			t.Fatalf("system prompt missing %q: %q", want, system.Content)
+		}
+	}
+}
+
+// Native (non-deferred) servers must NOT enumerate names — their tools already
+// surface full schemas, and the list would only duplicate tokens.
+func TestContextBuilder_MCPServerContributorOmitsNativeToolNames(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	cb := NewContextBuilder(t.TempDir())
+	err := cb.RegisterPromptContributor(mcpServerPromptContributor{
+		serverName: "slack",
+		toolCount:  2,
+		deferred:   false,
+		toolNames:  []string{"mcp_slack_read_channel", "mcp_slack_send_message"},
+	})
+	if err != nil {
+		t.Fatalf("RegisterPromptContributor() error = %v", err)
+	}
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	system := messages[0]
+	if strings.Contains(system.Content, "Its tool names") ||
+		strings.Contains(system.Content, "mcp_slack_send_message") {
+		t.Fatalf("native server should not enumerate tool names: %q", system.Content)
+	}
+}
+
+// Above the cap, the list truncates with an explicit "and N more" so a huge
+// catalog can't reintroduce the prompt bloat discovery exists to prevent.
+func TestContextBuilder_MCPServerContributorCapsDeferredToolNames(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	names := make([]string, maxDeferredToolNamesInPrompt+3)
+	for i := range names {
+		names[i] = fmt.Sprintf("mcp_big_tool_%03d", i)
+	}
+	cb := NewContextBuilder(t.TempDir())
+	err := cb.RegisterPromptContributor(mcpServerPromptContributor{
+		serverName: "big",
+		toolCount:  len(names),
+		deferred:   true,
+		toolNames:  names,
+	})
+	if err != nil {
+		t.Fatalf("RegisterPromptContributor() error = %v", err)
+	}
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	system := messages[0]
+	if !strings.Contains(system.Content, "and 3 more (searchable)") {
+		t.Fatalf("system prompt missing truncation suffix: %q", system.Content)
+	}
+	if strings.Contains(system.Content, names[maxDeferredToolNamesInPrompt]) {
+		t.Fatalf("system prompt should not list names beyond the cap: %q", system.Content)
 	}
 }
 
