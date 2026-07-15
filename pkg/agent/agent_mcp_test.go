@@ -140,13 +140,19 @@ func TestRegisterMCPServerPromptContributorUsesActualRegisteredToolCount(t *test
 	cb := NewContextBuilder(t.TempDir())
 	agent := &AgentInstance{ContextBuilder: cb}
 
-	registerMCPServerPromptContributor("research", agent, "github", 0, false)
+	registerMCPServerPromptContributor("research", agent, "github", nil, false)
 	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
 	if prompt := messages[0].Content; strings.Contains(prompt, "MCP server `github`") {
 		t.Fatalf("expected no MCP prompt when no tools were registered, got %q", prompt)
 	}
 
-	registerMCPServerPromptContributor("research", agent, "github", 2, false)
+	registerMCPServerPromptContributor(
+		"research",
+		agent,
+		"github",
+		[]string{"mcp_github_search", "mcp_github_create_issue"},
+		false,
+	)
 	messages = cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
 	prompt := messages[0].Content
 	if !strings.Contains(prompt, "MCP server `github` is connected") {

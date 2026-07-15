@@ -54,10 +54,20 @@ func (c toolDiscoveryPromptContributor) ContributePrompt(
 	}, nil
 }
 
+// maxDeferredToolNamesInPrompt caps the per-server name list so a huge
+// catalog can't reintroduce the prompt bloat discovery exists to prevent.
+// Names are cheap (~a token each) versus full schemas, and without them the
+// model has no way to know a hidden tool exists at all — it treats the last
+// search result as the whole universe and refuses requests it could serve.
+const maxDeferredToolNamesInPrompt = 60
+
 type mcpServerPromptContributor struct {
 	serverName string
 	toolCount  int
 	deferred   bool
+	// toolNames enumerates the server's registered tool names. Only rendered
+	// for deferred servers: native tools already surface their full schemas.
+	toolNames []string
 }
 
 func (c mcpServerPromptContributor) PromptSource() PromptSourceDescriptor {
@@ -90,22 +100,40 @@ func (c mcpServerPromptContributor) ContributePrompt(
 	if c.deferred {
 		availability = "hidden behind tool discovery until unlocked"
 	}
+	content := fmt.Sprintf(
+		"MCP server `%s` is connected. It contributes %d tool(s), currently %s.",
+		serverName,
+		c.toolCount,
+		availability,
+	)
+	// Deferred servers enumerate their tool NAMES (not schemas): the count
+	// alone leaves the model unable to know a hidden tool exists, so it
+	// treats whatever the last search returned as the whole universe and
+	// wrongly refuses requests it could serve.
+	if c.deferred && len(c.toolNames) > 0 {
+		names := c.toolNames
+		suffix := ""
+		if len(names) > maxDeferredToolNamesInPrompt {
+			suffix = fmt.Sprintf(" … and %d more (searchable)", len(names)-maxDeferredToolNamesInPrompt)
+			names = names[:maxDeferredToolNamesInPrompt]
+		}
+		content += fmt.Sprintf(
+			" Its tool names: `%s`%s. To call one, first unlock it by searching its name with the tool-discovery tool.",
+			strings.Join(names, "`, `"),
+			suffix,
+		)
+	}
 
 	return []PromptPart{
 		{
-			ID:     "capability.mcp." + promptSourceComponent(serverName),
-			Layer:  PromptLayerCapability,
-			Slot:   PromptSlotMCP,
-			Source: PromptSource{ID: mcpPromptSourceID(serverName), Name: "mcp:" + serverName},
-			Title:  "MCP server capability",
-			Content: fmt.Sprintf(
-				"MCP server `%s` is connected. It contributes %d tool(s), currently %s.",
-				serverName,
-				c.toolCount,
-				availability,
-			),
-			Stable: true,
-			Cache:  PromptCacheEphemeral,
+			ID:      "capability.mcp." + promptSourceComponent(serverName),
+			Layer:   PromptLayerCapability,
+			Slot:    PromptSlotMCP,
+			Source:  PromptSource{ID: mcpPromptSourceID(serverName), Name: "mcp:" + serverName},
+			Title:   "MCP server capability",
+			Content: content,
+			Stable:  true,
+			Cache:   PromptCacheEphemeral,
 		},
 	}, nil
 }

@@ -79,7 +79,7 @@ func (t *RegexSearchTool) Execute(ctx context.Context, args map[string]any) *Too
 	}
 
 	logger.InfoCF("discovery", "Regex search completed", map[string]any{"pattern": pattern, "results": len(res)})
-	return formatDiscoveryResponse(t.registry, res, t.ttl)
+	return formatDiscoveryResponse(t.registry, res, t.ttl, t.maxSearchResults)
 }
 
 type BM25SearchTool struct {
@@ -157,7 +157,7 @@ func (t *BM25SearchTool) Execute(ctx context.Context, args map[string]any) *Tool
 	}
 
 	logger.InfoCF("discovery", "BM25 search completed", map[string]any{"query": query, "results": len(results)})
-	return formatDiscoveryResponse(t.registry, results, t.ttl)
+	return formatDiscoveryResponse(t.registry, results, t.ttl, t.maxSearchResults)
 }
 
 // ToolSearchResult represents the result returned to the LLM.
@@ -206,7 +206,11 @@ func (r *ToolRegistry) SearchRegex(pattern string, maxSearchResults int) ([]Tool
 	return results, nil
 }
 
-func formatDiscoveryResponse(registry *ToolRegistry, results []ToolSearchResult, ttl int) *ToolResult {
+func formatDiscoveryResponse(
+	registry *ToolRegistry,
+	results []ToolSearchResult,
+	ttl, maxSearchResults int,
+) *ToolResult {
 	if len(results) == 0 {
 		return SilentResult("No tools found matching the query.")
 	}
@@ -228,6 +232,15 @@ func formatDiscoveryResponse(registry *ToolRegistry, results []ToolSearchResult,
 		len(results),
 		string(b),
 	)
+	// A full page is probably a truncated page: without this note the model
+	// treats the capped set as the entire library and wrongly concludes any
+	// absent tool doesn't exist.
+	if maxSearchResults > 0 && len(results) >= maxSearchResults {
+		msg += fmt.Sprintf(
+			"\n\nNOTE: results are capped at %d — more matching tools may exist. If the tool you need is not listed, search again with a more specific query (e.g. the exact tool name).",
+			maxSearchResults,
+		)
+	}
 
 	return SilentResult(msg)
 }

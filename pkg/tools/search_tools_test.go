@@ -101,6 +101,36 @@ func TestRegexSearchTool_Execute(t *testing.T) {
 	})
 }
 
+// A full result page discloses the cap: without the note the model treats the
+// truncated set as the entire library and concludes absent tools don't exist.
+func TestFormatDiscoveryResponse_DisclosesCap(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Capped Results Carry Truncation Note", func(t *testing.T) {
+		reg := setupPopulatedRegistry()
+		tool := NewRegexSearchTool(reg, 5, 2) // 3 hidden tools match "mcp_", cap at 2
+		res := tool.Execute(ctx, map[string]any{"pattern": "mcp_"})
+		if res.IsError {
+			t.Fatalf("Unexpected error: %v", res.ForLLM)
+		}
+		if !strings.Contains(res.ForLLM, "results are capped at 2") {
+			t.Errorf("Expected truncation note, got: %v", res.ForLLM)
+		}
+	})
+
+	t.Run("Partial Results Carry No Note", func(t *testing.T) {
+		reg := setupPopulatedRegistry()
+		tool := NewRegexSearchTool(reg, 5, 10) // 3 matches, far below the cap
+		res := tool.Execute(ctx, map[string]any{"pattern": "mcp_"})
+		if res.IsError {
+			t.Fatalf("Unexpected error: %v", res.ForLLM)
+		}
+		if strings.Contains(res.ForLLM, "results are capped") {
+			t.Errorf("Unexpected truncation note below the cap: %v", res.ForLLM)
+		}
+	})
+}
+
 func TestBM25SearchTool_Execute(t *testing.T) {
 	reg := setupPopulatedRegistry()
 	tool := NewBM25SearchTool(reg, 3, 10)
