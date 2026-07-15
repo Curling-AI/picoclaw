@@ -34,21 +34,21 @@ func init() {
 // Config is the current config structure with version support.
 type Config struct {
 	// Config schema version for migration.
-	Version   int             `json:"version"              yaml:"-"`
-	Isolation IsolationConfig `json:"isolation,omitempty"  yaml:"-"`
-	Agents    AgentsConfig    `json:"agents"               yaml:"-"`
-	Session   SessionConfig   `json:"session,omitempty"    yaml:"-"`
-	Evolution EvolutionConfig `json:"evolution,omitempty"  yaml:"-"`
-	Channels  ChannelsConfig  `json:"channel_list"         yaml:"channel_list"`
-	ModelList SecureModelList `json:"model_list"           yaml:"model_list"` // New model-centric provider configuration
-	Gateway   GatewayConfig   `json:"gateway"              yaml:"-"`
-	Events    EventsConfig    `json:"events,omitempty"     yaml:"-"`
-	Hooks     HooksConfig     `json:"hooks,omitempty"      yaml:"-"`
-	Tools     ToolsConfig     `json:"tools"                yaml:",inline"`
-	Messages  MessagesConfig  `json:"messages,omitempty"   yaml:"-"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"            yaml:"-"`
-	Devices   DevicesConfig   `json:"devices"              yaml:"-"`
-	Voice     VoiceConfig     `json:"voice"                yaml:"-"`
+	Version   int             `json:"version"             yaml:"-"`
+	Isolation IsolationConfig `json:"isolation,omitempty" yaml:"-"`
+	Agents    AgentsConfig    `json:"agents"              yaml:"-"`
+	Session   SessionConfig   `json:"session,omitempty"   yaml:"-"`
+	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"-"`
+	Channels  ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
+	ModelList SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
+	Gateway   GatewayConfig   `json:"gateway"             yaml:"-"`
+	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`
+	Tools     ToolsConfig     `json:"tools"               yaml:",inline"`
+	Messages  MessagesConfig  `json:"messages,omitempty"  yaml:"-"`
+	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
+	Devices   DevicesConfig   `json:"devices"             yaml:"-"`
+	Voice     VoiceConfig     `json:"voice"               yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -422,52 +422,52 @@ type ToolFeedbackConfig struct {
 }
 
 type AgentDefaults struct {
-	Name                      string   `json:"name,omitempty"                            env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
-	Workspace                 string   `json:"workspace"                                 env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
-	StateDir                  string   `json:"state_dir,omitempty"                       env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
-	RestrictToWorkspace       bool     `json:"restrict_to_workspace"                     env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
-	AllowReadOutsideWorkspace bool     `json:"allow_read_outside_workspace"              env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
-	Provider                  string   `json:"provider"                                  env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
-	ModelName                 string   `json:"model_name"                                env:"PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME"`
+	Name                      string   `json:"name,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_NAME"` // display name used in the welcome message (defaults to "PicoClaw")
+	Workspace                 string   `json:"workspace"                       env:"PICOCLAW_AGENTS_DEFAULTS_WORKSPACE"`
+	StateDir                  string   `json:"state_dir,omitempty"             env:"PICOCLAW_AGENTS_DEFAULTS_STATE_DIR"`
+	RestrictToWorkspace       bool     `json:"restrict_to_workspace"           env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
+	AllowReadOutsideWorkspace bool     `json:"allow_read_outside_workspace"    env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
+	Provider                  string   `json:"provider"                        env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
+	ModelName                 string   `json:"model_name"                      env:"PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME"`
 	ModelFallbacks            []string `json:"model_fallbacks,omitempty"`
-	ImageModel                string   `json:"image_model,omitempty"                     env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
+	ImageModel                string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks       []string `json:"image_model_fallbacks,omitempty"`
 	// CronModel routes cron jobs that opt in (Payload.Model set) to a dedicated
 	// model instead of the main one — e.g. a cheaper/deeper model for the
 	// memory-refresh curation pass. Platform-fixed; not settable by the agent.
-	CronModel                 string   `json:"cron_model,omitempty"                      env:"PICOCLAW_AGENTS_DEFAULTS_CRON_MODEL"`
+	CronModel                 string   `json:"cron_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_CRON_MODEL"`
 	CronModelFallbacks        []string `json:"cron_model_fallbacks,omitempty"`
-	MaxTokens                 int      `json:"max_tokens"                                env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
-	ContextWindow             int      `json:"context_window,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_WINDOW"`
-	Temperature               *float64 `json:"temperature,omitempty"                     env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
-	MaxToolIterations         int      `json:"max_tool_iterations"                       env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
-	TimeoutSeconds            int      `json:"timeout_seconds,omitempty"                 env:"PICOCLAW_AGENTS_DEFAULTS_TIMEOUT_SECONDS"`             // wall-clock timeout per agent run (0 = use default 600s)
-	VerboseDefault            string   `json:"verbose_default,omitempty"                 env:"PICOCLAW_AGENTS_DEFAULTS_VERBOSE_DEFAULT"`             // timeout-summary verbosity: "off", "on", "full"
-	SummarizeMessageThreshold int      `json:"summarize_message_threshold"               env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"` // legacy; superseded by MaxHistoryMessages
-	SummarizeTokenPercent     int      `json:"summarize_token_percent"                   env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`     // legacy; superseded by SummarizationThresholdPercent
+	MaxTokens                 int      `json:"max_tokens"                     env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS"`
+	ContextWindow             int      `json:"context_window,omitempty"       env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_WINDOW"`
+	Temperature               *float64 `json:"temperature,omitempty"          env:"PICOCLAW_AGENTS_DEFAULTS_TEMPERATURE"`
+	MaxToolIterations         int      `json:"max_tool_iterations"            env:"PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS"`
+	TimeoutSeconds            int      `json:"timeout_seconds,omitempty"      env:"PICOCLAW_AGENTS_DEFAULTS_TIMEOUT_SECONDS"`             // wall-clock timeout per agent run (0 = use default 600s)
+	VerboseDefault            string   `json:"verbose_default,omitempty"      env:"PICOCLAW_AGENTS_DEFAULTS_VERBOSE_DEFAULT"`             // timeout-summary verbosity: "off", "on", "full"
+	SummarizeMessageThreshold int      `json:"summarize_message_threshold"    env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_MESSAGE_THRESHOLD"` // legacy; superseded by MaxHistoryMessages
+	SummarizeTokenPercent     int      `json:"summarize_token_percent"        env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZE_TOKEN_PERCENT"`     // legacy; superseded by SummarizationThresholdPercent
 	// Memory management: controls when summarization triggers and how much history to keep.
 	// MaxHistoryMessages: max messages before summarization triggers (0 = message-count trigger disabled, token threshold still applies).
-	MaxHistoryMessages int `json:"max_history_messages,omitempty"            env:"PICOCLAW_AGENTS_DEFAULTS_MAX_HISTORY_MESSAGES"`
+	MaxHistoryMessages int `json:"max_history_messages,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_HISTORY_MESSAGES"`
 	// SummarizationThresholdPercent: percentage of ContextWindow that triggers summarization (default 90).
 	SummarizationThresholdPercent int `json:"summarization_threshold_percent,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_SUMMARIZATION_THRESHOLD_PERCENT"`
 	// KeepLastMessages: number of recent messages to keep after summarization (default 6).
-	KeepLastMessages     int                `json:"keep_last_messages,omitempty"              env:"PICOCLAW_AGENTS_DEFAULTS_KEEP_LAST_MESSAGES"`
-	MaxMediaSize         int                `json:"max_media_size,omitempty"                  env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
+	KeepLastMessages     int                `json:"keep_last_messages,omitempty"     env:"PICOCLAW_AGENTS_DEFAULTS_KEEP_LAST_MESSAGES"`
+	MaxMediaSize         int                `json:"max_media_size,omitempty"         env:"PICOCLAW_AGENTS_DEFAULTS_MAX_MEDIA_SIZE"`
 	Routing              *RoutingConfig     `json:"routing,omitempty"`
-	SteeringMode         string             `json:"steering_mode,omitempty"                   env:"PICOCLAW_AGENTS_DEFAULTS_STEERING_MODE"`      // "one-at-a-time" (default) or "all"
-	MaxParallelTurns     int                `json:"max_parallel_turns,omitempty"              env:"PICOCLAW_AGENTS_DEFAULTS_MAX_PARALLEL_TURNS"` // Max concurrent turns (0 or 1 = sequential)
-	SubTurn              SubTurnConfig      `json:"subturn"                                                                                                  envPrefix:"PICOCLAW_AGENTS_DEFAULTS_SUBTURN_"`
+	SteeringMode         string             `json:"steering_mode,omitempty"          env:"PICOCLAW_AGENTS_DEFAULTS_STEERING_MODE"`      // "one-at-a-time" (default) or "all"
+	MaxParallelTurns     int                `json:"max_parallel_turns,omitempty"     env:"PICOCLAW_AGENTS_DEFAULTS_MAX_PARALLEL_TURNS"` // Max concurrent turns (0 or 1 = sequential)
+	SubTurn              SubTurnConfig      `json:"subturn"                                                                                envPrefix:"PICOCLAW_AGENTS_DEFAULTS_SUBTURN_"`
 	ToolFeedback         ToolFeedbackConfig `json:"tool_feedback,omitempty"`
-	SplitOnMarker        bool               `json:"split_on_marker"                           env:"PICOCLAW_AGENTS_DEFAULTS_SPLIT_ON_MARKER"` // split messages on <|[SPLIT]|> marker
-	ContextManager       string             `json:"context_manager,omitempty"                 env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER"`
-	ContextManagerConfig json.RawMessage    `json:"context_manager_config,omitempty"          env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER_CONFIG"`
+	SplitOnMarker        bool               `json:"split_on_marker"                  env:"PICOCLAW_AGENTS_DEFAULTS_SPLIT_ON_MARKER"` // split messages on <|[SPLIT]|> marker
+	ContextManager       string             `json:"context_manager,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER"`
+	ContextManagerConfig json.RawMessage    `json:"context_manager_config,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER_CONFIG"`
 	TurnProfile          TurnProfileConfig  `json:"turn_profile,omitempty"`
-	MaxLLMRetries        int                `json:"max_llm_retries,omitempty"                 env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
-	LLMRetryBackoffSecs  int                `json:"llm_retry_backoff_secs,omitempty"          env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
+	MaxLLMRetries        int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
+	LLMRetryBackoffSecs  int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
 	// RecentNotesDays is how many days of recent daily notes are injected into
 	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
 	// recall tool for daily notes — keeps the prompt lean.
-	RecentNotesDays *int `json:"recent_notes_days,omitempty"               env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
+	RecentNotesDays *int `json:"recent_notes_days,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
 }
 
 const DefaultMaxMediaSize = 20 * 1024 * 1024 // 20 MB
@@ -847,7 +847,7 @@ type ModelConfig struct {
 	// Enabled indicates whether this model entry is active. When omitted in
 	// existing configs, the field is inferred during load: models with API keys
 	// or the reserved "local-model" name are auto-enabled.
-	Enabled bool `json:"enabled,omitempty"    yaml:"enabled,omitempty"`
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	// UserAgent is the user agent string to use for HTTP requests.
 	UserAgent string `json:"user_agent,omitempty" yaml:"-"`
 
@@ -1048,8 +1048,8 @@ type GLMSearchConfig struct {
 	BaseURL string       `json:"base_url"         yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GLM_BASE_URL"`
 	// SearchEngine specifies the search backend: "search_std" (default),
 	// "search_pro", "search_pro_sogou", or "search_pro_quark".
-	SearchEngine string `json:"search_engine"    yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GLM_SEARCH_ENGINE"`
-	MaxResults   int    `json:"max_results"      yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GLM_MAX_RESULTS"`
+	SearchEngine string `json:"search_engine" yaml:"-" env:"PICOCLAW_TOOLS_WEB_GLM_SEARCH_ENGINE"`
+	MaxResults   int    `json:"max_results"   yaml:"-" env:"PICOCLAW_TOOLS_WEB_GLM_MAX_RESULTS"`
 }
 
 type BaiduSearchConfig struct {
@@ -1060,7 +1060,7 @@ type BaiduSearchConfig struct {
 }
 
 type WebToolsConfig struct {
-	ToolConfig  `                    yaml:"-"                      envPrefix:"PICOCLAW_TOOLS_WEB_"`
+	ToolConfig  `                   yaml:"-"                      envPrefix:"PICOCLAW_TOOLS_WEB_"`
 	Brave       BraveConfig        `yaml:"brave,omitempty"                                        json:"brave"`
 	Tavily      TavilyConfig       `yaml:"tavily,omitempty"                                       json:"tavily"`
 	Kagi        KagiConfig         `yaml:"kagi,omitempty"                                         json:"kagi"`
@@ -1071,36 +1071,36 @@ type WebToolsConfig struct {
 	SearXNG     SearXNGConfig      `yaml:"-"                                                      json:"searxng"`
 	GLMSearch   GLMSearchConfig    `yaml:"glm_search,omitempty"                                   json:"glm_search"`
 	BaiduSearch BaiduSearchConfig  `yaml:"baidu_search,omitempty"                                 json:"baidu_search"`
-	Provider    string             `yaml:"-"                                                      json:"provider,omitempty"               env:"PICOCLAW_TOOLS_WEB_PROVIDER"`
+	Provider    string             `yaml:"-"                                                      json:"provider,omitempty" env:"PICOCLAW_TOOLS_WEB_PROVIDER"`
 	// PreferNative controls whether to use provider-native web search when
 	// the active LLM supports it (e.g. OpenAI web_search_preview). When true,
 	// the client-side web_search tool is hidden to avoid duplicate search surfaces,
 	// and the provider's built-in search is used instead. Falls back to client-side
 	// search when the provider does not support native search.
-	PreferNative bool `yaml:"-"                                                      json:"prefer_native"                    env:"PICOCLAW_TOOLS_WEB_PREFER_NATIVE"`
+	PreferNative bool `yaml:"-" json:"prefer_native" env:"PICOCLAW_TOOLS_WEB_PREFER_NATIVE"`
 	// Proxy is an optional proxy URL for web tools (http/https/socks5/socks5h).
 	// For authenticated proxies, prefer HTTP_PROXY/HTTPS_PROXY env vars instead of embedding credentials in config.
-	Proxy                string              `yaml:"-"                                                      json:"proxy,omitempty"                  env:"PICOCLAW_TOOLS_WEB_PROXY"`
-	FetchLimitBytes      int64               `yaml:"-"                                                      json:"fetch_limit_bytes,omitempty"      env:"PICOCLAW_TOOLS_WEB_FETCH_LIMIT_BYTES"`
-	Format               string              `yaml:"-"                                                      json:"format,omitempty"                 env:"PICOCLAW_TOOLS_WEB_FORMAT"`
-	PrivateHostWhitelist FlexibleStringSlice `yaml:"-"                                                      json:"private_host_whitelist,omitempty" env:"PICOCLAW_TOOLS_WEB_PRIVATE_HOST_WHITELIST"`
+	Proxy                string              `yaml:"-" json:"proxy,omitempty"                  env:"PICOCLAW_TOOLS_WEB_PROXY"`
+	FetchLimitBytes      int64               `yaml:"-" json:"fetch_limit_bytes,omitempty"      env:"PICOCLAW_TOOLS_WEB_FETCH_LIMIT_BYTES"`
+	Format               string              `yaml:"-" json:"format,omitempty"                 env:"PICOCLAW_TOOLS_WEB_FORMAT"`
+	PrivateHostWhitelist FlexibleStringSlice `yaml:"-" json:"private_host_whitelist,omitempty" env:"PICOCLAW_TOOLS_WEB_PRIVATE_HOST_WHITELIST"`
 }
 
 type CronToolsConfig struct {
-	ToolConfig `         envPrefix:"PICOCLAW_TOOLS_CRON_"`
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_CRON_"`
 	// 0 means no timeout.
-	ExecTimeoutMinutes    int      `                                 json:"exec_timeout_minutes"    env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`
-	AllowCommand          bool     `                                 json:"allow_command"           env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
-	CommandAllowedRemotes []string `                                 json:"command_allowed_remotes" env:"PICOCLAW_TOOLS_CRON_COMMAND_ALLOWED_REMOTES"`
+	ExecTimeoutMinutes    int      `json:"exec_timeout_minutes"    env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`
+	AllowCommand          bool     `json:"allow_command"           env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	CommandAllowedRemotes []string `json:"command_allowed_remotes" env:"PICOCLAW_TOOLS_CRON_COMMAND_ALLOWED_REMOTES"`
 	// MemoryRefreshEnabled seeds a self-managed daily job at boot (once, by
 	// name) that reviews recent conversations and refreshes durable memory in
 	// MEMORY.md — the agent-curated "keep memory fresh" pass. Off by default.
-	MemoryRefreshEnabled bool `                                 json:"memory_refresh_enabled"  env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_ENABLED"`
+	MemoryRefreshEnabled bool `json:"memory_refresh_enabled" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_ENABLED"`
 	// MemoryRefreshSchedule is the cron expression for that job (default 04:00).
-	MemoryRefreshSchedule string `                                 json:"memory_refresh_schedule" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_SCHEDULE"`
+	MemoryRefreshSchedule string `json:"memory_refresh_schedule" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_SCHEDULE"`
 	// MemoryRefreshModel, when set, runs the memory-refresh job on this model
 	// (via agents.defaults.cron_model routing) instead of the main one.
-	MemoryRefreshModel string `                                 json:"memory_refresh_model"    env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_MODEL"`
+	MemoryRefreshModel string `json:"memory_refresh_model" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_MODEL"`
 }
 
 // EffectiveMemoryRefreshSchedule returns the configured cron expr or the
@@ -1181,11 +1181,11 @@ type SkillsToolsConfig struct {
 	// skills via the find_installed_skills tool (keeps the prompt lean as evolution and
 	// installs grow the skill set). Reuses ToolDiscoveryConfig (Enabled +
 	// MaxSearchResults; TTL/Use* are ignored — skills load via read_file).
-	Discovery ToolDiscoveryConfig `yaml:"-"                                                       json:"discovery,omitempty"`
+	Discovery ToolDiscoveryConfig `yaml:"-" json:"discovery,omitempty"`
 	// Deprecated: use registries.github instead.
-	Github                SkillsGithubConfig `yaml:"github,omitempty"                                        json:"github"`
-	MaxConcurrentSearches int                `yaml:"-"                                                       json:"max_concurrent_searches" env:"PICOCLAW_TOOLS_SKILLS_MAX_CONCURRENT_SEARCHES"`
-	SearchCache           SearchCacheConfig  `yaml:"-"                                                       json:"search_cache"`
+	Github                SkillsGithubConfig `yaml:"github,omitempty" json:"github"`
+	MaxConcurrentSearches int                `yaml:"-"                json:"max_concurrent_searches" env:"PICOCLAW_TOOLS_SKILLS_MAX_CONCURRENT_SEARCHES"`
+	SearchCache           SearchCacheConfig  `yaml:"-"                json:"search_cache"`
 }
 
 type MediaCleanupConfig struct {
@@ -1217,42 +1217,42 @@ func (c ReadFileToolConfig) EffectiveMode() string {
 }
 
 type ToolsConfig struct {
-	AllowReadPaths  []string `json:"allow_read_paths"      yaml:"-"                env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
-	AllowWritePaths []string `json:"allow_write_paths"     yaml:"-"                env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+	AllowReadPaths  []string `json:"allow_read_paths"  yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
+	AllowWritePaths []string `json:"allow_write_paths" yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
 	// FilterSensitiveData controls whether to filter sensitive values (API keys,
 	// tokens, secrets) from tool results before sending to the LLM.
 	// Default: true (enabled)
-	FilterSensitiveData bool `json:"filter_sensitive_data" yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_SENSITIVE_DATA"`
+	FilterSensitiveData bool `json:"filter_sensitive_data" yaml:"-" env:"PICOCLAW_TOOLS_FILTER_SENSITIVE_DATA"`
 	// FilterMinLength is the minimum content length required for filtering.
 	// Content shorter than this will be returned unchanged for performance.
 	// Default: 8
-	FilterMinLength int                 `json:"filter_min_length"     yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
-	Web             WebToolsConfig      `json:"web"                   yaml:"web,omitempty"`
-	Cron            CronToolsConfig     `json:"cron"                  yaml:"-"`
-	Exec            ExecConfig          `json:"exec"                  yaml:"-"`
-	Skills          SkillsToolsConfig   `json:"skills"                yaml:"skills,omitempty"`
-	LoopDetection   LoopDetectionConfig `json:"loop_detection"        yaml:"-"`
-	MediaCleanup    MediaCleanupConfig  `json:"media_cleanup"         yaml:"-"`
-	MCP             MCPConfig           `json:"mcp"                   yaml:"-"`
-	AppendFile      ToolConfig          `json:"append_file"           yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
-	EditFile        ToolConfig          `json:"edit_file"             yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
-	FindSkills      ToolConfig          `json:"find_skills"           yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
-	Recall          ToolConfig          `json:"recall"                yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_RECALL_"`
-	I2C             ToolConfig          `json:"i2c"                   yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_I2C_"`
-	InstallSkill    ToolConfig          `json:"install_skill"         yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
-	ListDir         ToolConfig          `json:"list_dir"              yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
-	LoadImage       ToolConfig          `json:"load_image"            yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
-	Message         MessageToolsConfig  `json:"message"               yaml:"-"`
-	ReadFile        ReadFileToolConfig  `json:"read_file"             yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
-	Serial          ToolConfig          `json:"serial"                yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
-	SendFile        ToolConfig          `json:"send_file"             yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
-	SendTTS         ToolConfig          `json:"send_tts"              yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
-	Spawn           ToolConfig          `json:"spawn"                 yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
-	SpawnStatus     ToolConfig          `json:"spawn_status"          yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
-	SPI             ToolConfig          `json:"spi"                   yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SPI_"`
-	Subagent        ToolConfig          `json:"subagent"              yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
-	WebFetch        ToolConfig          `json:"web_fetch"             yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
-	WriteFile       ToolConfig          `json:"write_file"            yaml:"-"                                                           envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+	FilterMinLength int                 `json:"filter_min_length" yaml:"-"                env:"PICOCLAW_TOOLS_FILTER_MIN_LENGTH"`
+	Web             WebToolsConfig      `json:"web"               yaml:"web,omitempty"`
+	Cron            CronToolsConfig     `json:"cron"              yaml:"-"`
+	Exec            ExecConfig          `json:"exec"              yaml:"-"`
+	Skills          SkillsToolsConfig   `json:"skills"            yaml:"skills,omitempty"`
+	LoopDetection   LoopDetectionConfig `json:"loop_detection"    yaml:"-"`
+	MediaCleanup    MediaCleanupConfig  `json:"media_cleanup"     yaml:"-"`
+	MCP             MCPConfig           `json:"mcp"               yaml:"-"`
+	AppendFile      ToolConfig          `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
+	EditFile        ToolConfig          `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
+	FindSkills      ToolConfig          `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
+	Recall          ToolConfig          `json:"recall"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_RECALL_"`
+	I2C             ToolConfig          `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
+	InstallSkill    ToolConfig          `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
+	ListDir         ToolConfig          `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
+	LoadImage       ToolConfig          `json:"load_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
+	Message         MessageToolsConfig  `json:"message"           yaml:"-"`
+	ReadFile        ReadFileToolConfig  `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
+	Serial          ToolConfig          `json:"serial"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
+	SendFile        ToolConfig          `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
+	SendTTS         ToolConfig          `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
+	Spawn           ToolConfig          `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
+	SpawnStatus     ToolConfig          `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
+	SPI             ToolConfig          `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
+	Subagent        ToolConfig          `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
+	WebFetch        ToolConfig          `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WriteFile       ToolConfig          `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
 // IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
@@ -1385,12 +1385,12 @@ type MCPServerConfig struct {
 
 // MCPConfig defines configuration for all MCP servers
 type MCPConfig struct {
-	ToolConfig `                           envPrefix:"PICOCLAW_TOOLS_MCP_"`
+	ToolConfig `                    envPrefix:"PICOCLAW_TOOLS_MCP_"`
 	Discovery  ToolDiscoveryConfig `                                json:"discovery"`
 	// MaxInlineTextChars controls how much MCP text stays inline before it is saved as an artifact.
-	MaxInlineTextChars int `                                json:"max_inline_text_chars,omitempty" env:"PICOCLAW_TOOLS_MCP_MAX_INLINE_TEXT_CHARS"`
+	MaxInlineTextChars int `json:"max_inline_text_chars,omitempty" env:"PICOCLAW_TOOLS_MCP_MAX_INLINE_TEXT_CHARS"`
 	// Servers is a map of server name to server configuration
-	Servers map[string]MCPServerConfig `                                json:"servers,omitempty"`
+	Servers map[string]MCPServerConfig `json:"servers,omitempty"`
 }
 
 const DefaultMCPMaxInlineTextChars = 16 * 1024
