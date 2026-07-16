@@ -536,6 +536,8 @@ func (rt *Runtime) recordsForColdPathInputs(
 	admitted := make([]LearningRecord, 0, len(records))
 	evidence := make([]LearningRecord, 0, len(records))
 	judge := rt.successJudgeForWorkspace(workspace)
+	// Freshly-judged verdicts to persist so this record is not re-judged next run.
+	judgedDecisions := make(map[string]bool)
 
 	for _, record := range records {
 		if !isTaskRecordKind(record.Kind) || record.WorkspaceID != workspace {
@@ -551,13 +553,19 @@ func (rt *Runtime) recordsForColdPathInputs(
 		}
 
 		evidenceRecord := record
-		if record.Success != nil && *record.Success && judge != nil {
+		// LLM-judge each successful record AT MOST ONCE. The cold path runs
+		// after_turn and an unclustered record stays "new" (as clustering
+		// evidence) indefinitely, so without the SuccessJudged gate it would be
+		// re-judged every turn. Already-judged records reuse their persisted
+		// Success verdict below. (seucaranguejo fork)
+		if record.Success != nil && *record.Success && judge != nil && !record.SuccessJudged {
 			decision, err := judge.JudgeTaskRecord(ctx, record)
 			if err != nil {
 				return nil, nil, err
 			}
 			judgedSuccess := decision.Success
 			evidenceRecord.Success = &judgedSuccess
+			judgedDecisions[record.ID] = judgedSuccess
 			if !decision.Success {
 				logger.DebugCF("evolution", "Rejected task record by success judge", map[string]any{
 					"workspace": workspace,
@@ -571,6 +579,16 @@ func (rt *Runtime) recordsForColdPathInputs(
 			continue
 		}
 		admitted = append(admitted, evidenceRecord)
+	}
+
+	// Persist the judge verdicts (Success + SuccessJudged) so subsequent runs skip
+	// the LLM call. Runs before clustering's MarkTaskRecordsClustered; both load
+	// fresh from disk and only touch their own fields, so they compose. Only
+	// writes when something new was judged, so a steady state costs no writes.
+	if len(judgedDecisions) > 0 {
+		if err := rt.storeForWorkspace(workspace).MarkTaskRecordsJudged(judgedDecisions); err != nil {
+			return nil, nil, err
+		}
 	}
 	return admitted, evidence, nil
 }

@@ -83,6 +83,12 @@ type LearningRecord struct {
 	Source               map[string]any        `json:"source,omitempty"`
 	Status               RecordStatus          `json:"status"`
 	Success              *bool                 `json:"success,omitempty"`
+	// SuccessJudged marks that the cold-path LLM success judge already ran for
+	// this record and persisted its verdict in Success. The cold path runs
+	// after_turn and would otherwise re-judge every still-"new" (unclustered)
+	// successful record every turn; this flag makes each record judged at most
+	// once while it stays available as clustering evidence. (seucaranguejo fork)
+	SuccessJudged        bool                  `json:"success_judged,omitempty"`
 	ToolKinds            []string              `json:"tool_kinds,omitempty"`
 	ToolExecutions       []ToolExecutionRecord `json:"tool_executions,omitempty"`
 	InitialSkillNames    []string              `json:"initial_skill_names,omitempty"`
