@@ -305,6 +305,11 @@ func (p *Pipeline) CallLLM(
 			strings.Contains(errMsg, "max_tokens") ||
 			strings.Contains(errMsg, "invalidparameter") ||
 			strings.Contains(errMsg, "prompt is too long") ||
+			// zai/glm vision models (glm-4.6v) return this when the prompt exceeds
+			// their 128K window — must classify as a context error so the compaction
+			// retry (which then trims to the image model's window) kicks in instead
+			// of failing. (seucaranguejo fork)
+			strings.Contains(errMsg, "exceeds max length") ||
 			strings.Contains(errMsg, "request too large"))
 
 		if isTransientError && retry < maxRetries {
@@ -375,14 +380,18 @@ func (p *Pipeline) CallLLM(
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
 				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail))
 			}
-			if !compactionCanHelp(guardBuild, ts.agent.ContextWindow, exec.providerToolDefs, ts.agent.MaxTokens) {
+			// Compact/trim to the model actually serving this turn: a media turn
+			// routed to the small-context vision model needs its (128K) budget, not
+			// the main model's 1M, or the retry never trims enough and 400s again.
+			effectiveCW := turnContextWindow(ts, exec)
+			if !compactionCanHelp(guardBuild, effectiveCW, exec.providerToolDefs, ts.agent.MaxTokens) {
 				logger.ErrorCF(
 					"agent",
 					"Context error retry: budget exceeded even with empty history — skipping destructive compaction (check context_window/max_tokens)",
 					map[string]any{
 						"session_key":    ts.sessionKey,
 						"retry":          retry,
-						"context_window": ts.agent.ContextWindow,
+						"context_window": effectiveCW,
 						"max_tokens":     ts.agent.MaxTokens,
 						"tool_defs":      len(exec.providerToolDefs),
 					},
@@ -398,7 +407,7 @@ func (p *Pipeline) CallLLM(
 				if compactErr := p.ContextManager.Compact(ctx, &CompactRequest{
 					SessionKey: ts.sessionKey,
 					Reason:     ContextCompressReasonRetry,
-					Budget:     ts.agent.ContextWindow,
+					Budget:     effectiveCW,
 				}); compactErr != nil {
 					logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
 						"session_key": ts.sessionKey,
@@ -409,7 +418,7 @@ func (p *Pipeline) CallLLM(
 			ts.refreshRestorePointFromSession(ts.agent)
 			if asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
 				SessionKey: ts.sessionKey,
-				Budget:     ts.agent.ContextWindow,
+				Budget:     effectiveCW,
 				MaxTokens:  ts.agent.MaxTokens,
 			}); asmErr == nil && asmResp != nil {
 				exec.history = asmResp.History
@@ -448,7 +457,7 @@ func (p *Pipeline) CallLLM(
 					}
 					return rebuilt
 				},
-				ts.agent.ContextWindow,
+				effectiveCW,
 				exec.providerToolDefs,
 				ts.agent.MaxTokens,
 			)
@@ -465,7 +474,7 @@ func (p *Pipeline) CallLLM(
 					"retry":           retry,
 					"dropped_msgs":    dropped,
 					"remaining_msgs":  len(exec.history),
-					"context_window":  ts.agent.ContextWindow,
+					"context_window":  effectiveCW,
 					"max_tokens":      ts.agent.MaxTokens,
 					"still_overlimit": !fit,
 				})
@@ -475,7 +484,7 @@ func (p *Pipeline) CallLLM(
 					"retry":               retry,
 					"history_msgs":        len(exec.history),
 					"protected_turn_msgs": len(protectedTurnTail),
-					"context_window":      ts.agent.ContextWindow,
+					"context_window":      effectiveCW,
 					"max_tokens":          ts.agent.MaxTokens,
 				})
 			}

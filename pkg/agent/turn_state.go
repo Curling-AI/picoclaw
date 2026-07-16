@@ -146,6 +146,12 @@ type turnExecution struct {
 	activeModelConfig *config.ModelConfig
 	activeProvider    providers.LLMProvider
 	usedLight         bool
+	// effectiveContextWindow is the context budget for the model actually serving
+	// this turn. routeMediaTurn sets it to the (smaller) image-model window when a
+	// media turn routes to the vision model, so compaction/trim targets the vision
+	// model's real limit instead of the main model's. 0 = use the agent default.
+	// (seucaranguejo fork)
+	effectiveContextWindow int
 
 	// LLM call per-iteration state
 	response            *providers.LLMResponse

@@ -45,6 +45,7 @@ type AgentInstance struct {
 	MCPServerAllowlist        map[string]struct{}
 	Candidates                []providers.FallbackCandidate
 	ImageCandidates           []providers.FallbackCandidate
+	ImageContextWindow        int
 	CronCandidates            []providers.FallbackCandidate
 
 	// Router is non-nil when model routing is configured and the light model
@@ -333,6 +334,7 @@ func NewAgentInstance(
 		MCPServerAllowlist:        agentMCPServerAllowlist,
 		Candidates:                candidates,
 		ImageCandidates:           imageCandidates,
+		ImageContextWindow:        defaults.ImageContextWindow,
 		CronCandidates:            cronCandidates,
 		Router:                    router,
 		LightCandidates:           lightCandidates,
