@@ -257,6 +257,9 @@ func splitSkillFrontmatter(body string) (frontmatter, markdownBody string) {
 func parseSkillFrontmatterFields(frontmatter string, allowExtraFields bool) (map[string]string, error) {
 	var raw map[string]any
 	if err := yaml.Unmarshal([]byte(frontmatter), &raw); err != nil {
+		if fields, ok := lenientFrontmatterFields(frontmatter); ok {
+			return fields, nil
+		}
 		return nil, fmt.Errorf("invalid skill frontmatter: %w", err)
 	}
 	for key := range raw {
@@ -273,12 +276,47 @@ func parseSkillFrontmatterFields(frontmatter string, allowExtraFields bool) (map
 		Description string `yaml:"description"`
 	}
 	if err := yaml.Unmarshal([]byte(frontmatter), &typed); err != nil {
+		if fields, ok := lenientFrontmatterFields(frontmatter); ok {
+			return fields, nil
+		}
 		return nil, fmt.Errorf("invalid skill frontmatter: %w", err)
 	}
 	return map[string]string{
 		"name":        typed.Name,
 		"description": typed.Description,
 	}, nil
+}
+
+// lenientFrontmatterFields recovers name/description from LLM-generated skill
+// frontmatter that isn't strict YAML — overwhelmingly an unquoted scalar with a
+// colon (e.g. `description: Use when: the user asks…`), which fails yaml but is
+// otherwise unambiguous. It reads simple `key: value` lines, taking everything
+// after the FIRST colon as the raw value (quotes stripped), and only cares about
+// name + description. Returns ok=false unless both are present, so genuinely
+// broken frontmatter still errors rather than applying a malformed skill. Keeps a
+// valuable learning from being discarded over a formatting slip. (seucaranguejo fork)
+func lenientFrontmatterFields(frontmatter string) (map[string]string, bool) {
+	out := map[string]string{}
+	for _, line := range strings.Split(frontmatter, "\n") {
+		trimmed := strings.TrimSpace(line)
+		idx := strings.Index(trimmed, ":")
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(trimmed[:idx])
+		if key != "name" && key != "description" {
+			continue
+		}
+		val := strings.TrimSpace(trimmed[idx+1:])
+		val = strings.Trim(val, `"'`)
+		if val != "" {
+			out[key] = val
+		}
+	}
+	if out["name"] == "" || out["description"] == "" {
+		return nil, false
+	}
+	return out, true
 }
 
 func stripLeadingH1(body string) string {
