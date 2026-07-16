@@ -92,6 +92,13 @@ func newEvolutionBridge(
 
 func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider) string {
 	if cfg != nil {
+		// A dedicated evolution model (typically a cheap one, e.g. deepseek)
+		// overrides the main model for the cold-path LLM calls. The agent provider
+		// keeps its baked-in gateway attribution tags, so cost stays attributed
+		// even though the request's model field changes.
+		if modelID := strings.TrimSpace(cfg.Evolution.Model); modelID != "" {
+			return modelID
+		}
 		if modelID := cfg.Agents.Defaults.GetModelName(); modelID != "" {
 			return modelID
 		}

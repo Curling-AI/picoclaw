@@ -57,8 +57,15 @@ type Config struct {
 }
 
 type EvolutionConfig struct {
-	Enabled         bool     `json:"enabled,omitempty"`
-	Mode            string   `json:"mode,omitempty"`
+	Enabled bool   `json:"enabled,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	// Model overrides which model the cold-path LLM calls (success judge, pattern
+	// clusterer, draft generator) use. Empty = the agent's main model. The
+	// cold path runs after_turn and re-judges unclustered records every turn, so
+	// pointing it at a cheap model (e.g. deepseek) instead of the pricey main
+	// model cuts the evolution overhead while keeping gateway cost attribution
+	// (the agent provider's baked-in tags travel with the model swap).
+	Model           string   `json:"model,omitempty"`
 	StateDir        string   `json:"state_dir,omitempty"`
 	MinTaskCount    int      `json:"min_task_count,omitempty"`
 	MinSuccessRatio float64  `json:"min_success_ratio,omitempty"`
