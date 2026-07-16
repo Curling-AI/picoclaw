@@ -134,6 +134,15 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.ImageCandidates...)
 		targetModelName = strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel)
 		routeReason = "configured_image_model"
+		// The vision model's context window is typically far smaller than the main
+		// model's (e.g. glm-4.6v 128K vs glm-5.2 1M). Pin the turn's context budget
+		// to it so compaction/trim targets the real limit — otherwise a big
+		// document read is never compacted and the provider 400s "Prompt exceeds
+		// max length". Set before the early-return so it applies on every media
+		// iteration. (seucaranguejo fork)
+		if ts.agent.ImageContextWindow > 0 {
+			exec.effectiveContextWindow = ts.agent.ImageContextWindow
+		}
 	case exec.usedLight && len(ts.agent.Candidates) > 0:
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.Candidates...)
 		targetModelName = strings.TrimSpace(ts.agent.Model)
@@ -191,6 +200,21 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 	})
 
 	return nil
+}
+
+// turnContextWindow returns the context budget for the model actually serving
+// this turn: the (smaller) image-model window when a media turn routed to the
+// vision model, else the agent's default. Keeps compaction from targeting the
+// main model's huge window while the request is going to a small-context vision
+// model. (seucaranguejo fork)
+func turnContextWindow(ts *turnState, exec *turnExecution) int {
+	if exec != nil && exec.effectiveContextWindow > 0 {
+		return exec.effectiveContextWindow
+	}
+	if ts != nil && ts.agent != nil {
+		return ts.agent.ContextWindow
+	}
+	return 0
 }
 
 // CronModelSessionPrefix marks a cron-job turn that must run on

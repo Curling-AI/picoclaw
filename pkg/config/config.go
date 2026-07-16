@@ -439,6 +439,12 @@ type AgentDefaults struct {
 	ModelFallbacks            []string `json:"model_fallbacks,omitempty"`
 	ImageModel                string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks       []string `json:"image_model_fallbacks,omitempty"`
+	// ImageContextWindow is the context window of the image/vision model, which is
+	// usually far smaller than the main model's (glm-4.6v 128K vs glm-5.2 1M). When
+	// a media turn routes to the image model, compaction targets this budget so a
+	// big document read is trimmed to fit instead of 400ing "Prompt exceeds max
+	// length". 0 = fall back to the main context_window. (seucaranguejo fork)
+	ImageContextWindow int `json:"image_context_window,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_CONTEXT_WINDOW"`
 	// CronModel routes cron jobs that opt in (Payload.Model set) to a dedicated
 	// model instead of the main one — e.g. a cheaper/deeper model for the
 	// memory-refresh curation pass. Platform-fixed; not settable by the agent.
