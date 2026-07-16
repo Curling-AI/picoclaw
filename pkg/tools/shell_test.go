@@ -2008,6 +2008,70 @@ func TestShellTool_CustomAllowStillPermitsSafeMatch(t *testing.T) {
 	}
 }
 
+// TestShellTool_InlineCodeNotBlockedByFootgunWords verifies that destructive
+// command WORDS (format, reboot, mkfs) appearing inside inline interpreter code
+// — heredocs and quoted `-c`/`-e` strings — do NOT trip the built-in footgun
+// deny patterns. Inline code is equivalent to writing a script file and running
+// it (always allowed), so blocking it is pure friction. (seucaranguejo fork)
+func TestShellTool_InlineCodeNotBlockedByFootgunWords(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	tool, err := NewExecToolWithConfig(t.TempDir(), false, cfg)
+	if err != nil {
+		t.Fatalf("NewExecToolWithConfig() error: %v", err)
+	}
+	ws := t.TempDir()
+
+	cases := []string{
+		`python3 -c "print('{}'.format(42)); x = 'reboot the ui'"`,
+		"python3 << 'PYEOF'\nx = '{}'.format(1)\n# format the output nicely\nPYEOF",
+		`node -e "console.log('mkfs is just plain text here')"`,
+	}
+	for _, cmd := range cases {
+		if got := tool.guardCommand(cmd, ws); got != "" {
+			t.Errorf("inline code with a benign deny-word should pass guard, got %q for: %s", got, cmd)
+		}
+	}
+}
+
+// TestShellTool_BareFootgunCommandsStillBlocked verifies unquoted, real
+// destructive commands are still caught after the inline-code carve-out.
+func TestShellTool_BareFootgunCommandsStillBlocked(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	tool, err := NewExecToolWithConfig(t.TempDir(), false, cfg)
+	if err != nil {
+		t.Fatalf("NewExecToolWithConfig() error: %v", err)
+	}
+	ws := t.TempDir()
+
+	cases := []string{
+		"mkfs /dev/sda",
+		"dd if=/dev/zero of=/dev/sda",
+		"echo done; reboot",
+	}
+	for _, cmd := range cases {
+		if got := tool.guardCommand(cmd, ws); !strings.Contains(got, "dangerous pattern detected") {
+			t.Errorf("bare destructive command should be blocked, got %q for: %s", got, cmd)
+		}
+	}
+}
+
+func TestStripQuotedBodies(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`a 'bcd' e`, `a '   ' e`},
+		{`a "bc" d`, `a "  " d`},
+		{`x "a\"b" y`, `x "    " y`}, // escaped quote stays inside the string
+		{`echo 'reboot' now`, `echo '      ' now`},
+		{`no quotes here`, `no quotes here`},
+	}
+	for _, c := range cases {
+		if got := stripQuotedBodies(c.in); got != c.want {
+			t.Errorf("stripQuotedBodies(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestShellTool_CustomAllowDoesNotBecomeStrictAllowlist(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Tools.Exec.EnableDenyPatterns = true
