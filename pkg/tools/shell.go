@@ -37,9 +37,16 @@ func getSessionManager() *SessionManager {
 }
 
 type ExecTool struct {
-	workingDir          string
-	timeout             time.Duration
-	denyPatterns        []*regexp.Regexp
+	workingDir string
+	timeout    time.Duration
+	// denyPatterns are the built-in footgun patterns (fork bomb, mkfs, dd, …).
+	// They are scanned against the heredoc/quote-stripped command so destructive
+	// WORDS inside inline code (python -c, heredocs) don't false-trip them.
+	denyPatterns []*regexp.Regexp
+	// customDenyPatterns are deployment-configured; they scan the FULL command
+	// (including quoted bodies) because some intentionally target quoted content —
+	// e.g. the jq `$ENV.SECRET` secret-exfiltration guard (#3079).
+	customDenyPatterns  []*regexp.Regexp
 	allowPatterns       []*regexp.Regexp
 	customAllowPatterns []*regexp.Regexp
 	allowedPathPatterns []*regexp.Regexp
@@ -126,6 +133,7 @@ func NewExecToolWithConfig(
 	allowPaths ...[]*regexp.Regexp,
 ) (*ExecTool, error) {
 	denyPatterns := make([]*regexp.Regexp, 0)
+	customDenyPatterns := make([]*regexp.Regexp, 0)
 	customAllowPatterns := make([]*regexp.Regexp, 0)
 	var allowedPathPatterns []*regexp.Regexp
 	allowRemote := true
@@ -142,6 +150,9 @@ func NewExecToolWithConfig(
 			if runtime.GOOS == "windows" {
 				denyPatterns = append(denyPatterns, windowsDenyPatterns...)
 			}
+			// Custom deny patterns are kept separate: they scan the FULL command
+			// (quoted bodies included) since some target quoted content, whereas
+			// the built-in footgun patterns scan the heredoc/quote-stripped text.
 			if len(execConfig.CustomDenyPatterns) > 0 {
 				logger.InfoCF("tools", "using custom deny patterns", map[string]any{
 					"patterns": execConfig.CustomDenyPatterns,
@@ -151,7 +162,7 @@ func NewExecToolWithConfig(
 					if err != nil {
 						return nil, fmt.Errorf("invalid custom deny pattern %q: %w", pattern, err)
 					}
-					denyPatterns = append(denyPatterns, re)
+					customDenyPatterns = append(customDenyPatterns, re)
 				}
 			}
 		} else {
@@ -181,6 +192,7 @@ func NewExecToolWithConfig(
 		workingDir:          workingDir,
 		timeout:             timeout,
 		denyPatterns:        denyPatterns,
+		customDenyPatterns:  customDenyPatterns,
 		allowPatterns:       nil,
 		customAllowPatterns: customAllowPatterns,
 		allowedPathPatterns: allowedPathPatterns,
@@ -1189,6 +1201,56 @@ func stripHeredocBodies(cmd string) string {
 	return string(out)
 }
 
+// stripQuotedBodies blanks the CONTENTS of single- and double-quoted strings
+// (replacing inner bytes with spaces, keeping the quote delimiters and every
+// other byte position) so the deny-pattern scan sees only unquoted shell tokens.
+// Destructive-command words (format, reboot, dd if=) inside quoted DATA — e.g.
+// python/node source passed via `-c "…"` — are code, not commands, and must not
+// trip the footgun guard. A bare destructive command stays unquoted and is still
+// caught. Newlines are preserved to keep line structure. (seucaranguejo fork)
+func stripQuotedBodies(cmd string) string {
+	out := []byte(cmd)
+	n := len(out)
+	for i := 0; i < n; {
+		switch out[i] {
+		case '\'':
+			// Single quotes: no escaping inside; runs to the next single quote.
+			j := i + 1
+			for j < n && out[j] != '\'' {
+				if out[j] != '\n' {
+					out[j] = ' '
+				}
+				j++
+			}
+			i = j + 1 // skip the closing quote (or land past end if unbalanced)
+		case '"':
+			// Double quotes: a backslash escapes the next byte (so \" stays inside).
+			j := i + 1
+			for j < n && out[j] != '"' {
+				if out[j] == '\\' && j+1 < n {
+					if out[j] != '\n' {
+						out[j] = ' '
+					}
+					j++
+					if out[j] != '\n' {
+						out[j] = ' '
+					}
+					j++
+					continue
+				}
+				if out[j] != '\n' {
+					out[j] = ' '
+				}
+				j++
+			}
+			i = j + 1
+		default:
+			i++
+		}
+	}
+	return string(out)
+}
+
 func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
 	for _, pattern := range t.allowPatterns {
 		if pattern.MatchString(lower) {
@@ -1210,7 +1272,27 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	// Deny patterns always apply, even when a command matches a custom allow rule.
 	// Custom allow rules can permit a command, but must not disable secret-safety
 	// deny rules such as jq env access checks (#3079).
+	//
+	// Scan the heredoc- AND quote-stripped command: heredoc bodies and quoted
+	// string literals are DATA, not shell tokens. Inline interpreter code —
+	// `python3 -c "...".format(...)`, `python3 << EOF … format … EOF`, `node -e`
+	// — routinely contains destructive-command WORDS (format, reboot, dd) as
+	// ordinary identifiers/methods, and blocking it is pure friction with no
+	// security gain (inline code is equivalent to writing a script file and
+	// running it, which is always allowed). A bare destructive command stays
+	// unquoted and is still caught. (seucaranguejo fork)
+	denyScan := strings.ToLower(stripQuotedBodies(stripHeredocBodies(cmd)))
 	for _, pattern := range t.denyPatterns {
+		if pattern.MatchString(denyScan) {
+			return "Command blocked by safety guard (dangerous pattern detected)"
+		}
+	}
+
+	// Deployment-configured deny patterns scan the FULL command (quoted bodies
+	// included): some intentionally target quoted content — e.g. the jq
+	// `$ENV.SECRET` secret-exfiltration guard (#3079) — so they must not be
+	// defeated by the quote-stripping applied to the built-in footgun patterns.
+	for _, pattern := range t.customDenyPatterns {
 		if pattern.MatchString(lower) {
 			return "Command blocked by safety guard (dangerous pattern detected)"
 		}
