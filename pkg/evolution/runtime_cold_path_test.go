@@ -1283,3 +1283,67 @@ func (p *llmDraftRuntimeProvider) GetDefaultModel() string {
 	}
 	return "runtime-test-model"
 }
+
+func TestRuntime_RunColdPathOnce_JudgesEachRecordOnce(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	ok := true
+	rec := evolution.LearningRecord{
+		ID:          "task-solo",
+		Kind:        evolution.RecordKindTask,
+		WorkspaceID: root,
+		CreatedAt:   time.Unix(1700000000, 0).UTC(),
+		Summary:     "solo weather answer",
+		UserGoal:    "check weather in shanghai",
+		FinalOutput: "sunny, 26C",
+		Status:      evolution.RecordStatus("new"),
+		Success:     &ok,
+		ToolKinds:   []string{"read_file"},
+	}
+	if err := store.AppendLearningRecords([]evolution.LearningRecord{rec}); err != nil {
+		t.Fatalf("AppendLearningRecords: %v", err)
+	}
+
+	judge := &stubSuccessJudge{}
+	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
+		// MinTaskCount 2 keeps a lone record unclustered, so it stays "new" and
+		// would be re-judged every run without the SuccessJudged gate.
+		Config:         config.EvolutionConfig{Enabled: true, Mode: "draft", MinTaskCount: 2},
+		Store:          store,
+		SuccessJudge:   judge,
+		SkillsRecaller: evolution.NewSkillsRecaller(root),
+		DraftGenerator: stubDraftGenerator{draft: evolution.SkillDraft{TargetSkillName: "weather"}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+			t.Fatalf("RunColdPathOnce #%d: %v", i+1, runErr)
+		}
+	}
+
+	// Judged exactly once: the second run reuses the persisted verdict instead of
+	// re-calling the LLM judge.
+	if len(judge.calls) != 1 || judge.calls[0] != "task-solo" {
+		t.Fatalf("judge calls = %v, want exactly one [task-solo]", judge.calls)
+	}
+
+	recs, err := store.LoadLearningRecords()
+	if err != nil {
+		t.Fatalf("LoadLearningRecords: %v", err)
+	}
+	found := false
+	for _, r := range recs {
+		if r.ID == "task-solo" {
+			found = true
+			if !r.SuccessJudged {
+				t.Errorf("SuccessJudged not persisted on task-solo")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("task-solo missing from store")
+	}
+}

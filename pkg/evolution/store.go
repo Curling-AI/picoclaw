@@ -249,6 +249,72 @@ func (s *Store) MarkTaskRecordsClustered(ids []string) error {
 	return s.saveJSONLRecordsLocked(s.paths.TaskRecords, records)
 }
 
+// MarkTaskRecordsJudged persists the cold-path success judge's verdict so the
+// record is not re-judged on later runs. It sets SuccessJudged=true and Success
+// to the decided value for each id (keeping Status unchanged, so the record stays
+// available as clustering evidence). Mirrors MarkTaskRecordsClustered's
+// load/merge/rewrite. (seucaranguejo fork)
+func (s *Store) MarkTaskRecordsJudged(decisions map[string]bool) error {
+	if len(decisions) == 0 {
+		return nil
+	}
+	target := make(map[string]bool, len(decisions))
+	for id, success := range decisions {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		target[id] = success
+	}
+	if len(target) == 0 {
+		return nil
+	}
+
+	unlock := lockStoreFile(s.paths.TaskRecords)
+	defer unlock()
+
+	current, err := s.loadRecordsFromPath(s.paths.TaskRecords)
+	if err != nil {
+		return err
+	}
+	legacy, err := s.loadLegacyTaskRecords()
+	if err != nil {
+		return err
+	}
+	records := mergeLearningRecordsByID(legacy, current)
+
+	hasTargetRecordInWorkspace := make(map[string]bool, len(target))
+	if strings.TrimSpace(s.paths.Workspace) != "" {
+		for _, record := range records {
+			if _, ok := target[record.ID]; !ok {
+				continue
+			}
+			if record.WorkspaceID == s.paths.Workspace {
+				hasTargetRecordInWorkspace[record.ID] = true
+			}
+		}
+	}
+
+	changed := false
+	for i := range records {
+		success, ok := target[records[i].ID]
+		if !ok {
+			continue
+		}
+		if hasTargetRecordInWorkspace[records[i].ID] && records[i].WorkspaceID != s.paths.Workspace {
+			continue
+		}
+		judged := success
+		records[i].Success = &judged
+		records[i].SuccessJudged = true
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveJSONLRecordsLocked(s.paths.TaskRecords, records)
+}
+
 func (s *Store) SavePatternRecords(records []LearningRecord) error {
 	return s.saveJSONLRecords(s.paths.PatternRecords, records)
 }
