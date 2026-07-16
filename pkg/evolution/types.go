@@ -70,19 +70,19 @@ type ToolExecutionRecord struct {
 }
 
 type LearningRecord struct {
-	ID                   string                `json:"id"`
-	Kind                 RecordKind            `json:"kind"`
-	WorkspaceID          string                `json:"workspace_id"`
-	CreatedAt            time.Time             `json:"created_at"`
-	UpdatedAt            *time.Time            `json:"updated_at,omitempty"`
-	SessionKey           string                `json:"session_key,omitempty"`
-	TaskHash             string                `json:"task_hash,omitempty"`
-	Summary              string                `json:"summary"`
-	UserGoal             string                `json:"user_goal,omitempty"`
-	FinalOutput          string                `json:"final_output,omitempty"`
-	Source               map[string]any        `json:"source,omitempty"`
-	Status               RecordStatus          `json:"status"`
-	Success              *bool                 `json:"success,omitempty"`
+	ID          string         `json:"id"`
+	Kind        RecordKind     `json:"kind"`
+	WorkspaceID string         `json:"workspace_id"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   *time.Time     `json:"updated_at,omitempty"`
+	SessionKey  string         `json:"session_key,omitempty"`
+	TaskHash    string         `json:"task_hash,omitempty"`
+	Summary     string         `json:"summary"`
+	UserGoal    string         `json:"user_goal,omitempty"`
+	FinalOutput string         `json:"final_output,omitempty"`
+	Source      map[string]any `json:"source,omitempty"`
+	Status      RecordStatus   `json:"status"`
+	Success     *bool          `json:"success,omitempty"`
 	// SuccessJudged marks that the cold-path LLM success judge already ran for
 	// this record and persisted its verdict in Success. The cold path runs
 	// after_turn and would otherwise re-judge every still-"new" (unclustered)
