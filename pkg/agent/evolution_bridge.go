@@ -43,7 +43,18 @@ func newEvolutionBridge(
 		return nil, nil
 	}
 
+	// modelID drives the high-frequency, low-stakes cold-path calls (the success
+	// judge runs per-record every turn; the clusterer per cold-path run) — route
+	// these to the cheap evolution model. The DRAFT generator writes the actual
+	// SKILL.md (structured body + YAML frontmatter), so it stays on the main model
+	// even when the judge is cheap: it runs only after a successful cluster (rare),
+	// so keeping it on the stronger model costs ~nothing and avoids degrading skill
+	// quality (e.g. malformed frontmatter). (seucaranguejo fork)
 	modelID := resolvedEvolutionModelID(cfg, provider)
+	draftModelID := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	if draftModelID == "" && provider != nil {
+		draftModelID = provider.GetDefaultModel()
+	}
 	runtime, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: cfg.Evolution,
 		PatternClusterer: evolution.NewLLMPatternClusterer(
@@ -54,7 +65,7 @@ func newEvolutionBridge(
 			nil,
 		),
 		GeneratorFactory: func(workspace string) evolution.DraftGenerator {
-			return evolution.NewDraftGeneratorForWorkspace(workspace, provider, modelID)
+			return evolution.NewDraftGeneratorForWorkspace(workspace, provider, draftModelID)
 		},
 		SuccessJudgeFactory: func(workspace string) evolution.SuccessJudge {
 			return evolution.NewLLMTaskSuccessJudge(provider, modelID, &evolution.HeuristicSuccessJudge{})
@@ -92,6 +103,13 @@ func newEvolutionBridge(
 
 func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider) string {
 	if cfg != nil {
+		// A dedicated evolution model (typically a cheap one, e.g. deepseek)
+		// overrides the main model for the cold-path LLM calls. The agent provider
+		// keeps its baked-in gateway attribution tags, so cost stays attributed
+		// even though the request's model field changes.
+		if modelID := strings.TrimSpace(cfg.Evolution.Model); modelID != "" {
+			return modelID
+		}
 		if modelID := cfg.Agents.Defaults.GetModelName(); modelID != "" {
 			return modelID
 		}

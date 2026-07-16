@@ -1367,3 +1367,19 @@ func (p *capturingEvolutionDraftProvider) Chat(
 func (p *capturingEvolutionDraftProvider) GetDefaultModel() string {
 	return p.defaultModel
 }
+
+func TestResolvedEvolutionModelID_PrefersEvolutionModel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Agents.Defaults.ModelName = "zai/glm-5.2"
+
+	// No evolution model configured -> fall back to the agent's main model.
+	if got := resolvedEvolutionModelID(cfg, nil); got != "zai/glm-5.2" {
+		t.Fatalf("no evolution model set: want main model, got %q", got)
+	}
+
+	// Evolution model set (with surrounding space) -> it wins, trimmed.
+	cfg.Evolution.Model = "  deepseek/deepseek-v4-flash  "
+	if got := resolvedEvolutionModelID(cfg, nil); got != "deepseek/deepseek-v4-flash" {
+		t.Fatalf("evolution model set: want it (trimmed), got %q", got)
+	}
+}
