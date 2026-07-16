@@ -574,14 +574,20 @@ func TestSkillDiscovery_DefersCatalogToHint(t *testing.T) {
 		t.Fatalf("discovery off should inline the full catalog: %q", m1[0].Content)
 	}
 
-	// Discovery on: only a one-line hint, no per-skill <skills> block.
+	// Discovery on: only the NAMES + the find_installed_skills nudge — no <skills>
+	// block and no descriptions (that's what keeps the prompt lean).
 	lean := NewContextBuilder(ws).WithSkillDiscovery(true)
 	m2 := lean.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})
 	sys := m2[0].Content
 	if strings.Contains(sys, "<skills>") || strings.Contains(sys, "Extract text from PDF") {
-		t.Fatalf("discovery on should NOT inline the catalog: %q", sys)
+		t.Fatalf("discovery on should NOT inline the catalog/descriptions: %q", sys)
 	}
 	if !strings.Contains(sys, "find_installed_skills") || !strings.Contains(sys, "1 installed skill") {
 		t.Fatalf("discovery on should show a find_installed_skills hint with the count: %q", sys)
+	}
+	// The skill NAME must be listed (the deferred-MCP-style nudge) so the model
+	// knows the skill exists and can search for it by name.
+	if !strings.Contains(sys, "pdf-extract") {
+		t.Fatalf("discovery on should list the skill name: %q", sys)
 	}
 }

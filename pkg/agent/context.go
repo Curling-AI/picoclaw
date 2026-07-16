@@ -305,9 +305,10 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	}
 
 	// Skills. Default: inline the catalog (names+descriptions), AI reads full
-	// content with read_file. With skill discovery on, the catalog is deferred —
-	// only a one-line hint sits in the prompt and the agent pulls relevant skills
-	// via find_installed_skills, keeping the prompt lean regardless of skill count.
+	// content with read_file. With skill discovery on, the descriptions are deferred —
+	// only the skill NAMES sit in the prompt (mirroring the deferred-MCP name nudge)
+	// and the agent pulls relevant skills via find_installed_skills, keeping the
+	// prompt lean regardless of skill count.
 	if opts.IncludeSkillCatalog && cb.skillDiscovery {
 		if hint := cb.skillDiscoveryHint(opts.AllowedSkills); hint != "" {
 			add(PromptPart{
@@ -493,7 +494,7 @@ func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
 		return ""
 	}
 	allowedSet := cleanAllowedSet(allowed)
-	count := 0
+	var names []string
 	for _, s := range cb.skillsLoader.ListSkills() {
 		if s.Disabled {
 			continue
@@ -503,17 +504,32 @@ func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
 				continue
 			}
 		}
-		count++
+		names = append(names, s.Name)
 	}
-	if count == 0 {
+	total := len(names)
+	if total == 0 {
 		return ""
+	}
+	// Mirror the deferred-MCP nudge (mcpServerPromptContributor): list the NAMES
+	// only — descriptions/SKILL.md stay out of the prompt. The count alone left the
+	// model unable to know a given skill exists, so it never searched for it; the
+	// names make each one addressable while keeping the prompt lean. Same cap.
+	suffix := ""
+	if len(names) > maxDeferredToolNamesInPrompt {
+		suffix = fmt.Sprintf(" … and %d more (searchable)", len(names)-maxDeferredToolNamesInPrompt)
+		names = names[:maxDeferredToolNamesInPrompt]
 	}
 	return fmt.Sprintf(
 		"# Skills\n\nYou have %d installed skill(s) that extend your capabilities. "+
-			"They are not listed here to keep this prompt lean — call the find_installed_skills tool "+
-			"with a natural-language description of what you need to find the relevant one(s), "+
-			"then read the returned SKILL.md with read_file.",
-		count,
+			"Their names: `%s`%s. IMPORTANT: only the names are listed here — the skills' "+
+			"instructions are NOT loaded, so you cannot follow one from its name alone. To use a "+
+			"skill, your immediate next action MUST be a real find_installed_skills call (pass a "+
+			"natural-language description of the task, or the skill name) to get its SKILL.md "+
+			"location, then read that file with read_file; never reply with only a sentence saying "+
+			"you will use it.",
+		total,
+		strings.Join(names, "`, `"),
+		suffix,
 	)
 }
 
