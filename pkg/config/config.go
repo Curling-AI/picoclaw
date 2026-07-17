@@ -445,6 +445,14 @@ type AgentDefaults struct {
 	// big document read is trimmed to fit instead of 400ing "Prompt exceeds max
 	// length". 0 = fall back to the main context_window. (seucaranguejo fork)
 	ImageContextWindow int `json:"image_context_window,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_CONTEXT_WINDOW"`
+	// MediaDelegation, when true, replaces the whole-turn vision-model SWAP with a
+	// bounded vision sub-call ("auto-delegation"): the main (text) model stays in
+	// control and, for each current-turn image, one focused call to the image model
+	// (brief context + the image only) returns a text description injected back into
+	// the conversation. Cuts vision cost (image analyzed once, not the whole thread
+	// routed every turn) and avoids the vision endpoint rejecting large multi-image
+	// tool-heavy arrays. false = legacy swap. (seucaranguejo fork)
+	MediaDelegation bool `json:"media_delegation,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_MEDIA_DELEGATION"`
 	// CronModel routes cron jobs that opt in (Payload.Model set) to a dedicated
 	// model instead of the main one — e.g. a cheaper/deeper model for the
 	// memory-refresh curation pass. Platform-fixed; not settable by the agent.

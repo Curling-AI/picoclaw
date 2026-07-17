@@ -69,8 +69,15 @@ func (p *Pipeline) CallLLM(
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}
-	if err := p.routeMediaTurn(ts, exec); err != nil {
-		return ControlBreak, err
+	// Auto-delegation (seucaranguejo fork): for image turns, prefer a bounded
+	// vision sub-call over swapping the whole turn to the vision model. Falls
+	// back to routeMediaTurn's swap when disabled or when nothing was delegated.
+	if delegated, derr := p.delegateMediaTurn(ctx, ts, exec); derr != nil {
+		return ControlBreak, derr
+	} else if !delegated {
+		if err := p.routeMediaTurn(ts, exec); err != nil {
+			return ControlBreak, err
+		}
 	}
 	if err := p.routeCronModelTurn(ts, exec); err != nil {
 		return ControlBreak, err
