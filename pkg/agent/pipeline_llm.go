@@ -684,6 +684,25 @@ func (p *Pipeline) CallLLM(
 			})
 		return ControlBreak, nil
 	}
+	// Tool-call iteration: FLUSH the streamed narration before moving on — do
+	// not just cancel. The web-side streamer throttles partial updates (rpc:
+	// ~90ms/24 chars), so the tail of an intermediate narration ("…criar a
+	// apresent") may never have been pushed; and the tool-call interim below
+	// SKIPS re-publishing content that already streamed. Canceling here left
+	// the narration bubble truncated mid-word forever. Finalize pushes the full
+	// text (the streamer dedupes identical tails) — mirror of the
+	// FinalizeReasoning flush above. Only when content actually streamed:
+	// otherwise the interim publish below delivers the narration and a flush
+	// here would duplicate it. (seucaranguejo fork)
+	if exec.streamingPublisher != nil && exec.streamingPublisher.Published() {
+		if err := finalizeConfiguredStreamingLLM(turnCtx, ts, exec, exec.response.Content, nil); err != nil {
+			logger.WarnCF("agent", "Failed to flush streamed narration before tool calls", map[string]any{
+				"agent_id": ts.agent.ID,
+				"channel":  ts.channel,
+				"error":    err.Error(),
+			})
+		}
+	}
 	cancelConfiguredStreamingLLM(turnCtx, exec)
 
 	// Tool-call path: normalize and prepare for tool execution
