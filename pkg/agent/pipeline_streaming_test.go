@@ -1043,11 +1043,62 @@ func TestConfiguredStreamingToolCallsUseCompleteStreamResponse(t *testing.T) {
 	if provider.chatCalls != 0 {
 		t.Fatalf("Chat calls = %d, want 0", provider.chatCalls)
 	}
+	// The tool-call iteration must FINALIZE the streamed narration (full text
+	// flush — the rpc streamer throttles partials and the tool-call interim
+	// skips re-publishing streamed content), not cancel it. Canceling left the
+	// narration bubble truncated at the last throttled chunk.
+	if streamer.canceled != 0 {
+		t.Fatalf("streamer canceled = %d, want 0 (narration must be flushed, not canceled)", streamer.canceled)
+	}
+	if len(streamer.finalized) != 2 ||
+		streamer.finalized[0] != "need a tool" ||
+		streamer.finalized[1] != "tool call handled" {
+		t.Fatalf("stream finalized = %v, want [need a tool, tool call handled]", streamer.finalized)
+	}
+}
+
+func TestConfiguredStreamingToolCallsWithoutStreamedContentStillCancels(t *testing.T) {
+	// When the provider streamed NO visible content before the tool calls (e.g.
+	// content assembled only in the final response), there is nothing to flush —
+	// the interim publish delivers the narration, and a finalize here would
+	// duplicate it. The stream must be canceled as before.
+	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	provider := &configuredStreamingProvider{
+		streamPlan: []configuredStreamingCall{
+			{
+				// no chunks: nothing streamed
+				response: &providers.LLMResponse{
+					Content: "need a tool",
+					ToolCalls: []providers.ToolCall{{
+						ID:        "call-1",
+						Type:      "function",
+						Name:      "tool_limit_test_tool",
+						Arguments: map[string]any{"value": "x"},
+					}},
+				},
+			},
+			{
+				response: &providers.LLMResponse{Content: "tool call handled"},
+			},
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	agent := al.GetRegistry().GetDefaultAgent()
+	agent.Tools.Register(&toolLimitTestTool{})
+
+	got := runConfiguredStreamingTurn(t, al, "pico")
+
+	if got != "tool call handled" {
+		t.Fatalf("response = %q, want tool call handled", got)
+	}
 	if streamer.canceled != 1 {
-		t.Fatalf("streamer canceled = %d, want 1 for non-final tool-call response", streamer.canceled)
+		t.Fatalf("streamer canceled = %d, want 1 (nothing streamed, nothing to flush)", streamer.canceled)
 	}
 	if len(streamer.finalized) != 1 || streamer.finalized[0] != "tool call handled" {
-		t.Fatalf("stream finalized = %v, want [tool call handled]", streamer.finalized)
+		t.Fatalf("stream finalized = %v, want only the final [tool call handled]", streamer.finalized)
 	}
 }
 
