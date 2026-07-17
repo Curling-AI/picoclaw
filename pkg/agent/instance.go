@@ -46,6 +46,7 @@ type AgentInstance struct {
 	Candidates                []providers.FallbackCandidate
 	ImageCandidates           []providers.FallbackCandidate
 	ImageContextWindow        int
+	MediaDelegation           bool
 	CronCandidates            []providers.FallbackCandidate
 
 	// Router is non-nil when model routing is configured and the light model
@@ -335,6 +336,7 @@ func NewAgentInstance(
 		Candidates:                candidates,
 		ImageCandidates:           imageCandidates,
 		ImageContextWindow:        defaults.ImageContextWindow,
+		MediaDelegation:           defaults.MediaDelegation,
 		CronCandidates:            cronCandidates,
 		Router:                    router,
 		LightCandidates:           lightCandidates,

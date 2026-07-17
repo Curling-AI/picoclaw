@@ -153,6 +153,12 @@ type turnExecution struct {
 	// (seucaranguejo fork)
 	effectiveContextWindow int
 
+	// mediaAnalysisCache memoizes vision-delegation sub-call results within a
+	// turn, keyed by a hash of the image data URL(s), so an image is analyzed
+	// once even though the agentic loop re-resolves it every iteration.
+	// (seucaranguejo fork)
+	mediaAnalysisCache map[string]string
+
 	// LLM call per-iteration state
 	response            *providers.LLMResponse
 	normalizedToolCalls []providers.ToolCall
