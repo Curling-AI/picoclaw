@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1122,5 +1123,76 @@ func TestTurnState_SkillContextSnapshotsTrackLatestSuccessfulPath(t *testing.T) 
 	}
 	if snapshots[1].Sequence != 2 || snapshots[1].Trigger != skillContextTriggerContextRetryRebuild {
 		t.Fatalf("snapshots[1] = %+v, want sequence=2 trigger=%q", snapshots[1], skillContextTriggerContextRetryRebuild)
+	}
+}
+
+// alwaysToolCallRecorder sempre pede tool call e grava as mensagens de cada
+// chamada — permite verificar os avisos de tool-budget injetados em contexto.
+type alwaysToolCallRecorder struct {
+	mu       sync.Mutex
+	seen     []string // conteúdo de toda user message vista em qualquer chamada
+	toolName string
+}
+
+func (p *alwaysToolCallRecorder) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	for _, m := range messages {
+		if m.Role == "user" {
+			p.seen = append(p.seen, m.Content)
+		}
+	}
+	p.mu.Unlock()
+	return &providers.LLMResponse{
+		ToolCalls: []providers.ToolCall{{
+			ID: "c", Type: "function", Name: p.toolName,
+			Function: &providers.FunctionCall{Name: p.toolName, Arguments: `{"q":"x"}`},
+		}},
+	}, nil
+}
+
+func (p *alwaysToolCallRecorder) GetDefaultModel() string { return "mock-model" }
+
+func (p *alwaysToolCallRecorder) sawContaining(sub string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, s := range p.seen {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRunTurn_TwoStageBudgetWarnings(t *testing.T) {
+	// Um único aviso a 80% provou-se tarde demais em prod (18 estouros, nenhum
+	// conseguiu embrulhar). Agora: check de ritmo a 60% + wrap-up duro a 85%.
+	provider := &alwaysToolCallRecorder{toolName: "search"}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	agent.MaxIterations = 10 // soft na iteração 6, hard na 9
+
+	pipeline := NewPipeline(al)
+	opts := makeTestProcessOpts("test-session-two-stage")
+	ts := newTurnState(agent, opts, turnEventScope{
+		turnID:  "turn-two-stage",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	if _, err := al.runTurn(context.Background(), ts, pipeline); err != nil {
+		t.Fatalf("runTurn failed: %v", err)
+	}
+
+	if !provider.sawContaining("Tool-budget check") {
+		t.Error("soft pacing check (60%) was never injected")
+	}
+	if !provider.sawContaining("Tool-budget warning") {
+		t.Error("hard wrap-up warning (85%) was never injected")
 	}
 }
