@@ -324,10 +324,16 @@ func spawnSubTurn(
 		return nil, ErrInvalidSubTurnConfig
 	}
 
-	// 3. Determine timeout for child SubTurn
+	// 3. Determine timeout for child SubTurn. Background spawns (Async) are the
+	// long-haul profile by definition — "time-consuming tasks that can run
+	// independently" — so when no explicit timeout was requested they get 4× the
+	// default (5min→20min): a background research/build task rarely fits 5min.
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = rtCfg.defaultTimeout
+		if cfg.Async {
+			timeout *= 4
+		}
 	}
 
 	// 4. Create INDEPENDENT child context (not derived from parent ctx).
@@ -361,6 +367,14 @@ func spawnSubTurn(
 	ephemeralStore := newEphemeralSession(nil)
 	agent := *baseAgent // shallow copy
 	agent.Sessions = ephemeralStore
+	// Background spawns get 2× the iteration budget: prod had 8 spawn overruns
+	// reporting "[System: async:spawn] I've reached max_tool_iterations" back to
+	// the parent — a background task cannot ask the user to continue, so its
+	// budget must fit the whole job. Sync sub-turns (subagent/delegate) keep the
+	// parent's budget.
+	if cfg.Async && agent.MaxIterations > 0 {
+		agent.MaxIterations *= 2
+	}
 	// Clone the tool registry so child turn's tool registrations
 	// don't pollute the parent's registry.
 	if baseAgent.Tools != nil {
