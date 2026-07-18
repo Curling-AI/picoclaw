@@ -2328,3 +2328,81 @@ func TestDelegateToolRegistered_MultiAgent(t *testing.T) {
 		}
 	}
 }
+
+// ====================== Async spawns: 2× iteration budget ======================
+
+// countingToolCallProvider sempre pede tool call e conta as chamadas — o nº de
+// iterações do child é o nº de Chat calls até o corte do budget.
+type countingToolCallProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *countingToolCallProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tls []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	return &providers.LLMResponse{
+		ToolCalls: []providers.ToolCall{{
+			ID: "c", Type: "function", Name: "nonexistent_tool",
+			Function: &providers.FunctionCall{Name: "nonexistent_tool", Arguments: "{}"},
+		}},
+	}, nil
+}
+
+func (p *countingToolCallProvider) GetDefaultModel() string { return "count-model" }
+
+func (p *countingToolCallProvider) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestSpawnSubTurn_AsyncDoublesIterationBudget(t *testing.T) {
+	// Background (Async) é o perfil longo por definição — em prod 8 spawns
+	// estouraram o cap herdado do turno. Async ganha 2× o budget; sync mantém.
+	for _, tc := range []struct {
+		name      string
+		async     bool
+		wantCalls int
+	}{
+		{name: "async spawn dobra o budget", async: true, wantCalls: 6},
+		{name: "sync mantém o budget do pai", async: false, wantCalls: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &countingToolCallProvider{}
+			al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+			defer cleanup()
+			agent.MaxIterations = 3
+
+			parent := &turnState{
+				ctx:            context.Background(),
+				turnID:         "parent-budget",
+				depth:          0,
+				agent:          agent,
+				pendingResults: make(chan *tools.ToolResult, 4),
+				concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+			}
+
+			_, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+				Model:        "test-model",
+				Tools:        []tools.Tool{},
+				SystemPrompt: "tarefa longa",
+				Async:        tc.async,
+				Critical:     tc.async,
+			})
+			if err != nil {
+				t.Fatalf("spawnSubTurn: %v", err)
+			}
+			if got := provider.count(); got != tc.wantCalls {
+				t.Errorf("child LLM calls = %d, want %d", got, tc.wantCalls)
+			}
+		})
+	}
+}
