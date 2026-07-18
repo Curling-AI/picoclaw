@@ -7,7 +7,11 @@ import (
 )
 
 type SpawnTool struct {
-	spawner        SubTurnSpawner
+	spawner SubTurnSpawner
+	// manager só rastreia as tasks para o spawn_status (TrackTask/ResolveTask);
+	// a EXECUÇÃO segue no caminho SubTurn direto abaixo. Antes o manager era
+	// descartado no construtor e o spawn_status lia um map sempre vazio.
+	manager        *SubagentManager
 	defaultModel   string
 	maxTokens      int
 	temperature    float64
@@ -22,6 +26,7 @@ func NewSpawnTool(manager *SubagentManager) *SpawnTool {
 		return &SpawnTool{}
 	}
 	return &SpawnTool{
+		manager:      manager,
 		defaultModel: manager.defaultModel,
 		maxTokens:    manager.maxTokens,
 		temperature:  manager.temperature,
@@ -127,6 +132,13 @@ Task: %s`,
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
+		// Registra a task no manager ANTES de disparar, para o spawn_status
+		// enxergá-la desde o primeiro segundo (running → completed/failed).
+		taskID := ""
+		if t.manager != nil {
+			taskID = t.manager.TrackTask(task, label, targetAgentID, ToolChannel(ctx), ToolChatID(ctx))
+		}
+
 		// Launch async sub-turn in goroutine
 		go func() {
 			result, err := t.spawner.SpawnSubTurn(ctx, SubTurnConfig{
@@ -143,17 +155,37 @@ Task: %s`,
 				result = ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
 			}
 
+			if t.manager != nil && taskID != "" {
+				status := "completed"
+				resultText := ""
+				if result != nil {
+					resultText = result.ForLLM
+					if result.IsError {
+						status = "failed"
+					}
+				}
+				if err != nil {
+					status = "failed"
+				}
+				t.manager.ResolveTask(taskID, status, resultText)
+			}
+
 			// Call callback if provided
 			if cb != nil {
 				cb(ctx, result)
 			}
 		}()
 
-		// Return immediate acknowledgment
-		if label != "" {
-			return AsyncResult(fmt.Sprintf("Spawned subagent '%s' for task: %s", label, task))
+		// Return immediate acknowledgment. O task_id vai no ack para o modelo
+		// poder consultar spawn_status com o ID certo (antes ele chutava).
+		ref := ""
+		if taskID != "" {
+			ref = fmt.Sprintf(" (task_id: %s)", taskID)
 		}
-		return AsyncResult(fmt.Sprintf("Spawned subagent for task: %s", task))
+		if label != "" {
+			return AsyncResult(fmt.Sprintf("Spawned subagent '%s'%s for task: %s", label, ref, task))
+		}
+		return AsyncResult(fmt.Sprintf("Spawned subagent%s for task: %s", ref, task))
 	}
 
 	// Fallback: spawner not configured

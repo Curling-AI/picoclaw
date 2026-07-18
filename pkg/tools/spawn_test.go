@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockSpawner implements SubTurnSpawner for testing.
@@ -111,5 +112,63 @@ func TestSpawnTool_Execute_NilManager(t *testing.T) {
 	}
 	if !strings.Contains(result.ForLLM, "Subagent manager not configured") {
 		t.Errorf("Error message should mention manager not configured, got: %s", result.ForLLM)
+	}
+}
+
+// O spawn deve REGISTRAR a task no manager (senão o spawn_status lê um map
+// sempre vazio — bug de prod: "No subagents have been spawned yet" 2s após o
+// spawn) e RESOLVÊ-LA ao terminar, com o task_id visível no ack.
+func TestSpawnTool_Execute_TracksTaskInManager(t *testing.T) {
+	provider := &MockLLMProvider{}
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test")
+	tool := NewSpawnTool(manager)
+	spawner := &mockSpawner{done: make(chan struct{})}
+	tool.SetSpawner(spawner)
+
+	ctx := context.Background()
+	result := tool.Execute(ctx, map[string]any{"task": "long research", "label": "res"})
+	if result == nil || result.IsError {
+		t.Fatalf("unexpected error: %+v", result)
+	}
+	// O ack carrega o task_id para o modelo poder consultar o status certo.
+	if !strings.Contains(result.ForLLM, "task_id: subagent-") {
+		t.Errorf("ack must carry the task_id, got: %s", result.ForLLM)
+	}
+
+	// A task existe imediatamente (running ou já resolvida pela goroutine).
+	tasks := manager.ListTaskCopies()
+	if len(tasks) != 1 {
+		t.Fatalf("manager tasks = %d, want 1 (task registered at spawn time)", len(tasks))
+	}
+
+	<-spawner.done
+	// Espera a resolução (a goroutine resolve após o SpawnSubTurn retornar).
+	deadline := time.After(2 * time.Second)
+	for {
+		cpy, ok := manager.GetTaskCopy(tasks[0].ID)
+		if !ok {
+			t.Fatal("task disappeared from manager")
+		}
+		if cpy.Status == "completed" {
+			if !strings.Contains(cpy.Result, "Task completed") {
+				t.Errorf("task result = %q, want the subturn result", cpy.Result)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("task never resolved; status=%s", cpy.Status)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// E o spawn_status enxerga a task.
+	status := NewSpawnStatusTool(manager).Execute(ctx, map[string]any{})
+	if strings.Contains(status.ForLLM, "No subagents have been spawned yet") {
+		t.Errorf("spawn_status still blind to spawned task: %s", status.ForLLM)
+	}
+	if !strings.Contains(status.ForLLM, "subagent-") {
+		t.Errorf("spawn_status must list the task, got: %s", status.ForLLM)
 	}
 }

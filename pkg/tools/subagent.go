@@ -133,6 +133,43 @@ func (sm *SubagentManager) RegisterTool(tool Tool) {
 	sm.tools.Register(tool)
 }
 
+// TrackTask registers a subagent task whose execution happens OUTSIDE this
+// manager (the SpawnTool's direct SubTurn path). Without it, spawn_status reads
+// an always-empty task map: in prod, agents that spawned a background task got
+// "No subagents have been spawned yet" two seconds later. Returns the task ID
+// so the caller can surface it (and later resolve it via ResolveTask).
+func (sm *SubagentManager) TrackTask(
+	task, label, agentID, originChannel, originChatID string,
+) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	taskID := fmt.Sprintf("subagent-%d", sm.nextID)
+	sm.nextID++
+	sm.tasks[taskID] = &SubagentTask{
+		ID:            taskID,
+		Task:          task,
+		Label:         label,
+		AgentID:       agentID,
+		OriginChannel: originChannel,
+		OriginChatID:  originChatID,
+		Status:        "running",
+		Created:       time.Now().UnixMilli(),
+	}
+	return taskID
+}
+
+// ResolveTask finalizes a task registered via TrackTask with its terminal
+// status ("completed", "failed" or "canceled") and result text.
+func (sm *SubagentManager) ResolveTask(taskID, status, result string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if task, ok := sm.tasks[taskID]; ok {
+		task.Status = status
+		task.Result = result
+	}
+}
+
 func (sm *SubagentManager) Spawn(
 	ctx context.Context,
 	task, label, agentID, originChannel, originChatID string,
