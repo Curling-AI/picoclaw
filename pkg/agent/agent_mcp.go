@@ -198,10 +198,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 				return
 			}
 
-			ttl := al.cfg.Tools.MCP.Discovery.TTL
-			if ttl <= 0 {
-				ttl = 5 // Default value
-			}
+			ttl := discoveryPromoteTTL(al.cfg)
 
 			maxSearchResults := al.cfg.Tools.MCP.Discovery.MaxSearchResults
 			if maxSearchResults <= 0 {
@@ -474,4 +471,14 @@ func serverIsDeferred(discoveryEnabled bool, serverCfg config.MCPServerConfig) b
 		return *serverCfg.Deferred
 	}
 	return true
+}
+
+// discoveryPromoteTTL returns the configured tool-discovery promotion TTL (in
+// tool rounds), with the same default the discovery search tools use.
+func discoveryPromoteTTL(cfg *config.Config) int {
+	ttl := cfg.Tools.MCP.Discovery.TTL
+	if ttl <= 0 {
+		ttl = 5
+	}
+	return ttl
 }

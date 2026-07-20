@@ -41,6 +41,26 @@ func (p *Pipeline) CallLLM(
 
 	// PreLLM: graceful terminal handling
 	exec.gracefulTerminal, _ = ts.gracefulInterruptRequested()
+
+	// Deferred-tool visibility heal (seucaranguejo fork): every tool the
+	// outgoing messages reference must be in the tools array. Discovery
+	// promotions are in-memory, so a pod restart or TTL expiry could remove
+	// MCP tools while the history is full of successful calls to them — the
+	// model then "calls" a tool that isn't offered and (in streaming) returns
+	// reasoning-only/empty completions, permanently killing the conversation.
+	// Verified via A/B replay: with the referenced defs absent, glm-5.2
+	// returned empty 6/6; with them present, it acted 48/48.
+	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
+		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
+			logger.InfoCF("agent", "Re-promoted deferred tools referenced by session history",
+				map[string]any{
+					"agent_id":  ts.agent.ID,
+					"iteration": iteration,
+					"tools":     revived,
+				})
+		}
+	}
+
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefs()
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
 
