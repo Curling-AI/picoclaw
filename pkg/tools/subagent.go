@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,33 @@ import (
 // This avoids circular dependency between tools and agent packages.
 type SubTurnSpawner interface {
 	SpawnSubTurn(ctx context.Context, cfg SubTurnConfig) (*ToolResult, error)
+}
+
+// subagentPromptCore é a ÚNICA fonte do framing de sub-execução — antes havia
+// 5 declarações em 3 arquivos (subagent.go, spawn.go, agent_init.go) com
+// wording divergente, e editar uma não editava as outras.
+const subagentPromptCore = "Complete the given task independently and report the result.\n" +
+	"You have access to tools - use them as needed to complete your task.\n" +
+	"After completing the task, provide a clear summary of what was done."
+
+// SubagentSystemPrompt é o framing canônico de subagente síncrono.
+func SubagentSystemPrompt(label string) string {
+	if strings.TrimSpace(label) != "" {
+		return fmt.Sprintf("You are a subagent labeled %q. %s", label, subagentPromptCore)
+	}
+	return "You are a subagent. " + subagentPromptCore
+}
+
+// SpawnedSubagentSystemPrompt é o framing canônico de subagente em background.
+func SpawnedSubagentSystemPrompt(label string) string {
+	if strings.TrimSpace(label) != "" {
+		return fmt.Sprintf(
+			"You are a spawned subagent labeled %q running in the background. %s",
+			label,
+			subagentPromptCore,
+		)
+	}
+	return "You are a spawned subagent running in the background. " + subagentPromptCore
 }
 
 // SubTurnConfig holds configuration for spawning a sub-turn.
@@ -252,9 +280,7 @@ func (sm *SubagentManager) runTask(
 		)
 	} else {
 		// Fallback to legacy RunToolLoop
-		systemPrompt := `You are a subagent. Complete the given task independently and report the result.
-You have access to tools - use them as needed to complete your task.
-After completing the task, provide a clear summary of what was done.`
+		systemPrompt := SubagentSystemPrompt("")
 
 		messages := []providers.Message{
 			{Role: "system", Content: systemPrompt},
@@ -433,23 +459,8 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		label = ""
 	}
 
-	// Build system prompt for subagent
-	systemPrompt := fmt.Sprintf(
-		`You are a subagent. Complete the given task independently and provide a clear, concise result.
-
-Task: %s`,
-		task,
-	)
-
-	if label != "" {
-		systemPrompt = fmt.Sprintf(
-			`You are a subagent labeled "%s". Complete the given task independently and provide a clear, concise result.
-
-Task: %s`,
-			label,
-			task,
-		)
-	}
+	// Build system prompt for subagent (framing canônico compartilhado)
+	systemPrompt := SubagentSystemPrompt(label) + "\n\nTask: " + task
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {

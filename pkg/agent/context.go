@@ -28,8 +28,13 @@ type ContextBuilder struct {
 	splitOnMarker   bool
 	skillDiscovery  bool // defer the skill catalog behind find_installed_skills (lean prompt)
 	recentNotesDays int  // days of daily notes injected into the prompt (0 = rely on recall)
-	agentDiscovery  func(agentID string) []AgentDescriptor
-	promptRegistry  *PromptRegistry
+	// identityName, when set, replaces "picoclaw" in the identity header — the
+	// deployment names the assistant (agents.list[].name) and the old fixed
+	// "You are picoclaw" directly contradicted the bootstrap IDENTITY.md
+	// ("Your name is X. You are NOT picoclaw") in every prompt. (fork)
+	identityName   string
+	agentDiscovery func(agentID string) []AgentDescriptor
+	promptRegistry *PromptRegistry
 
 	// Cache for system prompt to avoid rebuilding on every call.
 	// This fixes issue #607: repeated reprocessing of the entire context.
@@ -79,6 +84,14 @@ func (cb *ContextBuilder) WithSplitOnMarker(enabled bool) *ContextBuilder {
 // the agent pulls relevant skills on demand via the find_installed_skills tool.
 func (cb *ContextBuilder) WithSkillDiscovery(enabled bool) *ContextBuilder {
 	cb.skillDiscovery = enabled
+	return cb
+}
+
+// WithIdentityName names the assistant in the identity header (replaces the
+// fixed "picoclaw"), removing the per-prompt contradiction with the
+// deployment's IDENTITY.md ("You are NOT picoclaw").
+func (cb *ContextBuilder) WithIdentityName(name string) *ContextBuilder {
+	cb.identityName = name
 	return cb
 }
 
@@ -202,10 +215,17 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 		rules[i] = fmt.Sprintf("%d. %s", i+1, rule)
 	}
 
-	return fmt.Sprintf(
-		`# picoclaw 🦞 (%s)
+	header := fmt.Sprintf("# picoclaw 🦞 (%s)", version)
+	intro := "You are picoclaw, a helpful AI assistant."
+	if name := strings.TrimSpace(cb.identityName); name != "" {
+		header = fmt.Sprintf("# %s (picoclaw %s)", name, version)
+		intro = fmt.Sprintf("You are %s, a helpful AI assistant.", name)
+	}
 
-You are picoclaw, a helpful AI assistant.
+	return fmt.Sprintf(
+		`%s
+
+%s
 
 ## Workspace
 Your workspace is at: %s
@@ -217,7 +237,8 @@ Your workspace is at: %s
 
 %s
 `,
-		version,
+		header,
+		intro,
 		workspacePath,
 		workspacePath,
 		workspacePath,
@@ -239,8 +260,11 @@ func formatToolDiscoveryRule(useBM25, useRegex bool) string {
 		toolNames = append(toolNames, `"tool_search_tool_regex"`)
 	}
 
+	// Sem número: esta regra é emitida como parte própria (contributor), fora
+	// da lista numerada do getIdentity — o "5." hardcoded ficava órfão quando
+	// as regras da identidade mudavam de quantidade.
 	return fmt.Sprintf(
-		`5. **Tool Discovery** - Your visible tools are limited to save memory, but a vast hidden library exists — each connected MCP server lists its hidden tool names in your context. Those names are references only: they are NOT in your callable tool list and cannot be invoked directly. To use any tool you don't already have, your immediate next action MUST be a real %s tool call — never a sentence announcing that you will search (announcing without calling ends your turn and does nothing). Searches return only the top matches, NOT the whole library: if the tool you need is not in the results, search again with a more specific query (e.g. the exact tool name). Do not refuse a request unless repeated searches turn up nothing. Found tools will temporarily unlock for your next turn.`,
+		`**Tool Discovery** - Your visible tools are limited to save memory, but a vast hidden library exists — each connected MCP server lists its hidden tool names in your context. Those names are references only: they are NOT in your callable tool list and cannot be invoked directly. To use any tool you don't already have, your immediate next action MUST be a real %s tool call — never a sentence announcing that you will search (announcing without calling ends your turn and does nothing). Searches return only the top matches, NOT the whole library: if the tool you need is not in the results, search again with a more specific query (e.g. the exact tool name). Do not refuse a request unless repeated searches turn up nothing. Found tools will temporarily unlock for your next turn.`,
 		strings.Join(toolNames, " or "),
 	)
 }

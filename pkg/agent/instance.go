@@ -167,6 +167,12 @@ func NewAgentInstance(
 		subagents = agentCfg.Subagents
 		skillsFilter = resolveAgentSkillsFilter(agentCfg, definition)
 	}
+	// O nome do agente (agents.list[].name / frontmatter) vira a identidade do
+	// system prompt — sem ele o kernel dizia "You are picoclaw" e o bootstrap
+	// IDENTITY.md rebatia "You are NOT picoclaw" no mesmo prompt.
+	if strings.TrimSpace(agentName) != "" {
+		contextBuilder = contextBuilder.WithIdentityName(agentName)
+	}
 	provider = resolvePrimaryProviderForAgent(cfg, workspace, agentID, model, provider)
 	warnOnUnknownAgentMCPServerDeclarations(agentID, workspace, cfg, definition)
 
