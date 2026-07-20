@@ -112,23 +112,8 @@ func (t *SpawnTool) execute(
 		}
 	}
 
-	// Build system prompt for spawned subagent
-	systemPrompt := fmt.Sprintf(
-		`You are a spawned subagent running in the background. Complete the given task independently and report back when done.
-
-Task: %s`,
-		task,
-	)
-
-	if label != "" {
-		systemPrompt = fmt.Sprintf(
-			`You are a spawned subagent labeled "%s" running in the background. Complete the given task independently and report back when done.
-
-Task: %s`,
-			label,
-			task,
-		)
-	}
+	// Build system prompt for spawned subagent (framing canônico compartilhado)
+	systemPrompt := SpawnedSubagentSystemPrompt(label) + "\n\nTask: " + task
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {

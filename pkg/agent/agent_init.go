@@ -354,11 +354,8 @@ func registerSharedTools(
 					}
 				}
 
-				// 3. System Prompt
-				systemPrompt := "You are a subagent. Complete the given task independently and report the result.\n" +
-					"You have access to tools - use them as needed to complete your task.\n" +
-					"After completing the task, provide a clear summary of what was done.\n\n" +
-					"Task: " + task
+				// 3. System Prompt (framing canônico compartilhado — tools.SubagentSystemPrompt)
+				systemPrompt := tools.SubagentSystemPrompt(label) + "\n\nTask: " + task
 
 				// 4. Resolve Model
 				modelToUse := agent.Model
