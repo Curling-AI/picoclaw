@@ -1195,4 +1195,15 @@ func TestRunTurn_TwoStageBudgetWarnings(t *testing.T) {
 	if !provider.sawContaining("Tool-budget warning") {
 		t.Error("hard wrap-up warning (85%) was never injected")
 	}
+
+	// The nudges are TURN-SCOPED: they must never be persisted to session
+	// history. A saved "wrap up NOW / do not begin large new sub-tasks"
+	// becomes a standing anti-tool instruction that poisons every later turn
+	// (observed in prod: sessions accumulated several and degraded into
+	// announce-without-acting loops).
+	for _, m := range agent.Sessions.GetHistory("test-session-two-stage") {
+		if strings.Contains(m.Content, "[System] Tool-budget") {
+			t.Fatalf("tool-budget nudge was persisted to session history: %q", m.Content)
+		}
+	}
 }

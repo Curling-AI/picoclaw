@@ -125,6 +125,15 @@ type turnExecution struct {
 	// models). Capped so a persistently silent model still ends the turn.
 	emptyResponseRetries int
 
+	// transientTurnMessages are turn-scoped steering notes (tool-budget
+	// nudges) appended to callMessages of every remaining iteration of THIS
+	// turn but never persisted to session history. Persisting them poisoned
+	// sessions: a saved "[System] Tool-budget warning … do not begin large new
+	// sub-tasks" reads as a standing anti-tool instruction in every later
+	// turn (observed in prod — sessions accumulated up to 4 of them and had
+	// 1.6× more empty turns). Mirrors the interruptHintMessage pattern.
+	transientTurnMessages []providers.Message
+
 	// Turn output
 	finalContent string
 
