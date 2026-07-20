@@ -206,7 +206,7 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 		rules = append(
 			rules,
 			fmt.Sprintf(
-				"**Memory** - When interacting with me if something seems memorable, update %s/memory/MEMORY.md",
+				"**Memory** - When something seems memorable, save it in the RIGHT file (all under %s/memory/): facts about the USER (identity, preferences, business) → memory/USER.md; adjustments to YOUR OWN behavior/persona → memory/SOUL.md; durable work/project context → memory/MEMORY.md; ephemeral day-to-day events → the daily note. NEVER duplicate into MEMORY.md a fact that is already visible in your prompt (AGENTS.md persona, USER.md, SOUL.md) — that pays for it twice in every request.",
 				workspacePath,
 			),
 		)
@@ -673,7 +673,13 @@ func (cb *ContextBuilder) InvalidateCache() {
 func (cb *ContextBuilder) sourcePaths() []string {
 	agentDefinition := cb.LoadAgentDefinition()
 	paths := agentDefinition.trackedPaths(cb.workspace)
-	paths = append(paths, filepath.Join(cb.workspace, "memory", "MEMORY.md"))
+	paths = append(paths,
+		filepath.Join(cb.workspace, "memory", "MEMORY.md"),
+		// Overlays graváveis do bootstrap (roteamento de memória): mudanças
+		// neles precisam invalidar o cache do system prompt.
+		filepath.Join(cb.workspace, "memory", "USER.md"),
+		filepath.Join(cb.workspace, "memory", "SOUL.md"),
+	)
 	return uniquePaths(paths)
 }
 
@@ -896,9 +902,17 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 			agentDefinition.Soul.Content,
 		)
 	}
+	// Overlay gravável do SOUL: o SOUL.md base pode ser read-only (montado
+	// pelo deployment); ajustes de comportamento aprendidos vão em
+	// memory/SOUL.md e aparecem junto da seção. (fork — roteamento de memória)
+	cb.appendOverlay(&sb, "SOUL.md (learned)", filepath.Join("memory", "SOUL.md"))
 	if agentDefinition.User != nil {
 		fmt.Fprintf(&sb, "## %s\n\n%s\n\n", "USER.md", agentDefinition.User.Content)
 	}
+	// Overlay gravável do USER: fatos aprendidos sobre o usuário vão em
+	// memory/USER.md — separados do MEMORY.md (contexto de trabalho) para não
+	// duplicar persona no prompt. (fork — roteamento de memória)
+	cb.appendOverlay(&sb, "USER.md (learned)", filepath.Join("memory", "USER.md"))
 
 	if agentDefinition.Source != AgentDefinitionSourceAgent {
 		filePath := filepath.Join(cb.workspace, "IDENTITY.md")
@@ -908,6 +922,18 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 	}
 
 	return sb.String()
+}
+
+// appendOverlay injeta um arquivo-overlay gravável (memory/USER.md,
+// memory/SOUL.md) como seção própria do bootstrap. Overlays existem porque os
+// arquivos base podem ser montados read-only pelo deployment: o agente grava o
+// que APRENDE nesses overlays em vez de duplicar tudo no MEMORY.md.
+func (cb *ContextBuilder) appendOverlay(sb *strings.Builder, label, relPath string) {
+	data, err := os.ReadFile(filepath.Join(cb.workspace, relPath))
+	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+		return
+	}
+	fmt.Fprintf(sb, "## %s\n\n%s\n\n", label, strings.TrimSpace(string(data)))
 }
 
 // buildDynamicContext returns a short dynamic context string with per-request info.
