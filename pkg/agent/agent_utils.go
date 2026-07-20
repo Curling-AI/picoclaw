@@ -409,6 +409,32 @@ func ensureSessionMetadata(store session.SessionStore, key string, scope *sessio
 	metaStore.EnsureSessionMetadata(key, scope, aliases)
 }
 
+// toolCallNamesFromMessages collects the distinct tool names referenced by
+// assistant tool_calls across messages, in first-seen order. Session-loaded
+// history carries the name inside Function; live normalized calls carry it in
+// Name — check both.
+func toolCallNamesFromMessages(messages []providers.Message) []string {
+	seen := map[string]struct{}{}
+	var names []string
+	for _, msg := range messages {
+		for _, tc := range msg.ToolCalls {
+			name := tc.Name
+			if name == "" && tc.Function != nil {
+				name = tc.Function.Name
+			}
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 func sleepWithContext(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()

@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -611,6 +612,18 @@ func (b *streamingReadIdleTimeoutBody) Close() error {
 	return b.body.Close()
 }
 
+// sortedToolIndexes returns a tool-call accumulator map's keys in ascending
+// order. Delta indexes are provider-assigned and not guaranteed to be
+// contiguous or zero-based.
+func sortedToolIndexes[T any](m map[int]T) []int {
+	idxs := make([]int, 0, len(m))
+	for i := range m {
+		idxs = append(idxs, i)
+	}
+	sort.Ints(idxs)
+	return idxs
+}
+
 // parseStreamResponse parses an OpenAI-compatible SSE stream.
 func parseStreamResponse(
 	ctx context.Context,
@@ -724,11 +737,8 @@ func parseStreamResponse(
 		// raw accumulated fragment so far — likely not yet valid JSON.
 		if onChunk != nil && len(choice.Delta.ToolCalls) > 0 {
 			snapshot := make([]ToolCall, 0, len(activeTools))
-			for i := 0; i < len(activeTools); i++ {
-				acc, ok := activeTools[i]
-				if !ok {
-					continue
-				}
+			for _, i := range sortedToolIndexes(activeTools) {
+				acc := activeTools[i]
 				snapshot = append(snapshot, ToolCall{
 					ID:   acc.id,
 					Type: "function",
@@ -796,13 +806,15 @@ func parseStreamResponse(
 		}
 	}
 
-	// Assemble tool calls from accumulated deltas
+	// Assemble tool calls from accumulated deltas. Iterate the ACTUAL map keys
+	// in order — NOT 0..len-1: providers occasionally stream a lone tool call
+	// at index 1, or leave gaps (an aborted call), and the positional loop
+	// silently dropped every accumulator whose index fell outside {0..n-1}.
+	// A dropped tool call turns a tool-use turn into a bare narration
+	// ("announce and stop"), which then poisons the session history.
 	var toolCalls []ToolCall
-	for i := 0; i < len(activeTools); i++ {
-		acc, ok := activeTools[i]
-		if !ok {
-			continue
-		}
+	for _, i := range sortedToolIndexes(activeTools) {
+		acc := activeTools[i]
 		args := make(map[string]any)
 		raw := acc.argsJSON.String()
 		if raw != "" {

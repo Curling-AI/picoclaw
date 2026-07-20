@@ -163,6 +163,52 @@ func (r *ToolRegistry) TickTTL() {
 	}
 }
 
+// TouchTools re-arms the TTL of promoted tools that were just used (sliding
+// expiration). A tool in active use must never expire mid-task: expiry is only
+// for tools that sat idle for a full TTL of tool rounds. Entries already at
+// TTL 0 are left alone — reviving expired tools is EnsureVisible's job, keyed
+// off what the conversation actually references.
+func (r *ToolRegistry) TouchTools(names []string, ttl int) {
+	if ttl <= 0 || len(names) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range names {
+		if entry, exists := r.tools[name]; exists && !entry.IsCore && entry.TTL > 0 {
+			entry.TTL = ttl
+		}
+	}
+}
+
+// EnsureVisible re-promotes hidden tools referenced by name so they are
+// callable and included in provider tool definitions again. It returns the
+// names actually revived (registered, non-core, currently expired).
+//
+// This is the heal for the dead-conversation bug: discovery promotions live
+// only in memory, so a pod restart (every deploy) or TTL expiry silently
+// removes MCP tools from the request while the session history is full of
+// successful calls to them. The model then tries to call a tool that is not
+// in the tools array and (in streaming) returns reasoning-only or empty
+// completions, killing the conversation until a new tool_search happens.
+// Re-promoting whatever the outgoing messages reference guarantees that any
+// tool the model can see itself using is also callable.
+func (r *ToolRegistry) EnsureVisible(names []string, ttl int) []string {
+	if ttl <= 0 || len(names) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var revived []string
+	for _, name := range names {
+		if entry, exists := r.tools[name]; exists && !entry.IsCore && entry.TTL <= 0 {
+			entry.TTL = ttl
+			revived = append(revived, name)
+		}
+	}
+	return revived
+}
+
 // Version returns the current registry version (atomically).
 func (r *ToolRegistry) Version() uint64 {
 	return r.version.Load()

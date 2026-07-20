@@ -934,6 +934,16 @@ toolLoop:
 	// allResponsesHandled=false and no pending steering: continue so coordinator
 	// makes another LLM call. The tool result is in messages and the LLM will
 	// return it as finalContent in the next iteration.
+	//
+	// Sliding TTL (seucaranguejo fork): tools used this round get a full TTL
+	// again before the tick — only IDLE promoted tools decay. Without this, a
+	// long task outlives its own tools mid-flight (TTL is a global counter
+	// across all of the agent's sessions) and the turn dies the way
+	// EnsureVisible describes.
+	roundCalls := []providers.Message{{Role: "assistant", ToolCalls: exec.normalizedToolCalls}}
+	if used := toolCallNamesFromMessages(roundCalls); len(used) > 0 {
+		ts.agent.Tools.TouchTools(used, discoveryPromoteTTL(p.Cfg))
+	}
 	ts.agent.Tools.TickTTL()
 	logger.DebugCF("agent", "TTL tick after tool execution", map[string]any{
 		"agent_id": ts.agent.ID, "iteration": iteration,
