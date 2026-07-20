@@ -84,8 +84,16 @@ func (p *Pipeline) CallLLM(
 	}
 
 	exec.callMessages = exec.messages
+	// Turn-scoped nudges (tool-budget steering) ride along on every remaining
+	// call of this turn but never enter exec.messages / session history — see
+	// turnExecution.transientTurnMessages.
+	if len(exec.transientTurnMessages) > 0 {
+		exec.callMessages = append(
+			append([]providers.Message(nil), exec.messages...),
+			exec.transientTurnMessages...)
+	}
 	if exec.gracefulTerminal {
-		exec.callMessages = append(append([]providers.Message(nil), exec.messages...), ts.interruptHintMessage())
+		exec.callMessages = append(append([]providers.Message(nil), exec.callMessages...), ts.interruptHintMessage())
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}

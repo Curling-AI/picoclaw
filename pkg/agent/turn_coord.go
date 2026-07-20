@@ -109,17 +109,22 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		ts.setIteration(iteration)
 		ts.setPhase(TurnPhaseRunning)
 
-		// Two-stage tool-budget steering, injected as in-context messages BEFORE
-		// the hard max_tool_iterations cut (which otherwise truncates mid-task
+		// Two-stage tool-budget steering, appended to callMessages BEFORE the
+		// hard max_tool_iterations cut (which otherwise truncates mid-task
 		// with a generic message):
 		//   60% — soft pacing check: plan the remainder to fit the budget.
 		//   85% — hard wrap-up: deliver what exists NOW.
+		// TRANSIENT on purpose (exec.transientTurnMessages, never persisted):
+		// these are instructions about THIS turn's remaining budget. Persisted
+		// to the session they become standing "stop using tools" instructions
+		// that poison every later turn — observed in prod, sessions carried up
+		// to 4 of them and degraded into announce-without-acting loops.
 		if budget := ts.agent.MaxIterations - iteration; ts.agent.MaxIterations > 0 && budget > 0 {
 			switch {
 			case !wrapUpNudged && iteration*100 >= ts.agent.MaxIterations*85:
 				wrapUpNudged = true
 				paceNudged = true // estágio suave perdeu o sentido aqui
-				pendingMessages = append(pendingMessages, providers.Message{
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role: "user",
 					Content: fmt.Sprintf(
 						"[System] Tool-budget warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
@@ -130,7 +135,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				})
 			case !paceNudged && iteration*100 >= ts.agent.MaxIterations*60:
 				paceNudged = true
-				pendingMessages = append(pendingMessages, providers.Message{
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role: "user",
 					Content: fmt.Sprintf(
 						"[System] Tool-budget check: you are at iteration %d of a hard limit of %d (~%d tool steps left). Plan the REMAINING work to fit this budget: prioritize what is essential to deliver the task, batch related steps, and skip exploratory detours. You do not need to stop — just spend the rest of the budget deliberately. If the work clearly cannot fit, deliver the most valuable subset and note what would be left.",
