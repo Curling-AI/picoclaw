@@ -1196,7 +1196,11 @@ func TestCronTool_ExecuteJobPublishesAgentResponse(t *testing.T) {
 	if !strings.Contains(executor.lastPrompt, "send me a poem") ||
 		!strings.Contains(executor.lastPrompt, "Scheduled run of cron job") ||
 		!strings.Contains(executor.lastPrompt, "do NOT record routine runs") ||
-		!strings.Contains(executor.lastPrompt, "scripts/job-1/run.sh") {
+		!strings.Contains(executor.lastPrompt, "scripts/job-1/run.sh") ||
+		// Execução DIRETA: a instrução antiga ("check whether ... exists")
+		// custava 2 iterações extras (test -f + cat) em toda run de 5 min.
+		!strings.Contains(executor.lastPrompt, "execute `bash scripts/job-1/run.sh` directly") ||
+		!strings.Contains(executor.lastPrompt, "do NOT test for it") {
 		t.Fatalf("prompt = %q, want mensagem original embrulhada na nota de sistema", executor.lastPrompt)
 	}
 	if executor.publishedResp != "generated reply" {

@@ -67,6 +67,15 @@ type UsageInfo struct {
 	// Anthropic-style cache_read_input_tokens. Zero when the provider reports
 	// no cache reuse. Included in PromptTokens, not additive.
 	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+	// ReasoningTokens is the thinking share of CompletionTokens (included in
+	// it, not additive), parsed from completion_tokens_details.reasoning_tokens.
+	// Provider-specific (Vercel AI Gateway sends it, most providers do not) —
+	// zero when absent.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	// CostUSD is the billed cost of this call in USD as reported by the
+	// provider (Vercel AI Gateway's "cost" field). Zero when the provider does
+	// not report billing — consumers must fall back to their own price tables.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // UnmarshalJSON reads the flat token counts plus the cached-token count, which
@@ -75,14 +84,20 @@ type UsageInfo struct {
 // cache_read_input_tokens. Either populates CachedPromptTokens.
 func (u *UsageInfo) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		PromptTokens        int `json:"prompt_tokens"`
-		CompletionTokens    int `json:"completion_tokens"`
-		TotalTokens         int `json:"total_tokens"`
-		CachedPromptTokens  int `json:"cached_prompt_tokens"`
-		CacheReadInputToken int `json:"cache_read_input_tokens"`
+		PromptTokens        int     `json:"prompt_tokens"`
+		CompletionTokens    int     `json:"completion_tokens"`
+		TotalTokens         int     `json:"total_tokens"`
+		CachedPromptTokens  int     `json:"cached_prompt_tokens"`
+		CacheReadInputToken int     `json:"cache_read_input_tokens"`
+		ReasoningTokens     int     `json:"reasoning_tokens"`
+		Cost                float64 `json:"cost"`
+		CostUSD             float64 `json:"cost_usd"`
 		PromptTokensDetails *struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -97,6 +112,22 @@ func (u *UsageInfo) UnmarshalJSON(data []byte) error {
 		u.CachedPromptTokens = raw.PromptTokensDetails.CachedTokens
 	case raw.CacheReadInputToken > 0:
 		u.CachedPromptTokens = raw.CacheReadInputToken
+	}
+	// Provider-specific extras with sensible fallbacks: reasoning share nests
+	// under completion_tokens_details (OpenAI-style / Vercel gateway) or comes
+	// flat on re-decode of our own serialization; billed cost is the gateway's
+	// "cost" field. Absent → zero, and consumers fall back to estimates.
+	switch {
+	case raw.ReasoningTokens > 0:
+		u.ReasoningTokens = raw.ReasoningTokens
+	case raw.CompletionTokensDetails != nil && raw.CompletionTokensDetails.ReasoningTokens > 0:
+		u.ReasoningTokens = raw.CompletionTokensDetails.ReasoningTokens
+	}
+	switch {
+	case raw.CostUSD > 0:
+		u.CostUSD = raw.CostUSD
+	case raw.Cost > 0:
+		u.CostUSD = raw.Cost
 	}
 	return nil
 }

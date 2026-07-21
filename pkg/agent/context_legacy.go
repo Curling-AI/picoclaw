@@ -320,6 +320,11 @@ func (m *legacyContextManager) retryLLMCall(
 			)
 		}()
 
+		// Out-of-pipeline call: report usage so summarization cost is metered.
+		if err == nil {
+			notifyBackgroundLLM(ctx, m.al, "summarize", agent.Model, resp)
+		}
+
 		if err == nil && resp != nil && resp.Content != "" {
 			return resp, nil
 		}

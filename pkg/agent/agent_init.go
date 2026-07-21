@@ -50,7 +50,11 @@ func NewAgentLoop(
 		stateManager = state.NewManager(defaultAgent.Workspace)
 	}
 
-	bridge, err := newEvolutionBridge(registry, cfg, provider)
+	// Evolution's LLM calls (judge/clusterer/draft) happen outside the turn
+	// pipeline; the observed wrapper routes their usage through AfterLLM so
+	// the meter sees them. Attached to the loop below, once it exists.
+	evolutionProvider := newObservedProvider(provider, "evolution")
+	bridge, err := newEvolutionBridge(registry, cfg, evolutionProvider)
 	if err != nil {
 		logger.WarnCF("agent", "Failed to initialize evolution bridge", map[string]any{
 			"error": err.Error(),
@@ -98,6 +102,7 @@ func NewAgentLoop(
 	al.hooks = NewHookManager(al.runtimeEvents.Channel())
 	configureHookManagerFromConfig(al.hooks, cfg)
 	al.contextManager = al.resolveContextManager()
+	evolutionProvider.attach(al)
 
 	// Register shared tools to all agents (now that al is created)
 	registerSharedTools(al, cfg, msgBus, registry, provider)
