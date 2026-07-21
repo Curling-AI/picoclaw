@@ -107,10 +107,34 @@ func sameCandidateSet(a, b []providers.FallbackCandidate) bool {
 	return true
 }
 
+// messagesContainCurrentTurnMediaTurn reports whether the current turn carries
+// media the VISION model should serve: images (resolved data URLs or path
+// tags) and audio/video. Plain document attachments (docx/xlsx/pdf → "file")
+// deliberately do NOT count: they are read via tools/skills, and routing a
+// document-only turn to the vision model shipped the whole agentic turn to
+// the (weaker) image model for no reason — observed in prod as users
+// uploading spreadsheets and getting empty responses/errors right after,
+// because gemini-2.5-flash-lite was suddenly driving a 40-tool turn.
 func messagesContainCurrentTurnMediaTurn(messages []providers.Message) bool {
 	for _, msg := range messages {
-		if len(msg.Media) > 0 {
-			return true
+		for _, ref := range msg.Media {
+			if strings.TrimSpace(ref) == "" {
+				continue
+			}
+			if strings.HasPrefix(ref, "data:") {
+				// Resolved payloads: only visual/audio ones route.
+				if strings.HasPrefix(ref, dataImageURLPrefix) ||
+					strings.HasPrefix(ref, "data:audio/") ||
+					strings.HasPrefix(ref, "data:video/") {
+					return true
+				}
+				continue
+			}
+			// Plain path/ref: classify by filename. "file" (documents,
+			// archives, unknown) stays on the main model.
+			if t := inferMediaType(ref, ""); t == "image" || t == "audio" || t == "video" {
+				return true
+			}
 		}
 		if resolvedImagePathTagRegex.MatchString(msg.Content) {
 			return true
