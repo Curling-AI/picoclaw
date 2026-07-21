@@ -157,6 +157,12 @@ func (m *seahorseContextManager) Ingest(ctx context.Context, req *IngestRequest)
 	return err
 }
 
+// CompactionState: seahorse compaction runs synchronously inside Compact —
+// there is no async window for the UI to surface.
+func (m *seahorseContextManager) CompactionState(string) CompactionState {
+	return CompactionState{}
+}
+
 // Clear removes all stored context for a session (seahorse DB + JSONL).
 func (m *seahorseContextManager) Clear(ctx context.Context, sessionKey string) error {
 	if err := m.engine.ClearSession(ctx, sessionKey); err != nil {
