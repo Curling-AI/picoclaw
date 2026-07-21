@@ -49,7 +49,7 @@ func TestParallelSearchProvider_SearchSuccess(t *testing.T) {
 				if req.Method != http.MethodPost {
 					t.Fatalf("method = %s, want POST", req.Method)
 				}
-				if got := req.Header.Get("x-api-key"); got != "parallel-key" {
+				if got := req.Header.Get("X-Api-Key"); got != "parallel-key" {
 					t.Fatalf("x-api-key = %q, want parallel-key", got)
 				}
 				if !strings.Contains(req.URL.String(), "api.parallel.ai/v1/search") {
@@ -132,7 +132,7 @@ func TestParallelSearchProvider_KeyRotationOnAuthError(t *testing.T) {
 		keyPool: NewAPIKeyPool([]string{"bad-key", "good-key"}),
 		client: &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				key := req.Header.Get("x-api-key")
+				key := req.Header.Get("X-Api-Key")
 				keysSeen = append(keysSeen, key)
 				rec := httptest.NewRecorder()
 				if key == "bad-key" {

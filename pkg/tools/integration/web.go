@@ -579,7 +579,9 @@ func (p *ParallelSearchProvider) Search(
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("x-api-key", apiKey)
+		// Parallel documents "x-api-key"; Header.Set canonicalizes it to
+		// X-Api-Key on the wire (HTTP header names are case-insensitive).
+		req.Header.Set("X-Api-Key", apiKey)
 
 		resp, err := p.client.Do(req)
 		if err != nil {
