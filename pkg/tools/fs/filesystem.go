@@ -436,6 +436,16 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	sniff := make([]byte, 512)
 	sniffN, _ := file.Read(sniff)
 
+	// Binary guard: dumping raw bytes of a docx/xlsx/pdf into the context is
+	// never what the model wants — observed in prod as 20-60KB of zip/pdf
+	// garbage persisted in sessions (context pollution + provider errors on
+	// the following call), followed by the agent slowly rediscovering the
+	// extraction skill. Refuse with instructions instead; genuine byte-level
+	// inspection still works via exec (xxd/hexdump).
+	if isBinaryReadFileData(sniff[:sniffN]) {
+		return ErrorResult(binaryReadFileGuidance(path, totalSize))
+	}
+
 	// Reset read position to beginning before applying the caller's offset.
 	if seeker, ok := file.(io.Seeker); ok {
 		_, err = seeker.Seek(0, io.SeekStart)
@@ -709,6 +719,37 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 
 func formatReadFileLinePrefix(lineNumber int64) string {
 	return strconv.FormatInt(lineNumber, 10) + "|"
+}
+
+// binaryReadFileGuidance builds the refusal message for binary reads: it
+// names the file/size and points the model at the right extraction path per
+// format, so the next tool call is the productive one instead of a raw dump.
+func binaryReadFileGuidance(path string, totalSize int64) string {
+	base := filepath.Base(path)
+	size := "unknown size"
+	if totalSize >= 0 {
+		size = fmt.Sprintf("%d bytes", totalSize)
+	}
+	hint := "extract its content with a suitable tool via exec"
+	switch strings.ToLower(filepath.Ext(base)) {
+	case ".docx", ".doc":
+		hint = "extract the text with the docx skill or a script (python-docx, or `pandoc <file> -t plain`)"
+	case ".xlsx", ".xls":
+		hint = "read it with the xlsx skill or a script (openpyxl/pandas)"
+	case ".pptx", ".ppt":
+		hint = "extract the slides with the pptx skill or a script (python-pptx)"
+	case ".pdf":
+		hint = "extract the text with the pdf skill or a script (pdfplumber, or `pdftotext`)"
+	case ".zip", ".tar", ".gz", ".rar", ".7z":
+		hint = "list/extract it via exec (`unzip -l`, `tar -tf`) and read the extracted files"
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
+		hint = "use load_image to view it"
+	}
+	return fmt.Sprintf(
+		"%s is a binary file (%s); refusing to dump raw bytes into the conversation. Instead, %s. "+
+			"For a genuine byte-level look use exec (`xxd %s | head`).",
+		base, size, hint, base,
+	)
 }
 
 func isBinaryReadFileData(data []byte) bool {
