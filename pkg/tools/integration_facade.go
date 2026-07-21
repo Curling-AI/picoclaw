@@ -26,6 +26,7 @@ type (
 	SearchResultItem         = integrationtools.SearchResultItem
 	BraveSearchProvider      = integrationtools.BraveSearchProvider
 	TavilySearchProvider     = integrationtools.TavilySearchProvider
+	ParallelSearchProvider   = integrationtools.ParallelSearchProvider
 	SogouSearchProvider      = integrationtools.SogouSearchProvider
 	DuckDuckGoSearchProvider = integrationtools.DuckDuckGoSearchProvider
 	GeminiSearchProvider     = integrationtools.GeminiSearchProvider

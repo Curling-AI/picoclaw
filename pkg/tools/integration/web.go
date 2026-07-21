@@ -501,6 +501,159 @@ func (p *TavilySearchProvider) Search(
 	return "", fmt.Errorf("all api keys failed, last error: %w", lastErr)
 }
 
+type ParallelSearchProvider struct {
+	keyPool *APIKeyPool
+	baseURL string
+	mode    string
+	proxy   string
+	client  *http.Client
+}
+
+// mapParallelAfterDate converts a web_search range code into the Parallel
+// source_policy.after_date filter (YYYY-MM-DD), or "" for no filter.
+func mapParallelAfterDate(rangeCode string, now time.Time) string {
+	var d time.Time
+	switch rangeCode {
+	case "d":
+		d = now.AddDate(0, 0, -1)
+	case "w":
+		d = now.AddDate(0, 0, -7)
+	case "m":
+		d = now.AddDate(0, -1, 0)
+	case "y":
+		d = now.AddDate(-1, 0, 0)
+	default:
+		return ""
+	}
+	return d.Format("2006-01-02")
+}
+
+func (p *ParallelSearchProvider) Search(
+	ctx context.Context,
+	query string,
+	count int,
+	rangeCode string,
+) (string, error) {
+	if p.keyPool == nil || len(p.keyPool.keys) == 0 {
+		return "", errors.New("no API key provided")
+	}
+
+	searchURL := p.baseURL
+	if searchURL == "" {
+		searchURL = "https://api.parallel.ai/v1/search"
+	}
+
+	advancedSettings := map[string]any{
+		"max_results": count,
+	}
+	if afterDate := mapParallelAfterDate(rangeCode, time.Now().UTC()); afterDate != "" {
+		advancedSettings["source_policy"] = map[string]any{"after_date": afterDate}
+	}
+	payload := map[string]any{
+		"objective":         query,
+		"search_queries":    []string{query},
+		"advanced_settings": advancedSettings,
+	}
+	if p.mode != "" {
+		payload["mode"] = p.mode
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	var lastErr error
+	iter := p.keyPool.NewIterator()
+
+	for {
+		apiKey, ok := iter.Next()
+		if !ok {
+			break
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "POST", searchURL, bytes.NewBuffer(bodyBytes))
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", userAgent)
+		// Parallel documents "x-api-key"; Header.Set canonicalizes it to
+		// X-Api-Key on the wire (HTTP header names are case-insensitive).
+		req.Header.Set("X-Api-Key", apiKey)
+
+		resp, err := p.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %w", err)
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("parallel api error (status %d): %s", resp.StatusCode, string(body))
+			if resp.StatusCode == http.StatusTooManyRequests ||
+				resp.StatusCode == http.StatusUnauthorized ||
+				resp.StatusCode == http.StatusForbidden ||
+				resp.StatusCode >= 500 {
+				continue
+			}
+			return "", lastErr
+		}
+
+		var searchResp struct {
+			Results []struct {
+				URL         string   `json:"url"`
+				Title       string   `json:"title"`
+				PublishDate string   `json:"publish_date"`
+				Excerpts    []string `json:"excerpts"`
+			} `json:"results"`
+		}
+
+		if err := json.Unmarshal(body, &searchResp); err != nil {
+			return "", fmt.Errorf("failed to parse response: %w", err)
+		}
+
+		results := searchResp.Results
+		if len(results) == 0 {
+			return fmt.Sprintf("No results for: %s", query), nil
+		}
+
+		var lines []string
+		lines = append(lines, fmt.Sprintf("Results for: %s (via Parallel)", query))
+		for i, item := range results {
+			if i >= count {
+				break
+			}
+			title := item.Title
+			if title == "" {
+				title = item.URL
+			}
+			if item.PublishDate != "" {
+				title = fmt.Sprintf("%s (%s)", title, item.PublishDate)
+			}
+			lines = append(lines, fmt.Sprintf("%d. %s\n   %s", i+1, title, item.URL))
+			for _, excerpt := range item.Excerpts {
+				if excerpt == "" {
+					continue
+				}
+				lines = append(lines, fmt.Sprintf("   %s", excerpt))
+			}
+		}
+
+		return strings.Join(lines, "\n"), nil
+	}
+
+	return "", fmt.Errorf("all api keys failed, last error: %w", lastErr)
+}
+
 type KagiSearchProvider struct {
 	keyPool *APIKeyPool
 	baseURL string
@@ -1472,6 +1625,11 @@ type WebSearchToolOptions struct {
 	TavilyBaseURL         string
 	TavilyMaxResults      int
 	TavilyEnabled         bool
+	ParallelAPIKeys       []string
+	ParallelBaseURL       string
+	ParallelMode          string
+	ParallelMaxResults    int
+	ParallelEnabled       bool
 	KagiAPIKeys           []string
 	KagiBaseURL           string
 	KagiMaxResults        int
@@ -1512,6 +1670,11 @@ func WebSearchToolOptionsFromConfig(cfg *config.Config) WebSearchToolOptions {
 		TavilyBaseURL:         cfg.Tools.Web.Tavily.BaseURL,
 		TavilyMaxResults:      cfg.Tools.Web.Tavily.MaxResults,
 		TavilyEnabled:         cfg.Tools.Web.Tavily.Enabled,
+		ParallelAPIKeys:       cfg.Tools.Web.Parallel.APIKeys.Values(),
+		ParallelBaseURL:       cfg.Tools.Web.Parallel.BaseURL,
+		ParallelMode:          cfg.Tools.Web.Parallel.Mode,
+		ParallelMaxResults:    cfg.Tools.Web.Parallel.MaxResults,
+		ParallelEnabled:       cfg.Tools.Web.Parallel.Enabled,
 		KagiAPIKeys:           cfg.Tools.Web.Kagi.APIKeys.Values(),
 		KagiBaseURL:           cfg.Tools.Web.Kagi.BaseURL,
 		KagiMaxResults:        cfg.Tools.Web.Kagi.MaxResults,
@@ -1558,13 +1721,14 @@ var (
 		"gemini",
 		"brave",
 		"tavily",
+		"parallel",
 		"kagi",
 		"perplexity",
 		"searxng",
 		"glm_search",
 		"baidu_search",
 	}
-	autoPrimaryWebSearchProviders  = []string{"perplexity", "brave", "kagi", "searxng", "tavily", "gemini"}
+	autoPrimaryWebSearchProviders  = []string{"parallel", "perplexity", "brave", "kagi", "searxng", "tavily", "gemini"}
 	autoFallbackWebSearchProviders = []string{"baidu_search", "glm_search"}
 )
 
@@ -1590,6 +1754,8 @@ func (opts WebSearchToolOptions) providerReady(name string) bool {
 		return opts.BraveEnabled && len(opts.BraveAPIKeys) > 0
 	case "tavily":
 		return opts.TavilyEnabled && len(opts.TavilyAPIKeys) > 0
+	case "parallel":
+		return opts.ParallelEnabled && len(opts.ParallelAPIKeys) > 0
 	case "kagi":
 		return opts.KagiEnabled && len(opts.KagiAPIKeys) > 0
 	case "perplexity":
@@ -1756,6 +1922,25 @@ func (opts WebSearchToolOptions) providerByName(name string) (SearchProvider, in
 		return &TavilySearchProvider{
 			keyPool: NewAPIKeyPool(opts.TavilyAPIKeys),
 			baseURL: opts.TavilyBaseURL,
+			proxy:   opts.Proxy,
+			client:  client,
+		}, maxResults, nil
+	case "parallel":
+		if !opts.providerReady("parallel") {
+			return nil, 0, nil
+		}
+		client, err := utils.CreateHTTPClient(opts.Proxy, searchTimeout)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to create HTTP client for Parallel: %w", err)
+		}
+		maxResults := 10
+		if opts.ParallelMaxResults > 0 {
+			maxResults = min(opts.ParallelMaxResults, 10)
+		}
+		return &ParallelSearchProvider{
+			keyPool: NewAPIKeyPool(opts.ParallelAPIKeys),
+			baseURL: opts.ParallelBaseURL,
+			mode:    opts.ParallelMode,
 			proxy:   opts.Proxy,
 			client:  client,
 		}, maxResults, nil

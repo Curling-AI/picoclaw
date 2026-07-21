@@ -996,6 +996,34 @@ func (c *TavilyConfig) SetAPIKeys(keys []string) {
 	}
 }
 
+type ParallelConfig struct {
+	Enabled bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_PARALLEL_ENABLED"`
+	APIKeys SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_PARALLEL_API_KEYS"`
+	BaseURL string        `json:"base_url"          yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_PARALLEL_BASE_URL"`
+	// Mode selects the Parallel search processor: "turbo", "basic" or
+	// "advanced". Empty uses the API default ("advanced").
+	Mode       string `json:"mode,omitempty" yaml:"-" env:"PICOCLAW_TOOLS_WEB_PARALLEL_MODE"`
+	MaxResults int    `json:"max_results"    yaml:"-" env:"PICOCLAW_TOOLS_WEB_PARALLEL_MAX_RESULTS"`
+}
+
+// APIKey returns the Parallel API key
+func (c *ParallelConfig) APIKey() string {
+	if len(c.APIKeys) == 0 {
+		return ""
+	}
+	return c.APIKeys[0].String()
+}
+
+// SetAPIKey sets the Parallel API key
+func (c *ParallelConfig) SetAPIKey(key string) {
+	c.APIKeys = SimpleSecureStrings(key)
+}
+
+// SetAPIKeys sets the Parallel API keys
+func (c *ParallelConfig) SetAPIKeys(keys []string) {
+	c.APIKeys = SimpleSecureStrings(keys...)
+}
+
 type KagiConfig struct {
 	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_ENABLED"`
 	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_KAGI_API_KEYS"`
@@ -1084,6 +1112,7 @@ type WebToolsConfig struct {
 	ToolConfig  `                   yaml:"-"                      envPrefix:"PICOCLAW_TOOLS_WEB_"`
 	Brave       BraveConfig        `yaml:"brave,omitempty"                                        json:"brave"`
 	Tavily      TavilyConfig       `yaml:"tavily,omitempty"                                       json:"tavily"`
+	Parallel    ParallelConfig     `yaml:"parallel,omitempty"                                     json:"parallel"`
 	Kagi        KagiConfig         `yaml:"kagi,omitempty"                                         json:"kagi"`
 	Sogou       SogouConfig        `yaml:"-"                                                      json:"sogou"`
 	DuckDuckGo  DuckDuckGoConfig   `yaml:"-"                                                      json:"duckduckgo"`
