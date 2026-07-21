@@ -185,6 +185,9 @@ func (p *Pipeline) callVisionDelegate(
 	if err != nil {
 		return "", err
 	}
+	// Out-of-pipeline call: report usage through the hooks so the meter sees
+	// the vision sub-call (billed by the provider either way).
+	notifyBackgroundLLM(ctx, p.al, "vision", model, resp)
 	if resp == nil || strings.TrimSpace(resp.Content) == "" {
 		return "", fmt.Errorf("vision delegate returned empty content")
 	}

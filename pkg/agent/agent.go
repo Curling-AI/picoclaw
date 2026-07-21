@@ -415,7 +415,11 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	// Ensure shared tools are re-registered on the new registry
 	registerSharedTools(al, cfg, al.bus, registry, provider)
 
-	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, provider)
+	// Same observed wrapper as NewAgentLoop: evolution's out-of-pipeline LLM
+	// calls must go through AfterLLM so the usage meter sees them.
+	evolutionProvider := newObservedProvider(provider, "evolution")
+	evolutionProvider.attach(al)
+	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, evolutionProvider)
 	if evolutionErr != nil {
 		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
 			map[string]any{"error": evolutionErr.Error()})

@@ -686,12 +686,19 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	//     first (setup) run and just execute it afterwards. job.ID is stable
 	//     (job.Name is a mutable 30-char truncation), so the path is a durable
 	//     per-job key the agent discovers by file existence.
+	// Phrasing matters for cost: an earlier wording ("check whether run.sh
+	// exists ... then run it") made agents spend an iteration on `test -f`,
+	// another on `cat run.sh`, and only then execute — 4 LLM calls per tick
+	// where 1-2 suffice, every 5 minutes, forever (observed in prod). The
+	// instruction now IS the check: run it directly; only a failure reveals
+	// the setup run.
 	message := fmt.Sprintf("[Scheduled run of cron job %q]\n%s\n\n"+
 		"(System note: this is a routine scheduled run.\n"+
-		"• Reproducibility: check whether scripts/%s/run.sh exists. If it does NOT, this is the "+
-		"setup run — build a reproducible script there that captures this task end-to-end, then run "+
-		"it. If it DOES, just run it and report only what changed since last time; do not re-derive "+
-		"the task. Keep state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
+		"• Reproducibility: in your FIRST tool call, execute `bash scripts/%s/run.sh` directly — do "+
+		"NOT test for it, read it, or list directories first. If it runs, report only what changed "+
+		"since last time. Only if it fails with \"No such file\" is this the setup run: build a "+
+		"reproducible script there that captures this task end-to-end, then run it. Keep "+
+		"state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
 		"• Notes: do NOT record routine runs in the daily notes — run silently when there is nothing "+
 		"new. Only write a note when the run produced a genuinely new fact the user would care about; "+
 		"never use the daily notes as a state store.)",

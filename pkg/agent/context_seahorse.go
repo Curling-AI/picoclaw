@@ -34,8 +34,11 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 	agent := al.registry.GetDefaultAgent()
 	dbPath := agent.Workspace + "/sessions/seahorse.db"
 
-	// Create CompleteFn from provider
-	completeFn := providerToCompleteFn(agent.Provider, agent.Model)
+	// Create CompleteFn from provider, observed so seahorse's out-of-pipeline
+	// summarization calls report usage to the meter.
+	seahorseProvider := newObservedProvider(agent.Provider, "summarize")
+	seahorseProvider.attach(al)
+	completeFn := providerToCompleteFn(seahorseProvider, agent.Model)
 
 	// Create engine
 	engine, err := seahorse.NewEngine(seahorse.Config{
