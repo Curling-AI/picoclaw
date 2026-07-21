@@ -733,13 +733,13 @@ func binaryReadFileGuidance(path string, totalSize int64) string {
 	hint := "extract its content with a suitable tool via exec"
 	switch strings.ToLower(filepath.Ext(base)) {
 	case ".docx", ".doc":
-		hint = "extract the text with the docx skill or a script (python-docx, or `pandoc <file> -t plain`)"
+		hint = "extract the text with the docx skill or a python script (python-docx via pip)"
 	case ".xlsx", ".xls":
 		hint = "read it with the xlsx skill or a script (openpyxl/pandas)"
 	case ".pptx", ".ppt":
 		hint = "extract the slides with the pptx skill or a script (python-pptx)"
 	case ".pdf":
-		hint = "extract the text with the pdf skill or a script (pdfplumber, or `pdftotext`)"
+		hint = "extract the text with `pdftotext <file> -` or the pdf skill (pdfplumber)"
 	case ".zip", ".tar", ".gz", ".rar", ".7z":
 		hint = "list/extract it via exec (`unzip -l`, `tar -tf`) and read the extracted files"
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
