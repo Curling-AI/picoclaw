@@ -28,6 +28,22 @@ type ContextManager interface {
 	// Clear removes all stored context for a session (messages, summaries, etc.).
 	// Called when the user issues /clear or /reset.
 	Clear(ctx context.Context, sessionKey string) error
+
+	// CompactionState reports whether an asynchronous history compaction is
+	// currently running for the session — the UI blocks new sends and shows
+	// progress while it is. Implementations without async compaction return
+	// the zero value.
+	CompactionState(sessionKey string) CompactionState
+}
+
+// CompactionState describes an in-flight asynchronous history compaction.
+type CompactionState struct {
+	Active bool
+	// StartedAtMS is the unix-millis timestamp compaction began.
+	StartedAtMS int64
+	// Messages is the number of history messages being summarized (estimate
+	// taken when compaction started).
+	Messages int
 }
 
 // AssembleRequest is the input to Assemble.

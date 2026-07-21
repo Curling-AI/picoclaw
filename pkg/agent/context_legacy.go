@@ -16,8 +16,39 @@ import (
 // as a ContextManager implementation. It is the default when no other
 // ContextManager is configured.
 type legacyContextManager struct {
-	al          *AgentLoop
-	summarizing sync.Map // dedup for async Compact (post-turn)
+	al *AgentLoop
+	// summarizing dedups async Compact (post-turn) AND doubles as the
+	// queryable "compacting now" state for the UI: key agentID:sessionKey,
+	// value *compactionEntry.
+	summarizing sync.Map
+}
+
+// compactionEntry is the live state of one async summarization run.
+type compactionEntry struct {
+	startedAt time.Time
+	messages  int
+}
+
+// CompactionState reports the in-flight summarization for a session, keyed
+// exactly like maybeSummarize stores it (default agent's ID + session key).
+func (m *legacyContextManager) CompactionState(sessionKey string) CompactionState {
+	agent := m.al.registry.GetDefaultAgent()
+	if agent == nil {
+		return CompactionState{}
+	}
+	v, ok := m.summarizing.Load(agent.ID + ":" + sessionKey)
+	if !ok {
+		return CompactionState{}
+	}
+	entry, ok := v.(*compactionEntry)
+	if !ok {
+		return CompactionState{Active: true}
+	}
+	return CompactionState{
+		Active:      true,
+		StartedAtMS: entry.startedAt.UnixMilli(),
+		Messages:    entry.messages,
+	}
 }
 
 func (m *legacyContextManager) Assemble(_ context.Context, req *AssembleRequest) (*AssembleResponse, error) {
@@ -91,7 +122,8 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 	msgTrigger := agent.SummarizeMessageThreshold > 0 && len(newHistory) > agent.SummarizeMessageThreshold
 	if msgTrigger || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
-		if _, loading := m.summarizing.LoadOrStore(summarizeKey, true); !loading {
+		entry := &compactionEntry{startedAt: time.Now(), messages: len(newHistory)}
+		if _, loading := m.summarizing.LoadOrStore(summarizeKey, entry); !loading {
 			go func() {
 				defer m.summarizing.Delete(summarizeKey)
 				defer func() {

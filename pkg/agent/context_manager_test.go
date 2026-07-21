@@ -792,6 +792,7 @@ func (m *noopContextManager) Assemble(_ context.Context, req *AssembleRequest) (
 func (m *noopContextManager) Compact(_ context.Context, _ *CompactRequest) error { return nil }
 func (m *noopContextManager) Ingest(_ context.Context, _ *IngestRequest) error   { return nil }
 func (m *noopContextManager) Clear(_ context.Context, _ string) error            { return nil }
+func (m *noopContextManager) CompactionState(string) CompactionState             { return CompactionState{} }
 
 // trackingContextManager tracks call counts for each method.
 type trackingContextManager struct {
@@ -829,6 +830,8 @@ func (m *trackingContextManager) Ingest(_ context.Context, req *IngestRequest) e
 	m.mu.Unlock()
 	return nil
 }
+
+func (m *trackingContextManager) CompactionState(string) CompactionState { return CompactionState{} }
 
 func (m *trackingContextManager) Clear(_ context.Context, sessionKey string) error {
 	m.clearCalls.Add(1)

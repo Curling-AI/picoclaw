@@ -49,6 +49,11 @@ type AgentInstance struct {
 	MediaDelegation           bool
 	CronCandidates            []providers.FallbackCandidate
 
+	// SubagentMgr is the spawn/subagent/spawn_status shared task manager for
+	// this agent (nil when none of those tools is enabled). Exposed so the
+	// control plane can list a session's background tasks for the chat UI.
+	SubagentMgr *tools.SubagentManager
+
 	// Router is non-nil when model routing is configured and the light model
 	// was successfully resolved. It scores each incoming message and decides
 	// whether to route to LightCandidates or stay with Candidates.
