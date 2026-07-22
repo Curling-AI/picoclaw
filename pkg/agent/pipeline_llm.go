@@ -34,6 +34,12 @@ func (p *Pipeline) CallLLM(
 	al := p.al
 	maxMediaSize := p.Cfg.Agents.Defaults.GetMaxMediaSize()
 
+	// Fresh streamed-output counter for this call so a hard-abort estimate below
+	// reflects only what THIS call generated (non-streaming calls stay at 0).
+	if ts != nil {
+		ts.resetStreamedOutputRunes()
+	}
+
 	// PreLLM: resolve media refs (except on iteration 1 where user media is already resolved)
 	if iteration > 1 {
 		exec.messages = resolveMediaRefs(exec.messages, p.MediaStore, maxMediaSize, exec.currentTurnStart)
@@ -314,6 +320,11 @@ func (p *Pipeline) CallLLM(
 			break
 		}
 		if ts.hardAbortRequested() && errors.Is(err, context.Canceled) {
+			// The gateway bills the tokens generated before the steer/cancel, but
+			// this call returns context.Canceled and never reaches the AfterLLM
+			// hook below — so without this it is invisible in usage_events. Meter
+			// it with an estimate (see reportAbortedStreamUsage).
+			p.reportAbortedStreamUsage(turnCtx, ts, exec)
 			_ = ts.requestHardAbort()
 			exec.abortedByHardAbort = true
 			return ControlBreak, nil
@@ -892,4 +903,55 @@ func transientLLMRetryReason(err error) (string, bool) {
 	}
 
 	return "", false
+}
+
+// reportAbortedStreamUsage meters a hard-aborted (steered) streaming call that
+// the normal AfterLLM path never sees: the call returns context.Canceled and
+// the pipeline breaks out before the hook, yet the gateway already billed the
+// tokens generated up to the cancel. Without this those (often long) generations
+// are invisible in usage_events.
+//
+// Input is taken from the previous call's usage — the prompt is ~identical and
+// its cache ratios carry over, which avoids over-billing a huge cached context
+// that a naive char-count would treat as uncached. Output is estimated from the
+// streamed content length. Cost is left 0 so the meter's price-table fallback
+// estimates it (cache-aware). It is an estimate for the internal usage screen;
+// the gateway remains the billing truth.
+func (p *Pipeline) reportAbortedStreamUsage(ctx context.Context, ts *turnState, exec *turnExecution) {
+	if p == nil || p.Hooks == nil || ts == nil || exec == nil {
+		return
+	}
+	outRunes := ts.getStreamedOutputRunes()
+	if outRunes <= 0 {
+		return // nothing generated yet (or a non-streaming call) — no estimate
+	}
+	prev := ts.GetLastUsage()
+	if prev == nil {
+		return // no input baseline; skip rather than risk a bad estimate
+	}
+	est := &providers.UsageInfo{
+		PromptTokens:       prev.PromptTokens,
+		CachedPromptTokens: prev.CachedPromptTokens,
+		CompletionTokens:   estimateTokensFromRunes(outRunes),
+	}
+	est.TotalTokens = est.PromptTokens + est.CompletionTokens
+	_, _ = p.Hooks.AfterLLM(ctx, &LLMHookResponse{
+		Meta:     ts.eventMeta("runTurn", "turn.llm.response"),
+		Context:  cloneTurnContext(ts.turnCtx),
+		Model:    exec.llmModel,
+		Response: &providers.LLMResponse{Usage: est},
+	})
+}
+
+// estimateTokensFromRunes approximates a token count from a rune count using a
+// rough ~4-chars-per-token heuristic (cross-language). Estimate only — used for
+// the aborted-stream metering above, never for billing.
+func estimateTokensFromRunes(runes int) int {
+	if runes <= 0 {
+		return 0
+	}
+	if t := runes / 4; t > 0 {
+		return t
+	}
+	return 1
 }
