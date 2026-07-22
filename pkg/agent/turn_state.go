@@ -290,6 +290,11 @@ type turnState struct {
 	tokenBudget      *atomic.Int64        // Shared token budget counter
 	lastFinishReason string               // Last LLM finish_reason
 	lastUsage        *providers.UsageInfo // Last LLM usage info
+	// streamedOutputRunes is the cumulative visible-output length of the current
+	// streaming LLM call, used to estimate usage on a hard-abort (see #1 metering
+	// gap: a steered stream is canceled before its usage chunk, so the call is
+	// otherwise never metered even though the gateway bills the generated tokens).
+	streamedOutputRunes int
 
 	// Back-reference to the owning AgentLoop (set for SubTurns only, used for hard abort cascade)
 	al *AgentLoop
@@ -928,6 +933,31 @@ func (ts *turnState) SetLastUsage(usage *providers.UsageInfo) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.lastUsage = usage
+}
+
+// setStreamedOutputRunes records the cumulative visible output length (in runes)
+// of the CURRENT streaming LLM call. onChunk delivers cumulative content, so the
+// last value is the total generated so far — used to estimate usage when a
+// stream is hard-aborted (steering) before its usage chunk arrives.
+func (ts *turnState) setStreamedOutputRunes(n int) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.streamedOutputRunes = n
+}
+
+// resetStreamedOutputRunes clears the counter at the start of an LLM call so it
+// only reflects the current call (non-streaming calls leave it at 0).
+func (ts *turnState) resetStreamedOutputRunes() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.streamedOutputRunes = 0
+}
+
+// getStreamedOutputRunes returns the current call's streamed output rune count.
+func (ts *turnState) getStreamedOutputRunes() int {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return ts.streamedOutputRunes
 }
 
 // =============================================================================

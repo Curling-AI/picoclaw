@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -128,6 +129,9 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 					publisher.UpdateReasoning(ctx, chunk.ReasoningContent)
 				}
 				if strings.TrimSpace(chunk.Content) != "" {
+					// chunk.Content is cumulative; track its length so an aborted
+					// stream can still be metered with an estimated output.
+					ts.setStreamedOutputRunes(utf8.RuneCountInString(chunk.Content))
 					publisher.Update(ctx, chunk.Content)
 				}
 				if len(chunk.ToolCalls) > 0 {
@@ -144,6 +148,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			exec.llmOpts,
 			func(accumulated string) {
 				recordChunk()
+				ts.setStreamedOutputRunes(utf8.RuneCountInString(accumulated))
 				publisher.Update(ctx, accumulated)
 			},
 		)
