@@ -562,6 +562,11 @@ func initSessionStore(dir string) session.SessionStore {
 		logger.InfoCF("agent", "Memory migrated to JSONL", map[string]any{"sessions_migrated": n})
 	}
 
+	// Cron runs each leave a session behind; without this the directory grows
+	// forever and listing sessions (which reads every meta off EFS) eventually
+	// outruns the gateway timeout, emptying the web sidebar.
+	startCronRunSweeper(store)
+
 	return session.NewJSONLBackend(store)
 }
 
