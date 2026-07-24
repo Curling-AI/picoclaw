@@ -11,7 +11,7 @@ import (
 
 const (
 	// cronRetentionEnv overrides how many days of cron runs are kept. Set it to
-	// 0 to keep every run forever (the pre-sweeper behaviour).
+	// 0 to keep every run forever (the pre-sweeper behavior).
 	cronRetentionEnv = "PICOCLAW_SESSIONS_CRON_RETENTION_DAYS"
 
 	// defaultCronRetentionDays keeps a couple of weeks of runs — long enough to
