@@ -482,6 +482,16 @@ func (al *AgentLoop) setPendingSkills(sessionKey string, skillNames []string) {
 	al.pendingSkills.Store(sessionKey, filtered)
 }
 
+// SetPendingSkills arms skills to be force-loaded (# Active Skills block) into
+// the next message processed for this session key. The gRPC gateway uses it to
+// activate skills the user selected in the web composer for the current
+// conversation — the same mechanism as the /use command's armed skills, but
+// driven by a structured field instead of chat text. Exported wrapper over the
+// unexported setPendingSkills so callers outside this package can arm skills.
+func (al *AgentLoop) SetPendingSkills(sessionKey string, skillNames []string) {
+	al.setPendingSkills(sessionKey, skillNames)
+}
+
 func (al *AgentLoop) takePendingSkills(sessionKey string) []string {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
