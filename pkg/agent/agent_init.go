@@ -304,9 +304,10 @@ func registerSharedTools(
 
 		// recall: BM25 search over the agent's own memory (MEMORY.md + all daily
 		// notes). The prompt only carries the last 3 days; this lifts that ceiling
-		// on demand without inflating every prompt.
+		// on demand without inflating every prompt. The two kinds are ranked
+		// separately with a quota each — see recallKindDurable.
 		if cfg.Tools.IsToolEnabled("recall") {
-			agent.Tools.Register(tools.NewRecallTool(agent.Workspace, 5))
+			agent.Tools.Register(tools.NewRecallTool(agent.Workspace, 3, 4))
 		}
 
 		// spawn (async), subagent (sync) and spawn_status share a
