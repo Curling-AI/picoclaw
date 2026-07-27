@@ -212,21 +212,28 @@ func (t *RecallTool) collectCorpora() (durable, episodic []recallDoc) {
 		}
 	}
 
-	// Daily notes live under memory/YYYYMM/YYYYMMDD.md.
+	// Daily notes live under memory/YYYYMM/YYYYMMDD.md — and ONLY there.
+	//
+	// Matching the shape instead of "any .md under any subdir" is not
+	// pedantry: memory/.backups/ holds snapshots of MEMORY.md taken before
+	// every guarded write, and treating those as notes fed recall stale COPIES
+	// of the durable memory dressed as episodes ("what happened on
+	// MEMORY.20260727-183315"). Seen in kind: 3 of the 4 episodic slots went to
+	// backups, one of them pre-migration content.
 	var notes []struct{ path, source string }
 	monthDirs, _ := os.ReadDir(memoryDir)
 	for _, md := range monthDirs {
-		if !md.IsDir() {
+		if !md.IsDir() || !isDigits(md.Name(), 6) {
 			continue
 		}
 		dayFiles, _ := os.ReadDir(filepath.Join(memoryDir, md.Name()))
 		for _, df := range dayFiles {
-			if df.IsDir() || !strings.HasSuffix(df.Name(), ".md") {
+			source := strings.TrimSuffix(df.Name(), ".md")
+			if df.IsDir() || !strings.HasSuffix(df.Name(), ".md") || !isDigits(source, 8) {
 				continue
 			}
 			notes = append(notes, struct{ path, source string }{
-				filepath.Join(memoryDir, md.Name(), df.Name()),
-				strings.TrimSuffix(df.Name(), ".md"),
+				filepath.Join(memoryDir, md.Name(), df.Name()), source,
 			})
 		}
 	}
@@ -316,16 +323,24 @@ func splitNoteEntries(content, source string) []recallDoc {
 	return docs
 }
 
+// isDigits reports whether s is exactly n decimal digits.
+func isDigits(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // hyphenatedDate turns an 8-digit YYYYMMDD source into "YYYY-MM-DD" so date
 // queries in either form match. Non-date sources (e.g. "MEMORY.md") yield "".
 func hyphenatedDate(source string) string {
-	if len(source) != 8 {
+	if !isDigits(source, 8) {
 		return ""
-	}
-	for _, r := range source {
-		if r < '0' || r > '9' {
-			return ""
-		}
 	}
 	return source[0:4] + "-" + source[4:6] + "-" + source[6:8]
 }

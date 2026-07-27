@@ -116,6 +116,31 @@ func TestRecallTool_DurableSurvivesShortNotes(t *testing.T) {
 	}
 }
 
+// memory/.backups/ guarda snapshots do MEMORY.md tirados antes de cada escrita
+// guardada. Indexá-los devolvia CÓPIAS velhas da memória durável vestidas de
+// episódio ("o que aconteceu em MEMORY.20260727-183315") — visto rodando no
+// kind, comendo 3 das 4 vagas episódicas.
+func TestRecallTool_IgnoresBackupsAndStrayDirs(t *testing.T) {
+	ws := t.TempDir()
+	writeRecallFile(t, ws, "memory/MEMORY.md", "### Projeto Ethos\n\nStack Go + React\n")
+	writeRecallFile(t, ws, "memory/202607/20260727.md", "- 18:35 gateway novo subido no kind\n")
+	writeRecallFile(t, ws, "memory/.backups/MEMORY.20260727-183315.257339.md",
+		"## Projeto Ethos\n\nStack Go + React (cópia pré-migração)\n")
+	writeRecallFile(t, ws, "memory/202607/rascunho.md", "- 10:00 arquivo que não é um dia\n")
+
+	_, episodic := NewRecallTool(ws, 3, 4).collectCorpora()
+	if len(episodic) != 1 {
+		t.Fatalf("só a nota do dia deveria virar episódio, veio %d: %#v", len(episodic), episodic)
+	}
+	if episodic[0].Source != "20260727" {
+		t.Fatalf("episódio veio da fonte errada: %#v", episodic[0])
+	}
+	res := NewRecallTool(ws, 3, 4).Execute(context.Background(), map[string]any{"query": "Projeto Ethos"})
+	if strings.Contains(res.ForLLM, "pré-migração") || strings.Contains(res.ForLLM, "183315") {
+		t.Fatalf("backup vazou para o recall: %s", res.ForLLM)
+	}
+}
+
 func TestRecallTool_Scope(t *testing.T) {
 	ws := t.TempDir()
 	writeRecallFile(t, ws, "memory/MEMORY.md", "### Deploy\n\nrunbook do deploy\n")
