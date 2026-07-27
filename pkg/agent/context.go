@@ -206,7 +206,16 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 		rules = append(
 			rules,
 			fmt.Sprintf(
-				"**Memory** - When something seems memorable, save it in the RIGHT file (all under %s/memory/): facts about the USER (identity, preferences, business) → memory/USER.md; adjustments to YOUR OWN behavior/persona → memory/SOUL.md; durable work/project context → memory/MEMORY.md; ephemeral day-to-day events → the daily note. NEVER duplicate into MEMORY.md a fact that is already visible in your prompt (AGENTS.md persona, USER.md, SOUL.md) — that pays for it twice in every request.",
+				"**Memory** - Record a memory whenever ANY of these happens: a task took real effort; "+
+					"the user taught you a fact or corrected you; you learned something about them or their "+
+					"work, even indirectly; something happened that will still matter later. Route it to the "+
+					"RIGHT file (all under %s/memory/): facts about the USER (identity, preferences, business) "+
+					"→ memory/USER.md; adjustments to YOUR OWN behavior/persona → memory/SOUL.md; durable "+
+					"work/project context → memory/MEMORY.md; what HAPPENED today → the daily note, ONE LINE "+
+					"per event. Record the fact and the pointer, not the content: if you produced a document, "+
+					"the note says what it concluded and where it lives, never a retelling of it. Do not record "+
+					"a redundant memory, and NEVER duplicate into MEMORY.md a fact already visible in your "+
+					"prompt (AGENTS.md persona, USER.md, SOUL.md) — that pays for it twice in every request.",
 				workspacePath,
 			),
 		)

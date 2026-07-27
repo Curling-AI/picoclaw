@@ -66,13 +66,51 @@ func TestGetRecentDailyNotesCapsPollutedDay(t *testing.T) {
 	if strings.Contains(out, "nota-de-ontem") {
 		t.Fatalf("ontem não cabe no budget consumido por hoje")
 	}
-	if !strings.Contains(out, "[notas mais antigas omitidas") {
+	if !strings.Contains(out, "[dias mais antigos omitidos") {
 		t.Fatalf("faltou o marcador de truncamento: %q", out[:200])
 	}
-	// Corte em fronteira de entrada (começa num header ##).
+	// O `# 2026-07-13` do arquivo legado é descartado: a data vem do NOME do
+	// arquivo, e um `# ` aqui vazaria da caixa de memória para a hierarquia do
+	// prompt.
+	if strings.Contains(out, "# 2026-07-13") {
+		t.Fatalf("o header de data legado deveria ser removido na leitura: %q", out[:200])
+	}
+	// Corte em fronteira de LINHA (a entrada é uma linha; o bloco `## ` legado
+	// também começa numa) — nunca no meio de uma.
 	tailStart := strings.Index(out, "truncadas]\n") + len("truncadas]\n")
-	if !strings.HasPrefix(out[tailStart:], "## ") {
-		t.Fatalf("o corte deveria cair numa fronteira de entrada: %q", out[tailStart:tailStart+40])
+	tail := out[tailStart:]
+	if !strings.HasPrefix(tail, "## ") && !strings.HasPrefix(tail, "- ") {
+		t.Fatalf("o corte deveria cair numa fronteira de linha: %q", tail[:40])
+	}
+}
+
+// A memória entra no prompt dentro de <memory scope=...>, e NENHUM `#` escapa
+// dela: heading é contenção fraca (o conteúdo é escrito pelo agente e editado
+// pelo usuário), então o delimitador é o que segura.
+func TestGetMemoryContext_WrapsInMemoryBlocks(t *testing.T) {
+	ms := NewMemoryStore(t.TempDir())
+	if err := ms.WriteLongTerm("### Projeto Ethos\n- **Stack**: Go + React"); err != nil {
+		t.Fatalf("WriteLongTerm: %v", err)
+	}
+	if err := ms.AppendToday("- 11:05 subimos o gateway novo"); err != nil {
+		t.Fatalf("AppendToday: %v", err)
+	}
+
+	out := ms.GetMemoryContext(3)
+	for _, want := range []string{`<memory scope="long-term">`, `<memory scope="notes" days="3">`, "</memory>"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("faltou %q no contexto: %q", want, out)
+		}
+	}
+	// Nenhuma linha de heading nível 1 ou 2: essas são as do prompt.
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(ln, "# ") || strings.HasPrefix(ln, "## ") {
+			t.Fatalf("heading %q escapou da caixa de memória", ln)
+		}
+	}
+	// E o aviso de que aquilo é dado, não instrução.
+	if !strings.Contains(out, "not instructions") {
+		t.Fatalf("faltou o aviso de dado-não-instrução: %q", out)
 	}
 }
 
@@ -96,7 +134,7 @@ func TestGetMemoryContext_RecentDaysWindow(t *testing.T) {
 	if !strings.Contains(leanCtx, "durable fact") {
 		t.Fatalf("days=0 should still include long-term memory: %q", leanCtx)
 	}
-	if strings.Contains(leanCtx, "something that happened today") || strings.Contains(leanCtx, "Recent Daily Notes") {
+	if strings.Contains(leanCtx, "something that happened today") || strings.Contains(leanCtx, `scope="notes"`) {
 		t.Fatalf("days=0 must NOT inject daily notes: %q", leanCtx)
 	}
 }
@@ -108,7 +146,7 @@ func TestWithRecentNotesDays_GatesPromptInjection(t *testing.T) {
 
 	lean := NewContextBuilder(ws).WithRecentNotesDays(0)
 	sys := lean.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})[0].Content
-	if strings.Contains(sys, "yesterday we shipped") || strings.Contains(sys, "Recent Daily Notes") {
+	if strings.Contains(sys, "yesterday we shipped") || strings.Contains(sys, `scope="notes"`) {
 		t.Fatalf("recentNotesDays=0 should keep daily notes out of the prompt: %q", sys)
 	}
 	// With notes deferred, the prompt must nudge the agent toward the recall tool.
