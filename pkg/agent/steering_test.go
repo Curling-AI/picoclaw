@@ -864,9 +864,11 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 	// agente ainda grava o arquivo de sessão do segundo turno enquanto o
 	// cleanup do t.TempDir roda, e o "directory not empty" reprovava o teste
 	// mesmo com a asserção passando.
-	tmpDir, err := os.MkdirTemp("", "agent-voice-steering-*")
-	if err != nil {
-		t.Fatalf("criar diretório temporário: %v", err)
+	// Nome próprio para o erro: um `err` aqui em cima seria sombreado pelos
+	// `if err := ...` do corpo do teste, e o govet do CI reprova shadow.
+	tmpDir, mkErr := os.MkdirTemp("", "agent-voice-steering-*")
+	if mkErr != nil {
+		t.Fatalf("criar diretório temporário: %v", mkErr)
 	}
 	defer os.RemoveAll(tmpDir)
 	cfg := &config.Config{
