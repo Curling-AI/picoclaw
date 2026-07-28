@@ -445,11 +445,22 @@ func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 		return nil
 	}
 
-	dir := filepath.Join(t.workspace, ".artifacts", "mcp")
+	// A subdirectory of artifacts/, not a parallel ".artifacts" (seucaranguejo
+	// fork). Two directories served the same purpose, and the hidden one was
+	// the only workspace data dir with NO persistent mount: in production, 83
+	// of the 85 paths quoted in one assistant's history no longer existed —
+	// the files died with the pod while the sessions kept pointing at them.
+	//
+	// In here the dump inherits the artifacts/ mount and still stays out of the
+	// user's way: the Artifacts screen lists only the top level and skips
+	// directories, so `mcp/` never shows up among the deliverables.
+	dir := filepath.Join(t.workspace, "artifacts", "mcp")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return t.largeTextArtifactFallback(text, err)
 	}
-	// TODO: Add lifecycle cleanup/retention for MCP artifact files.
+	// TODO: Add lifecycle cleanup/retention for MCP artifact files. Now that
+	// they persist, the pod restart is no longer the accidental garbage
+	// collector it used to be.
 
 	pattern := fmt.Sprintf(
 		"%s_%s_*.txt",
