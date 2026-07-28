@@ -227,10 +227,13 @@ type turnState struct {
 	profile config.EffectiveTurnProfile
 	scope   turnEventScope
 
-	turnID            string
-	agentID           string
-	sessionKey        string
-	activeSkills      []string
+	turnID       string
+	agentID      string
+	sessionKey   string
+	activeSkills []string
+	// modelTier: tier escolhido pelo usuário para ESTE turno; "" = modelo
+	// principal. Lido por routeModelTierTurn. (seucaranguejo fork)
+	modelTier         string
 	attemptedSkills   []string
 	skillContextTrace []SkillContextSnapshot
 	toolKinds         []string
@@ -314,6 +317,7 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 		agentID:      agent.ID,
 		sessionKey:   opts.Dispatch.SessionKey,
 		activeSkills: activeSkillNames(agent, opts),
+		modelTier:    opts.ModelTier,
 		turnCtx:      cloneTurnContext(scope.context),
 		channel:      opts.Dispatch.Channel(),
 		chatID:       opts.Dispatch.ChatID(),

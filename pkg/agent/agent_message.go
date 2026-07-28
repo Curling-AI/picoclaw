@@ -226,6 +226,15 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			})
 	}
 
+	if tier := al.takePendingModelTier(opts.Dispatch.SessionKey); tier != "" {
+		opts.ModelTier = tier
+		// Logado porque a troca de tier é rara e cara (invalida o cache de
+		// prompt) — e é a primeira coisa que se quer saber quando alguém
+		// reclamar que "a resposta piorou".
+		logger.InfoCF("agent", "Applying model tier",
+			map[string]any{"session_key": opts.Dispatch.SessionKey, "tier": tier})
+	}
+
 	return al.runAgentLoop(ctx, agent, opts)
 }
 

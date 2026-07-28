@@ -49,6 +49,14 @@ type AgentInstance struct {
 	MediaDelegation           bool
 	CronCandidates            []providers.FallbackCandidate
 
+	// TierCandidates holds one pre-resolved candidate list per user-facing model
+	// tier (agents.defaults.model_tiers), resolved once here instead of on every
+	// turn — same reasoning as ImageCandidates/CronCandidates. Each entry is a
+	// SINGLE candidate: a second one would make the provider treat it as a
+	// fallback chain and drop streaming. nil/empty = tiers are off.
+	// (seucaranguejo fork)
+	TierCandidates map[string][]providers.FallbackCandidate
+
 	// SubagentMgr is the spawn/subagent/spawn_status shared task manager for
 	// this agent (nil when none of those tools is enabled). Exposed so the
 	// control plane can list a session's background tasks for the chat UI.
@@ -270,8 +278,29 @@ func NewAgentInstance(
 		defaults.CronModelFallbacks,
 	)
 
+	// One candidate list per user-facing tier. Single candidate each (no
+	// fallbacks): streaming and fallback chains are mutually exclusive here.
+	var tierCandidates map[string][]providers.FallbackCandidate
+	if len(defaults.ModelTiers) > 0 {
+		tierCandidates = make(map[string][]providers.FallbackCandidate, len(defaults.ModelTiers))
+		for tier, tierModel := range defaults.ModelTiers {
+			tierModel = strings.TrimSpace(tierModel)
+			if tier == "" || tierModel == "" {
+				continue
+			}
+			if resolved := resolveModelCandidates(cfg, defaults.Provider, tierModel, nil); len(resolved) > 0 {
+				tierCandidates[tier] = resolved
+			}
+		}
+	}
+
 	candidateProviders := make(map[string]providers.LLMProvider)
 	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
+	for _, tierModel := range defaults.ModelTiers {
+		if strings.TrimSpace(tierModel) != "" {
+			populateCandidateProvidersFromNames(cfg, workspace, []string{tierModel}, candidateProviders)
+		}
+	}
 	if strings.TrimSpace(defaults.ImageModel) != "" {
 		imageNames := append([]string{defaults.ImageModel}, defaults.ImageModelFallbacks...)
 		populateCandidateProvidersFromNames(cfg, workspace, imageNames, candidateProviders)
@@ -349,6 +378,7 @@ func NewAgentInstance(
 		ImageContextWindow:        defaults.ImageContextWindow,
 		MediaDelegation:           defaults.MediaDelegation,
 		CronCandidates:            cronCandidates,
+		TierCandidates:            tierCandidates,
 		Router:                    router,
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,

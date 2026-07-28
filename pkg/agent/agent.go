@@ -59,8 +59,11 @@ type AgentLoop struct {
 	hookRuntime    hookRuntime
 	steering       *steeringQueue
 	pendingSkills  sync.Map
-	pendingStops   sync.Map
-	mu             sync.RWMutex
+	// pendingModelTier: tier escolhido pelo usuário no composer, armado por
+	// sessão e consumido no próximo turno. (seucaranguejo fork)
+	pendingModelTier sync.Map
+	pendingStops     sync.Map
+	mu               sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -85,17 +88,21 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	Dispatch                DispatchRequest // Normalized routed request boundary for this turn
-	SessionKey              string          // Session identifier for history/context
-	SessionAliases          []string        // Compatibility aliases for the session key
-	Channel                 string          // Target channel for tool execution
-	ChatID                  string          // Target chat ID for tool execution
-	MessageID               string          // Current inbound platform message ID
-	ReplyToMessageID        string          // Current inbound reply target message ID
-	SenderID                string          // Current sender ID for dynamic context
-	SenderDisplayName       string          // Current sender display name for dynamic context
-	UserMessage             string          // User message content (may include prefix)
-	ForcedSkills            []string        // Skills explicitly requested for this message
+	Dispatch          DispatchRequest // Normalized routed request boundary for this turn
+	SessionKey        string          // Session identifier for history/context
+	SessionAliases    []string        // Compatibility aliases for the session key
+	Channel           string          // Target channel for tool execution
+	ChatID            string          // Target chat ID for tool execution
+	MessageID         string          // Current inbound platform message ID
+	ReplyToMessageID  string          // Current inbound reply target message ID
+	SenderID          string          // Current sender ID for dynamic context
+	SenderDisplayName string          // Current sender display name for dynamic context
+	UserMessage       string          // User message content (may include prefix)
+	ForcedSkills      []string        // Skills explicitly requested for this message
+	// ModelTier is the user-picked tier for THIS message (composer selector).
+	// Empty = main model. Validated by the caller; unknown values are a no-op.
+	// (seucaranguejo fork)
+	ModelTier               string
 	TurnProfile             config.EffectiveTurnProfile
 	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
 	Media                   []string               // media:// refs from inbound message

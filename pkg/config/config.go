@@ -489,6 +489,15 @@ type AgentDefaults struct {
 	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
 	// recall tool for daily notes — keeps the prompt lean.
 	RecentNotesDays *int `json:"recent_notes_days,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_RECENT_NOTES_DAYS"`
+	// ModelTiers maps an opaque tier name the USER picks in the composer
+	// ("otimizado"/"pro"/"ultra") to the model that serves it. The control-plane
+	// owns the mapping and emits it here; the agent only pre-resolves candidates
+	// per tier and swaps on the turns that ask for one (routeModelTierTurn).
+	// Empty = the feature is off and every turn runs on the main model.
+	// No fim do struct de propósito: o tipo é mais largo que os vizinhos e, no
+	// meio deles, o gofmt realinharia as tags de todos os campos abaixo — 200
+	// linhas de ruído num campo de um. (seucaranguejo fork)
+	ModelTiers map[string]string `json:"model_tiers,omitempty"`
 }
 
 const DefaultMaxMediaSize = 20 * 1024 * 1024 // 20 MB
