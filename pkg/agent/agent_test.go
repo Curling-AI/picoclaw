@@ -4637,9 +4637,15 @@ func (p *resolvedImagePathVisionProvider) Chat(
 			hasPathTag = true
 		}
 		for _, ref := range msg.Media {
-			if strings.TrimSpace(ref) != "" {
-				hasMedia = true
-				break
+			if strings.TrimSpace(ref) == "" {
+				continue
+			}
+			hasMedia = true
+			// O que esta asserção sempre protegeu: ref NÃO RESOLVIDA chegando ao
+			// provider. media:// e caminho de disco viram nada no serializador —
+			// a imagem some sem erro. Só data: URL é imagem de verdade.
+			if !strings.HasPrefix(ref, "data:") {
+				return nil, fmt.Errorf("vision provider got an unresolved media ref %q", ref)
 			}
 		}
 	}
@@ -4649,8 +4655,10 @@ func (p *resolvedImagePathVisionProvider) Chat(
 	if !hasPathTag {
 		return nil, fmt.Errorf("vision provider expected resolved image path tag %q", pathTag)
 	}
-	if hasMedia {
-		return nil, fmt.Errorf("vision provider expected resolved attachment turn without raw media refs")
+	// A imagem anexada NESTE turno viaja junto (fork): sem isso o modelo de
+	// visão respondia sobre uma imagem que nunca recebeu.
+	if !hasMedia {
+		return nil, fmt.Errorf("vision provider expected the attached image inline, got none")
 	}
 
 	return &providers.LLMResponse{
@@ -4919,8 +4927,8 @@ func TestAgentLoop_UserAttachmentRoutesToImageModelAfterMediaResolution(t *testi
 	if !slices.Equal(visionProvider.pathTagSeen, []bool{true}) {
 		t.Fatalf("visionProvider pathTagSeen = %v, want %v", visionProvider.pathTagSeen, []bool{true})
 	}
-	if !slices.Equal(visionProvider.mediaSeen, []bool{false}) {
-		t.Fatalf("visionProvider mediaSeen = %v, want %v", visionProvider.mediaSeen, []bool{false})
+	if !slices.Equal(visionProvider.mediaSeen, []bool{true}) {
+		t.Fatalf("visionProvider mediaSeen = %v, want %v", visionProvider.mediaSeen, []bool{true})
 	}
 }
 
@@ -6585,13 +6593,90 @@ func TestResolveMediaRefs_ImageInjectsPathTag(t *testing.T) {
 	}
 	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
-	if len(result[0].Media) != 0 {
-		t.Fatalf("expected 0 media (images use path tags), got %d", len(result[0].Media))
+	// Fork: a imagem anexada NESTE turno vai junto da mensagem, além do path tag.
+	// Upstream mandava só o tag e esperava o modelo chamar load_image — no
+	// primeiro prompt isso falhava, e ele respondia sobre uma imagem que nunca viu.
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected the current-turn image inline, got %d media", len(result[0].Media))
+	}
+	if !strings.HasPrefix(result[0].Media[0], "data:image/") {
+		t.Fatalf("expected a data: URL, got %q", result[0].Media[0])
 	}
 	localPath, _, _ := store.ResolveWithMeta(ref)
 	expectedContent := "describe this [image:" + localPath + "]"
 	if result[0].Content != expectedContent {
 		t.Fatalf("expected content %q, got %q", expectedContent, result[0].Content)
+	}
+}
+
+// A contrapartida do inline: turno ANTIGO fica só com o path tag. Sem isso cada
+// imagem já enviada voltaria em base64 a cada turno seguinte — estouro de
+// contexto e de custo.
+func TestResolveMediaRefs_HistoricalImageStaysPathTagOnly(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "old.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00,
+		0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := store.Store(pngPath, media.MediaMeta{}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	messages := []providers.Message{
+		{Role: "user", Content: "a imagem de ontem", Media: []string{ref}},
+		{Role: "assistant", Content: "vi"},
+		{Role: "user", Content: "e agora?"},
+	}
+	// currentTurnStart = 2: só a última mensagem é do turno atual.
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 2)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("imagem histórica não pode voltar embutida, veio %d media", len(result[0].Media))
+	}
+	if !strings.Contains(result[0].Content, "[image:") {
+		t.Fatalf("esperava o path tag no histórico, veio %q", result[0].Content)
+	}
+}
+
+// O caminho do nosso canal web: o anexo chega como caminho absoluto, não como
+// media:// ref. Antes ele passava intacto e o serializador do provider o
+// descartava — a imagem sumia sem erro nenhum.
+func TestResolveMediaRefs_PlainLocalPathIsResolved(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "upload.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D,
+		0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00,
+		0x90, 0x77, 0x53, 0xDE,
+	}
+	if err := os.WriteFile(pngPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	messages := []providers.Message{
+		{Role: "user", Content: "qual o código?", Media: []string{pngPath}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
+
+	if len(result[0].Media) != 1 || !strings.HasPrefix(result[0].Media[0], "data:image/") {
+		t.Fatalf("esperava o caminho local virar data: URL, veio %v", result[0].Media)
+	}
+	if !strings.Contains(result[0].Content, "[image:"+pngPath+"]") {
+		t.Fatalf("esperava o path tag, veio %q", result[0].Content)
 	}
 }
 
@@ -6938,8 +7023,10 @@ func TestResolveMediaRefs_UsesMetaContentType(t *testing.T) {
 	}
 	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
-	if len(result[0].Media) != 0 {
-		t.Fatalf("expected 0 media (images use path tags), got %d", len(result[0].Media))
+	// O que este teste checa é o MIME vindo do meta; a imagem do turno atual vai
+	// embutida (fork), então o tag confirma que o content type foi respeitado.
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected the current-turn image inline, got %d media", len(result[0].Media))
 	}
 	localPath, _, _ := store.ResolveWithMeta(ref)
 	expectedContent := "hi [image:" + localPath + "]"
@@ -7169,8 +7256,10 @@ func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
 	}
 	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize, 0)
 
-	if len(result[0].Media) != 0 {
-		t.Fatalf("expected 0 media (all types use path tags), got %d", len(result[0].Media))
+	// Só a IMAGEM vai embutida; o PDF continua apenas como path tag, para ser
+	// lido por read_file em vez de entrar em base64 no contexto.
+	if len(result[0].Media) != 1 || !strings.HasPrefix(result[0].Media[0], "data:image/") {
+		t.Fatalf("esperava só a imagem embutida, veio %v", result[0].Media)
 	}
 	imgLocalPath, _, _ := store.ResolveWithMeta(imgRef)
 	pdfLocalPath, _, _ := store.ResolveWithMeta(fileRef)
