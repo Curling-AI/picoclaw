@@ -116,6 +116,11 @@ func (p *Pipeline) CallLLM(
 	if err := p.routeCronModelTurn(ts, exec); err != nil {
 		return ControlBreak, err
 	}
+	// Por último: o tier escolhido pelo usuário cede aos dois acima, que são
+	// restrições de capacidade (visão, cron) e não preferência.
+	if err := p.routeModelTierTurn(ts, exec); err != nil {
+		return ControlBreak, err
+	}
 
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,

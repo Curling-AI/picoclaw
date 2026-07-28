@@ -518,3 +518,35 @@ func (al *AgentLoop) clearPendingSkills(sessionKey string) {
 	}
 	al.pendingSkills.Delete(sessionKey)
 }
+
+// SetPendingModelTier arms the user-picked model tier for the next message
+// processed for this session key — the composer's model selector.
+//
+// Same shape as SetPendingSkills, and for the same reason: the pipeline has no
+// other per-turn channel. (Cron had to encode its model in the SESSION KEY
+// because it truly had none; the web does, so the tier travels as a structured
+// field and never touches the key.) The caller is responsible for validating
+// the tier against the configured set — an unknown value here is dropped, not
+// forwarded. (seucaranguejo fork)
+func (al *AgentLoop) SetPendingModelTier(sessionKey, tier string) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	tier = strings.TrimSpace(tier)
+	if sessionKey == "" || tier == "" {
+		return
+	}
+	al.pendingModelTier.Store(sessionKey, tier)
+}
+
+// takePendingModelTier consumes the armed tier (per-turn, like the skills).
+func (al *AgentLoop) takePendingModelTier(sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	value, ok := al.pendingModelTier.LoadAndDelete(sessionKey)
+	if !ok {
+		return ""
+	}
+	tier, _ := value.(string)
+	return tier
+}

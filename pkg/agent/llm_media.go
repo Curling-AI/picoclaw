@@ -307,3 +307,87 @@ func (p *Pipeline) routeCronModelTurn(ts *turnState, exec *turnExecution) error 
 
 	return nil
 }
+
+// routeModelTierTurn swaps the active model to the tier the USER picked in the
+// composer (turnState.modelTier, armed via SetPendingModelTier). Third sibling
+// of routeMediaTurn/routeCronModelTurn, and the same swap.
+//
+// It gives way to both of them, on purpose: a media turn is pinned to the
+// vision model and a cron turn to the cron model because those are CAPABILITY
+// constraints, while the tier is a user preference. Preference does not get to
+// override capability — a photo sent while "Ultra" is selected still has to go
+// to a model that can see it. (seucaranguejo fork)
+func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil {
+		return nil
+	}
+	tier := strings.TrimSpace(ts.modelTier)
+	if tier == "" || len(ts.agent.TierCandidates) == 0 {
+		return nil
+	}
+	// Cron pins its own model; a cron session never carries a user tier anyway,
+	// but the guard keeps it true if that ever changes.
+	if strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) {
+		return nil
+	}
+	// Media already swapped this turn to the vision model.
+	if len(ts.media) > 0 {
+		return nil
+	}
+	targetCandidates := ts.agent.TierCandidates[tier]
+	if len(targetCandidates) == 0 {
+		// Tier desconhecido (config mudou entre o envio e o turno): fica no
+		// modelo principal em vez de errar — o usuário não perde a mensagem.
+		logger.WarnCF("agent", "Unknown model tier; staying on the main model", map[string]any{
+			"agent_id": ts.agent.ID,
+			"tier":     tier,
+		})
+		return nil
+	}
+	targetCandidates = append([]providers.FallbackCandidate(nil), targetCandidates...)
+
+	firstCandidate := targetCandidates[0]
+	targetModel := resolvedCandidateModel(targetCandidates, firstCandidate.Model)
+	targetProvider := exec.activeProvider
+	if provider, err := providerForFallbackCandidate(
+		ts.agent,
+		ts.agent.Provider,
+		targetCandidates,
+		firstCandidate.Provider,
+		firstCandidate.Model,
+	); err != nil {
+		return err
+	} else if provider != nil {
+		targetProvider = provider
+	}
+
+	resolvedModelName := resolvedCandidateModelName(targetCandidates, firstCandidate.Model)
+	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
+		exec.activeModel == targetModel &&
+		exec.llmModelName == resolvedModelName {
+		return nil
+	}
+
+	exec.activeCandidates = targetCandidates
+	exec.activeModel = targetModel
+	exec.activeProvider = targetProvider
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		targetCandidates,
+		targetModel,
+		p.Cfg.Agents.Defaults.Provider,
+	)
+	exec.llmModelName = resolvedModelName
+	exec.usedLight = false
+
+	logger.InfoCF("agent", "Model tier routing selected model", map[string]any{
+		"agent_id":    ts.agent.ID,
+		"tier":        tier,
+		"model":       exec.activeModel,
+		"model_name":  exec.llmModelName,
+		"session_key": ts.sessionKey,
+	})
+
+	return nil
+}
