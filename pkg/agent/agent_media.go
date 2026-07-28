@@ -93,22 +93,34 @@ func resolveMediaRefs(
 		var pathTags []string
 
 		for _, ref := range m.Media {
-			if !strings.HasPrefix(ref, "media://") {
-				resolved = append(resolved, ref)
-				continue
-			}
+			var localPath string
+			var meta media.MediaMeta
 
-			localPath, meta, err := store.ResolveWithMeta(ref)
-			if err != nil {
-				fields := map[string]any{
-					"ref":   ref,
-					"error": err.Error(),
+			switch {
+			case strings.HasPrefix(ref, "media://"):
+				p, mt, err := store.ResolveWithMeta(ref)
+				if err != nil {
+					fields := map[string]any{
+						"ref":   ref,
+						"error": err.Error(),
+					}
+					if idx < currentTurnStart {
+						logger.DebugCF("agent", "Skipped stale historical media ref", fields)
+					} else {
+						logger.WarnCF("agent", "Failed to resolve media ref", fields)
+					}
+					continue
 				}
-				if idx < currentTurnStart {
-					logger.DebugCF("agent", "Skipped stale historical media ref", fields)
-				} else {
-					logger.WarnCF("agent", "Failed to resolve media ref", fields)
-				}
+				localPath, meta = p, mt
+			case isLocalMediaPath(ref):
+				// A plain filesystem path (the gRPC/web channel attaches uploads
+				// this way). Without this branch the ref fell through untouched:
+				// the provider drops anything that is not a data: URL, so the
+				// attachment reached the model as NOTHING — no image, not even a
+				// path tag. (seucaranguejo fork)
+				localPath = ref
+			default:
+				resolved = append(resolved, ref) // data: URL, http(s), unknown
 				continue
 			}
 
@@ -124,12 +136,27 @@ func resolveMediaRefs(
 			mime := detectMIME(localPath, meta)
 			pathTags = append(pathTags, buildPathTag(mime, localPath))
 
-			if m.Role == "tool" && idx >= currentTurnStart && strings.HasPrefix(mime, "image/") {
-				dataURL := encodeImageToDataURL(localPath, mime, info, maxSize)
-				if dataURL != "" {
-					pendingToolImages = append(pendingToolImages, dataURL)
-				}
+			if idx < currentTurnStart || !strings.HasPrefix(mime, "image/") {
+				continue // history and non-images stay path-tagged only
 			}
+			dataURL := encodeImageToDataURL(localPath, mime, info, maxSize)
+			if dataURL == "" {
+				continue
+			}
+			if m.Role == "tool" {
+				pendingToolImages = append(pendingToolImages, dataURL)
+				continue
+			}
+			// An image the user attached THIS turn travels with the message.
+			//
+			// Upstream leaves it as a path tag and waits for the model to call
+			// load_image. On the first prompt that reliably fails: the model
+			// answers about an image it never saw, or shells out to OCR the path
+			// (observed: `tesseract uploads/x.png`, which is not installed).
+			// Inlining also feeds the vision delegation, which produces a
+			// thorough OCR-grade description instead of a shallow guess.
+			// Bounded to the current turn, so history never re-ships the bytes.
+			resolved = append(resolved, dataURL)
 		}
 
 		msg.Media = resolved
@@ -146,6 +173,17 @@ func resolveMediaRefs(
 	}
 
 	return result
+}
+
+// isLocalMediaPath reports whether a media ref is a plain absolute filesystem
+// path (as opposed to a media:// ref, a data: URL or a remote URL). Requiring
+// an absolute path keeps a stray placeholder like "[image]" or a relative
+// fragment from being probed on disk.
+func isLocalMediaPath(ref string) bool {
+	if ref == "" || !strings.HasPrefix(ref, "/") {
+		return false
+	}
+	return !strings.Contains(ref, "://")
 }
 
 // encodeImageToDataURL base64-encodes an image file into a data URL.

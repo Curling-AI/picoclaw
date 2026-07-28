@@ -442,11 +442,16 @@ func (p *gracefulCaptureProvider) GetDefaultModel() string {
 }
 
 type lateSteeringProvider struct {
-	mu                 sync.Mutex
-	calls              int
-	firstCallStarted   chan struct{}
-	releaseFirstCall   chan struct{}
-	firstStartOnce     sync.Once
+	mu               sync.Mutex
+	calls            int
+	firstCallStarted chan struct{}
+	releaseFirstCall chan struct{}
+	firstStartOnce   sync.Once
+	// Fechado quando a SEGUNDA chamada já gravou as mensagens. Sem ele o teste
+	// esperava um outbound qualquer — e o primeiro turno produz um —, então
+	// podia cancelar o Run antes de a segunda chamada acontecer.
+	secondCallDone     chan struct{}
+	secondDoneOnce     sync.Once
 	secondCallMessages []providers.Message
 }
 
@@ -471,6 +476,9 @@ func (p *lateSteeringProvider) Chat(
 	p.mu.Lock()
 	p.secondCallMessages = append([]providers.Message(nil), messages...)
 	p.mu.Unlock()
+	if p.secondCallDone != nil {
+		p.secondDoneOnce.Do(func() { close(p.secondCallDone) })
+	}
 	return &providers.LLMResponse{Content: "continued response"}, nil
 }
 
@@ -852,7 +860,17 @@ func TestAgentLoop_Run_AutoContinuesLateSteeringMessage(t *testing.T) {
 }
 
 func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.T) {
-	tmpDir := t.TempDir()
+	// os.MkdirTemp em vez de t.TempDir (mesma escolha do teste vizinho): o
+	// agente ainda grava o arquivo de sessão do segundo turno enquanto o
+	// cleanup do t.TempDir roda, e o "directory not empty" reprovava o teste
+	// mesmo com a asserção passando.
+	// Nome próprio para o erro: um `err` aqui em cima seria sombreado pelos
+	// `if err := ...` do corpo do teste, e o govet do CI reprova shadow.
+	tmpDir, mkErr := os.MkdirTemp("", "agent-voice-steering-*")
+	if mkErr != nil {
+		t.Fatalf("criar diretório temporário: %v", mkErr)
+	}
+	defer os.RemoveAll(tmpDir)
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
@@ -868,6 +886,7 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 	provider := &lateSteeringProvider{
 		firstCallStarted: make(chan struct{}),
 		releaseFirstCall: make(chan struct{}),
+		secondCallDone:   make(chan struct{}),
 	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 
@@ -933,12 +952,14 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 
 	close(provider.releaseFirstCall)
 
-	subCtx, subCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer subCancel()
+	// Espera a SEGUNDA chamada, não um outbound qualquer: o primeiro turno já
+	// produz um, e cancelar o Run em cima dele matava o processamento da voz
+	// enfileirada antes de ela virar a segunda chamada. O timeout mantém o
+	// teste capaz de falhar de verdade se a voz nunca for processada.
 	select {
-	case <-msgBus.OutboundChan():
-	case <-subCtx.Done():
-		t.Fatal("expected outbound response")
+	case <-provider.secondCallDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout esperando a segunda chamada (voz enfileirada não foi processada)")
 	}
 
 	cancelRun()
