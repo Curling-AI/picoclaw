@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
 // writeSkill grava um SKILL.md com frontmatter, como o gerador de drafts faz.
@@ -161,4 +164,46 @@ func slicesContains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// find_installed_skills é a ferramenta que o prompt manda consultar PRIMEIRO.
+// Se ela não enxerga as skills do loop, o modelo pergunta, não acha, e sai
+// varrendo o disco com `find` até topar com o arquivo — foi exatamente o que
+// aconteceu no kind antes deste ajuste.
+func TestTurnSkillLister_EnxergaSkillDoLoopNoTurno(t *testing.T) {
+	workspace := t.TempDir()
+	loopRoot := filepath.Join(workspace, "loops", "vendas")
+	writeSkill(t, loopRoot, "protocolo-vendas", "Protocolo do loop", "corpo")
+	writeSkill(t, workspace, "global-skill", "Skill global", "corpo")
+
+	lister := turnSkillLister{cb: NewContextBuilder(workspace)}
+
+	// Sem turno no contexto (ou turno sem loop): só as globais.
+	names := skillNames(lister.ListSkillsForTurn(context.Background()))
+	if slicesContains(names, "protocolo-vendas") {
+		t.Fatalf("skill do loop apareceu fora do loop: %v", names)
+	}
+	if !slicesContains(names, "global-skill") {
+		t.Fatalf("skill global sumiu: %v", names)
+	}
+
+	// Dentro do loop: as duas.
+	ctx := withTurnState(context.Background(), &turnState{
+		opts: processOptions{Loop: LoopScope{Slug: "vendas", Root: loopRoot}},
+	})
+	names = skillNames(lister.ListSkillsForTurn(ctx))
+	if !slicesContains(names, "protocolo-vendas") {
+		t.Fatalf("skill do loop não apareceu dentro do loop: %v", names)
+	}
+	if !slicesContains(names, "global-skill") {
+		t.Fatalf("loop escondeu as skills globais: %v", names)
+	}
+}
+
+func skillNames(infos []skills.SkillInfo) []string {
+	out := make([]string, 0, len(infos))
+	for _, i := range infos {
+		out = append(out, i.Name)
+	}
+	return out
 }

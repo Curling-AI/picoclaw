@@ -296,8 +296,14 @@ func registerSharedTools(
 		// instead — keeps the prompt lean as the skill set grows.
 		if skills_enabled && cfg.Tools.Skills.Discovery.Enabled {
 			if loader := agent.ContextBuilder.SkillsLoader(); loader != nil {
+				// turnSkillLister e não o loader cru: dentro de um Loop a busca
+				// também tem de achar as skills que aquele loop aprendeu. É esta
+				// a ferramenta que o prompt manda consultar primeiro. (Loops)
 				agent.Tools.Register(
-					tools.NewFindInstalledSkillsTool(loader, cfg.Tools.Skills.Discovery.MaxSearchResults),
+					tools.NewFindInstalledSkillsTool(
+						turnSkillLister{cb: agent.ContextBuilder},
+						cfg.Tools.Skills.Discovery.MaxSearchResults,
+					),
 				)
 			}
 		}

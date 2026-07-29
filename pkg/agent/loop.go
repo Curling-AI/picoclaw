@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -198,4 +199,32 @@ func skillDescriptionFromFrontmatter(body string) string {
 		}
 	}
 	return ""
+}
+
+// turnSkillLister adapta o SkillsLoader do agente para a ferramenta
+// find_installed_skills enxergar também as skills do Loop do turno corrente.
+//
+// A resolução acontece na CHAMADA, e não na construção, porque a ferramenta é
+// registrada uma vez por agente e o loop é fato do turno. O turnState vem do
+// contexto — o mesmo canal que o spawn e as demais ferramentas já usam.
+type turnSkillLister struct {
+	cb *ContextBuilder
+}
+
+func (l turnSkillLister) ListSkills() []skills.SkillInfo {
+	if l.cb == nil || l.cb.skillsLoader == nil {
+		return nil
+	}
+	return l.cb.skillsLoader.ListSkills()
+}
+
+func (l turnSkillLister) ListSkillsForTurn(ctx context.Context) []skills.SkillInfo {
+	if l.cb == nil || l.cb.skillsLoader == nil {
+		return nil
+	}
+	scope := LoopScope{}
+	if ts := turnStateFromContext(ctx); ts != nil {
+		scope = ts.opts.Loop
+	}
+	return l.cb.loaderForLoop(scope).ListSkills()
 }
