@@ -63,7 +63,11 @@ type AgentLoop struct {
 	// sessão e consumido no próximo turno. (seucaranguejo fork)
 	pendingModelTier sync.Map
 	pendingStops     sync.Map
-	mu               sync.RWMutex
+	// loopResolver traduz chave de sessão → Loop. Instalado pelo control-plane,
+	// que é quem conhece o vínculo. Nil = todo turno roda no escopo global.
+	// (seucaranguejo fork — ver loop.go)
+	loopResolver LoopResolver
+	mu           sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -102,7 +106,17 @@ type processOptions struct {
 	// ModelTier is the user-picked tier for THIS message (composer selector).
 	// Empty = main model. Validated by the caller; unknown values are a no-op.
 	// (seucaranguejo fork)
-	ModelTier               string
+	ModelTier string
+	// Loop deste turno. Zero value = sem loop (conversa avulsa), que é o
+	// caminho normal. Resolvido em runAgentLoop a partir da SessionKey.
+	// (seucaranguejo fork — ver loop.go)
+	Loop LoopScope
+	// MaxToolIterations sobrescreve o teto do agente SÓ neste turno. 0 = usar o
+	// do agente. Existe porque o teto é fixado na construção do AgentInstance e
+	// um Loop que trabalha sozinho precisa de mais passos que uma conversa.
+	// Continua sendo detector de laço preso, não controle de custo — quem faz
+	// isso é o orçamento do ciclo, no control-plane. (seucaranguejo fork)
+	MaxToolIterations       int
 	TurnProfile             config.EffectiveTurnProfile
 	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
 	Media                   []string               // media:// refs from inbound message
@@ -544,6 +558,17 @@ func (al *AgentLoop) runAgentLoop(
 	opts processOptions,
 ) (string, error) {
 	opts = normalizeProcessOptions(opts)
+	// Resolve o Loop AQUI porque runAgentLoop é o funil de todos os caminhos —
+	// web, canais, cron, heartbeat e subturns. Um ponto só cobre todos, em vez
+	// de cada chamador ter que lembrar. (seucaranguejo fork)
+	if !opts.Loop.Active() {
+		opts.Loop = al.resolveLoop(agent, opts.SessionKey)
+	}
+	// O teto do loop não sobrescreve um pedido explícito do chamador (subturn
+	// assíncrono já dobra o seu) — ele só preenche quando ninguém pediu nada.
+	if opts.MaxToolIterations <= 0 && opts.Loop.MaxToolIterations > 0 {
+		opts.MaxToolIterations = opts.Loop.MaxToolIterations
+	}
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {

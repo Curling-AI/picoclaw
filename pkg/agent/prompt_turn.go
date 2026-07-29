@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -117,13 +118,19 @@ func promptBuildRequestForProcessOptions(
 }
 
 func promptOverlaysForOptions(opts processOptions) []PromptPart {
-	systemPrompt := strings.TrimSpace(opts.SystemPromptOverride)
-	if systemPrompt == "" {
-		return nil
+	var parts []PromptPart
+
+	// Loop: instruções e memória do loop deste turno. Entra como OVERLAY por
+	// request, e nunca no prompt estático — cb.cachedSystemPrompt é UMA string
+	// por pod, invalidada só por mtime e sem chave por sessão, então conteúdo de
+	// loop lá dentro faria o prompt do Loop A ser servido ao Loop B. Isso é bug
+	// de correção, não de performance. (seucaranguejo fork)
+	if part := loopPromptPart(opts.Loop); part != nil {
+		parts = append(parts, *part)
 	}
 
-	return []PromptPart{
-		{
+	if systemPrompt := strings.TrimSpace(opts.SystemPromptOverride); systemPrompt != "" {
+		parts = append(parts, PromptPart{
 			ID:      "instruction.subturn_profile",
 			Layer:   PromptLayerInstruction,
 			Slot:    PromptSlotWorkspace,
@@ -132,8 +139,62 @@ func promptOverlaysForOptions(opts processOptions) []PromptPart {
 			Content: systemPrompt,
 			Stable:  false,
 			Cache:   PromptCacheNone,
-		},
+		})
 	}
+
+	return parts
+}
+
+// loopPromptPart monta o bloco do loop: instruções + memória própria.
+//
+// Vem DEPOIS do prompt estático (que traz AGENTS.md, USER.md e a memória
+// global), então é camada por cima, não substituição — a decisão de produto era
+// herdar o global e somar o do loop.
+//
+// Marcado como cacheável: o conteúdo é estável enquanto a conversa continua no
+// mesmo loop, então vira um segundo breakpoint de cache em vez de texto novo a
+// cada turno.
+func loopPromptPart(scope LoopScope) *PromptPart {
+	if !scope.Active() {
+		return nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# Loop: %s\n", scope.Slug)
+	sb.WriteString("\nEsta conversa pertence a um loop — uma meta com prazo. " +
+		"O que segue vale para todo trabalho feito aqui dentro.\n")
+
+	if body := readTrimmedFile(loopInstructionsFile(scope.Root)); body != "" {
+		sb.WriteString("\n" + body + "\n")
+	}
+
+	// Delimitador em vez de heading, pela mesma razão da memória global: heading
+	// é contenção fraca — o modelo o trata como sugestão de seção, não como
+	// fronteira de conteúdo.
+	if mem := readTrimmedFile(loopMemoryFile(scope.Root)); mem != "" {
+		fmt.Fprintf(&sb, "\n<memory scope=\"loop:%s\">\n%s\n</memory>\n", scope.Slug, mem)
+	}
+
+	return &PromptPart{
+		ID:      "instruction.loop",
+		Layer:   PromptLayerInstruction,
+		Slot:    PromptSlotWorkspace,
+		Source:  PromptSource{ID: PromptSourceLoop, Name: "loop:" + scope.Slug},
+		Title:   "Loop",
+		Content: sb.String(),
+		Stable:  true,
+		Cache:   PromptCacheEphemeral,
+	}
+}
+
+// readTrimmedFile devolve o conteúdo ou "" — arquivo ausente é estado normal
+// (loop recém-criado, pod novo), não erro.
+func readTrimmedFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func promptContentBlock(part PromptPart, cache *providers.CacheControl) providers.ContentBlock {

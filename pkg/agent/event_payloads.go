@@ -53,6 +53,10 @@ type TurnEndPayload struct {
 	SkillContextSnapshots []SkillContextSnapshot
 	ToolKinds             []string
 	ToolExecutions        []ToolExecutionRecord
+	// Loop deste turno. Zero value = turno global. O cold path do evolution usa
+	// LoopRoot como Workspace, o que isola task-records, padrões e skills
+	// geradas dentro de loops/<slug>/. (seucaranguejo fork — ver loop.go)
+	Loop LoopScope
 }
 
 // LLMRequestPayload describes an outbound LLM request.
