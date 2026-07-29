@@ -9,6 +9,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/skills"
+	fstools "github.com/sipeed/picoclaw/pkg/tools/fs"
 )
 
 // Loops (fork seucaranguejo): um Loop é uma meta com prazo que vive DENTRO de um
@@ -199,6 +200,17 @@ func skillDescriptionFromFrontmatter(body string) string {
 		}
 	}
 	return ""
+}
+
+// init liga a resolução de caminho de entregáveis às ferramentas de arquivo.
+//
+// Injeção, e não import direto, porque pkg/tools/fs não pode importar este
+// pacote (agent já importa tools). Sem esta linha nada é redirecionado: o
+// comportamento volta a ser o anterior, com o nudge no prompt sozinho.
+func init() {
+	fstools.SetLoopRootResolver(func(ctx context.Context) string {
+		return LoopFromContext(ctx).Root
+	})
 }
 
 // LoopFromContext devolve o Loop do turno corrente, ou o zero value fora de um

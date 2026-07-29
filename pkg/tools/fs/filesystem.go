@@ -397,6 +397,8 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	if !ok {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	// offset (optional, default 0)
 	offset, err := getInt64Arg(args, "offset", 0)
@@ -548,6 +550,8 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 	if !ok {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	startLine, err := getInt64Arg(args, "start_line", 1)
 	if err != nil {
@@ -993,6 +997,8 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	if !ok {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	content, ok := args["content"].(string)
 	if !ok {
@@ -1066,6 +1072,8 @@ func (t *ListDirTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 	if !ok {
 		path = "."
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	entries, err := t.fs.ReadDir(path)
 	if err != nil {
