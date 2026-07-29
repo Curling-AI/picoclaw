@@ -201,6 +201,21 @@ func skillDescriptionFromFrontmatter(body string) string {
 	return ""
 }
 
+// LoopFromContext devolve o Loop do turno corrente, ou o zero value fora de um
+// loop.
+//
+// Exportado porque as ferramentas do control-plane (memória, por exemplo) são
+// registradas de FORA deste pacote e precisam do escopo do turno para escrever
+// no lugar certo. TurnStateFromContext não serve: devolve um tipo não
+// exportado, então quem está fora não consegue ler campo nenhum.
+// (seucaranguejo fork)
+func LoopFromContext(ctx context.Context) LoopScope {
+	if ts := turnStateFromContext(ctx); ts != nil {
+		return ts.opts.Loop
+	}
+	return LoopScope{}
+}
+
 // turnSkillLister adapta o SkillsLoader do agente para a ferramenta
 // find_installed_skills enxergar também as skills do Loop do turno corrente.
 //

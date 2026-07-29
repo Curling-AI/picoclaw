@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,5 +252,23 @@ func TestEvolutionBridge_TurnEndComLoopEscreveNaRaizDoLoop(t *testing.T) {
 	if _, err := os.Stat(global); !os.IsNotExist(err) {
 		data, _ := os.ReadFile(global)
 		t.Fatalf("record vazou para o workspace global (%v):\n%s", err, data)
+	}
+}
+
+// LoopFromContext é o que as ferramentas do control-plane usam para saber em
+// qual memória escrever — TurnStateFromContext devolve tipo não exportado e não
+// serve de fora do pacote.
+func TestLoopFromContext(t *testing.T) {
+	if got := LoopFromContext(context.Background()); got.Active() {
+		t.Fatalf("sem turno no contexto: Active() = true, want false")
+	}
+
+	root := filepath.Join(t.TempDir(), "loops", "vendas")
+	ctx := withTurnState(context.Background(), &turnState{
+		opts: processOptions{Loop: LoopScope{Slug: "vendas", Root: root}},
+	})
+	got := LoopFromContext(ctx)
+	if !got.Active() || got.Slug != "vendas" || got.Root != root {
+		t.Fatalf("LoopFromContext = %+v", got)
 	}
 }

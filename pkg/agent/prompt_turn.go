@@ -177,6 +177,13 @@ func loopPromptPart(scope LoopScope) *PromptPart {
 		fmt.Fprintf(&sb, "\n<memory scope=\"loop:%s\">\n%s\n</memory>\n", scope.Slug, mem)
 	}
 
+	// Onde os entregáveis do loop moram. Sem esta linha o agente grava em
+	// artifacts/ do assistente e o que ele produziu perseguindo ESTA meta se
+	// mistura com o de todas as outras conversas — o mesmo motivo de a memória e
+	// as skills serem do loop.
+	fmt.Fprintf(&sb, "\n## Entregáveis\n\nSalve os arquivos que produzir aqui em `loops/%s/artifacts/`, "+
+		"não em `artifacts/`. É o que pertence a esta meta.\n", scope.Slug)
+
 	// Catálogo das skills que ESTE loop aprendeu. Vai aqui, no overlay, e não no
 	// catálogo do prompt estático: aquele é cacheado por pod e vazaria as skills
 	// de um loop para todos os outros. É também o único jeito de o modelo saber
