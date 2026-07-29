@@ -94,7 +94,13 @@ func (al *AgentLoop) applyExplicitSkillCommand(
 		return true, true, "Cleared pending skill override."
 	}
 
-	skillName, ok := agent.ContextBuilder.ResolveSkillName(arg)
+	// /use dentro de um loop também alcança as skills do loop. O escopo é
+	// resolvido aqui porque o /use roda ANTES do turno, fora de runAgentLoop.
+	var useLoop LoopScope
+	if opts != nil {
+		useLoop = al.resolveLoop(agent, opts.Dispatch.SessionKey)
+	}
+	skillName, ok := agent.ContextBuilder.ResolveSkillNameForLoop(arg, useLoop)
 	if !ok {
 		return true, true, fmt.Sprintf("Unknown skill: %s\nUse /list skills to see installed skills.", arg)
 	}

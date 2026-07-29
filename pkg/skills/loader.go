@@ -75,15 +75,39 @@ func (info SkillInfo) validate() error {
 
 type SkillsLoader struct {
 	workspace       string
+	loopSkills      string // skills do Loop deste turno (seucaranguejo fork)
 	workspaceSkills string // workspace skills (project-level)
 	globalSkills    string // global skills (~/.picoclaw/skills)
 	builtinSkills   string // builtin skills
 }
 
+// WithLoopSkills devolve uma CÓPIA do loader que também enxerga as skills do
+// loop, com prioridade sobre as do workspace.
+//
+// Existe porque o loader do agente é construído uma vez, com três raízes fixas,
+// e o loop é fato do TURNO. Sem esta raiz extra, o cold path do loop escreve
+// skills em loops/<slug>/skills/ que nada volta a ler — geradas, versionadas,
+// com backup e ciclo de vida, e invisíveis para o modelo.
+//
+// Cópia, e não mutação: o loader do agente é compartilhado entre turnos
+// concorrentes, e um deles é de outro loop. (seucaranguejo fork)
+func (sl *SkillsLoader) WithLoopSkills(loopRoot string) *SkillsLoader {
+	if sl == nil {
+		return nil
+	}
+	loopRoot = strings.TrimSpace(loopRoot)
+	if loopRoot == "" {
+		return sl
+	}
+	clone := *sl
+	clone.loopSkills = filepath.Join(loopRoot, "skills")
+	return &clone
+}
+
 // SkillRoots returns all unique skill root directories used by this loader.
-// The order follows resolution priority: workspace > global > builtin.
+// The order follows resolution priority: loop > workspace > global > builtin.
 func (sl *SkillsLoader) SkillRoots() []string {
-	roots := []string{sl.workspaceSkills, sl.globalSkills, sl.builtinSkills}
+	roots := []string{sl.loopSkills, sl.workspaceSkills, sl.globalSkills, sl.builtinSkills}
 	seen := make(map[string]struct{}, len(roots))
 	out := make([]string, 0, len(roots))
 
@@ -160,7 +184,10 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 		}
 	}
 
-	// Priority: workspace > global > builtin
+	// Priority: loop > workspace > global > builtin. A skill do loop vence a
+	// homônima global DENTRO do loop — é o que "o loop aprendeu um jeito
+	// próprio de fazer isso" significa. (seucaranguejo fork)
+	addSkills(sl.loopSkills, "loop")
 	addSkills(sl.workspaceSkills, "workspace")
 	addSkills(sl.globalSkills, "global")
 	addSkills(sl.builtinSkills, "builtin")
@@ -177,6 +204,14 @@ func (sl *SkillsLoader) LoadSkill(name string) (string, bool) {
 	// evolution/recall paths without each caller re-checking.
 	if LoadDisabled(sl.workspaceSkills)[name] {
 		return "", false
+	}
+
+	// 0. skills do Loop deste turno, quando houver (seucaranguejo fork)
+	if sl.loopSkills != "" {
+		skillFile := filepath.Join(sl.loopSkills, name, "SKILL.md")
+		if content, err := os.ReadFile(skillFile); err == nil {
+			return sl.stripFrontmatter(string(content)), true
+		}
 	}
 
 	// 1. load from workspace skills first (project-level)

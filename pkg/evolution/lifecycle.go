@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
@@ -57,11 +58,50 @@ func ApplyLifecycleState(paths Paths, profile SkillProfile, next SkillStatus) er
 	}
 
 	skillPath := filepath.Join(workspace, "skills", profile.SkillName, "SKILL.md")
-	err := os.Remove(skillPath)
+	return trashSkillFile(paths, profile.SkillName, skillPath)
+}
+
+// maxLifecycleDeletesPerRun limita quantas skills um único run pode aposentar.
+//
+// A transição só dispara com 365 dias de ociosidade, então mais que um punhado
+// por run não é o ciclo de vida funcionando: é um relógio errado, um restore de
+// backup com mtime zerado, ou perfis importados em lote. Nesses casos parar e
+// avisar é melhor que apagar tudo e descobrir depois.
+const maxLifecycleDeletesPerRun = 5
+
+// trashSkillFile move a skill para a lixeira em vez de apagar.
+//
+// O lifecycle apagava com os.Remove direto. Só que a decisão de aposentar vem de
+// um retention score alimentado por um juiz de sucesso heurístico/LLM — um sinal
+// ruidoso —, e o arquivo é trabalho que o próprio sistema gerou. Deletar sem
+// rede transforma um erro de pontuação em perda definitiva. Com Loops isso
+// piora: agora o usuário VÊ essas skills, então o sumiço é visível e
+// inexplicável. (seucaranguejo fork)
+func trashSkillFile(paths Paths, skillName, skillPath string) error {
+	data, err := os.ReadFile(skillPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	trashDir := filepath.Join(paths.RootDir, "trash")
+	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+		return fmt.Errorf("create lifecycle trash dir: %w", err)
+	}
+	// Nome do arquivo carrega a data para dois ciclos de vida do mesmo nome não
+	// se sobrescreverem na lixeira.
+	trashPath := filepath.Join(trashDir, fmt.Sprintf("%s.%s.SKILL.md",
+		skillName, time.Now().UTC().Format("20060102T150405Z")))
+	if err := os.WriteFile(trashPath, data, 0o644); err != nil {
+		return fmt.Errorf("write lifecycle trash copy: %w", err)
+	}
+
+	if err := os.Remove(skillPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func RunLifecycleOnce(store *Store, paths Paths, workspace string, now time.Time) (LifecycleRunSummary, error) {
@@ -83,6 +123,18 @@ func RunLifecycleOnce(store *Store, paths Paths, workspace string, now time.Time
 		summary.EvaluatedProfiles++
 		next := NextLifecycleState(profile, now)
 		if next == profile.Status {
+			continue
+		}
+
+		// O teto vale por RUN, não por perfil: um run que quer apagar muita
+		// coisa de uma vez é o sintoma que interessa. Os perfis restantes ficam
+		// como estão e voltam a ser avaliados no run seguinte.
+		if next == SkillStatusDeleted && summary.DeletedSkills >= maxLifecycleDeletesPerRun {
+			logger.WarnCF("evolution", "Lifecycle delete cap reached — skipping remaining deletions", map[string]any{
+				"cap":       maxLifecycleDeletesPerRun,
+				"workspace": workspace,
+				"skill":     profile.SkillName,
+			})
 			continue
 		}
 

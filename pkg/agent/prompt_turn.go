@@ -28,6 +28,7 @@ func promptBuildRequestForTurn(
 		SenderDisplayName: ts.opts.SenderDisplayName,
 		ActiveSkills:      activeSkillNames(ts.agent, ts.opts),
 		Overlays:          promptOverlaysForOptions(ts.opts),
+		Loop:              ts.opts.Loop,
 	}
 	hasCallableTools := true
 	if ts.profile.Enabled {
@@ -91,6 +92,7 @@ func promptBuildRequestForProcessOptions(
 		SenderDisplayName: opts.SenderDisplayName,
 		ActiveSkills:      activeSkillNames(agent, opts),
 		Overlays:          promptOverlaysForOptions(opts),
+		Loop:              opts.Loop,
 	}
 	profile := opts.TurnProfile
 	hasCallableTools := true
@@ -173,6 +175,16 @@ func loopPromptPart(scope LoopScope) *PromptPart {
 	// fronteira de conteúdo.
 	if mem := readTrimmedFile(loopMemoryFile(scope.Root)); mem != "" {
 		fmt.Fprintf(&sb, "\n<memory scope=\"loop:%s\">\n%s\n</memory>\n", scope.Slug, mem)
+	}
+
+	// Catálogo das skills que ESTE loop aprendeu. Vai aqui, no overlay, e não no
+	// catálogo do prompt estático: aquele é cacheado por pod e vazaria as skills
+	// de um loop para todos os outros. É também o único jeito de o modelo saber
+	// que elas existem — o find_installed_skills enumera só as três raízes fixas.
+	if catalog := loopSkillCatalog(scope); catalog != "" {
+		sb.WriteString("\n## Skills deste loop\n\n" +
+			"Aprendidas aqui dentro, em ciclos anteriores. Preferem-se às globais de mesmo nome.\n\n" +
+			catalog)
 	}
 
 	return &PromptPart{
