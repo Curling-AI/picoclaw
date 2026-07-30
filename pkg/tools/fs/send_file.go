@@ -87,6 +87,8 @@ func (t *SendFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	if strings.TrimSpace(path) == "" {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	// Prefer context-injected channel/chatID (set by ExecuteWithContext), fall back to SetContext values.
 	channel := ToolChannel(ctx)

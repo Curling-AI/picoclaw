@@ -90,6 +90,8 @@ func (t *LoadImageTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	if strings.TrimSpace(path) == "" {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	// Prefer context-injected channel/chatID (set by ExecuteWithContext), fall back to SetContext values.
 	channel := ToolChannel(ctx)

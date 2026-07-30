@@ -26,6 +26,7 @@ func TestMeasurementProfile_NegaFerramentasQueAgem(t *testing.T) {
 		fakeTool{name: "exec"},
 		fakeTool{name: "spawn"},
 		fakeTool{name: "subagent"},
+		fakeTool{name: "create_loop"},
 	} {
 		registry.Register(tool)
 	}
@@ -41,7 +42,7 @@ func TestMeasurementProfile_NegaFerramentasQueAgem(t *testing.T) {
 		t.Fatalf("HistoryMode = %q, want off", profile.HistoryMode)
 	}
 
-	for _, denied := range []string{"message", "cron", "memory", "exec", "spawn", "subagent"} {
+	for _, denied := range []string{"message", "cron", "memory", "exec", "spawn", "subagent", "create_loop"} {
 		if slices.Contains(profile.AllowedTools, denied) {
 			t.Fatalf("ferramenta que AGE ficou permitida: %q", denied)
 		}

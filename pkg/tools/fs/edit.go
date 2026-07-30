@@ -58,6 +58,8 @@ func (t *EditFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	if !ok {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	oldText, ok := args["old_text"].(string)
 	if !ok {
@@ -118,6 +120,8 @@ func (t *AppendFileTool) Execute(ctx context.Context, args map[string]any) *Tool
 	if !ok {
 		return ErrorResult("path is required")
 	}
+	// Entregáveis do Loop: `artifacts/` aqui dentro é o do loop (loop_paths.go).
+	path = resolveLoopPath(ctx, path)
 
 	content, ok := args["content"].(string)
 	if !ok {

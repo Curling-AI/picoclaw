@@ -28,11 +28,15 @@ import (
 //
 // spawn/subagent estão aqui por um motivo específico: sem essa negação, o
 // turno contornaria a restrição inteira delegando a um filho irrestrito.
+//
+// ATENÇÃO ao adicionar ferramenta nova ao produto: se ela AGE, o nome entra
+// aqui. Isto já foi esquecido uma vez — `create_loop` nasceu depois desta lista
+// e ficou permitida num turno que só deveria observar.
 var measurementDeniedTools = []string{
 	// Agem no mundo
 	"message", "send_file", "send_tts", "webhook",
 	// Agem no próprio assistente
-	"cron", "memory", "install_skill", "share",
+	"cron", "memory", "install_skill", "share", "create_loop",
 	// Execução arbitrária
 	"exec", "shell", "write_file", "edit_file", "append_file",
 	// Delegação — a saída de emergência da restrição
