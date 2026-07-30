@@ -204,9 +204,18 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 		return false
 	}
 
+	// Loop: o cold path inteiro é parametrizado por esta única string, então
+	// trocá-la já isola task-records, padrões, drafts e as skills aplicadas
+	// dentro de loops/<slug>/. Fila e dedupe do ColdPathRunner passam a ser por
+	// loop de graça, porque a chave dele é o workspace. (seucaranguejo fork)
+	workspace := payload.Workspace
+	if payload.Loop.Active() {
+		workspace = payload.Loop.Root
+	}
+
 	input := evolution.TurnCaseInput{
-		Workspace:             payload.Workspace,
-		WorkspaceID:           payload.Workspace,
+		Workspace:             workspace,
+		WorkspaceID:           workspace,
 		TurnID:                meta.TurnID,
 		SessionKey:            meta.SessionKey,
 		AgentID:               meta.AgentID,

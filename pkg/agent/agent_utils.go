@@ -527,7 +527,7 @@ func activeSkillNames(agent *AgentInstance, opts processOptions) []string {
 			continue
 		}
 		if agent.ContextBuilder != nil {
-			if canonical, ok := agent.ContextBuilder.ResolveSkillName(name); ok {
+			if canonical, ok := agent.ContextBuilder.ResolveSkillNameForLoop(name, opts.Loop); ok {
 				name = canonical
 			}
 		}

@@ -632,7 +632,7 @@ func (cb *ContextBuilder) EstimateSystemTokens(summary string, activeSkills []st
 
 	totalChars := utf8.RuneCountInString(staticPrompt) + dynamicContextChars
 
-	if skillsText := cb.buildActiveSkillsContext(activeSkills); skillsText != "" {
+	if skillsText := cb.buildActiveSkillsContext(activeSkills, LoopScope{}); skillsText != "" {
 		totalChars += utf8.RuneCountInString(skillsText)
 		totalChars += 7 // separator \n\n---\n\n
 	}
@@ -695,15 +695,35 @@ func (cb *ContextBuilder) sourcePaths() []string {
 // skillRoots returns all skill root directories that can affect
 // BuildSkillsSummary output (workspace/global/builtin).
 func (cb *ContextBuilder) skillRoots() []string {
+	return cb.skillRootsForLoop(LoopScope{})
+}
+
+// skillRootsForLoop é skillRoots incluindo as skills do loop do turno.
+//
+// Usado também na ATRIBUIÇÃO de uso (inferSkillNamesFromToolCall): sem o loop
+// aqui, ler uma skill do loop não conta como uso dela, e a skill que o próprio
+// loop gerou apodrece no lifecycle por falta de sinal. (seucaranguejo fork)
+func (cb *ContextBuilder) skillRootsForLoop(scope LoopScope) []string {
+	fallback := []string{filepath.Join(cb.workspace, "skills")}
 	if cb.skillsLoader == nil {
-		return []string{filepath.Join(cb.workspace, "skills")}
+		return fallback
 	}
 
-	roots := cb.skillsLoader.SkillRoots()
+	roots := cb.loaderForLoop(scope).SkillRoots()
 	if len(roots) == 0 {
-		return []string{filepath.Join(cb.workspace, "skills")}
+		return fallback
 	}
 	return roots
+}
+
+// loaderForLoop devolve o loader que enxerga as skills do loop deste turno, ou
+// o loader do agente quando não há loop. Nunca devolve nil se skillsLoader
+// existe. (seucaranguejo fork)
+func (cb *ContextBuilder) loaderForLoop(scope LoopScope) *skills.SkillsLoader {
+	if cb.skillsLoader == nil || !scope.Active() {
+		return cb.skillsLoader
+	}
+	return cb.skillsLoader.WithLoopSkills(scope.Root)
 }
 
 // cacheBaseline holds the file existence snapshot and the latest observed
@@ -1052,7 +1072,7 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 		if len(req.AllowedSkills) > 0 {
 			activeSkills = filterNamesByTurnProfile(activeSkills, req.AllowedSkills)
 		}
-		promptParts = append(promptParts, cb.buildActiveSkillsPromptParts(activeSkills)...)
+		promptParts = append(promptParts, cb.buildActiveSkillsPromptParts(activeSkills, req.Loop)...)
 	}
 	if !req.SuppressDefaultSystemPrompt {
 		if contributedParts, err := cb.promptRegistryOrDefault().Collect(context.Background(), req); err != nil {
@@ -1421,13 +1441,13 @@ func (cb *ContextBuilder) AddAssistantMessage(
 	return messages
 }
 
-func (cb *ContextBuilder) buildActiveSkillsContext(skillNames []string) string {
-	ordered := cb.ResolveActiveSkillsForContext(skillNames)
+func (cb *ContextBuilder) buildActiveSkillsContext(skillNames []string, scope LoopScope) string {
+	ordered := cb.ResolveActiveSkillsForLoop(skillNames, scope)
 	if len(ordered) == 0 {
 		return ""
 	}
 
-	content := cb.skillsLoader.LoadSkillsForContext(ordered)
+	content := cb.loaderForLoop(scope).LoadSkillsForContext(ordered)
 	if strings.TrimSpace(content) == "" {
 		return ""
 	}
@@ -1440,6 +1460,10 @@ The following skills are active for this request. Follow them when relevant.
 }
 
 func (cb *ContextBuilder) ResolveActiveSkillsForContext(skillNames []string) []string {
+	return cb.ResolveActiveSkillsForLoop(skillNames, LoopScope{})
+}
+
+func (cb *ContextBuilder) ResolveActiveSkillsForLoop(skillNames []string, scope LoopScope) []string {
 	if cb.skillsLoader == nil || len(skillNames) == 0 {
 		return nil
 	}
@@ -1447,7 +1471,7 @@ func (cb *ContextBuilder) ResolveActiveSkillsForContext(skillNames []string) []s
 	var ordered []string
 	seen := make(map[string]struct{}, len(skillNames))
 	for _, name := range skillNames {
-		canonical, ok := cb.ResolveSkillName(name)
+		canonical, ok := cb.ResolveSkillNameForLoop(name, scope)
 		if !ok {
 			continue
 		}
@@ -1463,8 +1487,8 @@ func (cb *ContextBuilder) ResolveActiveSkillsForContext(skillNames []string) []s
 	return ordered
 }
 
-func (cb *ContextBuilder) buildActiveSkillsPromptParts(skillNames []string) []PromptPart {
-	skillsText := cb.buildActiveSkillsContext(skillNames)
+func (cb *ContextBuilder) buildActiveSkillsPromptParts(skillNames []string, scope LoopScope) []PromptPart {
+	skillsText := cb.buildActiveSkillsContext(skillNames, scope)
 	if strings.TrimSpace(skillsText) == "" {
 		return nil
 	}
@@ -1497,12 +1521,19 @@ func (cb *ContextBuilder) ListSkillNames() []string {
 }
 
 func (cb *ContextBuilder) ResolveSkillName(name string) (string, bool) {
+	return cb.ResolveSkillNameForLoop(name, LoopScope{})
+}
+
+// ResolveSkillNameForLoop resolve o nome também contra as skills do loop do
+// turno — sem isso o modelo vê a skill no catálogo do loop e não consegue
+// ativá-la. (seucaranguejo fork)
+func (cb *ContextBuilder) ResolveSkillNameForLoop(name string, scope LoopScope) (string, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" || cb.skillsLoader == nil {
 		return "", false
 	}
 
-	for _, skill := range cb.skillsLoader.ListSkills() {
+	for _, skill := range cb.loaderForLoop(scope).ListSkills() {
 		if strings.EqualFold(skill.Name, name) {
 			return skill.Name, true
 		}

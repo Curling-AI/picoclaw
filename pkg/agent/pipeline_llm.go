@@ -421,7 +421,7 @@ func (p *Pipeline) CallLLM(
 			// non-destructive in-request trim below. See compactionCanHelp.
 			guardSkills := ts.activeSkills
 			if ts.agent.ContextBuilder != nil {
-				guardSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForContext(ts.activeSkills)
+				guardSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForLoop(ts.activeSkills, ts.opts.Loop)
 			}
 			_, guardTail := splitHistoryForActiveTurn(exec.history, ts.persistedMessagesSnapshot())
 			guardBuild := func(trimmedHistory []providers.Message) []providers.Message {
@@ -477,7 +477,7 @@ func (p *Pipeline) CallLLM(
 			}
 			contextualSkills := ts.activeSkills
 			if ts.agent.ContextBuilder != nil {
-				contextualSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForContext(ts.activeSkills)
+				contextualSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForLoop(ts.activeSkills, ts.opts.Loop)
 			}
 			ts.recordSkillContextSnapshot(skillContextTriggerContextRetryRebuild, contextualSkills)
 			stableHistory, protectedTurnTail := splitHistoryForActiveTurn(

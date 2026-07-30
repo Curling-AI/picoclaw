@@ -451,6 +451,26 @@ func (ts *turnState) currentIteration() int {
 	return ts.iteration
 }
 
+// maxIterations é o teto de passos de ferramenta DESTE turno.
+//
+// O teto do agente é resolvido uma vez, na construção do AgentInstance
+// (instance.go), e vale para o pod inteiro. Um Loop que persegue meta sozinho
+// precisa de mais passos que uma conversa, e não dá para reconstruir o agente
+// por turno — daí o override por opções. Sem override, é exatamente o valor de
+// antes. (seucaranguejo fork)
+func (ts *turnState) maxIterations() int {
+	if ts == nil {
+		return 0
+	}
+	if ts.opts.MaxToolIterations > 0 {
+		return ts.opts.MaxToolIterations
+	}
+	if ts.agent == nil {
+		return 0
+	}
+	return ts.agent.MaxIterations
+}
+
 func (ts *turnState) setFinalContent(content string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()

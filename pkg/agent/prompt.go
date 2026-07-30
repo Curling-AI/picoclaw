@@ -58,11 +58,14 @@ const (
 	PromptSourceToolDiscovery  PromptSourceID = "tool_registry:discovery"
 	PromptSourceOutputPolicy   PromptSourceID = "runtime.output"
 	PromptSourceSubTurnProfile PromptSourceID = "subturn.profile"
-	PromptSourceUserMessage    PromptSourceID = "turn:user_message"
-	PromptSourceSteering       PromptSourceID = "turn:steering"
-	PromptSourceSubTurnResult  PromptSourceID = "turn:subturn_result"
-	PromptSourceToolResult     PromptSourceID = "turn:tool_result"
-	PromptSourceInterrupt      PromptSourceID = "turn:interrupt"
+	// PromptSourceLoop: instruções e memória do Loop deste turno.
+	// (seucaranguejo fork — ver loop.go)
+	PromptSourceLoop          PromptSourceID = "loop:instructions"
+	PromptSourceUserMessage   PromptSourceID = "turn:user_message"
+	PromptSourceSteering      PromptSourceID = "turn:steering"
+	PromptSourceSubTurnResult PromptSourceID = "turn:subturn_result"
+	PromptSourceToolResult    PromptSourceID = "turn:tool_result"
+	PromptSourceInterrupt     PromptSourceID = "turn:interrupt"
 )
 
 type PromptCachePolicy string
@@ -117,6 +120,10 @@ type PromptBuildRequest struct {
 
 	ActiveSkills []string
 	Overlays     []PromptPart
+
+	// Loop deste turno. Zero value = sem loop. Decide de quais raízes as skills
+	// são resolvidas e o que entra no bloco do loop. (seucaranguejo fork)
+	Loop LoopScope
 
 	SuppressDefaultSystemPrompt bool
 	SuppressSkillContext        bool
@@ -246,6 +253,13 @@ func builtinPromptSources() []PromptSourceDescriptor {
 			Description:     "Child agent profile instructions",
 			Allowed:         []PromptPlacement{{Layer: PromptLayerInstruction, Slot: PromptSlotWorkspace}},
 			StableByDefault: false,
+		},
+		{
+			ID:              PromptSourceLoop,
+			Owner:           "loop",
+			Description:     "Loop instructions and loop-scoped memory",
+			Allowed:         []PromptPlacement{{Layer: PromptLayerInstruction, Slot: PromptSlotWorkspace}},
+			StableByDefault: true,
 		},
 		{
 			ID:              PromptSourceUserMessage,

@@ -33,7 +33,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 
 	contextualSkills := ts.activeSkills
 	if ts.agent.ContextBuilder != nil {
-		contextualSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForContext(ts.activeSkills)
+		contextualSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForLoop(ts.activeSkills, ts.opts.Loop)
 	}
 	ts.recordSkillContextSnapshot(skillContextTriggerInitialBuild, contextualSkills)
 	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)

@@ -55,7 +55,7 @@ func inferSkillNamesFromToolCall(ts *turnState, toolName string, toolArgs map[st
 
 	var roots []string
 	if ts.agent != nil && ts.agent.ContextBuilder != nil {
-		roots = ts.agent.ContextBuilder.skillRoots()
+		roots = ts.agent.ContextBuilder.skillRootsForLoop(ts.opts.Loop)
 	}
 	if len(roots) == 0 && strings.TrimSpace(ts.workspace) != "" {
 		roots = []string{filepath.Join(ts.workspace, "skills")}
@@ -84,7 +84,7 @@ func inferSkillNamesFromToolCall(ts *turnState, toolName string, toolArgs map[st
 			continue
 		}
 		if ts.agent != nil && ts.agent.ContextBuilder != nil {
-			if canonical, ok := ts.agent.ContextBuilder.ResolveSkillName(skillName); ok {
+			if canonical, ok := ts.agent.ContextBuilder.ResolveSkillNameForLoop(skillName, ts.opts.Loop); ok {
 				skillName = canonical
 			}
 		}

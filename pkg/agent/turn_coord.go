@@ -59,6 +59,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				SkillContextSnapshots: skillContextSnapshots,
 				ToolKinds:             ts.toolKindsSnapshot(),
 				ToolExecutions:        ts.toolExecutionsSnapshot(),
+				Loop:                  ts.opts.Loop,
 			},
 		)
 	}()
@@ -96,7 +97,11 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	paceNudged := false
 	wrapUpNudged := false
 
-	for ts.currentIteration() < ts.agent.MaxIterations || len(exec.pendingMessages) > 0 || func() bool {
+	// Teto DESTE turno: o do agente, salvo override nas opções (Loops). Fixo
+	// durante o turno, então basta resolver uma vez. (seucaranguejo fork)
+	maxIter := ts.maxIterations()
+
+	for ts.currentIteration() < maxIter || len(exec.pendingMessages) > 0 || func() bool {
 		graceful, _ := ts.gracefulInterruptRequested()
 		return graceful
 	}() {
@@ -119,9 +124,9 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		// to the session they become standing "stop using tools" instructions
 		// that poison every later turn — observed in prod, sessions carried up
 		// to 4 of them and degraded into announce-without-acting loops.
-		if budget := ts.agent.MaxIterations - iteration; ts.agent.MaxIterations > 0 && budget > 0 {
+		if budget := maxIter - iteration; maxIter > 0 && budget > 0 {
 			switch {
-			case !wrapUpNudged && iteration*100 >= ts.agent.MaxIterations*85:
+			case !wrapUpNudged && iteration*100 >= maxIter*85:
 				wrapUpNudged = true
 				paceNudged = true // estágio suave perdeu o sentido aqui
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
@@ -129,18 +134,18 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 					Content: fmt.Sprintf(
 						"[System] Tool-budget warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
 						iteration,
-						ts.agent.MaxIterations,
+						maxIter,
 						budget,
 					),
 				})
-			case !paceNudged && iteration*100 >= ts.agent.MaxIterations*60:
+			case !paceNudged && iteration*100 >= maxIter*60:
 				paceNudged = true
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role: "user",
 					Content: fmt.Sprintf(
 						"[System] Tool-budget check: you are at iteration %d of a hard limit of %d (~%d tool steps left). Plan the REMAINING work to fit this budget: prioritize what is essential to deliver the task, batch related steps, and skip exploratory detours. You do not need to stop — just spend the rest of the budget deliberately. If the work clearly cannot fit, deliver the most valuable subset and note what would be left.",
 						iteration,
-						ts.agent.MaxIterations,
+						maxIter,
 						budget,
 					),
 				})
@@ -232,7 +237,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			map[string]any{
 				"agent_id":  ts.agent.ID,
 				"iteration": iteration,
-				"max":       ts.agent.MaxIterations,
+				"max":       maxIter,
 			})
 
 		// Execute LLM call via Pipeline
@@ -311,7 +316,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	if finalContent == "" {
-		if ts.currentIteration() >= ts.agent.MaxIterations && ts.agent.MaxIterations > 0 {
+		if ts.currentIteration() >= maxIter && maxIter > 0 {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
 			finalContent = toolLimitResponse
