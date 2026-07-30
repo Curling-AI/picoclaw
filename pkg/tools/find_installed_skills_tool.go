@@ -23,6 +23,15 @@ type skillLister interface {
 	ListSkills() []skills.SkillInfo
 }
 
+// turnSkillLister lista as skills visíveis no TURNO corrente, e não só as do
+// agente. Existe por causa dos Loops: um turno dentro de um loop também enxerga
+// as skills que aquele loop aprendeu, e é ESTA ferramenta que o prompt manda
+// consultar primeiro — sem isto o modelo pergunta, não acha, e sai varrendo o
+// disco com `find` até topar com o arquivo. (seucaranguejo fork)
+type turnSkillLister interface {
+	ListSkillsForTurn(ctx context.Context) []skills.SkillInfo
+}
+
 // FindInstalledSkillsTool ranks the assistant's installed skills against a natural
 // language query using BM25 over each skill's name+description.
 type FindInstalledSkillsTool struct {
@@ -83,14 +92,22 @@ type skillSearchResult struct {
 	Location    string `json:"location"`
 }
 
-func (t *FindInstalledSkillsTool) Execute(_ context.Context, args map[string]any) *ToolResult {
+// listSkills prefere a listagem do turno quando o loader sabe fazê-la.
+func (t *FindInstalledSkillsTool) listSkills(ctx context.Context) []skills.SkillInfo {
+	if lister, ok := t.loader.(turnSkillLister); ok {
+		return lister.ListSkillsForTurn(ctx)
+	}
+	return t.loader.ListSkills()
+}
+
+func (t *FindInstalledSkillsTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	query, ok := args["query"].(string)
 	if !ok || strings.TrimSpace(query) == "" {
 		return ErrorResult("Missing or invalid 'query' argument. Must be a non-empty string.")
 	}
 
 	docs := make([]skillSearchDoc, 0)
-	for _, s := range t.loader.ListSkills() {
+	for _, s := range t.listSkills(ctx) {
 		if s.Disabled {
 			continue
 		}

@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
 // Loops (fork seucaranguejo): um Loop é uma meta com prazo que vive DENTRO de um
@@ -125,4 +129,117 @@ func loopMemoryFile(root string) string {
 // loopInstructionsFile é o LOOP.md, gravado pela UI do control-plane.
 func loopInstructionsFile(root string) string {
 	return filepath.Join(root, "LOOP.md")
+}
+
+// loopSkillsDir é onde o cold path do loop aplica as skills que ele gerou —
+// mesma forma de <workspace>/skills/, porque o Applier é parametrizado só pelo
+// workspace e o loop é um mini-workspace.
+func loopSkillsDir(root string) string {
+	return filepath.Join(root, "skills")
+}
+
+// maxLoopCatalogEntries limita o catálogo do loop no prompt. O bloco do loop é
+// pago em input a cada mensagem, e o evolution não tem teto de quantas skills
+// cria — sem limite, um loop antigo empurra o prompt para cima sozinho.
+const maxLoopCatalogEntries = 20
+
+// loopSkillCatalog lista nome + descrição das skills do loop.
+//
+// Lê o diretório direto em vez de usar o SkillsLoader porque este código roda na
+// montagem do prompt, onde só existe o LoopScope — e porque o que interessa aqui
+// é exatamente "o que é DO loop", não o resultado da resolução com fallback.
+func loopSkillCatalog(scope LoopScope) string {
+	if !scope.Active() {
+		return ""
+	}
+	entries, err := os.ReadDir(loopSkillsDir(scope.Root))
+	if err != nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	shown := 0
+	for _, e := range entries {
+		if !e.IsDir() || shown >= maxLoopCatalogEntries {
+			continue
+		}
+		name := e.Name()
+		if err := skills.ValidateSkillName(name); err != nil {
+			continue
+		}
+		body := readTrimmedFile(filepath.Join(loopSkillsDir(scope.Root), name, "SKILL.md"))
+		if body == "" {
+			continue
+		}
+		if desc := skillDescriptionFromFrontmatter(body); desc != "" {
+			fmt.Fprintf(&sb, "- `%s` — %s\n", name, desc)
+		} else {
+			fmt.Fprintf(&sb, "- `%s`\n", name)
+		}
+		shown++
+	}
+	return sb.String()
+}
+
+// skillDescriptionFromFrontmatter extrai o `description:` do frontmatter YAML.
+// Sem parser de YAML de propósito: o frontmatter é escrito pelo próprio
+// gerador de drafts, e uma descrição ausente degrada para só o nome.
+func skillDescriptionFromFrontmatter(body string) string {
+	if !strings.HasPrefix(body, "---") {
+		return ""
+	}
+	rest := strings.TrimPrefix(body, "---")
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return ""
+	}
+	for _, line := range strings.Split(rest[:end], "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "description:"); ok {
+			return strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	return ""
+}
+
+// LoopFromContext devolve o Loop do turno corrente, ou o zero value fora de um
+// loop.
+//
+// Exportado porque as ferramentas do control-plane (memória, por exemplo) são
+// registradas de FORA deste pacote e precisam do escopo do turno para escrever
+// no lugar certo. TurnStateFromContext não serve: devolve um tipo não
+// exportado, então quem está fora não consegue ler campo nenhum.
+// (seucaranguejo fork)
+func LoopFromContext(ctx context.Context) LoopScope {
+	if ts := turnStateFromContext(ctx); ts != nil {
+		return ts.opts.Loop
+	}
+	return LoopScope{}
+}
+
+// turnSkillLister adapta o SkillsLoader do agente para a ferramenta
+// find_installed_skills enxergar também as skills do Loop do turno corrente.
+//
+// A resolução acontece na CHAMADA, e não na construção, porque a ferramenta é
+// registrada uma vez por agente e o loop é fato do turno. O turnState vem do
+// contexto — o mesmo canal que o spawn e as demais ferramentas já usam.
+type turnSkillLister struct {
+	cb *ContextBuilder
+}
+
+func (l turnSkillLister) ListSkills() []skills.SkillInfo {
+	if l.cb == nil || l.cb.skillsLoader == nil {
+		return nil
+	}
+	return l.cb.skillsLoader.ListSkills()
+}
+
+func (l turnSkillLister) ListSkillsForTurn(ctx context.Context) []skills.SkillInfo {
+	if l.cb == nil || l.cb.skillsLoader == nil {
+		return nil
+	}
+	scope := LoopScope{}
+	if ts := turnStateFromContext(ctx); ts != nil {
+		scope = ts.opts.Loop
+	}
+	return l.cb.loaderForLoop(scope).ListSkills()
 }

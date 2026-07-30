@@ -121,6 +121,10 @@ type PromptBuildRequest struct {
 	ActiveSkills []string
 	Overlays     []PromptPart
 
+	// Loop deste turno. Zero value = sem loop. Decide de quais raízes as skills
+	// são resolvidas e o que entra no bloco do loop. (seucaranguejo fork)
+	Loop LoopScope
+
 	SuppressDefaultSystemPrompt bool
 	SuppressSkillContext        bool
 	SuppressToolUseRule         bool

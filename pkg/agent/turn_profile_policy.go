@@ -8,6 +8,14 @@ import (
 )
 
 func resolveTurnProfileOptions(cfg *config.Config, opts processOptions) (processOptions, error) {
+	// Perfil já escolhido pelo chamador vence a config. O turno de MEDIÇÃO dos
+	// Loops depende disto: ele monta um perfil restrito antes de chamar
+	// runAgentLoop, e sem esta guarda a config do assistente o sobrescreveria,
+	// dando as ferramentas de escrita justamente ao turno que não pode ter
+	// nenhuma. (seucaranguejo fork)
+	if opts.TurnProfile.Enabled {
+		return opts, nil
+	}
 	if cfg == nil {
 		return opts, nil
 	}
