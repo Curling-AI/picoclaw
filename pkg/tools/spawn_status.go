@@ -8,6 +8,32 @@ import (
 	"time"
 )
 
+// webInternalChannel is the channel web turns run on. Its chat id is PER RUN,
+// not per conversation, so it cannot be used to scope anything that must
+// survive from one turn to the next.
+const webInternalChannel = "grpc"
+
+// scopeChatID returns the chat id to filter by, empty when filtering by it
+// would be wrong.
+//
+// MEDIDO em dev, na mesma conversa: o turno que chamou spawn tinha
+// chat_id=afaa113c-…, o turno seguinte chat_id=50227613-…, e o id real da
+// conversa era ec4527c0-… — três valores distintos. Filtrar por esse campo no
+// canal web faz o subagente lançado num turno desaparecer no turno seguinte:
+// spawn_status devolvia "No subagent found with task ID: subagent-1" enquanto
+// o badge da própria tela mostrava a tarefa rodando.
+//
+// A listagem que alimenta a tela (SessionRuntime) já passa chat id vazio pelo
+// mesmo motivo; o contorno só não existia aqui. Canais reais (Telegram,
+// WhatsApp, Slack) têm chat id estável e seguem filtrados — lá o escopo é o
+// que impede uma conversa de ver a tarefa de outra.
+func scopeChatID(channel, chatID string) string {
+	if channel == webInternalChannel {
+		return ""
+	}
+	return chatID
+}
+
 // SpawnStatusTool reports the status of subagents that were spawned via the
 // spawn tool. It can query a specific task by ID, or list every known task with
 // a summary count broken-down by status.
@@ -57,7 +83,7 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 	// current chat only — preventing cross-conversation task leakage in
 	// multi-user deployments.
 	callerChannel := ToolChannel(ctx)
-	callerChatID := ToolChatID(ctx)
+	callerChatID := scopeChatID(callerChannel, ToolChatID(ctx))
 
 	var taskID string
 	if rawTaskID, ok := args["task_id"]; ok && rawTaskID != nil {
