@@ -304,6 +304,15 @@ var insufficientCreditCodes = map[string]bool{
 // gateways, truncated envelopes) — the pattern chosen is the one that sits
 // well inside the 128-char body preview rather than the trailing code, which
 // can be cut off.
+// upstreamUnavailableCodes são os códigos que significam "nenhum upstream
+// atendeu". Tabela e não substring solta: um código é contrato, uma mensagem
+// muda sem aviso.
+var upstreamUnavailableCodes = map[string]bool{
+	"provider_unavailable":  true,
+	"upstream_unavailable":  true,
+	"no_provider_available": true,
+}
+
 func IsInsufficientCreditError(err error) bool {
 	if err == nil {
 		return false
@@ -353,6 +362,45 @@ func IsUnknownGatewayUserError(err error) bool {
 		return strings.Contains(strings.ToLower(httpErr.BodyPreview), "user_not_found")
 	}
 	return false
+}
+
+// IsUpstreamUnavailableError reports whether err means every upstream behind
+// the gateway refused or timed out — nothing the user did, and nothing they
+// can fix.
+//
+// Distinct from a rate limit on purpose: this is capacity or transport, and
+// the honest thing to tell someone is "try again", not a status code. It is
+// also NOT the credit case, which is about the account and needs a different
+// action entirely.
+//
+// Measured against a real gateway under load: the upstream stalls, the
+// gateway's 30s ceiling fires, and the client gets 503 provider_unavailable
+// with the JSON envelope in the body. Users saw that envelope verbatim in
+// Slack and Telegram, which is what this exists to stop.
+func IsUpstreamUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *common.HTTPError
+	if errors.As(err, &httpErr) && httpErr != nil {
+		switch httpErr.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		default:
+			return false
+		}
+		if upstreamUnavailableCodes[httpErr.ErrorCode] {
+			return true
+		}
+		return strings.Contains(strings.ToLower(httpErr.BodyPreview), "temporarily unavailable")
+	}
+	// Já embrulhado ("LLM call failed after retries: ..."), que é a forma que
+	// chega ao formatador de mensagem do canal.
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "502") && !strings.Contains(msg, "503") && !strings.Contains(msg, "504") {
+		return false
+	}
+	return strings.Contains(msg, "provider_unavailable") ||
+		strings.Contains(msg, "temporarily unavailable")
 }
 
 // classifyByStatus maps HTTP status codes to FailoverReason.
