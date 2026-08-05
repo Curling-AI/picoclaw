@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"regexp"
 	"strings"
 	"syscall"
@@ -194,6 +195,21 @@ func ClassifyError(err error, provider, model string) *FailoverError {
 	// Try HTTP status code extraction first.
 	var httpErr *common.HTTPError
 	if errors.As(err, &httpErr) && httpErr != nil {
+		// Credit exhaustion arrives as 429, which classifyByStatus would read
+		// as a rate limit and therefore retry. Retrying does not make money
+		// appear: it just spends two more requests and delays by ~6s the
+		// message telling the user what to do. Billing is already
+		// non-retriable, so this reclassification is the whole fix.
+		// (seucaranguejo fork)
+		if IsInsufficientCreditError(err) {
+			return &FailoverError{
+				Reason:   FailoverBilling,
+				Provider: provider,
+				Model:    model,
+				Status:   httpErr.StatusCode,
+				Wrapped:  err,
+			}
+		}
 		if reason := classifyByStatus(httpErr.StatusCode); reason != "" {
 			return &FailoverError{
 				Reason:   reason,
@@ -262,6 +278,81 @@ func classifyByErrorType(err error) FailoverReason {
 	}
 
 	return ""
+}
+
+// Credit/identity errors from a gateway that owns a wallet (hulk). Both are
+// user-account conditions, not provider failures, so they need answers the
+// generic classifier cannot give: one must not be retried at all, the other
+// must be retried exactly once.
+// (seucaranguejo fork)
+
+// insufficientCreditCodes are the error.code values meaning "this account has
+// no credit left".
+var insufficientCreditCodes = map[string]bool{
+	"insufficient_balance": true,
+	"insufficient_quota":   true,
+}
+
+// IsInsufficientCreditError reports whether err is a gateway 429 caused by an
+// exhausted balance, as opposed to an ordinary rate limit.
+//
+// Requires BOTH the 429 and a credit code: matching the message alone would
+// read a provider that merely mentions "quota" in a throttling message as a
+// billing failure, turning a retriable blip into a hard stop.
+//
+// Falls back to substring matching when the typed code is absent (older
+// gateways, truncated envelopes) — the pattern chosen is the one that sits
+// well inside the 128-char body preview rather than the trailing code, which
+// can be cut off.
+func IsInsufficientCreditError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *common.HTTPError
+	if errors.As(err, &httpErr) && httpErr != nil {
+		if httpErr.StatusCode != http.StatusTooManyRequests {
+			return false
+		}
+		if insufficientCreditCodes[httpErr.ErrorCode] {
+			return true
+		}
+		body := strings.ToLower(httpErr.BodyPreview)
+		return strings.Contains(body, "insufficient_quota") ||
+			strings.Contains(body, "insufficient_balance") ||
+			strings.Contains(body, "credit balance")
+	}
+	// The message may already be wrapped ("LLM call failed after retries: ...").
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "429") {
+		return false
+	}
+	return strings.Contains(msg, "insufficient_quota") ||
+		strings.Contains(msg, "insufficient_balance") ||
+		strings.Contains(msg, "credit balance")
+}
+
+// IsUnknownGatewayUserError reports whether err means the gateway does not
+// know this user yet.
+//
+// It happens in a narrow but real window: the gateway serves its catalog from
+// a snapshot rebuilt about once a minute, so a freshly linked account can 404
+// on its very first message. Worth ONE retry — the condition heals by itself —
+// but not more, because a genuinely unlinked account would just burn attempts.
+func IsUnknownGatewayUserError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *common.HTTPError
+	if errors.As(err, &httpErr) && httpErr != nil {
+		if httpErr.StatusCode != http.StatusNotFound {
+			return false
+		}
+		if httpErr.ErrorCode == "user_not_found" || httpErr.ErrorCode == "user_link_not_found" {
+			return true
+		}
+		return strings.Contains(strings.ToLower(httpErr.BodyPreview), "user_not_found")
+	}
+	return false
 }
 
 // classifyByStatus maps HTTP status codes to FailoverReason.
