@@ -25,6 +25,20 @@ func formatProcessingError(err error) string {
 			"fale com o responsável pela conta para liberar."
 	}
 
+	// Nenhum upstream atendeu. Mesmo motivo do ramo acima para não ter
+	// "Original error:": este texto chega VERBATIM ao WhatsApp, ao Telegram e
+	// ao Slack, e foi exatamente aqui que usuários receberam
+	// `{"error":{"message":"The model is temporarily unavailable across all
+	// configured providers",...}}` como se fosse uma resposta.
+	//
+	// Diz o que a pessoa pode fazer (tentar de novo) e o que ela NÃO precisa
+	// fazer (nada de conta, nada de configuração) — a falha é de capacidade do
+	// provedor, não dela. (seucaranguejo fork)
+	if providers.IsUpstreamUnavailableError(err) {
+		return "O modelo está temporariamente indisponível — isso é do provedor, não da sua conta. " +
+			"Tente de novo em alguns instantes."
+	}
+
 	if kind, ok := providers.ClassifyAuthError(err); ok {
 		return fmt.Sprintf(
 			"Error processing message: %s\n\nOriginal error:\n%s",

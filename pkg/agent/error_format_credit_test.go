@@ -61,3 +61,25 @@ func TestUnrelatedErrorsKeepTheGenericFormat(t *testing.T) {
 		t.Errorf("generic path changed: %q", msg)
 	}
 }
+
+// O que os usuários receberam no Slack e no Telegram: o envelope JSON do
+// gateway, cru, como se fosse resposta do assistente.
+func TestUpstreamUnavailableNaoVazaJSON(t *testing.T) {
+	raw := `{"error":{"message":"The model is temporarily unavailable across all configured providers","type":"server_error","code":"provider_unavailable"}}`
+	err := fmt.Errorf("LLM call failed after retries: API request failed:\n  Status: 503\n  Body: %s", raw)
+
+	got := formatProcessingError(err)
+
+	for _, proibido := range []string{"{", "provider_unavailable", "Status:", "Original error:", "503"} {
+		if strings.Contains(got, proibido) {
+			t.Errorf("vazou %q para o usuário: %s", proibido, got)
+		}
+	}
+	if !strings.Contains(got, "Tente de novo") {
+		t.Errorf("não diz o que fazer: %s", got)
+	}
+	// Não pode culpar a conta: a falha é de capacidade do provedor.
+	if strings.Contains(strings.ToLower(got), "crédito") {
+		t.Errorf("confundiu indisponibilidade com falta de crédito: %s", got)
+	}
+}
