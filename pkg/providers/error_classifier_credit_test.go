@@ -29,7 +29,7 @@ func httpErr(status int, body, code string) *common.HTTPError {
 func TestInsufficientCreditIsNotARateLimit(t *testing.T) {
 	err := httpErr(http.StatusTooManyRequests, balanceBody, "insufficient_balance")
 	if !IsInsufficientCreditError(err) {
-		t.Fatal("balance 429 not recognised")
+		t.Fatal("balance 429 not recognized")
 	}
 	// The whole point: billing is non-retriable, rate_limit is not. Retrying
 	// does not make money appear — it spends two more requests and delays the
@@ -43,9 +43,11 @@ func TestInsufficientCreditIsNotARateLimit(t *testing.T) {
 func TestOrdinaryRateLimitStillRetries(t *testing.T) {
 	// A throttling 429 must keep its retriable classification, or a transient
 	// blip becomes a hard failure for the user.
-	err := httpErr(http.StatusTooManyRequests,
+	err := httpErr(
+		http.StatusTooManyRequests,
 		`{"error":{"message":"Rate limit reached for requests","type":"rate_limit_error","code":"rate_limit_exceeded"}}`,
-		"rate_limit_exceeded")
+		"rate_limit_exceeded",
+	)
 	if IsInsufficientCreditError(err) {
 		t.Error("ordinary rate limit misread as exhausted credit")
 	}
@@ -87,20 +89,24 @@ func TestInsufficientCreditSurvivesTruncationAndWrapping(t *testing.T) {
 	}
 }
 
-func TestUnknownGatewayUserIsRecognised(t *testing.T) {
+func TestUnknownGatewayUserIsRecognized(t *testing.T) {
 	// The gateway serves its catalog from a snapshot rebuilt about once a
 	// minute, so a freshly linked account can 404 on its first message.
-	err := httpErr(http.StatusNotFound,
+	err := httpErr(
+		http.StatusNotFound,
 		`{"error":{"message":"The user is not active for this product","type":"invalid_request_error","code":"user_not_found"}}`,
-		"user_not_found")
+		"user_not_found",
+	)
 	if !IsUnknownGatewayUserError(err) {
-		t.Fatal("user_not_found not recognised")
+		t.Fatal("user_not_found not recognized")
 	}
 	// A missing MODEL is a configuration bug and must not be confused with it:
 	// retrying that would only delay a failure that never heals.
-	modelErr := httpErr(http.StatusNotFound,
+	modelErr := httpErr(
+		http.StatusNotFound,
 		`{"error":{"message":"The requested model does not exist or is inactive","type":"invalid_request_error","code":"model_not_found"}}`,
-		"model_not_found")
+		"model_not_found",
+	)
 	if IsUnknownGatewayUserError(modelErr) {
 		t.Error("model_not_found misread as an unknown user")
 	}
