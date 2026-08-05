@@ -404,3 +404,43 @@ func TestSpawnStatusTool_ChannelFiltering_NoContext(t *testing.T) {
 		t.Errorf("Expected task visible from no-context caller, got:\n%s", result.ForLLM)
 	}
 }
+
+// Regressão do bug medido em dev: no canal web o chat id é POR EXECUÇÃO, então
+// a tarefa lançada num turno ficava invisível no turno seguinte — spawn_status
+// dizia "No subagent found" enquanto o badge da tela mostrava ela rodando.
+func TestSpawnStatusWebIgnoraChatIDPorExecucao(t *testing.T) {
+	mgr := NewSubagentManager(nil, "", "")
+	mgr.tasks["subagent-1"] = &SubagentTask{
+		ID: "subagent-1", Status: "running", Task: "tarefa longa",
+		OriginChannel: "grpc", OriginChatID: "run-do-turno-1",
+	}
+	tool := NewSpawnStatusTool(mgr)
+
+	// Turno seguinte: mesma conversa, id de execução diferente.
+	ctx := WithToolContext(context.Background(), "grpc", "run-do-turno-2")
+
+	res := tool.Execute(ctx, map[string]any{"task_id": "subagent-1"})
+	if res.IsError {
+		t.Fatalf("subagente sumiu entre turnos: %s", res.ForLLM)
+	}
+	if lista := tool.Execute(ctx, map[string]any{}); lista.IsError ||
+		!strings.Contains(lista.ForLLM, "subagent-1") {
+		t.Errorf("listagem não trouxe a tarefa: %s", lista.ForLLM)
+	}
+}
+
+// O escopo continua valendo onde o chat id é ESTÁVEL: no Telegram, uma
+// conversa não pode enxergar a tarefa de outra.
+func TestSpawnStatusCanalRealMantemEscopo(t *testing.T) {
+	mgr := NewSubagentManager(nil, "", "")
+	mgr.tasks["subagent-1"] = &SubagentTask{
+		ID: "subagent-1", Status: "running",
+		OriginChannel: "telegram", OriginChatID: "chat-42",
+	}
+	tool := NewSpawnStatusTool(mgr)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-99")
+
+	if res := tool.Execute(ctx, map[string]any{"task_id": "subagent-1"}); !res.IsError {
+		t.Error("conversa alheia enxergou a tarefa")
+	}
+}
