@@ -483,8 +483,15 @@ type AgentDefaults struct {
 	ContextManager       string             `json:"context_manager,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER"`
 	ContextManagerConfig json.RawMessage    `json:"context_manager_config,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER_CONFIG"`
 	TurnProfile          TurnProfileConfig  `json:"turn_profile,omitempty"`
-	MaxLLMRetries        int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
-	LLMRetryBackoffSecs  int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
+	// BillPartialStreams says whether the gateway charges for a stream the user
+	// interrupted. nil/true keeps the historical assumption (the provider bills
+	// tokens generated up to the cancel); false is for a gateway that only
+	// charges on a complete upstream response, where metering the interrupted
+	// stream as billable would debit the user for something never charged.
+	// (seucaranguejo fork)
+	BillPartialStreams  *bool `json:"bill_partial_streams,omitempty"   env:"PICOCLAW_AGENTS_DEFAULTS_BILL_PARTIAL_STREAMS"`
+	MaxLLMRetries       int   `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
+	LLMRetryBackoffSecs int   `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
 	// RecentNotesDays is how many days of recent daily notes are injected into
 	// the system prompt (nil = 3). Set to 0 to inject none and rely on the
 	// recall tool for daily notes — keeps the prompt lean.

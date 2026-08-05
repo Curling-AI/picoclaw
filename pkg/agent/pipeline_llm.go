@@ -873,6 +873,17 @@ func transientLLMRetryReason(err error) (string, bool) {
 		return "", false
 	}
 
+	// A gateway that owns the wallet answers 404 for a moment after an account
+	// is linked, because it serves its catalog from a snapshot rebuilt about
+	// once a minute. That heals on its own, so it is worth ONE more attempt —
+	// otherwise a brand-new user's very first message fails hard, which is the
+	// worst possible first impression. Checked before the generic classifier,
+	// which does not classify 404 at all and would fail without retrying.
+	// (seucaranguejo fork)
+	if providers.IsUnknownGatewayUserError(err) {
+		return "unknown_gateway_user", true
+	}
+
 	if failErr := providers.ClassifyError(err, "", ""); failErr != nil {
 		switch failErr.Reason {
 		case providers.FailoverTimeout:
@@ -912,16 +923,22 @@ func transientLLMRetryReason(err error) (string, bool) {
 
 // reportAbortedStreamUsage meters a hard-aborted (steered) streaming call that
 // the normal AfterLLM path never sees: the call returns context.Canceled and
-// the pipeline breaks out before the hook, yet the gateway already billed the
-// tokens generated up to the cancel. Without this those (often long) generations
-// are invisible in usage_events.
+// the pipeline breaks out before the hook, so without this those (often long)
+// generations are invisible in usage_events.
 //
 // Input is taken from the previous call's usage — the prompt is ~identical and
 // its cache ratios carry over, which avoids over-billing a huge cached context
 // that a naive char-count would treat as uncached. Output is estimated from the
-// streamed content length. Cost is left 0 so the meter's price-table fallback
-// estimates it (cache-aware). It is an estimate for the internal usage screen;
+// streamed content length. It is an estimate for the internal usage screen;
 // the gateway remains the billing truth.
+//
+// Whether it counts as BILLABLE depends on the gateway: the original premise
+// here was "the gateway already billed the tokens generated up to the cancel",
+// which is true of a provider that bills as it streams and FALSE of one that
+// only charges on a complete upstream response. Getting that backwards charges
+// the user every time they press stop — and the people who steer most are the
+// power users. bill_partial_streams carries the answer.
+// (seucaranguejo fork)
 func (p *Pipeline) reportAbortedStreamUsage(ctx context.Context, ts *turnState, exec *turnExecution) {
 	if p == nil || p.Hooks == nil || ts == nil || exec == nil {
 		return
@@ -941,11 +958,23 @@ func (p *Pipeline) reportAbortedStreamUsage(ctx context.Context, ts *turnState, 
 	}
 	est.TotalTokens = est.PromptTokens + est.CompletionTokens
 	_, _ = p.Hooks.AfterLLM(ctx, &LLMHookResponse{
-		Meta:     ts.eventMeta("runTurn", "turn.llm.response"),
-		Context:  cloneTurnContext(ts.turnCtx),
-		Model:    exec.llmModel,
-		Response: &providers.LLMResponse{Usage: est},
+		Meta:        ts.eventMeta("runTurn", "turn.llm.response"),
+		Context:     cloneTurnContext(ts.turnCtx),
+		Model:       exec.llmModel,
+		Response:    &providers.LLMResponse{Usage: est},
+		NonBillable: !p.billsPartialStreams(),
 	})
+}
+
+// billsPartialStreams reports whether the active gateway charges for an
+// interrupted stream. Defaults to true, preserving the historical behavior for
+// every provider that is not explicitly configured otherwise.
+// (seucaranguejo fork)
+func (p *Pipeline) billsPartialStreams() bool {
+	if p == nil || p.Cfg == nil || p.Cfg.Agents.Defaults.BillPartialStreams == nil {
+		return true
+	}
+	return *p.Cfg.Agents.Defaults.BillPartialStreams
 }
 
 // estimateTokensFromRunes approximates a token count from a rune count using a

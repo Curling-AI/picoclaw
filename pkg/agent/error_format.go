@@ -11,6 +11,20 @@ func formatProcessingError(err error) string {
 		return ""
 	}
 
+	// Conta sem crédito. Este texto vai INTEIRO para o usuário final pelos
+	// canais de mensagem (WhatsApp/Telegram) e pelo cron, então é o único ramo
+	// aqui sem o bloco "Original error:": um JSON de 429 cru num DM é pior que
+	// mensagem nenhuma. Em português porque é string de UI, mesmo dentro do
+	// fork — a convenção do repo separa código (inglês) de UI (português).
+	//
+	// O texto serve para "acabaram" e para "nunca teve" (não há concessão de
+	// boas-vindas), e não promete recarga enquanto não existir fluxo de compra.
+	// (seucaranguejo fork)
+	if providers.IsInsufficientCreditError(err) {
+		return "Sua conta está sem créditos. Veja o saldo em Configurações → Uso; " +
+			"fale com o responsável pela conta para liberar."
+	}
+
 	if kind, ok := providers.ClassifyAuthError(err); ok {
 		return fmt.Sprintf(
 			"Error processing message: %s\n\nOriginal error:\n%s",

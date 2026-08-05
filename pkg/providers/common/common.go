@@ -405,6 +405,15 @@ type HTTPError struct {
 	ContentType string
 	APIBase     string
 	IsHTML      bool
+	// ErrorCode is the machine-readable code from the provider's error envelope
+	// ({"error":{"code":"..."}}), empty when absent or unparseable.
+	//
+	// It exists because classifying on BodyPreview is a trap: the preview is
+	// truncated to 128 chars, so whether a code survives depends on how long
+	// the message before it happens to be. A gateway adding one field to the
+	// envelope would silently break the classification, with no test failing.
+	// (seucaranguejo fork)
+	ErrorCode string
 }
 
 func (e *HTTPError) Error() string {
@@ -442,7 +451,31 @@ func HandleErrorResponse(resp *http.Response, apiBase string) error {
 		BodyPreview: ResponsePreview(body, 128),
 		ContentType: contentType,
 		APIBase:     apiBase,
+		ErrorCode:   extractErrorCode(body),
 	}
+}
+
+// extractErrorCode pulls error.code out of the OpenAI-style error envelope
+// shared by OpenAI, the Vercel AI Gateway and hulk.
+//
+// Reads the raw body rather than BodyPreview on purpose: the preview is capped
+// at 128 chars and the code is usually the LAST field, so parsing the preview
+// would drop exactly the value we came for. Anything unparseable yields "",
+// and callers fall back to their previous behavior.
+// (seucaranguejo fork)
+func extractErrorCode(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code any `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	// Some providers send a numeric code (the upstream behind hulk answers
+	// {"code":404}); only a string is a usable discriminator.
+	code, _ := envelope.Error.Code.(string)
+	return code
 }
 
 // ReadAndParseResponse peeks at the response body to detect HTML errors,

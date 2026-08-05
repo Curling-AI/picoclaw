@@ -118,6 +118,16 @@ type LLMHookResponse struct {
 	Context  *TurnContext           `json:"context,omitempty"`
 	Model    string                 `json:"model"`
 	Response *providers.LLMResponse `json:"response,omitempty"`
+	// NonBillable marks usage the gateway did NOT charge for, so a metering
+	// consumer records the tokens without inventing a cost.
+	//
+	// Today the only producer is the aborted-stream estimate: a gateway that
+	// bills only on a complete upstream response charges nothing for a stream
+	// the user interrupted, and metering it as billable would debit the user
+	// for something they were never charged. The tokens are still real and
+	// still worth reporting.
+	// (seucaranguejo fork)
+	NonBillable bool `json:"non_billable,omitempty"`
 }
 
 func (r *LLMHookResponse) Clone() *LLMHookResponse {
