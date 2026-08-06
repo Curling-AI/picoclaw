@@ -893,6 +893,12 @@ func buildToolsList(tools []ToolDefinition, nativeSearch bool) []any {
 		if nativeSearch && strings.EqualFold(t.Function.Name, "web_search") {
 			continue
 		}
+		// A single lookaround `pattern` fails the WHOLE request with 400 — not
+		// just the tool carrying it. Since the tool list travels on every turn,
+		// one third-party MCP server with an invalid schema mutes the whole
+		// assistant. Stripping here, at the provider boundary, is the only spot
+		// that covers EVERY tool: native, skill-provided or MCP. (fork)
+		t.Function.Parameters = common.StripUnsupportedPatterns(t.Function.Parameters)
 		result = append(result, t)
 	}
 	if nativeSearch {
