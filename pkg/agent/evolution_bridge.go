@@ -101,6 +101,28 @@ func newEvolutionBridge(
 	return bridge, nil
 }
 
+// wireModelID traduz um nome de model_list para o id que vai NO FIO.
+//
+// model_name é chave de busca local e pode não existir no provedor: a config
+// de produção nomeia a entrada de cron como "ethos-flash-cron" apontando para
+// o modelo "ethos-flash". Todo o resto do pipeline resolve pela model_list e
+// manda o segundo; esta função existia sem resolver e mandava o primeiro.
+//
+// O sintoma foi model_not_found no gateway, uma vez por turno (o cold-path da
+// evolução roda nessa frequência), com custo zero e nenhuma linha de erro do
+// lado do agente — falha silenciosa que só aparecia no painel do provedor.
+//
+// Não resolver é seguro por construção: se o nome não estiver na model_list,
+// devolve o próprio nome, que é o comportamento anterior para todo o resto.
+func wireModelID(cfg *config.Config, raw string) string {
+	if mc := lookupModelConfigByRef(cfg, raw); mc != nil {
+		if wire := strings.TrimSpace(mc.Model); wire != "" {
+			return wire
+		}
+	}
+	return raw
+}
+
 func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider) string {
 	if cfg != nil {
 		// A dedicated evolution model (typically a cheap one, e.g. deepseek)
@@ -108,10 +130,10 @@ func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider
 		// keeps its baked-in gateway attribution tags, so cost stays attributed
 		// even though the request's model field changes.
 		if modelID := strings.TrimSpace(cfg.Evolution.Model); modelID != "" {
-			return modelID
+			return wireModelID(cfg, modelID)
 		}
 		if modelID := cfg.Agents.Defaults.GetModelName(); modelID != "" {
-			return modelID
+			return wireModelID(cfg, modelID)
 		}
 	}
 	if provider != nil {

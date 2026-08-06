@@ -1167,6 +1167,11 @@ type CronToolsConfig struct {
 	// MemoryRefreshModel, when set, runs the memory-refresh job on this model
 	// (via agents.defaults.cron_model routing) instead of the main one.
 	MemoryRefreshModel string `json:"memory_refresh_model" env:"PICOCLAW_TOOLS_CRON_MEMORY_REFRESH_MODEL"`
+	// ReasoningEffort pede raciocínio alto nos turnos de cron SEM exigir uma
+	// entrada dedicada na model_list. Duas configurações do mesmo modelo
+	// obrigavam a dois model_name, e um model_name que parece nome de modelo
+	// acabou vazando para o provedor. Vazio = deixa como o modelo vier. (fork)
+	ReasoningEffort string `json:"reasoning_effort,omitempty" env:"PICOCLAW_TOOLS_CRON_REASONING_EFFORT"`
 }
 
 // EffectiveMemoryRefreshSchedule returns the configured cron expr or the
