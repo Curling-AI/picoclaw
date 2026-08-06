@@ -203,6 +203,17 @@ func (p *Provider) buildRequestBody(
 	// with the same key and reuse prefix KV cache across calls.
 	// Prompt caching is only supported by OpenAI-native endpoints.
 	// Non-OpenAI providers reject unknown fields with 422 errors.
+	// reasoning_effort por CHAMADA.
+	//
+	// Existe para que um caminho (a curadoria noturna de memória) peça
+	// raciocínio alto sem precisar de uma entrada própria na model_list só para
+	// carregar extra_body. Duas entradas do mesmo modelo obrigam a dois
+	// model_name, e um model_name que parece nome de modelo acaba vazando para
+	// o provedor — foi o que causou model_not_found em produção. (fork)
+	if effort, ok := options["reasoning_effort"].(string); ok && strings.TrimSpace(effort) != "" {
+		requestBody["reasoning_effort"] = strings.TrimSpace(effort)
+	}
+
 	if cacheKey, ok := options["prompt_cache_key"].(string); ok && cacheKey != "" {
 		if supportsPromptCacheKey(p.apiBase) {
 			requestBody["prompt_cache_key"] = cacheKey

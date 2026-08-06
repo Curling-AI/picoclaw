@@ -130,6 +130,14 @@ func (p *Pipeline) CallLLM(
 	if exec.useNativeSearch {
 		exec.llmOpts["native_search"] = true
 	}
+	// Turno de cron pede raciocínio alto por OPÇÃO, não por uma entrada
+	// dedicada na model_list. O routeCronModelTurn acima já garantiu que este
+	// turno está no modelo de cron; aqui só ajustamos o corpo. (fork)
+	if strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) {
+		if effort := strings.TrimSpace(p.Cfg.Tools.Cron.ReasoningEffort); effort != "" {
+			exec.llmOpts["reasoning_effort"] = effort
+		}
+	}
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 
 	exec.llmModel = exec.activeModel
