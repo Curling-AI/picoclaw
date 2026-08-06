@@ -445,7 +445,17 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	// extraction skill. Refuse with instructions instead; genuine byte-level
 	// inspection still works via exec (xxd/hexdump).
 	if isBinaryReadFileData(sniff[:sniffN]) {
-		return ErrorResult(binaryReadFileGuidance(path, totalSize))
+		// A document is served as Markdown instead of refused. The sniffed
+		// bytes are replayed ahead of the handle so this works on a
+		// non-seekable stream too, and so the conversion never re-opens the
+		// path outside the sandbox that authorized this handle.
+		md, applicable, convErr := documentMarkdown(
+			ctx, path, io.MultiReader(bytes.NewReader(sniff[:sniffN]), file),
+		)
+		if applicable && convErr == nil {
+			return documentReadResult(path, md, offset, length)
+		}
+		return ErrorResult(binaryReadFileGuidance(path, totalSize, convErr))
 	}
 
 	// Reset read position to beginning before applying the caller's offset.
@@ -587,8 +597,12 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 	}
 	defer file.Close()
 
-	if info, statErr := file.Stat(); statErr == nil && info.IsDir() {
-		return ErrorResult(fmt.Sprintf("failed to open file: path is a directory: %s", path))
+	totalSize := int64(-1)
+	if info, statErr := file.Stat(); statErr == nil {
+		if info.IsDir() {
+			return ErrorResult(fmt.Sprintf("failed to open file: path is a directory: %s", path))
+		}
+		totalSize = info.Size()
 	}
 
 	sample := make([]byte, 512)
@@ -597,11 +611,25 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 		return ErrorResult(fmt.Sprintf("failed to read file: %v", readErr))
 	}
 	sample = sample[:sampleN]
+
+	var source io.Reader = io.MultiReader(bytes.NewReader(sample), file)
 	if isBinaryReadFileData(sample) {
-		return ErrorResult("file appears to be binary; switch read_file mode to 'bytes' for byte-based inspection")
+		// Same rule as byte mode: a document becomes Markdown and is then
+		// numbered line by line like any other text. Anything else still
+		// refuses — but with the per-format guidance, instead of the old
+		// "switch to bytes mode", which was never the useful answer for a docx.
+		md, applicable, convErr := documentMarkdown(ctx, path, source)
+		if !applicable || convErr != nil {
+			// A dica por formato é a que resolve um docx; a de trocar para o
+			// modo 'bytes' continua junto porque é a saída específica DESTE
+			// modo e a única que serve para um binário genérico.
+			return ErrorResult(binaryReadFileGuidance(path, totalSize, convErr) +
+				" In line mode you can also switch read_file mode to 'bytes' for byte-based inspection.")
+		}
+		source = bytes.NewReader(md)
 	}
 
-	reader := bufio.NewReaderSize(io.MultiReader(bytes.NewReader(sample), file), 32*1024)
+	reader := bufio.NewReaderSize(source, 32*1024)
 
 	var content strings.Builder
 	lineIndex := int64(1)
@@ -728,7 +756,11 @@ func formatReadFileLinePrefix(lineNumber int64) string {
 // binaryReadFileGuidance builds the refusal message for binary reads: it
 // names the file/size and points the model at the right extraction path per
 // format, so the next tool call is the productive one instead of a raw dump.
-func binaryReadFileGuidance(path string, totalSize int64) string {
+// reason is the converter's own diagnosis when this file IS a document but
+// could not be converted (a scanned PDF, an encrypted one). It is worth
+// surfacing verbatim: it names the cause, which is what points the model at
+// OCR instead of at a pointless retry.
+func binaryReadFileGuidance(path string, totalSize int64, reason error) string {
 	base := filepath.Base(path)
 	size := "unknown size"
 	if totalSize >= 0 {
@@ -737,23 +769,28 @@ func binaryReadFileGuidance(path string, totalSize int64) string {
 	hint := "extract its content with a suitable tool via exec"
 	switch strings.ToLower(filepath.Ext(base)) {
 	case ".docx", ".doc":
-		hint = "extract the text with the docx skill or a python script (python-docx via pip)"
+		hint = "convert it with `anydoc <file>`, or the docx skill for anything beyond reading"
 	case ".xlsx", ".xls":
-		hint = "read it with the xlsx skill or a script (openpyxl/pandas)"
+		hint = "convert it with `anydoc <file>`, or the xlsx skill for anything beyond reading"
 	case ".pptx", ".ppt":
-		hint = "extract the slides with the pptx skill or a script (python-pptx)"
+		hint = "convert it with `anydoc <file>`, or the pptx skill for anything beyond reading"
 	case ".pdf":
-		hint = "extract the text with `pdftotext <file> -` or the pdf skill (pdfplumber)"
+		hint = "convert it with `anydoc <file>`; if it is scanned, use the pdf skill to OCR it first"
 	case ".zip", ".tar", ".gz", ".rar", ".7z":
 		hint = "list/extract it via exec (`unzip -l`, `tar -tf`) and read the extracted files"
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
 		hint = "use load_image to view it"
 	}
-	return fmt.Sprintf(
+
+	msg := fmt.Sprintf(
 		"%s is a binary file (%s); refusing to dump raw bytes into the conversation. Instead, %s. "+
 			"For a genuine byte-level look use exec (`xxd %s | head`).",
 		base, size, hint, base,
 	)
+	if reason != nil {
+		msg = fmt.Sprintf("%s could not be converted to text: %v. %s", base, reason, msg)
+	}
+	return msg
 }
 
 func isBinaryReadFileData(data []byte) bool {
