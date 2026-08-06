@@ -1,6 +1,7 @@
 package fstools
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,17 +48,39 @@ func TestReadFileTool_RefusesBinaryWithGuidance(t *testing.T) {
 
 func TestBinaryReadFileGuidance_PerFormatHints(t *testing.T) {
 	cases := map[string]string{
-		"a.xlsx": "openpyxl",
-		"b.pdf":  "pdfplumber",
-		"c.pptx": "python-pptx",
+		"a.xlsx": "anydoc",
+		"b.pdf":  "anydoc",
+		"c.pptx": "anydoc",
 		"d.zip":  "unzip -l",
 		"e.png":  "load_image",
 		"f.bin":  "suitable tool",
 	}
 	for file, want := range cases {
-		got := binaryReadFileGuidance("/x/"+file, 123)
+		got := binaryReadFileGuidance("/x/"+file, 123, nil)
 		if !strings.Contains(got, want) {
 			t.Errorf("%s: guidance %q should mention %q", file, got, want)
 		}
+	}
+
+	// Um PDF escaneado é o caso em que a dica genérica não serve: a saída tem
+	// de mandar para o OCR, não para outra tentativa do conversor.
+	if got := binaryReadFileGuidance("/x/scan.pdf", 1, nil); !strings.Contains(got, "OCR") {
+		t.Errorf("PDF hint deveria citar OCR: %s", got)
+	}
+}
+
+// Quando o arquivo É um documento mas o conversor falhou, o motivo dele
+// tem de chegar ao modelo: é ele que diz "OCR is required" e evita
+// que o agente tente de novo a mesma coisa.
+func TestBinaryReadFileGuidance_IncluiMotivoDaFalha(t *testing.T) {
+	got := binaryReadFileGuidance(
+		"/x/scan.pdf", 42,
+		errors.New("PDF has no extractable text (Scanned, 1 pages): OCR is required"),
+	)
+	if !strings.Contains(got, "OCR is required") {
+		t.Errorf("motivo do conversor perdido: %s", got)
+	}
+	if !strings.Contains(got, "scan.pdf") {
+		t.Errorf("guidance deveria nomear o arquivo: %s", got)
 	}
 }
