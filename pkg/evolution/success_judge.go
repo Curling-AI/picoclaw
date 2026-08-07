@@ -79,7 +79,7 @@ func (j *LLMTaskSuccessJudge) JudgeTaskRecord(
 		return j.fallbackDecision(ctx, record)
 	}
 
-	callCtx, cancel := withLLMCallTimeout(ctx, llmTaskSuccessJudgeTimeout)
+	callCtx, cancel := withLLMCallTimeout(ctx, llmTaskSuccessJudgeTimeout())
 	defer cancel()
 	resp, err := j.provider.Chat(callCtx, []providers.Message{
 		{
