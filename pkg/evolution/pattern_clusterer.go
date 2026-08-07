@@ -5,7 +5,9 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -168,7 +170,7 @@ func (c *LLMPatternClusterer) BuildPatterns(
 		return fallback.BuildPatterns(ctx, workspace, tasks, existing)
 	}
 
-	callCtx, cancel := withLLMCallTimeout(ctx, llmPatternClusterTimeout)
+	callCtx, cancel := withLLMCallTimeout(ctx, llmPatternClusterTimeout())
 	defer cancel()
 	resp, err := c.provider.Chat(callCtx, []providers.Message{
 		{
@@ -180,7 +182,9 @@ func (c *LLMPatternClusterer) BuildPatterns(
 			Content: buildPatternClusterPrompt(workspace, tasks, existing),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
-	if err != nil || resp == nil || strings.TrimSpace(resp.Content) == "" {
+	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
+	if err != nil || vazio {
+		logClusterFallback("BuildPatterns", len(tasks), err, vazio)
 		return fallback.BuildPatterns(ctx, workspace, tasks, existing)
 	}
 
@@ -240,7 +244,7 @@ func (c *LLMPatternClusterer) BuildPatternsWithEvidence(
 		evidenceTasks = successfulTasks
 	}
 
-	callCtx, cancel := withLLMCallTimeout(ctx, llmPatternClusterTimeout)
+	callCtx, cancel := withLLMCallTimeout(ctx, llmPatternClusterTimeout())
 	defer cancel()
 	resp, err := c.provider.Chat(callCtx, []providers.Message{
 		{
@@ -252,7 +256,9 @@ func (c *LLMPatternClusterer) BuildPatternsWithEvidence(
 			Content: buildPatternClusterPrompt(workspace, evidenceTasks, existing),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
-	if err != nil || resp == nil || strings.TrimSpace(resp.Content) == "" {
+	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
+	if err != nil || vazio {
+		logClusterFallback("BuildPatternsWithEvidence", len(evidenceTasks), err, vazio)
 		return buildFallbackPatternsWithEvidence(
 			ctx,
 			fallback,
@@ -729,4 +735,23 @@ func labelSummary(label string) string {
 		return "Learned task pattern."
 	}
 	return strings.ToUpper(label[:1]) + label[1:] + "."
+}
+
+// logClusterFallback registra a desistência da clusterização por LLM.
+//
+// Existe porque a ausência dela custou caro: o fallback para a heurística era
+// silencioso, então uma taxa de falha de 89 em 91 chamadas passou meses sem
+// ninguém notar — o produto parecia funcionar, o gateway acumulava erro, e a
+// geração era paga e descartada a cada turno. Um caminho degradado que não se
+// anuncia é indistinguível do caminho bom.
+func logClusterFallback(origem string, registros int, err error, vazio bool) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Printf("evolution: cluster %s: timeout com %d registros — heurística assumiu; ajuste %s",
+			origem, registros, envPatternClusterTimeout)
+	case err != nil:
+		log.Printf("evolution: cluster %s: %v — heurística assumiu", origem, err)
+	case vazio:
+		log.Printf("evolution: cluster %s: resposta vazia do modelo — heurística assumiu", origem)
+	}
 }
