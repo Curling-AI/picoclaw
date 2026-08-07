@@ -182,8 +182,9 @@ func (c *LLMPatternClusterer) BuildPatterns(
 			Content: buildPatternClusterPrompt(workspace, tasks, existing),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
-	if err != nil || resp == nil || strings.TrimSpace(resp.Content) == "" {
-		logClusterFallback("BuildPatterns", len(tasks), err, resp == nil || strings.TrimSpace(resp.Content) == "")
+	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
+	if err != nil || vazio {
+		logClusterFallback("BuildPatterns", len(tasks), err, vazio)
 		return fallback.BuildPatterns(ctx, workspace, tasks, existing)
 	}
 
@@ -255,8 +256,9 @@ func (c *LLMPatternClusterer) BuildPatternsWithEvidence(
 			Content: buildPatternClusterPrompt(workspace, evidenceTasks, existing),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
-	if err != nil || resp == nil || strings.TrimSpace(resp.Content) == "" {
-		logClusterFallback("BuildPatternsWithEvidence", len(evidenceTasks), err, resp == nil || strings.TrimSpace(resp.Content) == "")
+	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
+	if err != nil || vazio {
+		logClusterFallback("BuildPatternsWithEvidence", len(evidenceTasks), err, vazio)
 		return buildFallbackPatternsWithEvidence(
 			ctx,
 			fallback,
