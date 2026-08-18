@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -53,6 +54,11 @@ type CronJob struct {
 	CreatedAtMS    int64        `json:"createdAtMs"`
 	UpdatedAtMS    int64        `json:"updatedAtMs"`
 	DeleteAfterRun bool         `json:"deleteAfterRun"`
+	// SkipWhenIdle marca o job como dispensável quando nada aconteceu desde a
+	// última execução. Só tem efeito se um IdleProbe estiver instalado; sem
+	// probe o job roda sempre, que é o comportamento de quem usa o picoclaw
+	// sozinho.
+	SkipWhenIdle bool `json:"skipWhenIdle,omitempty"`
 }
 
 type CronStore struct {
@@ -61,6 +67,25 @@ type CronStore struct {
 }
 
 type JobHandler func(job *CronJob) (string, error)
+
+// IdleProbe responde se houve atividade relevante desde `since`.
+//
+// Existe para jobs cujo trabalho só faz sentido quando algo mudou — curar
+// memória de uma conversa que não aconteceu gasta uma chamada de modelo para
+// concluir que não havia nada a fazer.
+//
+// O picoclaw não sabe de onde vem essa resposta: quem embute decide (um banco,
+// um arquivo, uma API). Sem probe instalado, jobs com SkipWhenIdle rodam
+// normalmente — o mecanismo é opcional por construção, não por configuração.
+//
+// Erro é tratado como "pode ter havido atividade" e o job roda. Perder uma
+// execução em silêncio é pior que pagar uma a mais.
+type IdleProbe func(ctx context.Context, since time.Time) (ativo bool, err error)
+
+// idleProbeTimeout limita a consulta de atividade. O probe está no caminho de
+// execução do job: se a fonte estiver lenta, é melhor rodar o job do que
+// segurar a agenda esperando resposta.
+const idleProbeTimeout = 10 * time.Second
 
 // maxConcurrentJobs bounds how many cron jobs execute at once. Jobs run in
 // their own goroutines so one long-running job cannot dam the schedule
@@ -79,6 +104,76 @@ type CronService struct {
 	wakeChan  chan struct{}
 	gronx     *gronx.Gronx
 	execSlots chan struct{}
+	idleProbe IdleProbe
+}
+
+// SetIdleProbe instala (ou remove, com nil) a fonte de "houve atividade?".
+//
+// Fica fora do construtor porque é opcional: quem roda o picoclaw sozinho
+// nunca chama isto, e os jobs seguem rodando como sempre rodaram.
+func (cs *CronService) SetIdleProbe(p IdleProbe) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.idleProbe = p
+}
+
+// devePular diz se o job pode ser dispensado nesta rodada.
+//
+// Falha em qualquer ponto — sem probe, sem execução anterior, erro na consulta
+// — devolve false: na dúvida o job roda.
+// reagendarSemExecutar move o job para a próxima ocorrência sem tocar em
+// LastRunAtMS.
+//
+// O watermark tem que continuar apontando para a última execução DE VERDADE:
+// se cada pulo o adiantasse, a atividade ocorrida entre o último run e o pulo
+// cairia fora da janela da próxima consulta, e essa memória nunca seria
+// curada — o gate teria trocado gasto por perda silenciosa.
+func (cs *CronService) reagendarSemExecutar(jobID string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for i := range cs.store.Jobs {
+		job := &cs.store.Jobs[i]
+		if job.ID != jobID {
+			continue
+		}
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
+		job.UpdatedAtMS = time.Now().UnixMilli()
+		if err := cs.saveStoreUnsafe(); err != nil {
+			log.Printf("[cron] falha ao salvar reagendamento de '%s': %v", job.Name, err)
+		}
+		return
+	}
+}
+
+func (cs *CronService) devePular(job *CronJob) bool {
+	if !job.SkipWhenIdle {
+		return false
+	}
+	// Job de disparo único é pedido explícito, não rotina: pular deixaria ele
+	// pendente para sempre, porque não há próxima ocorrência para reagendar.
+	if job.Schedule.Kind != "cron" {
+		return false
+	}
+	cs.mu.RLock()
+	probe := cs.idleProbe
+	cs.mu.RUnlock()
+	if probe == nil {
+		return false
+	}
+	// Sem execução anterior não há janela para consultar: primeira vez roda.
+	if job.State.LastRunAtMS == nil {
+		return false
+	}
+	desde := time.UnixMilli(*job.State.LastRunAtMS)
+
+	ctx, cancel := context.WithTimeout(context.Background(), idleProbeTimeout)
+	defer cancel()
+	ativo, err := probe(ctx, desde)
+	if err != nil {
+		log.Printf("[cron] probe de atividade falhou para '%s' (%v) — executando mesmo assim", job.Name, err)
+		return false
+	}
+	return !ativo
 }
 
 func NewCronService(storePath string, onJob JobHandler) *CronService {
@@ -249,6 +344,15 @@ func (cs *CronService) executeJobByID(jobID string) {
 
 	if callbackJob == nil {
 		log.Printf("[cron] job %s not found, skipping", jobID)
+		return
+	}
+
+	if cs.devePular(callbackJob) {
+		// Reagenda sem executar: o job continua vivo, só não gastou um turno
+		// para descobrir que não havia trabalho.
+		log.Printf("[cron] ⏭ pulando job '%s' (id: %s): nada aconteceu desde a última execução",
+			callbackJob.Name, jobID)
+		cs.reagendarSemExecutar(jobID)
 		return
 	}
 
