@@ -109,7 +109,7 @@ func TestProbeRecebeUltimaExecucao(t *testing.T) {
 
 // A propriedade que sustenta o resto: pular NÃO adianta o watermark. Se
 // adiantasse, a atividade ocorrida entre o último run e o pulo cairia fora da
-// próxima janela e a memória correspondente nunca seria curada.
+// próxima janela e essa memória nunca seria curada.
 func TestPuloNaoMexeNoWatermark(t *testing.T) {
 	cs := servicoComProbe(t, func(context.Context, time.Time) (bool, error) { return false, nil })
 	criado, err := cs.AddJob("refresh", CronSchedule{Kind: "cron", Expr: "0 4 * * *"}, "curar memória", "cli", "direct")

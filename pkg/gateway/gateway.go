@@ -934,8 +934,9 @@ func seedMemoryRefreshJob(cronService *cron.CronService, cfg *config.Config) {
 		// Só vale onde houver um IdleProbe instalado; no picoclaw sozinho o
 		// job continua rodando como sempre.
 		criado.SkipWhenIdle = true
-		if err := cronService.UpdateJob(criado); err != nil {
-			logger.WarnCF("cron", "Failed to mark memory-refresh as skip-when-idle", map[string]any{"error": err.Error()})
+		if errMarca := cronService.UpdateJob(criado); errMarca != nil {
+			logger.WarnCF("cron", "Failed to mark memory-refresh as skip-when-idle",
+				map[string]any{"error": errMarca.Error()})
 		}
 	}
 	if err != nil {

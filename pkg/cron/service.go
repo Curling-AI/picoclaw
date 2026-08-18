@@ -126,8 +126,8 @@ func (cs *CronService) SetIdleProbe(p IdleProbe) {
 //
 // O watermark tem que continuar apontando para a última execução DE VERDADE:
 // se cada pulo o adiantasse, a atividade ocorrida entre o último run e o pulo
-// cairia fora da janela da próxima consulta, e a memória correspondente nunca
-// seria curada — o gate teria trocado gasto por perda silenciosa.
+// cairia fora da janela da próxima consulta, e essa memória nunca seria
+// curada — o gate teria trocado gasto por perda silenciosa.
 func (cs *CronService) reagendarSemExecutar(jobID string) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
