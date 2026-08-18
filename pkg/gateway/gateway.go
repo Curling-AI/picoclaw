@@ -919,12 +919,26 @@ func seedMemoryRefreshJob(cronService *cron.CronService, cfg *config.Config) {
 		return
 	}
 
-	if _, err := cronService.AddJobWithModel(
+	criado, err := cronService.AddJobWithModel(
 		memoryRefreshJobName,
 		cron.CronSchedule{Kind: "cron", Expr: schedule},
 		prompt,
 		"", "", model,
-	); err != nil {
+	)
+	if criado != nil {
+		// Curar memória de uma conversa que não aconteceu gasta um turno de
+		// modelo para concluir que não havia nada a fazer. O prompt já pede
+		// para não fazer nada nesse caso — mas quem decide é o modelo, depois
+		// de ser chamado. A flag move a decisão para antes.
+		//
+		// Só vale onde houver um IdleProbe instalado; no picoclaw sozinho o
+		// job continua rodando como sempre.
+		criado.SkipWhenIdle = true
+		if err := cronService.UpdateJob(criado); err != nil {
+			logger.WarnCF("cron", "Failed to mark memory-refresh as skip-when-idle", map[string]any{"error": err.Error()})
+		}
+	}
+	if err != nil {
 		logger.WarnCF("cron", "Failed to seed memory-refresh job", map[string]any{"error": err.Error()})
 	} else {
 		logger.InfoCF("cron", "Seeded memory-refresh job", map[string]any{"schedule": schedule, "model": model})
