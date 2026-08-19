@@ -65,6 +65,8 @@ func setNativeToolEnabled(t *ToolsConfig, name string, v bool) {
 		t.WebFetch.Enabled = v
 	case "send_file":
 		t.SendFile.Enabled = v
+	case "generate_image":
+		t.GenerateImage.Enabled = v
 	case "send_tts":
 		t.SendTTS.Enabled = v
 	case "write_file":
