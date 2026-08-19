@@ -1323,15 +1323,15 @@ type ToolsConfig struct {
 	// entries exist so the host can toggle them per assistant through the same
 	// tools.<name>.enabled contract as the built-ins, which is also what keeps
 	// the config schema from rejecting the keys.
-	GenerateImage ToolConfig `json:"generate_image"    yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_GENERATE_IMAGE_"`
-	EditImage     ToolConfig `json:"edit_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_IMAGE_"`
-	SendTTS       ToolConfig `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
-	Spawn         ToolConfig `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
-	SpawnStatus   ToolConfig `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
-	SPI           ToolConfig `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
-	Subagent      ToolConfig `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
-	WebFetch      ToolConfig `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
-	WriteFile     ToolConfig `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+	GenerateImage ToolConfig `json:"generate_image" yaml:"-" envPrefix:"PICOCLAW_TOOLS_GENERATE_IMAGE_"`
+	EditImage     ToolConfig `json:"edit_image"     yaml:"-" envPrefix:"PICOCLAW_TOOLS_EDIT_IMAGE_"`
+	SendTTS       ToolConfig `json:"send_tts"       yaml:"-" envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
+	Spawn         ToolConfig `json:"spawn"          yaml:"-" envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
+	SpawnStatus   ToolConfig `json:"spawn_status"   yaml:"-" envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
+	SPI           ToolConfig `json:"spi"            yaml:"-" envPrefix:"PICOCLAW_TOOLS_SPI_"`
+	Subagent      ToolConfig `json:"subagent"       yaml:"-" envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
+	WebFetch      ToolConfig `json:"web_fetch"      yaml:"-" envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WriteFile     ToolConfig `json:"write_file"     yaml:"-" envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
 // IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
