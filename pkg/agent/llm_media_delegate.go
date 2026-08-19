@@ -96,7 +96,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 	resolvedModelName := resolvedCandidateModelName(targetCandidates, targetModelName)
 	first := targetCandidates[0]
 	visionProvider, err := providerForFallbackCandidate(
-		ts.agent, ts.agent.Provider, targetCandidates, first.Provider, first.Model,
+		ts.agent, ts.agent.Provider, targetCandidates, first,
 	)
 	if err != nil || visionProvider == nil {
 		logger.WarnCF("agent", "Media delegation: no vision provider, falling back to swap", map[string]any{
