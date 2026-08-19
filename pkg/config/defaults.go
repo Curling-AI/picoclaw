@@ -451,6 +451,12 @@ func DefaultConfig() *Config {
 			SendFile: ToolConfig{
 				Enabled: true,
 			},
+			GenerateImage: ToolConfig{
+				Enabled: true,
+			},
+			EditImage: ToolConfig{
+				Enabled: true,
+			},
 			SendTTS: ToolConfig{
 				Enabled: false,
 			},
