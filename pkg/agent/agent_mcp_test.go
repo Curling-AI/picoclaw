@@ -22,7 +22,7 @@ func boolPtr(b bool) *bool { return &b }
 func TestMCPRuntimeResetClearsState(t *testing.T) {
 	var rt mcpRuntime
 	manager := mcp.NewManager()
-	rt.setManager(manager)
+	rt.setManager(manager, "fp-antiga")
 	rt.setInitErr(errors.New("stale init error"))
 	rt.initOnce.Do(func() {})
 
@@ -50,7 +50,7 @@ func TestReloadProviderAndConfig_ResetsMCPRuntime(t *testing.T) {
 	defer al.Close()
 
 	manager := mcp.NewManager()
-	al.mcp.setManager(manager)
+	al.mcp.setManager(manager, "fp-antiga")
 	al.mcp.setInitErr(errors.New("stale init error"))
 	al.mcp.initOnce.Do(func() {})
 
@@ -74,6 +74,73 @@ func TestReloadProviderAndConfig_ResetsMCPRuntime(t *testing.T) {
 	if !reran {
 		t.Fatal("expected MCP initOnce to be reset after reload")
 	}
+}
+
+// The whole point of the fingerprint: a reload that does not touch MCP keeps
+// the live connections. Reconnecting them is network work — dial every server,
+// list every tool — and it was happening on reloads that only flipped a model
+// or a tool, which is what made the config save take seconds.
+func TestMCPRuntimeResetForReload(t *testing.T) {
+	t.Run("mesma configuração mantém o manager", func(t *testing.T) {
+		var rt mcpRuntime
+		manager := mcp.NewManager()
+		rt.setManager(manager, "fp-1")
+		rt.setInitErr(errors.New("stale init error"))
+		rt.initOnce.Do(func() {})
+
+		old, carried := rt.resetForReload("fp-1")
+		if !carried {
+			t.Fatal("configuração idêntica devia reaproveitar a conexão")
+		}
+		if old != nil {
+			t.Fatal("nada a fechar quando a conexão é reaproveitada")
+		}
+		if rt.getManager() != manager {
+			t.Fatal("o manager vivo tinha que continuar ali")
+		}
+		// initOnce rearmado é o que faz as tools serem registradas de novo no
+		// registry novo — sem isso o agente reaproveita a conexão e fica sem
+		// nenhuma tool de MCP.
+		reran := false
+		rt.initOnce.Do(func() { reran = true })
+		if !reran {
+			t.Fatal("initOnce tinha que ser rearmado mesmo reaproveitando")
+		}
+		if err := rt.getInitErr(); err != nil {
+			t.Fatalf("getInitErr() = %v, want nil", err)
+		}
+	})
+
+	t.Run("configuração diferente devolve o manager para fechar", func(t *testing.T) {
+		var rt mcpRuntime
+		manager := mcp.NewManager()
+		rt.setManager(manager, "fp-1")
+
+		old, carried := rt.resetForReload("fp-2")
+		if carried {
+			t.Fatal("servidor diferente não pode reaproveitar conexão")
+		}
+		if old != manager {
+			t.Fatalf("resetForReload() old = %p, want %p", old, manager)
+		}
+		if rt.hasManager() {
+			t.Fatal("o manager antigo tinha que sair do runtime")
+		}
+	})
+
+	t.Run("sem fingerprint nunca reaproveita", func(t *testing.T) {
+		// Fingerprint vazio é o "não sei": MCP desligado, ou config que não
+		// serializou. Reaproveitar no escuro deixaria conexão viva para uma
+		// configuração que ninguém conferiu.
+		var rt mcpRuntime
+		manager := mcp.NewManager()
+		rt.setManager(manager, "")
+
+		old, carried := rt.resetForReload("")
+		if carried || old != manager {
+			t.Fatal("fingerprint vazio tinha que forçar a reconexão")
+		}
+	})
 }
 
 func TestServerIsDeferred(t *testing.T) {
@@ -322,5 +389,49 @@ func TestEnsureMCPInitialized_LoadFailureIsNonFatal(t *testing.T) {
 	// Idempotent: a second call still succeeds without MCP tools.
 	if err := al.ensureMCPInitialized(context.Background()); err != nil {
 		t.Fatalf("second ensureMCPInitialized() error = %q, want nil", err.Error())
+	}
+}
+
+// The fingerprint is what decides whether a reload keeps or drops the
+// connections, so it has to be strict about the MCP config and blind to
+// everything else. Too loose and a real server change is missed; too tight and
+// every save reconnects again — which is the cost this whole path avoids.
+func TestMCPFingerprint(t *testing.T) {
+	comServidor := func(al *AgentLoop, url string) {
+		al.cfg.Tools.MCP.Enabled = true
+		al.cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+			"github": {Enabled: true, URL: url},
+		}
+	}
+
+	al, _, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	defer al.Close()
+
+	comServidor(al, "https://api.github.com/mcp")
+	base := al.mcpFingerprint()
+	if base == "" {
+		t.Fatal("com MCP ligado o fingerprint não pode ser vazio")
+	}
+	if again := al.mcpFingerprint(); again != base {
+		t.Error("mesma configuração tem que dar o mesmo fingerprint")
+	}
+
+	// O caso que motivou tudo: trocar o modelo do agente não mexe em servidor
+	// nenhum, e antes derrubava as seis conexões.
+	al.cfg.Agents.Defaults.ModelName = "outro-modelo"
+	if trocado := al.mcpFingerprint(); trocado != base {
+		t.Error("trocar de modelo não pode invalidar as conexões de MCP")
+	}
+
+	// E o caso oposto: mudou o servidor, tem que reconectar.
+	comServidor(al, "https://api.github.com/mcp/v2")
+	if trocado := al.mcpFingerprint(); trocado == base {
+		t.Error("URL diferente tem que forçar reconexão")
+	}
+
+	al.cfg.Tools.MCP.Enabled = false
+	if desligado := al.mcpFingerprint(); desligado != "" {
+		t.Errorf("MCP desligado devia dar fingerprint vazio, deu %q", desligado)
 	}
 }
