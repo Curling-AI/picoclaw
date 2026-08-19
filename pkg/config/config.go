@@ -1323,13 +1323,16 @@ type ToolsConfig struct {
 	// same tools.<name>.enabled contract as the built-ins, which is also what
 	// keeps the config schema from rejecting the key.
 	GenerateImage ToolConfig `json:"generate_image"    yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_GENERATE_IMAGE_"`
-	SendTTS       ToolConfig `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
-	Spawn         ToolConfig `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
-	SpawnStatus   ToolConfig `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
-	SPI           ToolConfig `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
-	Subagent      ToolConfig `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
-	WebFetch      ToolConfig `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
-	WriteFile     ToolConfig `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+	// EditImage gates the companion tool that EDITS an existing image from a
+	// prompt (image in, image out). Same contract reason as GenerateImage.
+	EditImage   ToolConfig `json:"edit_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_IMAGE_"`
+	SendTTS     ToolConfig `json:"send_tts"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_TTS_"`
+	Spawn       ToolConfig `json:"spawn"             yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_"`
+	SpawnStatus ToolConfig `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
+	SPI         ToolConfig `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
+	Subagent    ToolConfig `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
+	WebFetch    ToolConfig `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WriteFile   ToolConfig `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
 // IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
@@ -2113,6 +2116,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.SendFile.Enabled
 	case "generate_image":
 		return t.GenerateImage.Enabled
+	case "edit_image":
+		return t.EditImage.Enabled
 	case "send_tts":
 		return t.SendTTS.Enabled
 	case "write_file":
@@ -2135,6 +2140,6 @@ func KnownNativeTools() []string {
 		"i2c", "install_skill", "list_dir", "load_image", "message",
 		"read_file", "serial", "spawn", "spawn_status", "spi", "subagent",
 		"web_fetch", "send_file", "send_tts", "write_file", "mcp",
-		"generate_image",
+		"generate_image", "edit_image",
 	}
 }

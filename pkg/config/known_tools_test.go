@@ -67,6 +67,8 @@ func setNativeToolEnabled(t *ToolsConfig, name string, v bool) {
 		t.SendFile.Enabled = v
 	case "generate_image":
 		t.GenerateImage.Enabled = v
+	case "edit_image":
+		t.EditImage.Enabled = v
 	case "send_tts":
 		t.SendTTS.Enabled = v
 	case "write_file":
