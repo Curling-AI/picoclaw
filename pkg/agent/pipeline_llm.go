@@ -14,6 +14,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
@@ -23,6 +24,20 @@ import (
 // tool calls) LLM responses. One retry recovers the transient reasoning-only
 // glitch; more would just stall visibly silent turns.
 const maxEmptyResponseRetries = 1
+
+// maxTruncatedToolCallRetries caps same-turn retries after the model answered
+// with the tail of a tool call it failed to emit structurally. Same shape and
+// same reasoning as maxEmptyResponseRetries: one retry clears the glitch, more
+// would burn the tool budget re-rolling a model that cannot get there.
+const maxTruncatedToolCallRetries = 1
+
+// truncatedToolCallNudge tells the model what went wrong on the wire. Kept
+// concrete (name the syntax it just used) because a vague "try again" reliably
+// produces the same broken emission.
+const truncatedToolCallNudge = "[System] Your last reply reached us as the tail of a tool call written out as text " +
+	"(`<function=...><parameter=...>` markup), not as a tool call — so nothing ran and the user saw raw markup. " +
+	"Re-issue that call using the tool-calling API. Do not describe the call, do not write the markup out, and do " +
+	"not paste the arguments into your reply."
 
 func (p *Pipeline) CallLLM(
 	ctx context.Context,
@@ -762,6 +777,51 @@ func (p *Pipeline) CallLLM(
 			} else if exec.response.Reasoning != "" {
 				responseContent = exec.response.Reasoning
 			}
+		}
+
+		// A reply that ENDS in pseudo-XML tool-call markup is a tool call the
+		// model failed to emit structurally — the gateway's own parser matched
+		// the opening `<tool_call><function=NAME>`, gave up, and forwarded the
+		// remainder as text. The extractor cannot rescue this one: the name
+		// went with the prefix, so there is nothing left to call.
+		//
+		// What matters is that it is NOT delivered as the answer. Persisted, a
+		// turn like this teaches the model that writing calls out as prose is
+		// what one does here, and the session degrades for good (the same
+		// mechanism that made announce-and-stop turns self-reinforcing).
+		if protocoltypes.LooksLikeTruncatedToolCall(responseContent) {
+			// gracefulTerminal = o usuário interrompeu: as tool defs já foram
+			// tiradas da request e o modelo foi mandado encerrar. Insistir numa
+			// chamada aqui seria brigar com a interrupção.
+			if !exec.gracefulTerminal && exec.truncatedToolCallRetries < maxTruncatedToolCallRetries {
+				exec.truncatedToolCallRetries++
+				cancelConfiguredStreamingLLM(turnCtx, exec)
+				// Transient, never persisted: it is a correction about THIS
+				// emission, and a saved "do not write markup" note reads as a
+				// standing instruction in every later turn.
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+					Role:    "user",
+					Content: truncatedToolCallNudge,
+				})
+				logger.WarnCF("agent", "LLM answered with a truncated tool call written as text; retrying",
+					map[string]any{
+						"agent_id":      ts.agent.ID,
+						"iteration":     iteration,
+						"retry":         exec.truncatedToolCallRetries,
+						"content_chars": len(responseContent),
+					})
+				return ControlContinue, nil
+			}
+			// Out of retries: drop it and let the coordinator's DefaultResponse
+			// answer instead. That one is marked as fallback and stays out of
+			// session history, which raw markup would not.
+			logger.WarnCF("agent", "LLM kept answering with a truncated tool call; dropping the text",
+				map[string]any{
+					"agent_id":      ts.agent.ID,
+					"iteration":     iteration,
+					"content_chars": len(responseContent),
+				})
+			responseContent = ""
 		}
 
 		exec.finalContent = responseContent

@@ -125,6 +125,12 @@ type turnExecution struct {
 	// models). Capped so a persistently silent model still ends the turn.
 	emptyResponseRetries int
 
+	// truncatedToolCallRetries counts same-turn retries after the model
+	// answered with the tail of a pseudo-XML tool call instead of emitting it
+	// structurally. Capped like emptyResponseRetries so a model stuck in that
+	// shape still ends the turn.
+	truncatedToolCallRetries int
+
 	// transientTurnMessages are turn-scoped steering notes (tool-budget
 	// nudges) appended to callMessages of every remaining iteration of THIS
 	// turn but never persisted to session history. Persisting them poisoned
