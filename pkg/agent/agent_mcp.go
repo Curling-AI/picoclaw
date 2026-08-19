@@ -159,13 +159,13 @@ func (al *AgentLoop) mcpWorkspacePath() string {
 	return workspacePath
 }
 
-// mcpFingerprint summarises everything that decides WHICH servers get dialled
+// mcpFingerprint summarizes everything that decides WHICH servers get dialed
 // and how: the server set left after the per-agent allowlists, plus the
 // workspace they run in. Anything outside that — agent names, models, other
 // tools — can change without invalidating a live connection.
 //
 // Empty means "do not carry anything over": with MCP off there is nothing to
-// keep, and a config that cannot be marshalled is not a config we should be
+// keep, and a config that cannot be marshaled is not a config we should be
 // comparing by value.
 func (al *AgentLoop) mcpFingerprint() string {
 	if !al.cfg.Tools.IsToolEnabled("mcp") {
@@ -225,7 +225,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 
 		// A manager still here after a reload was CARRIED OVER by
 		// resetForReload: same servers, same workspace, connections already up.
-		// Skip the dialling and go straight to registering its tools into the
+		// Skip the dialing and go straight to registering its tools into the
 		// rebuilt registry.
 		mcpManager := al.mcp.getManager()
 		carried := mcpManager != nil

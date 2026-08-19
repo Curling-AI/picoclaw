@@ -397,18 +397,18 @@ func TestEnsureMCPInitialized_LoadFailureIsNonFatal(t *testing.T) {
 // everything else. Too loose and a real server change is missed; too tight and
 // every save reconnects again — which is the cost this whole path avoids.
 func TestMCPFingerprint(t *testing.T) {
-	comServidor := func(al *AgentLoop, url string) {
-		al.cfg.Tools.MCP.Enabled = true
-		al.cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+	al, cfg, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	defer al.Close()
+
+	comServidor := func(url string) {
+		cfg.Tools.MCP.Enabled = true
+		cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
 			"github": {Enabled: true, URL: url},
 		}
 	}
 
-	al, _, _, _, cleanup := newTestAgentLoop(t)
-	defer cleanup()
-	defer al.Close()
-
-	comServidor(al, "https://api.github.com/mcp")
+	comServidor("https://api.github.com/mcp")
 	base := al.mcpFingerprint()
 	if base == "" {
 		t.Fatal("com MCP ligado o fingerprint não pode ser vazio")
@@ -419,18 +419,18 @@ func TestMCPFingerprint(t *testing.T) {
 
 	// O caso que motivou tudo: trocar o modelo do agente não mexe em servidor
 	// nenhum, e antes derrubava as seis conexões.
-	al.cfg.Agents.Defaults.ModelName = "outro-modelo"
+	cfg.Agents.Defaults.ModelName = "outro-modelo"
 	if trocado := al.mcpFingerprint(); trocado != base {
 		t.Error("trocar de modelo não pode invalidar as conexões de MCP")
 	}
 
 	// E o caso oposto: mudou o servidor, tem que reconectar.
-	comServidor(al, "https://api.github.com/mcp/v2")
+	comServidor("https://api.github.com/mcp/v2")
 	if trocado := al.mcpFingerprint(); trocado == base {
 		t.Error("URL diferente tem que forçar reconexão")
 	}
 
-	al.cfg.Tools.MCP.Enabled = false
+	cfg.Tools.MCP.Enabled = false
 	if desligado := al.mcpFingerprint(); desligado != "" {
 		t.Errorf("MCP desligado devia dar fingerprint vazio, deu %q", desligado)
 	}
