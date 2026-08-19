@@ -655,6 +655,8 @@ func parseStreamResponse(
 		argsJSON strings.Builder
 	}
 	activeTools := map[int]*toolAccum{}
+	// Latched: once the text is tool-call markup, the rest of it is too.
+	markupSuppressed := false
 
 	processEvent := func(data string) error {
 		if strings.TrimSpace(data) == "" {
@@ -718,7 +720,21 @@ func parseStreamResponse(
 		// when a provider sends both fields in the same event.
 		if choice.Delta.Content != "" {
 			textContent.WriteString(choice.Delta.Content)
-			if onChunk != nil {
+			// Stop PUBLISHING (never accumulating) once the text turns into
+			// tool-call markup. The salvage below can turn that text into a
+			// real call, but it only runs at end-of-stream — by then the raw
+			// `<tool_call><function=…>` has already been streamed to the user
+			// and no later finalize retracts it (seen in the kind e2e: the tool
+			// ran and the answer arrived, with the markup still sitting above
+			// it until a reload).
+			//
+			// Whatever is withheld is not lost: Finalize delivers the final
+			// content at the end of the turn. The cost of a false positive is
+			// one message that arrives whole instead of typing itself out.
+			if !markupSuppressed && protocoltypes.LooksLikeToolCallMarkup(textContent.String()) {
+				markupSuppressed = true
+			}
+			if onChunk != nil && !markupSuppressed {
 				onChunk(StreamChunk{Content: textContent.String()})
 			}
 		}
@@ -855,6 +871,26 @@ func parseStreamResponse(
 		if extracted := protocoltypes.ExtractToolCallsFromText(content); len(extracted) > 0 {
 			toolCalls = extracted
 			content = protocoltypes.StripToolCallsFromText(content)
+		}
+	}
+
+	// Same fallback, one channel over: reasoning models sometimes emit the call
+	// inside their THINKING instead of the content — the turn then comes back
+	// with no content and no tool calls, the agent loop salvages the thinking
+	// as the reply, and the user reads raw markup (prod, 2026-08-19).
+	//
+	// Gated on empty content on purpose. A model that answered AND merely
+	// mused "I could call read_file" in its scratchpad must not have that
+	// musing promoted to a real call.
+	if len(toolCalls) == 0 && content == "" {
+		for _, thinking := range []string{reasoningContent.String(), reasoning.String()} {
+			if thinking == "" {
+				continue
+			}
+			if extracted := protocoltypes.ExtractToolCallsFromText(thinking); len(extracted) > 0 {
+				toolCalls = extracted
+				break
+			}
 		}
 	}
 
