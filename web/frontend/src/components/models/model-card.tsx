@@ -1,7 +1,7 @@
 import {
+  IconArrowAutofitDown,
   IconEdit,
   IconKey,
-  IconLoader2,
   IconStar,
   IconStarFilled,
   IconTrash,
@@ -20,46 +20,69 @@ interface ModelCardProps {
   model: ModelInfo
   onEdit: (model: ModelInfo) => void
   onSetDefault: (model: ModelInfo) => void
+  onToggleFallback: (model: ModelInfo) => void
   onDelete: (model: ModelInfo) => void
-  settingDefault: boolean
+  inFallbackChain: boolean
+  isDefault: boolean
+  defaultChainAllowed: boolean
+  fallbackDefaultConflict: boolean
+  deleteDisabled: boolean
 }
 
 export function ModelCard({
   model,
   onEdit,
   onSetDefault,
+  onToggleFallback,
   onDelete,
-  settingDefault,
+  inFallbackChain,
+  isDefault,
+  defaultChainAllowed,
+  fallbackDefaultConflict,
+  deleteDisabled,
 }: ModelCardProps) {
   const { t } = useTranslation()
   const isOAuth = model.auth_method === "oauth"
   const status = model.status
   const statusLabel = t(`models.status.${status}`)
-  const canSetDefault =
+  const canSetDefault = model.available && !isDefault && defaultChainAllowed
+  const canUseInFallback =
     model.available &&
-    !model.is_default &&
-    !model.is_virtual &&
-    model.default_model_allowed !== false
+    !isDefault &&
+    !fallbackDefaultConflict &&
+    defaultChainAllowed
 
   const setDefaultLabel = t("models.action.setDefault")
   const setDefaultDisabledReason = (() => {
-    if (settingDefault) return t("models.action.setDefaultDisabled.setting")
     if (!model.available)
       return t("models.action.setDefaultDisabled.unavailable")
-    if (model.is_default) return t("models.action.setDefaultDisabled.isDefault")
+    if (isDefault) return t("models.action.setDefaultDisabled.isDefault")
     if (model.is_virtual) return t("models.action.setDefaultDisabled.isVirtual")
-    if (model.default_model_allowed === false) {
+    if (!defaultChainAllowed) {
       return t("models.action.setDefaultDisabled.unsupportedProvider")
     }
     return setDefaultLabel
   })()
 
   const editLabel = t("models.action.edit")
+  const toggleFallbackLabel = inFallbackChain
+    ? t("models.action.removeFromFallback")
+    : t("models.action.addToFallback")
+  const toggleFallbackDisabledReason = (() => {
+    if (!model.available)
+      return t("models.action.setDefaultDisabled.unavailable")
+    if (model.is_virtual) return t("models.action.setDefaultDisabled.isVirtual")
+    if (!defaultChainAllowed) {
+      return t("models.action.setDefaultDisabled.unsupportedProvider")
+    }
+    if (isDefault || fallbackDefaultConflict)
+      return t("models.action.addToFallbackDisabled.isDefault")
+    return toggleFallbackLabel
+  })()
   const deleteLabel = t("models.action.delete")
-  const deleteDisabledReason = model.is_default
+  const deleteDisabledReason = deleteDisabled
     ? t("models.action.deleteDisabled.isDefault")
     : deleteLabel
-  const deleteDisabled = model.is_default
 
   return (
     <div
@@ -75,7 +98,7 @@ export function ModelCard({
           <span
             className={[
               "mt-0.5 h-2 w-2 shrink-0 rounded-full",
-              model.is_default
+              isDefault
                 ? "bg-green-400 shadow-[0_0_0_2px_rgba(74,222,128,0.35)]"
                 : status === "available"
                   ? "bg-green-500"
@@ -88,7 +111,7 @@ export function ModelCard({
           <span className="text-foreground truncate text-sm font-semibold">
             {model.model_name}
           </span>
-          {model.is_default && (
+          {isDefault && (
             <span className="bg-primary/10 text-primary shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
               {t("models.badge.default")}
             </span>
@@ -101,7 +124,7 @@ export function ModelCard({
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
-          {model.is_default ? (
+          {isDefault ? (
             <span
               className="text-primary p-1"
               title={t("models.badge.default")}
@@ -109,43 +132,25 @@ export function ModelCard({
               <IconStarFilled className="size-3.5" />
             </span>
           ) : (
-            <Tooltip delayDuration={!canSetDefault || settingDefault ? 0 : 700}>
+            <Tooltip delayDuration={!canSetDefault ? 0 : 700}>
               <TooltipTrigger asChild>
                 <span
-                  className={
-                    !canSetDefault || settingDefault
-                      ? "cursor-not-allowed"
-                      : undefined
-                  }
-                  tabIndex={!canSetDefault || settingDefault ? 0 : undefined}
-                  role={!canSetDefault || settingDefault ? "button" : undefined}
-                  aria-disabled={
-                    !canSetDefault || settingDefault ? true : undefined
-                  }
-                  aria-label={
-                    !canSetDefault || settingDefault
-                      ? setDefaultLabel
-                      : undefined
-                  }
-                  title={
-                    !canSetDefault || settingDefault
-                      ? setDefaultLabel
-                      : undefined
-                  }
+                  className={!canSetDefault ? "cursor-not-allowed" : undefined}
+                  tabIndex={!canSetDefault ? 0 : undefined}
+                  role={!canSetDefault ? "button" : undefined}
+                  aria-disabled={!canSetDefault ? true : undefined}
+                  aria-label={!canSetDefault ? setDefaultLabel : undefined}
+                  title={!canSetDefault ? setDefaultLabel : undefined}
                 >
                   <Button
                     variant="ghost"
                     size="icon-sm"
                     onClick={() => onSetDefault(model)}
-                    disabled={settingDefault || !canSetDefault}
+                    disabled={!canSetDefault}
                     aria-label={setDefaultLabel}
                     title={setDefaultLabel}
                   >
-                    {settingDefault ? (
-                      <IconLoader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <IconStar className="size-3.5" />
-                    )}
+                    <IconStar className="size-3.5" />
                   </Button>
                 </span>
               </TooltipTrigger>
@@ -162,6 +167,36 @@ export function ModelCard({
           >
             <IconEdit className="size-3.5" />
           </Button>
+
+          <Tooltip delayDuration={canUseInFallback ? 700 : 0}>
+            <TooltipTrigger asChild>
+              <span
+                className={!canUseInFallback ? "cursor-not-allowed" : undefined}
+                tabIndex={!canUseInFallback ? 0 : undefined}
+                role={!canUseInFallback ? "button" : undefined}
+                aria-disabled={!canUseInFallback ? true : undefined}
+                aria-label={!canUseInFallback ? toggleFallbackLabel : undefined}
+                title={!canUseInFallback ? toggleFallbackLabel : undefined}
+              >
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => onToggleFallback(model)}
+                  disabled={!canUseInFallback}
+                  aria-label={toggleFallbackLabel}
+                  title={toggleFallbackLabel}
+                >
+                  <IconArrowAutofitDown
+                    className={[
+                      "size-3.5",
+                      inFallbackChain ? "text-primary" : "",
+                    ].join(" ")}
+                  />
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{toggleFallbackDisabledReason}</TooltipContent>
+          </Tooltip>
 
           <Tooltip delayDuration={deleteDisabled ? 0 : 700}>
             <TooltipTrigger asChild>

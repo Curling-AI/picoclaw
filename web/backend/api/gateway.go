@@ -373,21 +373,34 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("failed to load config: %w", err)
 	}
+	normalizeStoredModelNames(cfg)
 
 	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelName == "" {
 		return false, "no default model configured", nil
+	}
+	if aliasModels := modelConfigsByName(cfg)[modelName]; len(aliasModels) > 1 {
+		if err := validateDefaultChainModelSet(
+			modelName,
+			aliasModels,
+			true,
+			defaultChainProvider(cfg),
+		); err != nil {
+			// Validation failures are readiness reasons, not handler errors.
+			//nolint:nilerr
+			return false, err.Error(), nil
+		}
 	}
 
 	modelCfg := lookupModelConfig(cfg, modelName)
 	if modelCfg == nil {
 		return false, fmt.Sprintf("default model %q is invalid", modelName), nil
 	}
-	if !defaultModelAllowedForModelConfig(modelCfg) {
+	if !defaultModelAllowedForModelConfig(modelCfg, defaultChainProvider(cfg)) {
 		return false, fmt.Sprintf("default model %q is not usable for chat", modelName), nil
 	}
 
-	if !hasModelConfiguration(modelCfg) {
+	if !rawTemplateHasConfiguration(modelCfg) {
 		return false, fmt.Sprintf("default model %q has no credentials configured", modelName), nil
 	}
 	if requiresRuntimeProbe(modelCfg) && !probeLocalModelAvailability(modelCfg) {
@@ -398,7 +411,7 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 }
 
 func lookupModelConfig(cfg *config.Config, modelName string) *config.ModelConfig {
-	modelCfg, err := cfg.GetModelConfig(modelName)
+	modelCfg, err := providers.ResolveModelConfig(cfg, modelName)
 	if err != nil {
 		return nil
 	}
@@ -410,6 +423,7 @@ func computeConfigSignature(cfg *config.Config) string {
 		return ""
 	}
 	var parts []string
+	parts = append(parts, "default_provider:"+defaultChainProvider(cfg))
 	defaultModel := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if defaultModel != "" {
 		parts = append(parts, "model:"+defaultModel)
@@ -504,32 +518,60 @@ func computeModelStreamingSignatures(cfg *config.Config) []string {
 	if defaultProvider == "" {
 		defaultProvider = "openai"
 	}
-	names := []string{strings.TrimSpace(cfg.Agents.Defaults.GetModelName())}
-	names = append(names, cfg.Agents.Defaults.ModelFallbacks...)
-	if cfg.Agents.Defaults.Routing != nil {
-		names = append(names, cfg.Agents.Defaults.Routing.LightModel)
+	type streamingRef struct {
+		scope string
+		name  string
 	}
-	for _, agent := range cfg.Agents.List {
+
+	refs := []streamingRef{{
+		scope: "defaults.primary",
+		name:  strings.TrimSpace(cfg.Agents.Defaults.GetModelName()),
+	}}
+	for i, name := range cfg.Agents.Defaults.ModelFallbacks {
+		refs = append(refs, streamingRef{
+			scope: "defaults.fallback:" + strconv.Itoa(i),
+			name:  name,
+		})
+	}
+	if cfg.Agents.Defaults.Routing != nil {
+		refs = append(refs, streamingRef{
+			scope: "defaults.routing.light",
+			name:  cfg.Agents.Defaults.Routing.LightModel,
+		})
+	}
+	for agentIndex, agent := range cfg.Agents.List {
 		if agent.Model == nil {
 			continue
 		}
-		names = append(names, agent.Model.Primary)
-		names = append(names, agent.Model.Fallbacks...)
+		refs = append(refs, streamingRef{
+			scope: "agent:" + strconv.Itoa(agentIndex) + ".primary",
+			name:  agent.Model.Primary,
+		})
+		for i, name := range agent.Model.Fallbacks {
+			refs = append(refs, streamingRef{
+				scope: "agent:" + strconv.Itoa(agentIndex) + ".fallback:" + strconv.Itoa(i),
+				name:  name,
+			})
+		}
 	}
 
-	seenNames := make(map[string]bool)
 	seenEntries := make(map[string]bool)
-	signatures := make([]string, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" || seenNames[name] {
+	signatures := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref.name = strings.TrimSpace(ref.name)
+		if ref.name == "" {
 			continue
 		}
-		seenNames[name] = true
-		for _, match := range modelConfigsMatchingSignatureRef(cfg.ModelList, name, defaultProvider) {
+		referenceEntry := strings.Join([]string{ref.scope, ref.name}, ":")
+		if !seenEntries[referenceEntry] {
+			seenEntries[referenceEntry] = true
+			signatures = append(signatures, referenceEntry)
+		}
+		for _, match := range modelConfigsMatchingSignatureRef(cfg.ModelList, ref.name, defaultProvider) {
 			mc := match.model
 			entry := strings.Join([]string{
-				name,
+				ref.scope,
+				ref.name,
 				strconv.Itoa(match.index),
 				strings.TrimSpace(mc.Provider),
 				strings.TrimSpace(mc.Model),
@@ -570,76 +612,51 @@ func modelConfigsMatchingSignatureRef(
 	if len(matches) > 0 {
 		return matches
 	}
-	for i, mc := range modelList {
-		if mc == nil || strings.TrimSpace(mc.Model) != raw {
-			continue
-		}
-		return []signatureModelConfigMatch{{index: i, model: mc}}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{Provider: defaultProvider},
+		},
+		ModelList: modelList,
 	}
-	for i, mc := range modelList {
-		if modelConfigMatchesBareRef(mc, raw, defaultProvider) {
-			return []signatureModelConfigMatch{{index: i, model: mc}}
-		}
+	resolved, err := providers.ResolveModelConfig(cfg, raw)
+	if err != nil {
+		return nil
 	}
-
-	rawRef := providers.ParseModelRef(raw, "")
-	rawHasProvider := rawRef != nil && hasUnambiguousProviderPrefix(raw) &&
-		strings.TrimSpace(rawRef.Provider) != "" && strings.TrimSpace(rawRef.Model) != ""
-	if rawHasProvider {
-		for i, mc := range modelList {
-			if modelConfigMatchesProviderRef(mc, raw) {
-				return []signatureModelConfigMatch{{index: i, model: mc}}
-			}
+	for i, modelCfg := range modelList {
+		if modelConfigsMatchResolvedEntry(modelCfg, resolved, defaultProvider) {
+			return []signatureModelConfigMatch{{index: i, model: modelCfg}}
 		}
 	}
 	return nil
 }
 
-func hasUnambiguousProviderPrefix(raw string) bool {
-	provider, _, found := strings.Cut(strings.TrimSpace(raw), "/")
-	if !found {
+func modelConfigsMatchResolvedEntry(
+	left,
+	right *config.ModelConfig,
+	defaultProvider string,
+) bool {
+	if left == nil || right == nil || left.IsVirtual() {
 		return false
 	}
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return false
-	}
-	normalizedProvider := providers.NormalizeProvider(provider)
-	if !providers.IsSupportedModelProvider(normalizedProvider) {
-		return false
-	}
-	return true
+	leftProvider, leftModel := modelConfigProviderAndID(left, defaultProvider)
+	rightProvider, rightModel := providers.ExtractProtocol(right)
+	return left.ModelName == right.ModelName &&
+		providers.ModelKey(leftProvider, leftModel) == providers.ModelKey(rightProvider, rightModel) &&
+		left.APIBase == right.APIBase &&
+		left.APIKey() == right.APIKey() &&
+		left.Enabled == right.Enabled &&
+		left.AuthMethod == right.AuthMethod &&
+		left.ConnectMode == right.ConnectMode
 }
 
-func modelConfigMatchesProviderRef(mc *config.ModelConfig, raw string) bool {
+func modelConfigProviderAndID(mc *config.ModelConfig, defaultProvider string) (string, string) {
 	if mc == nil {
-		return false
+		return "", ""
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false
+	if strings.TrimSpace(mc.Provider) != "" {
+		return providers.ExtractProtocol(mc)
 	}
-	rawRef := providers.ParseModelRef(raw, "")
-	if rawRef == nil || strings.TrimSpace(rawRef.Provider) == "" || strings.TrimSpace(rawRef.Model) == "" {
-		return false
-	}
-	protocol, modelID := providers.ExtractProtocol(mc)
-	return providers.ModelKey(protocol, modelID) == providers.ModelKey(rawRef.Provider, rawRef.Model)
-}
-
-func modelConfigMatchesBareRef(mc *config.ModelConfig, raw string, defaultProvider string) bool {
-	if mc == nil {
-		return false
-	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false
-	}
-	protocol, modelID := providers.ExtractProtocol(mc)
-	if strings.TrimSpace(modelID) != raw {
-		return false
-	}
-	return providers.NormalizeProvider(protocol) == providers.NormalizeProvider(defaultProvider)
+	return providers.SplitModelProviderAndID(mc.Model, defaultProvider)
 }
 
 func computeChannelSignatures(channels config.ChannelsConfig) []string {

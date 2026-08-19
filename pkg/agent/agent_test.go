@@ -284,6 +284,24 @@ type modelRewriteHook struct {
 	model string
 }
 
+type clearOptionsHook struct{}
+
+func (clearOptionsHook) BeforeLLM(
+	ctx context.Context,
+	req *LLMHookRequest,
+) (*LLMHookRequest, HookDecision, error) {
+	next := req.Clone()
+	next.Options = nil
+	return next, HookDecision{Action: HookActionModify}, nil
+}
+
+func (clearOptionsHook) AfterLLM(
+	ctx context.Context,
+	resp *LLMHookResponse,
+) (*LLMHookResponse, HookDecision, error) {
+	return resp.Clone(), HookDecision{Action: HookActionContinue}, nil
+}
+
 func (h modelRewriteHook) BeforeLLM(
 	ctx context.Context,
 	req *LLMHookRequest,
@@ -3695,6 +3713,12 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 				APIBase:   remoteServer.URL,
 				APIKeys:   config.SimpleSecureStrings("remote-key"),
 			},
+			{
+				ModelName: "deepseek",
+				Model:     "openrouter/deepseek/deepseek-v3.2",
+				APIBase:   remoteServer.URL,
+				APIKeys:   config.SimpleSecureStrings("remote-key-secondary"),
+			},
 		},
 	}
 
@@ -3734,6 +3758,12 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	if !strings.Contains(switchResp, "Switched model from local to deepseek") {
 		t.Fatalf("unexpected /switch reply: %q", switchResp)
 	}
+	agent := al.registry.GetDefaultAgent()
+	for _, candidate := range agent.Candidates[1:] {
+		if agent.CandidateProviders[candidateProviderKey(candidate)] == nil {
+			t.Fatalf("candidate provider %q was not initialized after model switch", candidate.DisplayName)
+		}
+	}
 
 	secondResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
 		Channel:  "telegram",
@@ -3755,6 +3785,71 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 			"remote model after switch = %q, want %q",
 			remoteModel,
 			"deepseek-v3.2",
+		)
+	}
+}
+
+func TestProcessMessage_SwitchModelPreservesPrimaryProviderFallbackInheritance(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				Provider:          "openai",
+				ModelName:         "first",
+				ModelFallbacks:    []string{"fallback"},
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "first",
+				Provider:  "openai",
+				Model:     "first",
+				APIKeys:   config.SimpleSecureStrings("sk-first"),
+			},
+			{
+				ModelName: "second",
+				Provider:  "openai",
+				Model:     "second",
+				APIKeys:   config.SimpleSecureStrings("sk-second"),
+			},
+			{
+				ModelName: "fallback",
+				Provider:  "openai",
+				Model:     "fallback",
+			},
+		},
+	}
+
+	provider, _, err := providers.CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	helper := testHelper{al: al}
+
+	switchResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "/switch model to second",
+	})
+	if !strings.Contains(switchResp, "Switched model from first to second") {
+		t.Fatalf("unexpected /switch reply: %q", switchResp)
+	}
+
+	agent := al.registry.GetDefaultAgent()
+	if len(agent.Candidates) != 2 {
+		t.Fatalf("len(agent.Candidates) = %d, want 2", len(agent.Candidates))
+	}
+	fallbackProvider := agent.CandidateProviders[candidateProviderKey(agent.Candidates[1])]
+	if fallbackProvider != agent.Provider {
+		t.Fatalf(
+			"fallback provider = %T, want switched primary provider %T",
+			fallbackProvider,
+			agent.Provider,
 		)
 	}
 }
@@ -4892,7 +4987,7 @@ func TestAgentLoop_UserAttachmentRoutesToImageModelAfterMediaResolution(t *testi
 	}
 
 	visionProvider := &resolvedImagePathVisionProvider{expectedPath: pngPath}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
@@ -4978,7 +5073,7 @@ func TestAgentLoop_TextFollowUpAfterUserAttachmentStaysOnTextModel(t *testing.T)
 	}
 
 	visionProvider := &resolvedImagePathVisionProvider{expectedPath: pngPath}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
 
 	sessionKey := "agent:main:telegram:direct:user1"
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
@@ -5060,7 +5155,7 @@ func TestAgentLoop_GenericImagePlaceholderDoesNotRouteToImageModel(t *testing.T)
 	}
 
 	visionProvider := &unexpectedVisionProvider{}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
@@ -5136,7 +5231,7 @@ func TestAgentLoop_TextFollowUpAfterLoadImageStaysOnTextModel(t *testing.T) {
 	}
 
 	visionProvider := &visionAnswerProvider{}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
 
 	sessionKey := "agent:main:telegram:direct:user1"
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
@@ -5243,7 +5338,7 @@ func TestAgentLoop_LoadImageFollowUpRoutesToImageModel(t *testing.T) {
 	}
 
 	visionProvider := &visionAnswerProvider{}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	agent.CandidateProviders[candidateProviderKey(agent.ImageCandidates[0])] = visionProvider
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
@@ -7273,12 +7368,14 @@ func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
 
 type nativeSearchProvider struct {
 	supported bool
+	lastOpts  map[string]any
 }
 
 func (p *nativeSearchProvider) Chat(
 	ctx context.Context, msgs []providers.Message, tools []providers.ToolDefinition,
 	model string, opts map[string]any,
 ) (*providers.LLMResponse, error) {
+	p.lastOpts = shallowCloneLLMOptions(opts)
 	return &providers.LLMResponse{Content: "ok"}, nil
 }
 
@@ -7296,6 +7393,40 @@ func (p *plainProvider) Chat(
 }
 
 func (p *plainProvider) GetDefaultModel() string { return "test-model" }
+
+func TestProcessMessage_NativeSearchHandlesHookClearingOptions(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.ModelName = "test-model"
+	cfg.Agents.Defaults.MaxToolIterations = 2
+	cfg.Tools.Web.Enabled = true
+	cfg.Tools.Web.PreferNative = true
+
+	provider := &nativeSearchProvider{supported: true}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	agent.Provider = provider
+	agent.Candidates = nil
+	if err := al.MountHook(NamedHook("clear-options", clearOptionsHook{})); err != nil {
+		t.Fatalf("MountHook() error = %v", err)
+	}
+
+	response, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel: "pico",
+		ChatID:  "native-search-hook",
+		Content: "search",
+	})
+	if err != nil {
+		t.Fatalf("processMessage() error = %v", err)
+	}
+	if response != "ok" {
+		t.Fatalf("response = %q, want ok", response)
+	}
+	if got := provider.lastOpts["native_search"]; got != true {
+		t.Fatalf("native_search option = %#v, want true", got)
+	}
+}
 
 func TestIsNativeSearchProvider_Supported(t *testing.T) {
 	if !isNativeSearchProvider(&nativeSearchProvider{supported: true}) {
@@ -7353,7 +7484,13 @@ func TestFilterClientWebSearch_EmptyInput(t *testing.T) {
 type overflowProvider struct {
 	calls        int
 	lastMessages []providers.Message
-	chatFunc     func(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string, opts map[string]any) (*providers.LLMResponse, error)
+	chatFunc     func(
+		ctx context.Context,
+		messages []providers.Message,
+		tools []providers.ToolDefinition,
+		model string,
+		opts map[string]any,
+	) (*providers.LLMResponse, error)
 }
 
 func (p *overflowProvider) Chat(
