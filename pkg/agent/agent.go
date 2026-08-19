@@ -477,7 +477,12 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	al.mu.Unlock()
 	al.refreshRuntimeEventLogger(cfg)
 
-	oldMCPManager := al.mcp.reset()
+	// A conexão MCP só cai quando a configuração DELA muda. Trocar de modelo,
+	// renomear o agente ou ligar uma tool não invalida um servidor já
+	// conectado, e reconectar todos custava os segundos que o usuário via
+	// esperando no botão.
+	mcpStart := time.Now()
+	oldMCPManager, mcpCarried := al.mcp.resetForReload(al.mcpFingerprint())
 	al.hookRuntime.reset(al)
 	configureHookManagerFromConfig(al.hooks, cfg)
 	if err := al.ensureHooksInitialized(ctx); err != nil {
@@ -500,6 +505,10 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
 	}
+	logger.InfoCF("agent", "MCP ready after reload", map[string]any{
+		"reconnected": !mcpCarried,
+		"duration_ms": time.Since(mcpStart).Milliseconds(),
+	})
 
 	// Close old provider after releasing the lock
 	// This prevents blocking readers while closing

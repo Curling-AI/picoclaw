@@ -8,6 +8,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -23,6 +26,10 @@ type mcpRuntime struct {
 	mu       sync.Mutex
 	manager  *mcp.Manager
 	initErr  error
+	// fingerprint identifies the config the current manager was loaded from,
+	// so a reload can tell "the MCP setup is the same" from "it changed" and
+	// keep the live connections in the first case.
+	fingerprint string
 	// retryCancel stops the background reconnect loop for servers that failed
 	// at load time; reset/takeManager cancel it so a stale loop never touches
 	// a closed manager or a reloaded registry.
@@ -34,6 +41,7 @@ func (r *mcpRuntime) reset() *mcp.Manager {
 	manager := r.manager
 	r.manager = nil
 	r.initErr = nil
+	r.fingerprint = ""
 	r.initOnce = sync.Once{}
 	cancel := r.retryCancel
 	r.retryCancel = nil
@@ -42,6 +50,33 @@ func (r *mcpRuntime) reset() *mcp.Manager {
 		cancel()
 	}
 	return manager
+}
+
+// resetForReload prepares the runtime for a config reload and answers whether
+// the live connections can be kept.
+//
+// Reloading used to close every MCP server and dial them all again, which is
+// what made a config change cost seconds: connecting to the servers and listing
+// their tools is network work, and a pod with a handful of connectors has
+// hundreds of tools to enumerate. Most reloads do not touch MCP at all — a
+// renamed agent, a model swap, a toggled tool — and for those the connections
+// are still valid.
+//
+// When the fingerprint matches, the manager stays and only initOnce is rearmed,
+// so tools get REGISTERED again into the rebuilt registry (that part is
+// in-memory and must happen every time) without reconnecting anything. The
+// returned manager is the one the caller must close; on a carried reload there
+// is none.
+func (r *mcpRuntime) resetForReload(fingerprint string) (old *mcp.Manager, carried bool) {
+	r.mu.Lock()
+	if fingerprint != "" && r.manager != nil && r.fingerprint == fingerprint {
+		r.initErr = nil
+		r.initOnce = sync.Once{}
+		r.mu.Unlock()
+		return nil, true
+	}
+	r.mu.Unlock()
+	return r.reset(), false
 }
 
 func (r *mcpRuntime) setRetryCancel(cancel context.CancelFunc) {
@@ -54,9 +89,10 @@ func (r *mcpRuntime) setRetryCancel(cancel context.CancelFunc) {
 	}
 }
 
-func (r *mcpRuntime) setManager(manager *mcp.Manager) {
+func (r *mcpRuntime) setManager(manager *mcp.Manager, fingerprint string) {
 	r.mu.Lock()
 	r.manager = manager
+	r.fingerprint = fingerprint
 	r.initErr = nil
 	r.mu.Unlock()
 }
@@ -77,6 +113,7 @@ func (r *mcpRuntime) takeManager() *mcp.Manager {
 	r.mu.Lock()
 	manager := r.manager
 	r.manager = nil
+	r.fingerprint = ""
 	cancel := r.retryCancel
 	r.retryCancel = nil
 	r.mu.Unlock()
@@ -96,6 +133,56 @@ func (r *mcpRuntime) getManager() *mcp.Manager {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.manager
+}
+
+// loadMCPIfNeeded dials the servers, unless the manager was carried over from
+// the previous config and is already connected.
+func loadMCPIfNeeded(
+	ctx context.Context,
+	manager *mcp.Manager,
+	cfg config.MCPConfig,
+	workspacePath string,
+	carried bool,
+) error {
+	if carried {
+		return nil
+	}
+	return manager.LoadFromMCPConfig(ctx, cfg, workspacePath)
+}
+
+// mcpWorkspacePath is the workspace MCP servers are started in.
+func (al *AgentLoop) mcpWorkspacePath() string {
+	workspacePath := al.cfg.WorkspacePath()
+	if defaultAgent := al.registry.GetDefaultAgent(); defaultAgent != nil && defaultAgent.Workspace != "" {
+		workspacePath = defaultAgent.Workspace
+	}
+	return workspacePath
+}
+
+// mcpFingerprint summarizes everything that decides WHICH servers get dialed
+// and how: the server set left after the per-agent allowlists, plus the
+// workspace they run in. Anything outside that — agent names, models, other
+// tools — can change without invalidating a live connection.
+//
+// Empty means "do not carry anything over": with MCP off there is nothing to
+// keep, and a config that cannot be marshaled is not a config we should be
+// comparing by value.
+func (al *AgentLoop) mcpFingerprint() string {
+	if !al.cfg.Tools.IsToolEnabled("mcp") {
+		return ""
+	}
+	payload, err := json.Marshal(struct {
+		MCP       config.MCPConfig `json:"mcp"`
+		Workspace string           `json:"workspace"`
+	}{
+		MCP:       filterMCPConfigServers(al.cfg.Tools.MCP, al.registry.allowedMCPServers()),
+		Workspace: al.mcpWorkspacePath(),
+	})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 // ensureMCPInitialized loads MCP servers/tools once so both Run() and direct
@@ -131,16 +218,25 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 		return nil
 	}
 
-	al.mcp.initOnce.Do(func() {
-		mcpManager := mcp.NewManager(mcp.WithRuntimeEvents(al.runtimeEvents))
+	fingerprint := al.mcpFingerprint()
 
-		defaultAgent := al.registry.GetDefaultAgent()
-		workspacePath := al.cfg.WorkspacePath()
-		if defaultAgent != nil && defaultAgent.Workspace != "" {
-			workspacePath = defaultAgent.Workspace
+	al.mcp.initOnce.Do(func() {
+		workspacePath := al.mcpWorkspacePath()
+
+		// A manager still here after a reload was CARRIED OVER by
+		// resetForReload: same servers, same workspace, connections already up.
+		// Skip the dialing and go straight to registering its tools into the
+		// rebuilt registry.
+		mcpManager := al.mcp.getManager()
+		carried := mcpManager != nil
+		if carried {
+			logger.InfoCF("agent", "Reusing live MCP connections (config unchanged)",
+				map[string]any{"server_count": len(mcpManager.GetServers())})
+		} else {
+			mcpManager = mcp.NewManager(mcp.WithRuntimeEvents(al.runtimeEvents))
 		}
 
-		if err := mcpManager.LoadFromMCPConfig(ctx, mcpCfg, workspacePath); err != nil {
+		if err := loadMCPIfNeeded(ctx, mcpManager, mcpCfg, workspacePath, carried); err != nil {
 			// A failed MCP connection (e.g. an unauthorized connector returning
 			// 401) must NOT be fatal. ensureMCPInitialized runs at the top of
 			// Run() and on every direct turn, so propagating this error would
@@ -231,7 +327,7 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 			}
 		}
 
-		al.mcp.setManager(mcpManager)
+		al.mcp.setManager(mcpManager, fingerprint)
 
 		// Servers that failed to connect (expired OAuth grant, connector down)
 		// keep retrying in the background and register their tools once they
