@@ -1827,3 +1827,68 @@ func TestStart_ClearsStaleWebhookBeforePolling(t *testing.T) {
 	require.Eventually(t, polledAfterDelete.Load, 3*time.Second, 50*time.Millisecond,
 		"expected polling to run after the webhook was cleared")
 }
+
+// Send-only mode: the client comes up so the agent can still reply, but nothing
+// polls and — the part that matters — the webhook is NOT cleared. Start() wipes
+// stale webhooks before polling, so without this guard a pod restart would
+// silently delete the webhook that inbound now depends on.
+func TestStart_NoPollDoesNotPollAndKeepsWebhook(t *testing.T) {
+	var getUpdatesCalls, webhookDeletes int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getMe"):
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"t","username":"test_bot"}}`))
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			atomic.AddInt32(&getUpdatesCalls, 1)
+			_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+		case strings.HasSuffix(r.URL.Path, "/deleteWebhook"):
+			atomic.AddInt32(&webhookDeletes, 1)
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true,"result":{}}`))
+		}
+	}))
+	defer server.Close()
+
+	ch, err := NewTelegramChannel(
+		&config.Channel{Type: config.ChannelTelegram, Enabled: true},
+		&config.TelegramSettings{
+			Token:   *config.NewSecureString(testToken),
+			BaseURL: server.URL,
+			NoPoll:  true,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, ch.Start(context.Background()))
+	t.Cleanup(func() { _ = ch.Stop(context.Background()) })
+
+	time.Sleep(200 * time.Millisecond)
+
+	assert.Zero(t, atomic.LoadInt32(&getUpdatesCalls), "send-only must not poll")
+	assert.Zero(t, atomic.LoadInt32(&webhookDeletes), "send-only must not delete the webhook inbound depends on")
+	assert.True(t, ch.IsRunning(), "the client must stay up so the agent can reply")
+}
+
+// The token check stays in send-only mode: a revoked token must surface as a
+// failed channel, not as a bot that looks connected and silently cannot reply.
+func TestStart_NoPollStillChecksToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":401,"description":"Unauthorized"}`))
+	}))
+	defer server.Close()
+
+	ch, err := NewTelegramChannel(
+		&config.Channel{Type: config.ChannelTelegram, Enabled: true},
+		&config.TelegramSettings{
+			Token:   *config.NewSecureString(testToken),
+			BaseURL: server.URL,
+			NoPoll:  true,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Error(t, ch.Start(context.Background()))
+}

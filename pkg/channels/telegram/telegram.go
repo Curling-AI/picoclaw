@@ -163,6 +163,16 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 		return fmt.Errorf("telegram: bot token check failed: %w", err)
 	}
 
+	// Send-only: the client is up (the agent can reply) but nothing polls, and
+	// crucially the webhook below is NOT cleared — inbound arrives through it.
+	if c.tgCfg != nil && c.tgCfg.NoPoll {
+		c.SetRunning(true)
+		logger.InfoCF("telegram", "Telegram bot connected (send-only, no polling)", map[string]any{
+			"username": c.bot.Username(),
+		})
+		return nil
+	}
+
 	// Long polling and webhooks are mutually exclusive: a webhook left over
 	// from a previous integration of the same bot makes every getUpdates call
 	// return 409 Conflict, forever (observed in prod: 20k+ errors in 48h).

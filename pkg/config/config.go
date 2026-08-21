@@ -619,6 +619,14 @@ type TelegramSettings struct {
 	Streaming         StreamingConfig `json:"streaming,omitzero"   yaml:"-"`
 	UseMarkdownV2     bool            `json:"use_markdown_v2"      yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
 	MediaGroupDelayMS int             `json:"media_group_delay_ms" yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MEDIA_GROUP_DELAY_MS"`
+	// NoPoll starts the channel send-only: the bot client stays up so the agent
+	// can reply, but getUpdates never runs. It exists so inbound can move to a
+	// webhook received elsewhere while the pod sleeps.
+	//
+	// Env-only, deliberately: config.json rejects unknown fields and the pod
+	// CrashLoops on them, so a config field would break every Telegram pod
+	// running an older image. An env var an old binary simply ignores.
+	NoPoll bool `json:"-" yaml:"-" env:"PICOCLAW_CHANNELS_TELEGRAM_NO_POLL"`
 }
 
 type FeishuSettings struct {
