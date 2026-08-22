@@ -1347,11 +1347,19 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 		}
 
-		// Heredoc bodies are stdin DATA, not filesystem references — writing
-		// HTML/CSS via `cat > file << 'EOF'` would otherwise trip the scanner
-		// on content like `/*`, `</style>` or `/>`. Redirect targets and argv
-		// stay in the scanned text. (seucaranguejo fork)
-		scanCmd := stripHeredocBodies(cmd)
+		// Heredoc bodies and quoted string literals are DATA, not filesystem
+		// references. `cat > f << 'EOF'` trips the scanner on `/*` or `</style>`;
+		// `python3 -c "cx = w // 2"` trips it on `//`, which reads as an absolute
+		// path and resolves to `/` — outside any workspace. Integer division is
+		// how you centre an image, so this blocked most Pillow work; `node -e`
+		// with a `//` comment died the same way.
+		//
+		// Same reasoning the deny scan above already uses: inline interpreter
+		// code is equivalent to writing a script file and running it, which the
+		// guard always allowed — and that detour is exactly what agents were
+		// doing to get around this. A path passed as a real argument stays
+		// unquoted (`python3 /etc/x.py`) and is still caught. (seucaranguejo fork)
+		scanCmd := stripQuotedBodies(stripHeredocBodies(cmd))
 
 		matchIndices := absolutePathPattern.FindAllStringIndex(scanCmd, -1)
 

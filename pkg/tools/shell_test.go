@@ -2120,3 +2120,45 @@ func TestShellTool_NoActionNoCommandStillErrors(t *testing.T) {
 		t.Error("expected error when neither action nor command is given")
 	}
 }
+
+// TestShellTool_InlineCodeNotScannedAsPaths: código passado a um interpretador
+// entre aspas é DADO, não referência de arquivo. O caso que motivou: `w // 2` —
+// divisão inteira, como se centraliza uma imagem — era lido como caminho
+// absoluto `//`, que resolve para `/` e cai fora de qualquer workspace. Isso
+// derrubava quase todo script de Pillow, e `node -e` com comentário `//` morria
+// igual. (seucaranguejo fork)
+func TestShellTool_InlineCodeNotScannedAsPaths(t *testing.T) {
+	workspace := t.TempDir()
+	tool, err := NewExecTool(workspace, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	allowed := []string{
+		`python3 -c "cx = w // 2"`,
+		`python3 -c "img = Image.open('uploads/f.png'); cx, cy = w // 2, h // 2"`,
+		`node -e "// centre it
+const c = w / 2"`,
+		`python3 -c "print('a//b')"`,
+	}
+	for _, cmd := range allowed {
+		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
+			t.Errorf("inline code should not be scanned as paths: %q\n  error: %s", cmd, result.ForLLM)
+		}
+	}
+
+	// O que continua barrado: caminho passado como ARGUMENTO de verdade fica
+	// fora das aspas, e é isso que o guard existe para pegar.
+	blocked := []string{
+		`python3 /root/secrets.py`,
+		`cat /root/.ssh/id_rsa`,
+		`cp ../../outside.txt .`,
+	}
+	for _, cmd := range blocked {
+		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if !result.IsError {
+			t.Errorf("path outside the workspace should stay blocked: %q\n  got: %s", cmd, result.ForLLM)
+		}
+	}
+}
