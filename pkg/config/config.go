@@ -610,6 +610,24 @@ type WhatsAppSettings struct {
 	BridgeURL        string `json:"bridge_url"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
 	UseNative        bool   `json:"use_native"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
 	SessionStorePath string `json:"session_store_path" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
+
+	// Cloud API, send-only: the pod replies over Meta's Graph API and receives
+	// nothing, because inbound arrives at a webhook elsewhere. It is the
+	// WhatsApp twin of the Telegram no_poll mode, and it exists for the same
+	// reason — a channel that holds a connection keeps the pod awake forever.
+	//
+	// With these two set the bridge is not used at all; BridgeURL stays for the
+	// deployments that still run one.
+	AccessToken   SecureString `json:"access_token,omitzero" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_ACCESS_TOKEN"`
+	PhoneNumberID string       `json:"phone_number_id"       yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_PHONE_NUMBER_ID"`
+	GraphBaseURL  string       `json:"graph_base_url"        yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GRAPH_BASE_URL"`
+}
+
+// CloudAPIReady reports whether the channel can talk to the Cloud API. Both
+// fields are required: a token without the phone number id has nothing to send
+// to, and the id without a token cannot authenticate.
+func (w WhatsAppSettings) CloudAPIReady() bool {
+	return w.AccessToken.String() != "" && w.PhoneNumberID != ""
 }
 
 type TelegramSettings struct {
