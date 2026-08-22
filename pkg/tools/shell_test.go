@@ -2162,3 +2162,138 @@ const c = w / 2"`,
 		}
 	}
 }
+
+// TestShellTool_TildeIsExpandedNotTreatedAsRoot: `~/x` era lido como `/x` — um
+// caminho na RAIZ — então `ls ~/.config` reprovava sempre. Expandir para o HOME
+// faz o guard julgar o caminho que o shell usaria. (seucaranguejo fork)
+func TestShellTool_TildeIsExpandedNotTreatedAsRoot(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("sem HOME neste ambiente")
+	}
+	workspace := filepath.Join(home, "ws-tilde-test")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Skipf("não deu para criar workspace sob o HOME: %v", err)
+	}
+	defer os.RemoveAll(workspace)
+
+	tool, err := NewExecTool(workspace, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	// Dentro do workspace, escrito com til: tem que passar.
+	if got := tool.guardCommand("cat ~/ws-tilde-test/a.txt", workspace); got != "" {
+		t.Errorf("caminho do workspace escrito com ~ foi bloqueado: %s", got)
+	}
+	// Fora do workspace continua sendo julgado como fora — pelo motivo CERTO.
+	if got := tool.guardCommand("cat ~/.ssh/id_rsa", workspace); got == "" {
+		t.Error("~/.ssh fora do workspace devia continuar bloqueado")
+	}
+}
+
+// TestShellTool_BareDoubleSlashIsNotAPath: `//` fora de aspas é operador
+// (divisão inteira, comentário), não caminho — como caminho ele limpa para a
+// raiz e reprova qualquer workspace. (seucaranguejo fork)
+func TestShellTool_BareDoubleSlashIsNotAPath(t *testing.T) {
+	workspace := t.TempDir()
+	tool := &ExecTool{restrictToWorkspace: true}
+
+	for _, cmd := range []string{
+		`echo ok  # divide // por dois`,
+		`awk '{print $1}' file  # usa // como separador`,
+	} {
+		if got := tool.guardCommand(cmd, workspace); got != "" {
+			t.Errorf("`//` solto não é caminho: %q\n  got: %s", cmd, got)
+		}
+	}
+}
+
+// TestShellTool_BulkDeleteOfPersistedDirsBlocked: no seucaranguejo o workspace
+// é EFS — sessions/ é o histórico da conversa e artifacts/ são os entregáveis.
+// Apagar em massa é perda permanente, não um pod descartável.
+func TestShellTool_BulkDeleteOfPersistedDirsBlocked(t *testing.T) {
+	workspace := t.TempDir()
+	tool, err := NewExecTool(workspace, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	blocked := []string{
+		"rm -rf sessions/",
+		"rm -rf ./memory",
+		"rm -fr artifacts",
+		"rm -rf " + workspace + "/artifacts",
+		"find sessions -delete",
+		"find memory/ -name '*.md' -exec rm {} ;",
+		"rm -rf /",
+	}
+	for _, cmd := range blocked {
+		if got := tool.guardCommand(cmd, workspace); got == "" {
+			t.Errorf("destruição do que persiste devia ser bloqueada: %q", cmd)
+		}
+	}
+
+	// O trabalho normal não pode virar refém da regra.
+	allowed := []string{
+		"rm artifacts/rascunho.png",
+		"rm -f artifacts/velho.pdf",
+		"rm -rf tmp/build",
+		"rm -rf node_modules",
+		"find artifacts -name '*.png' | head",
+		"ls -la sessions/",
+	}
+	for _, cmd := range allowed {
+		if got := tool.guardCommand(cmd, workspace); got != "" {
+			t.Errorf("trabalho normal foi bloqueado: %q\n  got: %s", cmd, got)
+		}
+	}
+}
+
+// TestShellTool_DeletingWholeWorkspaceBlocked: apagar a RAIZ do workspace é o
+// pior caso — no seucaranguejo ela é EFS e guarda histórico, memória e
+// entregáveis. `rm -rf .` e `rm -rf *` só são catastróficos por causa de onde
+// rodam, então a checagem precisa do cwd resolvido, não de regex estático.
+func TestShellTool_DeletingWholeWorkspaceBlocked(t *testing.T) {
+	// EvalSymlinks no temp dir: no macOS ele é /var/... -> /private/var/..., e o
+	// scanner resolve symlink no CAMINHO mas não no cwd, e reprova qualquer
+	// caminho absoluto. É o mesmo motivo de 3 testes desta suíte falharem só no
+	// macOS; aqui não queremos medir isso.
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewExecTool(workspace, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	blocked := []string{
+		"rm -rf .",
+		"rm -rf ./",
+		"rm -rf *",
+		"rm -rf " + workspace,
+		"rm -fr " + workspace,
+		"rm -r -f " + workspace,
+	}
+	for _, cmd := range blocked {
+		if got := tool.guardCommand(cmd, workspace); got == "" {
+			t.Errorf("apagar o workspace inteiro devia ser bloqueado: %q", cmd)
+		}
+	}
+
+	// Subdiretório efêmero e arquivo solto continuam livres.
+	allowed := []string{
+		"rm -rf sub",
+		"rm -rf " + filepath.Join(workspace, "sub"),
+		"rm -rf tmp/cache",
+	}
+	for _, cmd := range allowed {
+		if got := tool.guardCommand(cmd, workspace); got != "" {
+			t.Errorf("apagar subdiretório não devia ser bloqueado: %q\n  got: %s", cmd, got)
+		}
+	}
+}
