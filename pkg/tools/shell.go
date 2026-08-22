@@ -83,7 +83,7 @@ var (
 		// sessions/ (histórico da conversa), memory/ e artifacts/ (entregáveis)
 		// — apagar isso é perda permanente do dado do usuário, não de um pod
 		// descartável. O segundo continua valendo, e por isso a regra é
-		// estreita: pega o ACIDENTE (o comando escrito por engano), não um
+		// estreita: pega o ACIDENTE (a linha escrita por engano), não um
 		// agente decidido, que escaparia com base64 ou sub-shell de qualquer
 		// jeito. A rede de proteção de verdade é backup do EFS.
 		// (seucaranguejo fork)
@@ -1295,7 +1295,7 @@ func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
 var recursiveRmRE = regexp.MustCompile(
 	`\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(?:-[a-zA-Z]+\s+)*([^\s;|&]+)`)
 
-// deletesWorkspaceRoot diz se o comando apaga o workspace INTEIRO.
+// deletesWorkspaceRoot diz se a linha apaga o workspace INTEIRO.
 //
 // Não dá para fazer isso com regex estático: `rm -rf .` e `rm -rf *` só são
 // catastróficos por causa de ONDE rodam. Aqui o cwd é conhecido, então o alvo é
@@ -1461,7 +1461,7 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 		// references. `cat > f << 'EOF'` trips the scanner on `/*` or `</style>`;
 		// `python3 -c "cx = w // 2"` trips it on `//`, which reads as an absolute
 		// path and resolves to `/` — outside any workspace. Integer division is
-		// how you centre an image, so this blocked most Pillow work; `node -e`
+		// how you center an image, so this blocked most Pillow work; `node -e`
 		// with a `//` comment died the same way.
 		//
 		// Same reasoning the deny scan above already uses: inline interpreter

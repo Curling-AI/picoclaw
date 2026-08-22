@@ -2137,7 +2137,7 @@ func TestShellTool_InlineCodeNotScannedAsPaths(t *testing.T) {
 	allowed := []string{
 		`python3 -c "cx = w // 2"`,
 		`python3 -c "img = Image.open('uploads/f.png'); cx, cy = w // 2, h // 2"`,
-		`node -e "// centre it
+		`node -e "// center it
 const c = w / 2"`,
 		`python3 -c "print('a//b')"`,
 	}
@@ -2172,8 +2172,8 @@ func TestShellTool_TildeIsExpandedNotTreatedAsRoot(t *testing.T) {
 		t.Skip("sem HOME neste ambiente")
 	}
 	workspace := filepath.Join(home, "ws-tilde-test")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Skipf("não deu para criar workspace sob o HOME: %v", err)
+	if mkErr := os.MkdirAll(workspace, 0o755); mkErr != nil {
+		t.Skipf("não deu para criar workspace sob o HOME: %v", mkErr)
 	}
 	defer os.RemoveAll(workspace)
 
@@ -2263,8 +2263,8 @@ func TestShellTool_DeletingWholeWorkspaceBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(workspace, "sub"), 0o755); err != nil {
-		t.Fatal(err)
+	if mkErr := os.MkdirAll(filepath.Join(workspace, "sub"), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
 	}
 	tool, err := NewExecTool(workspace, true)
 	if err != nil {
