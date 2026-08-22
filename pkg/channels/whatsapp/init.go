@@ -19,6 +19,11 @@ func init() {
 			if !ok {
 				return nil, channels.ErrSendFailed
 			}
+			// Cloud API vence quando há credencial: é o caminho que não segura
+			// conexão. A bridge fica para quem ainda roda uma.
+			if c.CloudAPIReady() {
+				return NewCloudChannel(bc, c, b)
+			}
 			return NewWhatsAppChannel(bc, c, b)
 		},
 	)

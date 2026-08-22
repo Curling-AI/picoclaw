@@ -1064,7 +1064,10 @@ func (m *Manager) getChannelConfigAndEnabled(channelName string) (*config.Channe
 	switch settings := decoded.(type) {
 	case *config.WhatsAppSettings:
 		if channelType == config.ChannelWhatsApp {
-			return bc, settings.BridgeURL != ""
+			// Cloud API OU bridge. Exigir só a bridge descartava em silêncio
+			// todo canal configurado com credencial da Cloud API — que é o que
+			// o formulário do Ethos coleta.
+			return bc, settings.CloudAPIReady() || settings.BridgeURL != ""
 		}
 		return bc, channelType == config.ChannelWhatsAppNative && settings.UseNative
 	case *config.MatrixSettings:
