@@ -77,6 +77,31 @@ var (
 		),
 		// Power-state changes.
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
+		// Apagar a RAIZ. O upstream tirou `rm -rf` da lista de propósito — o
+		// argumento é que o pod é efêmero e o regex é contornável. O primeiro
+		// deixou de valer no seucaranguejo: o workspace é EFS e guarda
+		// sessions/ (histórico da conversa), memory/ e artifacts/ (entregáveis)
+		// — apagar isso é perda permanente do dado do usuário, não de um pod
+		// descartável. O segundo continua valendo, e por isso a regra é
+		// estreita: pega o ACIDENTE (a linha escrita por engano), não um
+		// agente decidido, que escaparia com base64 ou sub-shell de qualquer
+		// jeito. A rede de proteção de verdade é backup do EFS.
+		// (seucaranguejo fork)
+		regexp.MustCompile(`\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z]+\s+)*/\s*$`),
+	}
+
+	// persistedDirDenyPatterns barram destruição em massa dos diretórios que
+	// SOBREVIVEM ao pod. Ficam separados porque só fazem sentido quando o
+	// workspace é persistido — ver defaultDenyPatterns. (seucaranguejo fork)
+	persistedDirDenyPatterns = []*regexp.Regexp{
+		// `rm -rf sessions`, `rm -rf ./memory/`, `rm -rf <ws>/artifacts` …
+		regexp.MustCompile(
+			`\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(-[a-zA-Z]+\s+)*` +
+				`\S*(^|/|\s|\./)?(sessions|memory|artifacts|loops|state|cron|uploads|scripts)/?(\s|$)`),
+		// `find sessions -delete`, `find memory/ -exec rm …`
+		regexp.MustCompile(
+			`\bfind\b[^|;&]*\b(sessions|memory|artifacts|loops|state|cron|uploads|scripts)\b` +
+				`[^|;&]*(-delete\b|-exec\s+rm\b)`),
 	}
 
 	// windowsDenyPatterns contains PowerShell-specific deny patterns that only
@@ -1265,6 +1290,73 @@ func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
 	return false
 }
 
+// recursiveRmRE casa `rm` recursivo e captura o ALVO. As flags podem vir em
+// qualquer ordem e agrupadas (`-rf`, `-fr`, `-r -f`). (seucaranguejo fork)
+var recursiveRmRE = regexp.MustCompile(
+	`\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(?:-[a-zA-Z]+\s+)*([^\s;|&]+)`)
+
+// deletesWorkspaceRoot diz se a linha apaga o workspace INTEIRO.
+//
+// Não dá para fazer isso com regex estático: `rm -rf .` e `rm -rf *` só são
+// catastróficos por causa de ONDE rodam. Aqui o cwd é conhecido, então o alvo é
+// resolvido e comparado com a raiz — que no seucaranguejo é EFS e guarda o
+// histórico e os entregáveis do usuário. (seucaranguejo fork)
+func deletesWorkspaceRoot(cmd, cwdPath string) bool {
+	for _, m := range recursiveRmRE.FindAllStringSubmatch(cmd, -1) {
+		alvo := strings.Trim(m[1], `"'`)
+		if alvo == "*" || alvo == "." || alvo == "./" || alvo == ".." {
+			return true
+		}
+		abs, err := commandPathAbs(alvo, cwdPath)
+		if err != nil {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = resolved
+		}
+		raiz := cwdPath
+		if r, err := filepath.EvalSymlinks(raiz); err == nil {
+			raiz = r
+		}
+		// O próprio workspace, ou qualquer ancestral dele.
+		if abs == raiz {
+			return true
+		}
+		if rel, err := filepath.Rel(abs, raiz); err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	return false
+}
+
+// expandTilde troca `~/` pelo HOME antes da varredura de caminho.
+//
+// Sem isso o scanner casa o `/…` DEPOIS do til e julga `~/.config` como
+// `/.config`, um caminho na RAIZ do filesystem, que reprova sempre. O efeito
+// era duplo: barrava `ls ~/.config` (legítimo) e "acertava" em
+// `rm -rf ~/.assistant/workspace` pelo motivo errado. Expandir faz o guard
+// julgar o caminho que o shell realmente usaria. (seucaranguejo fork)
+func expandTilde(cmd string) string {
+	if !strings.Contains(cmd, "~/") {
+		return cmd
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return cmd
+	}
+	var b strings.Builder
+	for i := 0; i < len(cmd); i++ {
+		// Só `~/` que ABRE token: `foo~/bar` não é expansão de shell.
+		if cmd[i] == '~' && i+1 < len(cmd) && cmd[i+1] == '/' &&
+			(i == 0 || isShellTokenBoundary(cmd[i-1])) {
+			b.WriteString(home)
+			continue
+		}
+		b.WriteByte(cmd[i])
+	}
+	return b.String()
+}
+
 func (t *ExecTool) guardCommand(command, cwd string) string {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
@@ -1288,6 +1380,18 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 		}
 	}
 
+	// Destruição em massa do que sobrevive ao pod. Mensagem própria: "dangerous
+	// pattern" não diz ao agente o que fazer, e aqui existe alternativa boa
+	// (apagar arquivo a arquivo, ou mover para tmp/). (seucaranguejo fork)
+	for _, pattern := range persistedDirDenyPatterns {
+		if pattern.MatchString(denyScan) {
+			return "Command blocked by safety guard (bulk delete of a persisted " +
+				"workspace directory: sessions/, memory/, artifacts/, loops/, state/, " +
+				"cron/, uploads/ and scripts/ survive restarts and are the user's data. " +
+				"Delete specific files instead, or move them to tmp/.)"
+		}
+	}
+
 	// Deployment-configured deny patterns scan the FULL command (quoted bodies
 	// included): some intentionally target quoted content — e.g. the jq
 	// `$ENV.SECRET` secret-exfiltration guard (#3079) — so they must not be
@@ -1305,6 +1409,12 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	}
 
 	if t.restrictToWorkspace {
+		if abs, err := filepath.Abs(cwd); err == nil && deletesWorkspaceRoot(cmd, abs) {
+			return "Command blocked by safety guard (this deletes the whole workspace, " +
+				"which persists across restarts and holds the user's history, memory and " +
+				"deliverables. Delete specific files or subdirectories instead.)"
+		}
+
 		// Block path traversal patterns including .../.../ variants
 		if regexp.MustCompile(`\.\.(?:[\\/]\.\.)*[\\/]`).MatchString(cmd) {
 			return "Command blocked by safety guard (path traversal detected)"
@@ -1347,11 +1457,19 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 		}
 
-		// Heredoc bodies are stdin DATA, not filesystem references — writing
-		// HTML/CSS via `cat > file << 'EOF'` would otherwise trip the scanner
-		// on content like `/*`, `</style>` or `/>`. Redirect targets and argv
-		// stay in the scanned text. (seucaranguejo fork)
-		scanCmd := stripHeredocBodies(cmd)
+		// Heredoc bodies and quoted string literals are DATA, not filesystem
+		// references. `cat > f << 'EOF'` trips the scanner on `/*` or `</style>`;
+		// `python3 -c "cx = w // 2"` trips it on `//`, which reads as an absolute
+		// path and resolves to `/` — outside any workspace. Integer division is
+		// how you center an image, so this blocked most Pillow work; `node -e`
+		// with a `//` comment died the same way.
+		//
+		// Same reasoning the deny scan above already uses: inline interpreter
+		// code is equivalent to writing a script file and running it, which the
+		// guard always allowed — and that detour is exactly what agents were
+		// doing to get around this. A path passed as a real argument stays
+		// unquoted (`python3 /etc/x.py`) and is still caught. (seucaranguejo fork)
+		scanCmd := expandTilde(stripQuotedBodies(stripHeredocBodies(cmd)))
 
 		matchIndices := absolutePathPattern.FindAllStringIndex(scanCmd, -1)
 
@@ -1363,7 +1481,10 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			// `</style>`) — HTML/JS written inline (python -c, node -e) hits
 			// these constantly. Real absolute paths never start this way.
 			// (seucaranguejo fork)
-			if strings.HasPrefix(raw, "/*") || raw == "/>" || raw == "/" {
+			// `//` solto é operador, não caminho: divisão inteira em Python
+			// e comentário em JS/shell fora de aspas. Como caminho ele limpa
+			// para `/` — a raiz — e reprova qualquer workspace.
+			if strings.HasPrefix(raw, "/*") || raw == "/>" || raw == "/" || raw == "//" {
 				continue
 			}
 			if loc[0] > 0 && scanCmd[loc[0]-1] == '<' {
