@@ -136,12 +136,41 @@ func TestNewSlackChannel(t *testing.T) {
 		}
 	})
 
-	t.Run("missing app token", func(t *testing.T) {
+	// O app_token é o token de app-level do Socket Mode, e nada mais. Sem ele o
+	// canal não é inválido: é SÓ-SAÍDA — responde pela Web API e não abre
+	// socket, que é o que deixa o pod dormir.
+	//
+	// Este teste afirmava o contrário e recusava a configuração. Era a única
+	// coisa que impedia o modo, porque o portão do manager já pede só o
+	// bot_token.
+	t.Run("sem app token, o canal é so-saida", func(t *testing.T) {
 		cfg := &config.SlackSettings{}
 		cfg.BotToken = *config.NewSecureString("xoxb-test")
-		_, err := NewSlackChannel(bc, cfg, msgBus)
-		if err == nil {
-			t.Error("expected error for missing app_token, got nil")
+		ch, err := NewSlackChannel(bc, cfg, msgBus)
+		if err != nil {
+			t.Fatalf("sem app_token devia ser aceito: %v", err)
+		}
+		if !ch.sendOnly() {
+			t.Error("sem app_token o canal tem de ser so-saida")
+		}
+		if ch.socketClient != nil {
+			t.Error("so-saida nao pode ter cliente de socket")
+		}
+	})
+
+	t.Run("com app token, abre socket", func(t *testing.T) {
+		cfg := &config.SlackSettings{}
+		cfg.BotToken = *config.NewSecureString("xoxb-test")
+		cfg.AppToken = *config.NewSecureString("xapp-test")
+		ch, err := NewSlackChannel(bc, cfg, msgBus)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ch.sendOnly() {
+			t.Error("com app_token o canal tem de manter o Socket Mode")
+		}
+		if ch.socketClient == nil {
+			t.Error("faltou o cliente de socket")
 		}
 	})
 
