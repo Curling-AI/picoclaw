@@ -43,16 +43,31 @@ func NewSlackChannel(
 	cfg *config.SlackSettings,
 	messageBus *bus.MessageBus,
 ) (*SlackChannel, error) {
-	if cfg.BotToken.String() == "" || cfg.AppToken.String() == "" {
-		return nil, fmt.Errorf("slack bot_token and app_token are required")
+	if cfg.BotToken.String() == "" {
+		return nil, fmt.Errorf("slack bot_token is required")
 	}
 
-	api := slack.New(
-		cfg.BotToken.String(),
-		slack.OptionAppLevelToken(cfg.AppToken.String()),
-	)
+	// Sem app_token o canal é SÓ-SAÍDA: fala pela Web API e não abre socket.
+	//
+	// É o análogo do no_poll do Telegram, e existe pela mesma razão — um canal
+	// que segura conexão mantém o pod acordado para sempre. Quando a entrada
+	// chega pela Events API, quem recebe é o control plane, que acorda o pod
+	// antes de entregar.
+	//
+	// Tudo que responde (Send, SendMedia, reações) é Web API e continua igual;
+	// só o laço de eventos depende do socket.
+	sendOnly := cfg.AppToken.String() == ""
 
-	socketClient := socketmode.New(api)
+	opts := []slack.Option{}
+	if !sendOnly {
+		opts = append(opts, slack.OptionAppLevelToken(cfg.AppToken.String()))
+	}
+	api := slack.New(cfg.BotToken.String(), opts...)
+
+	var socketClient *socketmode.Client
+	if !sendOnly {
+		socketClient = socketmode.New(api)
+	}
 
 	base := channels.NewBaseChannel("slack", cfg, messageBus, bc.AllowFrom,
 		channels.WithMaxMessageLength(40000),
@@ -81,10 +96,10 @@ func NewSlackChannel(
 }
 
 func (c *SlackChannel) Start(ctx context.Context) error {
-	logger.InfoC("slack", "Starting Slack channel (Socket Mode)")
-
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
+	// AuthTest também nos dá o bot_user_id, que o stripBotMention precisa para
+	// tirar a menção do texto — não é só uma checagem de credencial.
 	authResp, err := c.api.AuthTest()
 	if err != nil {
 		return fmt.Errorf("slack auth test failed: %w", err)
@@ -92,10 +107,20 @@ func (c *SlackChannel) Start(ctx context.Context) error {
 	c.botUserID = authResp.UserID
 	c.teamID = authResp.TeamID
 
+	modo := "Socket Mode"
+	if c.sendOnly() {
+		modo = "send-only"
+	}
 	logger.InfoCF("slack", "Slack bot connected", map[string]any{
 		"bot_user_id": c.botUserID,
 		"team":        authResp.Team,
+		"mode":        modo,
 	})
+
+	if c.sendOnly() {
+		c.SetRunning(true)
+		return nil
+	}
 
 	go c.eventLoop()
 
@@ -113,6 +138,11 @@ func (c *SlackChannel) Start(ctx context.Context) error {
 	logger.InfoC("slack", "Slack channel started (Socket Mode)")
 	return nil
 }
+
+// sendOnly reporta se o canal responde sem abrir socket. A ausência do
+// app_token é o sinal: ele é o token de app-level do Socket Mode e não serve
+// para mais nada.
+func (c *SlackChannel) sendOnly() bool { return c.socketClient == nil }
 
 func (c *SlackChannel) Stop(ctx context.Context) error {
 	logger.InfoC("slack", "Stopping Slack channel")
