@@ -1934,7 +1934,6 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 	list := toChannelHashes(cfg)
 	added, removed := compareChannels(m.channelHashes, list)
 
-	deferFuncs := make([]func(), 0, len(removed)+len(added))
 	for _, name := range removed {
 		// Stop all channels
 		channel := m.channels[name]
@@ -1947,9 +1946,7 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 				"error":   err.Error(),
 			})
 		}
-		deferFuncs = append(deferFuncs, func() {
-			m.UnregisterChannel(name)
-		})
+		m.unregisterChannelLocked(name)
 	}
 	dispatchCtx, cancel := context.WithCancel(ctx)
 	m.dispatchTask = &asyncTask{cancel: cancel}
@@ -2004,33 +2001,22 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 			runtimeevents.SeverityInfo,
 			ChannelLifecyclePayload{Type: channelType},
 		)
-		deferFuncs = append(deferFuncs, func() {
-			m.RegisterChannel(name, channel)
-		})
+		m.registerChannelLocked(name, channel)
 	}
 
 	// Commit hashes only on full success.
 	m.channelHashes = list
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorCF("channels", "channel registration goroutine panic recovered",
-					map[string]any{
-						"panic": fmt.Sprintf("%v", r),
-						"stack": string(debug.Stack()),
-					})
-			}
-		}()
-		for _, f := range deferFuncs {
-			f()
-		}
-	}()
 	return nil
 }
 
 func (m *Manager) RegisterChannel(name string, channel Channel) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.registerChannelLocked(name, channel)
+}
+
+// registerChannelLocked é o RegisterChannel para quem JÁ segura m.mu.
+func (m *Manager) registerChannelLocked(name string, channel Channel) {
 	m.channels[name] = channel
 	if m.mux != nil {
 		m.registerChannelHTTPHandler(name, channel)
@@ -2040,6 +2026,15 @@ func (m *Manager) RegisterChannel(name string, channel Channel) {
 func (m *Manager) UnregisterChannel(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.unregisterChannelLocked(name)
+}
+
+// unregisterChannelLocked é o UnregisterChannel para quem JÁ segura m.mu.
+//
+// Drenar o worker aqui dentro é seguro: o caminho de envio (runWorker,
+// sendWithRetry, preSend) não toca em m.mu, então o `<-w.done` não pode
+// esperar por quem espera o lock.
+func (m *Manager) unregisterChannelLocked(name string) {
 	if ch, ok := m.channels[name]; ok && m.mux != nil {
 		m.unregisterChannelHTTPHandler(name, ch)
 	}
