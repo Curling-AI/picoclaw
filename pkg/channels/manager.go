@@ -2015,7 +2015,7 @@ func (m *Manager) RegisterChannel(name string, channel Channel) {
 	m.registerChannelLocked(name, channel)
 }
 
-// registerChannelLocked é o RegisterChannel para quem JÁ segura m.mu.
+// registerChannelLocked is RegisterChannel for callers that ALREADY hold m.mu.
 func (m *Manager) registerChannelLocked(name string, channel Channel) {
 	m.channels[name] = channel
 	if m.mux != nil {
@@ -2029,11 +2029,12 @@ func (m *Manager) UnregisterChannel(name string) {
 	m.unregisterChannelLocked(name)
 }
 
-// unregisterChannelLocked é o UnregisterChannel para quem JÁ segura m.mu.
+// unregisterChannelLocked is UnregisterChannel for callers that ALREADY hold
+// m.mu.
 //
-// Drenar o worker aqui dentro é seguro: o caminho de envio (runWorker,
-// sendWithRetry, preSend) não toca em m.mu, então o `<-w.done` não pode
-// esperar por quem espera o lock.
+// Draining the worker in here is safe: the send path (runWorker, sendWithRetry,
+// preSend) never touches m.mu, so the `<-w.done` cannot end up waiting on
+// someone who is waiting for the lock.
 func (m *Manager) unregisterChannelLocked(name string) {
 	if ch, ok := m.channels[name]; ok && m.mux != nil {
 		m.unregisterChannelHTTPHandler(name, ch)

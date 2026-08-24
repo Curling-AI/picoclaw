@@ -8,25 +8,26 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
-// Reload precisa PARAR o canal que saiu do config, não só esquecê-lo.
+// Reload must STOP the channel that left the config, not merely forget it.
 //
-// O caso que motivou o teste é a migração do Slack de Socket Mode para webhook:
-// o canal muda de forma, o hash muda, e o antigo tem de largar o websocket. Se
-// ele continuar de pé, o pod segue segurando a conexão que a migração existe
-// para eliminar — e sem barulho nenhum, porque o canal novo também funciona.
+// The case that motivated this test is the Slack migration from Socket Mode to
+// webhook: the channel changes shape, its hash changes, and the old one has to
+// drop the websocket. If it stays up, the pod keeps holding the very connection
+// the migration exists to remove — and it does so quietly, because the new
+// channel works too.
 //
-// Reload tinha os helpers cobertos (toChannelHashes, compareChannels) mas o
-// caminho added/removed não, e o control plane passou a depender dele.
-func TestReloadParaOCanalQueSaiuDoConfig(t *testing.T) {
-	antigo := config.DefaultConfig()
-	antigo.Channels["slack"] = &config.Channel{
+// Reload had its helpers covered (toChannelHashes, compareChannels) but not the
+// added/removed path, and the control plane now depends on it.
+func TestReloadStopsChannelDroppedFromConfig(t *testing.T) {
+	old := config.DefaultConfig()
+	old.Channels["slack"] = &config.Channel{
 		Enabled:  true,
 		Settings: config.RawNode(`{"app_token":"xapp-socket"}`),
 	}
 
-	parado := false
+	stopped := false
 	ch := &mockChannel{stopFn: func(context.Context) error {
-		parado = true
+		stopped = true
 		return nil
 	}}
 
@@ -34,38 +35,38 @@ func TestReloadParaOCanalQueSaiuDoConfig(t *testing.T) {
 		channels:      map[string]Channel{"slack": ch},
 		workers:       make(map[string]*channelWorker),
 		bus:           bus.NewMessageBus(),
-		config:        antigo,
-		channelHashes: toChannelHashes(antigo),
+		config:        old,
+		channelHashes: toChannelHashes(old),
 	}
 
-	// Config novo sem o canal: é o que o removed deve pegar.
-	novo := config.DefaultConfig()
-	if err := m.Reload(context.Background(), novo); err != nil {
+	// New config without the channel: this is what `removed` must catch.
+	if err := m.Reload(context.Background(), config.DefaultConfig()); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 
-	if !parado {
-		t.Error("o canal removido não recebeu Stop — o websocket antigo continua de pé")
+	if !stopped {
+		t.Error("the removed channel never got Stop — the old websocket is still up")
 	}
-	if _, ainda := m.channels["slack"]; ainda {
-		t.Error("o canal removido continua registrado no manager")
+	if _, still := m.channels["slack"]; still {
+		t.Error("the removed channel is still registered in the manager")
 	}
 }
 
-// Canal que NÃO mudou não pode ser reiniciado.
+// A channel that did NOT change must not be restarted.
 //
-// É o que separa "reconciliar" de "reiniciar tudo": derrubar um canal intacto
-// numa mudança que não é dele custa uma janela de indisponibilidade sem motivo.
-func TestReloadNaoTocaCanalIntacto(t *testing.T) {
+// This is what separates "reconcile" from "restart everything": tearing down an
+// untouched channel over a change that is not its own costs a window of
+// unavailability for nothing.
+func TestReloadLeavesUnchangedChannelAlone(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Channels["slack"] = &config.Channel{
 		Enabled:  true,
-		Settings: config.RawNode(`{"bot_token":"xoxb-igual"}`),
+		Settings: config.RawNode(`{"bot_token":"xoxb-same"}`),
 	}
 
-	parado := false
+	stopped := false
 	ch := &mockChannel{stopFn: func(context.Context) error {
-		parado = true
+		stopped = true
 		return nil
 	}}
 
@@ -77,27 +78,27 @@ func TestReloadNaoTocaCanalIntacto(t *testing.T) {
 		channelHashes: toChannelHashes(cfg),
 	}
 
-	// Mesmo canal, config recarregado: o hash não muda.
-	igual := config.DefaultConfig()
-	igual.Channels["slack"] = &config.Channel{
+	// Same channel, config reloaded: the hash does not move.
+	same := config.DefaultConfig()
+	same.Channels["slack"] = &config.Channel{
 		Enabled:  true,
-		Settings: config.RawNode(`{"bot_token":"xoxb-igual"}`),
+		Settings: config.RawNode(`{"bot_token":"xoxb-same"}`),
 	}
-	if err := m.Reload(context.Background(), igual); err != nil {
+	if err := m.Reload(context.Background(), same); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 
-	if parado {
-		t.Error("canal intacto foi parado — Reload está derrubando o que não mudou")
+	if stopped {
+		t.Error("an unchanged channel was stopped — Reload is tearing down what did not change")
 	}
 	if _, ok := m.channels["slack"]; !ok {
-		t.Error("canal intacto sumiu do manager")
+		t.Error("the unchanged channel disappeared from the manager")
 	}
 }
 
-// O canal `grpc` é registrado pelo main, fora do config, e não pode sumir num
-// reload: é por ele que a conversa da web recebe resposta.
-func TestReloadPreservaCanalForaDoConfig(t *testing.T) {
+// The `grpc` channel is registered by main, outside the config, and must not
+// vanish on a reload: it is how the web conversation gets its replies.
+func TestReloadKeepsChannelRegisteredOutsideConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	m := &Manager{
 		channels:      map[string]Channel{"grpc": &mockChannel{}},
@@ -111,6 +112,6 @@ func TestReloadPreservaCanalForaDoConfig(t *testing.T) {
 		t.Fatalf("Reload: %v", err)
 	}
 	if _, ok := m.channels["grpc"]; !ok {
-		t.Error("o canal grpc sumiu no reload — a web para de receber resposta")
+		t.Error("the grpc channel vanished on reload — the web stops receiving replies")
 	}
 }
