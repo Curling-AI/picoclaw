@@ -533,8 +533,13 @@ func (rt *Runtime) recordsForColdPathInputs(
 	workspace string,
 	records []LearningRecord,
 ) ([]LearningRecord, []LearningRecord, error) {
-	admitted := make([]LearningRecord, 0, len(records))
-	evidence := make([]LearningRecord, 0, len(records))
+	// Not sized at len(records): the filters below drop nearly everything, and
+	// the store holds every record ever written. Measured in production on an
+	// assistant with 105k records, these two slices alone were 57MB of the 225MB
+	// live heap — capacity for rows that never arrive. Empty-but-non-nil keeps
+	// the previous return contract.
+	admitted := make([]LearningRecord, 0)
+	evidence := make([]LearningRecord, 0)
 	judge := rt.successJudgeForWorkspace(workspace)
 	// Freshly-judged verdicts to persist so this record is not re-judged next run.
 	judgedDecisions := make(map[string]bool)
