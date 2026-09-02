@@ -59,7 +59,9 @@ func TestDecodeJSONLLinesToleratesATornLastLine(t *testing.T) {
 	var seen int
 	err := decodeJSONLLines(path, func(line []byte) error {
 		seen++
-		var probe struct{ ID string }
+		var probe struct {
+			ID string `json:"id"`
+		}
 		return json.Unmarshal(line, &probe)
 	})
 	if err != nil {
@@ -75,7 +77,9 @@ func TestDecodeJSONLLinesToleratesATornLastLine(t *testing.T) {
 func TestDecodeJSONLLinesRejectsATornLineInTheMiddle(t *testing.T) {
 	path := writeLines(t, `{"id":"a"}`, `{"id":"trunc`, `{"id":"c"}`)
 	err := decodeJSONLLines(path, func(line []byte) error {
-		var probe struct{ ID string }
+		var probe struct {
+			ID string `json:"id"`
+		}
 		return json.Unmarshal(line, &probe)
 	})
 	if err == nil {
