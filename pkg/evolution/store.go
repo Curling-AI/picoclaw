@@ -591,25 +591,36 @@ func decodeJSONLLines(path string, decode func(line []byte) error) error {
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var lines [][]byte
+
+	// One line of lookahead, not the whole file. The last line is tolerated when
+	// it is torn — a JSONL append that died mid-write — and knowing a line is the
+	// last one only needs to know whether another follows it. Buffering every
+	// line to answer that held the file twice: measured on the heaviest assistant
+	// in production, 32MB of raw lines alongside the decoded records.
+	var pending []byte
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
-		lines = append(lines, append([]byte(nil), line...))
+		if pending != nil {
+			if err := decode(pending); err != nil {
+				return err
+			}
+		}
+		pending = append([]byte(nil), line...)
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-
-	for i, line := range lines {
-		if err := decode(line); err != nil {
-			if i == len(lines)-1 && isInvalidJSON(err) {
-				return nil
-			}
-			return err
+	if pending == nil {
+		return nil
+	}
+	if err := decode(pending); err != nil {
+		if isInvalidJSON(err) {
+			return nil
 		}
+		return err
 	}
 	return nil
 }
