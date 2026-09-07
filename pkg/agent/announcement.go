@@ -16,8 +16,12 @@ const announcementTailWindow = 220
 // a real answer that happens to open with the marker; requiring the action verb
 // is what keeps it out.
 var (
-	announcementIntent = regexp.MustCompile(`(?i)(\bvou\b|\birei\b|\bdeixa eu\b|\bdeixe-me\b|\bdeixa-me\b|\bj[áa] volto\b|\bseguindo com\b|\blet me\b|\bi'?ll\b|\bi'?m going to\b|\bi am going to\b)`)
-	announcementAction = regexp.MustCompile(`(?i)(\bbusc\w+|\bpesquis\w+|\bprocur\w+|\bconsult\w+|\bverific\w+|\bconfirm\w+|\bchec\w+|\bexecut\w+|\brod(ar|ando)\b|\babr(ir|indo)\b|\bacess\w+|\bbaix\w+|\banalis\w+|\b[lv](er|endo) (o|a|os|as)\b|\bsearch\w*|\blook up\b|\bfetch\w*|\bopen\w*|\bbrowse\w*|\bread the\b|\brun the\b)`)
+	announcementIntent = regexp.MustCompile(
+		`(?i)(\bvou\b|\birei\b|\bdeixa eu\b|\bdeixe-me\b|\bdeixa-me\b|\bj[áa] volto\b|\bseguindo com\b|\blet me\b|\bi'?ll\b|\bi'?m going to\b|\bi am going to\b)`,
+	)
+	announcementAction = regexp.MustCompile(
+		`(?i)(\bbusc\w+|\bpesquis\w+|\bprocur\w+|\bconsult\w+|\bverific\w+|\bconfirm\w+|\bchec\w+|\bexecut\w+|\brod(ar|ando)\b|\babr(ir|indo)\b|\bacess\w+|\bbaix\w+|\banalis\w+|\b[lv](er|endo) (o|a|os|as)\b|\bsearch\w*|\blook up\b|\bfetch\w*|\bopen\w*|\bbrowse\w*|\bread the\b|\brun the\b)`,
+	)
 )
 
 // looksLikeUndeliveredAnnouncement reports whether a reply promises an action

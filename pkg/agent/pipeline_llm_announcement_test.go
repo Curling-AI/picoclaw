@@ -14,6 +14,8 @@ import (
 // announcedToolCall is verbatim from greenhouse (2026-09-07). The turn ended
 // right here: no markup for the truncation guard to find, no call on the wire,
 // and the user had to type "Siga" to get anything else.
+//
+//nolint:misspell // verbatim prod payload: misspell reads "rela"(ção) as "real"
 const announcedToolCall = "Vou buscar o artigo do DCRainmaker sobre o Fenix 9 e resumir, depois procurar " +
 	"relação com o seu relógio 970.\n\nPrimeiro, deixa eu abrir o artigo."
 
@@ -86,7 +88,11 @@ func TestAnnouncementRetryIsCappedAndTheNudgeIsNeverPersisted(t *testing.T) {
 	provider := &alwaysAnnouncingProvider{}
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 
-	if _, err := al.ProcessDirect(context.Background(), "resuma esse artigo pra mim", "announce-cap-session"); err != nil {
+	if _, err := al.ProcessDirect(
+		context.Background(),
+		"resuma esse artigo pra mim",
+		"announce-cap-session",
+	); err != nil {
 		t.Fatalf("ProcessDirect: %v", err)
 	}
 	if got := provider.calls.Load(); got != 1+maxUndeliveredAnnouncementRetries {

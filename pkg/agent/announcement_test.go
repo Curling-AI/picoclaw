@@ -6,6 +6,11 @@ import "testing"
 // (2026-09-07): the turn ended there, nothing ran, and the user had to prod the
 // agent to continue. The "answer" cases are replies from the same sessions that
 // merely sound similar — they are what a careless matcher breaks.
+// The fixtures are Portuguese, and misspell reads locale US: it takes "rela"(ção)
+// for "real" and "definitivo" for "definition". Editing a verbatim prod payload
+// to please a spell checker would cost the test its whole point.
+//
+//nolint:misspell // verbatim prod payloads, see above
 func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 	tests := []struct {
 		name string
@@ -82,6 +87,6 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 // same reply — the agent said it would look, then looked, then reported. Only
 // the tail is read, so the opening promise must not flag it.
 const longAnswerBody = "O resultado: a conta de agosto fechou em R$ 12.400. " +
-	"O maior item foi o plano anual renovado no dia 3, R$ 7.900, e o restante se " +
+	"O maior item foi o plano de 12 meses renovado no dia 3, R$ 7.900, e o restante se " +
 	"divide entre licenças avulsas (R$ 3.100) e um ajuste retroativo de R$ 1.400 " +
 	"lançado pelo financeiro na virada do mês. Nada fora do previsto no orçamento."
