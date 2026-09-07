@@ -143,6 +143,10 @@ type turnExecution struct {
 	// for this — a retry advances it without any tool having run.
 	toolRanThisTurn bool
 
+	// degenerateResponseRetries counts same-turn retries after the model looped
+	// on one repeated block instead of answering. Capped like its siblings.
+	degenerateResponseRetries int
+
 	// transientTurnMessages are turn-scoped steering notes (tool-budget
 	// nudges) appended to callMessages of every remaining iteration of THIS
 	// turn but never persisted to session history. Persisting them poisoned
