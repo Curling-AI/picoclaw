@@ -39,6 +39,19 @@ const truncatedToolCallNudge = "[System] Your last reply reached us as the tail 
 	"Re-issue that call using the tool-calling API. Do not describe the call, do not write the markup out, and do " +
 	"not paste the arguments into your reply."
 
+// maxUndeliveredAnnouncementRetries caps same-turn retries after the model
+// promised an action in prose and emitted no call. One retry, like its two
+// siblings above: a model that promises twice is not going to get there on a
+// third roll, and the user is already waiting.
+const maxUndeliveredAnnouncementRetries = 1
+
+// undeliveredAnnouncementNudge names what the model actually did. "You said you
+// would and then did not" is the part it can act on; a generic "use your tools"
+// reads as a standing lecture and produces another polite promise.
+const undeliveredAnnouncementNudge = "[System] Your last reply announced an action (\"deixa eu buscar…\", \"vou abrir…\") " +
+	"but carried no tool call, so nothing ran and the user is still waiting. Perform the action now by emitting the " +
+	"tool call itself. Do not restate what you are about to do, and do not answer from memory what the tool was for."
+
 func (p *Pipeline) CallLLM(
 	ctx context.Context,
 	turnCtx context.Context,
@@ -816,6 +829,53 @@ func (p *Pipeline) CallLLM(
 			// answer instead. That one is marked as fallback and stays out of
 			// session history, which raw markup would not.
 			logger.WarnCF("agent", "LLM kept answering with a truncated tool call; dropping the text",
+				map[string]any{
+					"agent_id":      ts.agent.ID,
+					"iteration":     iteration,
+					"content_chars": len(responseContent),
+				})
+			responseContent = ""
+		}
+
+		// The other half of the same failure. Above, the model wrote the call
+		// out and left markup behind for the guard to find; here it writes the
+		// INTENT in clean prose — "deixa eu abrir o artigo." — and stops. No
+		// markup, so nothing catches it: the promise ships as the answer and,
+		// persisted, becomes the example that teaches the next turn to promise
+		// again. Measured on greenhouse (2026-09-07): ~0.5% of web turns, but it
+		// clusters, and one session repeated it six times.
+		//
+		// Narrow on purpose. Only before the first tool of the turn runs — after
+		// that the same words are narration, not a promise. Tools must have been
+		// offered, or there was nothing to call.
+		//
+		// gracefulTerminal is left alone: the user interrupted, the tool defs
+		// are already out of the request and the model was told to wrap up, so a
+		// closing "deixa eu ver" is not this bug.
+		if !exec.gracefulTerminal && !exec.toolRanThisTurn &&
+			len(exec.providerToolDefs) > 0 &&
+			looksLikeUndeliveredAnnouncement(responseContent) {
+			if exec.undeliveredAnnouncementRetries < maxUndeliveredAnnouncementRetries {
+				exec.undeliveredAnnouncementRetries++
+				cancelConfiguredStreamingLLM(turnCtx, exec)
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+					Role:    "user",
+					Content: undeliveredAnnouncementNudge,
+				})
+				logger.WarnCF("agent", "LLM announced a tool call in prose and stopped; retrying",
+					map[string]any{
+						"agent_id":      ts.agent.ID,
+						"iteration":     iteration,
+						"retry":         exec.undeliveredAnnouncementRetries,
+						"content_chars": len(responseContent),
+					})
+				return ControlContinue, nil
+			}
+			// Out of retries: drop it, exactly as the truncated sibling does.
+			// DefaultResponse is marked as fallback and stays out of session
+			// history — and a promise that never lands is worse than an honest
+			// failure, because it looks like progress and the user waits on it.
+			logger.WarnCF("agent", "LLM kept announcing without emitting a tool call; dropping the promise",
 				map[string]any{
 					"agent_id":      ts.agent.ID,
 					"iteration":     iteration,
