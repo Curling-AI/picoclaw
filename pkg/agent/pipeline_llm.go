@@ -52,6 +52,16 @@ const undeliveredAnnouncementNudge = "[System] Your last reply announced an acti
 	"but carried no tool call, so nothing ran and the user is still waiting. Perform the action now by emitting the " +
 	"tool call itself. Do not restate what you are about to do, and do not answer from memory what the tool was for."
 
+// maxDegenerateResponseRetries caps same-turn retries after the model looped on
+// one block. Same one-shot budget as its siblings: the reroll either breaks the
+// cycle or the model is not going to answer this turn.
+const maxDegenerateResponseRetries = 1
+
+// degenerateResponseNudge points at the loop itself. Naming the failure beats a
+// generic "be concise", which a model already stuck in a cycle ignores.
+const degenerateResponseNudge = "[System] Your last reply got stuck repeating the same phrase over and over " +
+	"instead of answering, and was discarded. Answer the question once, in your own words, and stop."
+
 func (p *Pipeline) CallLLM(
 	ctx context.Context,
 	turnCtx context.Context,
@@ -743,6 +753,46 @@ func (p *Pipeline) CallLLM(
 		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
+
+	// A completion that ends in the same block over and over is a generation
+	// loop: the model stopped answering and spent the rest of its budget on one
+	// phrase. Reported on greenhouse (2026-09-07) as a wall of "princípios de
+	// interação com IA /" where an answer should have been.
+	//
+	// Sits ahead of the no-tool-call split because the loop can happen either
+	// way, and the existing loop detector is no help: it counts repeated TOOL
+	// calls, not repetition inside one completion.
+	if !exec.gracefulTerminal && looksDegenerate(exec.response.Content) {
+		if exec.degenerateResponseRetries < maxDegenerateResponseRetries {
+			exec.degenerateResponseRetries++
+			cancelConfiguredStreamingLLM(turnCtx, exec)
+			exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+				Role:    "user",
+				Content: degenerateResponseNudge,
+			})
+			logger.WarnCF("agent", "LLM response degenerated into a repeated block; retrying",
+				map[string]any{
+					"agent_id":      ts.agent.ID,
+					"iteration":     iteration,
+					"retry":         exec.degenerateResponseRetries,
+					"content_chars": len(exec.response.Content),
+				})
+			return ControlContinue, nil
+		}
+		// Out of retries: drop the wall of text so it is neither shown nor
+		// persisted. The empty-response guard below would otherwise read the
+		// blanked content as the reasoning-only glitch and spend another call
+		// re-rolling a model that already looped twice, so retire its budget too
+		// and let DefaultResponse close the turn.
+		logger.WarnCF("agent", "LLM kept degenerating into a repeated block; dropping the text",
+			map[string]any{
+				"agent_id":      ts.agent.ID,
+				"iteration":     iteration,
+				"content_chars": len(exec.response.Content),
+			})
+		exec.response.Content = ""
+		exec.emptyResponseRetries = maxEmptyResponseRetries
+	}
 
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
