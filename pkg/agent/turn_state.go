@@ -136,6 +136,13 @@ type turnExecution struct {
 	// above so a model that keeps promising still ends the turn.
 	undeliveredAnnouncementRetries int
 
+	// toolRanThisTurn records whether any tool has executed in THIS turn. It is
+	// what separates a promise from narration: before the first tool runs, "vou
+	// buscar" is a call the model failed to emit; after it, the same words are
+	// the agent describing work it already did. Iteration count cannot stand in
+	// for this — a retry advances it without any tool having run.
+	toolRanThisTurn bool
+
 	// transientTurnMessages are turn-scoped steering notes (tool-budget
 	// nudges) appended to callMessages of every remaining iteration of THIS
 	// turn but never persisted to session history. Persisting them poisoned

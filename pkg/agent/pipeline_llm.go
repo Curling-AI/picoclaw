@@ -845,27 +845,43 @@ func (p *Pipeline) CallLLM(
 		// again. Measured on greenhouse (2026-09-07): ~0.5% of web turns, but it
 		// clusters, and one session repeated it six times.
 		//
-		// Narrow on purpose. Only the first iteration counts — from the second
-		// on a tool already ran, so the same words are narration, not a promise.
-		// Tools must have been offered, or there was nothing to call.
-		if !exec.gracefulTerminal && iteration == 1 &&
+		// Narrow on purpose. Only before the first tool of the turn runs — after
+		// that the same words are narration, not a promise. Tools must have been
+		// offered, or there was nothing to call.
+		//
+		// gracefulTerminal is left alone: the user interrupted, the tool defs
+		// are already out of the request and the model was told to wrap up, so a
+		// closing "deixa eu ver" is not this bug.
+		if !exec.gracefulTerminal && !exec.toolRanThisTurn &&
 			len(exec.providerToolDefs) > 0 &&
-			exec.undeliveredAnnouncementRetries < maxUndeliveredAnnouncementRetries &&
 			looksLikeUndeliveredAnnouncement(responseContent) {
-			exec.undeliveredAnnouncementRetries++
-			cancelConfiguredStreamingLLM(turnCtx, exec)
-			exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
-				Role:    "user",
-				Content: undeliveredAnnouncementNudge,
-			})
-			logger.WarnCF("agent", "LLM announced a tool call in prose and stopped; retrying",
+			if exec.undeliveredAnnouncementRetries < maxUndeliveredAnnouncementRetries {
+				exec.undeliveredAnnouncementRetries++
+				cancelConfiguredStreamingLLM(turnCtx, exec)
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+					Role:    "user",
+					Content: undeliveredAnnouncementNudge,
+				})
+				logger.WarnCF("agent", "LLM announced a tool call in prose and stopped; retrying",
+					map[string]any{
+						"agent_id":      ts.agent.ID,
+						"iteration":     iteration,
+						"retry":         exec.undeliveredAnnouncementRetries,
+						"content_chars": len(responseContent),
+					})
+				return ControlContinue, nil
+			}
+			// Out of retries: drop it, exactly as the truncated sibling does.
+			// DefaultResponse is marked as fallback and stays out of session
+			// history — and a promise that never lands is worse than an honest
+			// failure, because it looks like progress and the user waits on it.
+			logger.WarnCF("agent", "LLM kept announcing without emitting a tool call; dropping the promise",
 				map[string]any{
 					"agent_id":      ts.agent.ID,
 					"iteration":     iteration,
-					"retry":         exec.undeliveredAnnouncementRetries,
 					"content_chars": len(responseContent),
 				})
-			return ControlContinue, nil
+			responseContent = ""
 		}
 
 		exec.finalContent = responseContent

@@ -284,6 +284,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		case ControlToolLoop:
 			// Execute tools via Pipeline
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
+			exec.toolRanThisTurn = true
 			switch toolCtrl {
 			case ToolControlContinue:
 				// Re-read exec.messages since ExecuteTools may have updated it

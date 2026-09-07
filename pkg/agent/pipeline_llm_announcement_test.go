@@ -105,3 +105,30 @@ func TestAnnouncementRetryIsCappedAndTheNudgeIsNeverPersisted(t *testing.T) {
 		}
 	}
 }
+
+// The promise is what teaches the next turn to promise again, so running out of
+// retries must not leave it in the session either.
+func TestExhaustedAnnouncementIsNeitherDeliveredNorPersisted(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &alwaysAnnouncingProvider{}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+
+	resp, err := al.ProcessDirect(context.Background(), "resuma esse artigo pra mim", "announce-drop-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if strings.Contains(resp, "deixa eu abrir o artigo") {
+		t.Errorf("the undelivered promise was handed to the user: %q", resp)
+	}
+
+	history := directSessionHistory(t, al)
+	if len(history) == 0 {
+		t.Fatal("session history is empty — the loop below would be vacuous")
+	}
+	for _, m := range history {
+		if strings.Contains(m.Content, "deixa eu abrir o artigo") {
+			t.Errorf("the undelivered promise was persisted: %q", m.Content)
+		}
+	}
+}
