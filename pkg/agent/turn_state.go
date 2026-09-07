@@ -131,6 +131,11 @@ type turnExecution struct {
 	// shape still ends the turn.
 	truncatedToolCallRetries int
 
+	// undeliveredAnnouncementRetries counts same-turn retries after the model
+	// promised an action in prose and emitted no tool call. Capped like the two
+	// above so a model that keeps promising still ends the turn.
+	undeliveredAnnouncementRetries int
+
 	// transientTurnMessages are turn-scoped steering notes (tool-budget
 	// nudges) appended to callMessages of every remaining iteration of THIS
 	// turn but never persisted to session history. Persisting them poisoned
