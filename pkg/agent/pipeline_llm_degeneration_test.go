@@ -80,7 +80,11 @@ func TestDegenerateRetryIsCappedAndNothingLoopedIsPersisted(t *testing.T) {
 	provider := &alwaysLoopingProvider{}
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 
-	if _, err := al.ProcessDirect(context.Background(), "procura tudo sobre isso", "degenerate-cap-session"); err != nil {
+	if _, err := al.ProcessDirect(
+		context.Background(),
+		"procura tudo sobre isso",
+		"degenerate-cap-session",
+	); err != nil {
 		t.Fatalf("ProcessDirect: %v", err)
 	}
 	if got := provider.calls.Load(); got != 1+maxDegenerateResponseRetries {
