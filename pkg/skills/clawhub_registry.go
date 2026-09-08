@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -119,18 +120,39 @@ func (c *ClawHubRegistry) Name() string {
 	return "clawhub"
 }
 
-func (c *ClawHubRegistry) ResolveInstallDirName(target string) (string, error) {
-	if err := utils.ValidateSkillIdentifier(target); err != nil {
-		return "", err
+func splitTarget(target string) (owner, slug string, err error) {
+	target = strings.TrimSpace(target)
+	if o, s, ok := strings.Cut(target, "/"); ok {
+		owner, slug = strings.TrimPrefix(strings.TrimSpace(o), "@"), strings.TrimSpace(s)
+		if err := utils.ValidateSkillIdentifier(owner); err != nil {
+			return "", "", fmt.Errorf("invalid owner %q: error: %s", owner, err.Error())
+		}
+	} else {
+		slug = target
 	}
-	return target, nil
+	if err := utils.ValidateSkillIdentifier(slug); err != nil {
+		return "", "", fmt.Errorf("invalid slug %q: error: %s", slug, err.Error())
+	}
+	return owner, slug, nil
 }
 
-func (c *ClawHubRegistry) SkillURL(slug, _ string) string {
-	if slug == "" {
+func (c *ClawHubRegistry) ResolveInstallDirName(target string) (string, error) {
+	_, slug, err := splitTarget(target)
+	if err != nil {
+		return "", err
+	}
+	return slug, nil
+}
+
+func (c *ClawHubRegistry) SkillURL(target, _ string) string {
+	owner, slug, err := splitTarget(target)
+	if err != nil || slug == "" {
 		return ""
 	}
-	return c.baseURL + "/skills/" + url.PathEscape(slug)
+	if owner == "" {
+		return c.baseURL + "/skills/" + url.PathEscape(slug)
+	}
+	return c.baseURL + "/" + url.PathEscape(owner) + "/skills/" + url.PathEscape(slug)
 }
 
 func (c ClawHubConfig) IsEnabled() bool {
@@ -153,6 +175,7 @@ type clawhubSearchResult struct {
 	DisplayName *string `json:"displayName"`
 	Summary     *string `json:"summary"`
 	Version     *string `json:"version"`
+	OwnerHandle *string `json:"ownerHandle"`
 }
 
 func (c *ClawHubRegistry) Search(ctx context.Context, query string, limit int) ([]SearchResult, error) {
@@ -201,6 +224,7 @@ func (c *ClawHubRegistry) Search(ctx context.Context, query string, limit int) (
 			DisplayName:  displayName,
 			Summary:      summary,
 			Version:      utils.DerefStr(r.Version, ""),
+			OwnerHandle:  strings.TrimPrefix(strings.TrimSpace(utils.DerefStr(r.OwnerHandle, "")), "@"),
 			RegistryName: c.Name(),
 		})
 	}
@@ -227,12 +251,16 @@ type clawhubModerationInfo struct {
 	IsSuspicious     bool `json:"isSuspicious"`
 }
 
-func (c *ClawHubRegistry) GetSkillMeta(ctx context.Context, slug string) (*SkillMeta, error) {
-	if err := utils.ValidateSkillIdentifier(slug); err != nil {
-		return nil, fmt.Errorf("invalid slug %q: error: %s", slug, err.Error())
+func (c *ClawHubRegistry) GetSkillMeta(ctx context.Context, target string) (*SkillMeta, error) {
+	owner, slug, err := splitTarget(target)
+	if err != nil {
+		return nil, err
 	}
 
 	u := c.baseURL + c.skillsPath + "/" + url.PathEscape(slug)
+	if owner != "" {
+		u += "?ownerHandle=" + url.QueryEscape(owner)
+	}
 
 	body, err := c.doGet(ctx, u)
 	if err != nil {
@@ -271,8 +299,9 @@ func (c *ClawHubRegistry) DownloadAndInstall(
 	ctx context.Context,
 	slug, version, targetDir string,
 ) (*InstallResult, error) {
-	if err := utils.ValidateSkillIdentifier(slug); err != nil {
-		return nil, fmt.Errorf("invalid slug %q: error: %s", slug, err.Error())
+	owner, bareSlug, err := splitTarget(slug)
+	if err != nil {
+		return nil, err
 	}
 
 	// Step 1: Fetch metadata (with fallback).
@@ -306,7 +335,10 @@ func (c *ClawHubRegistry) DownloadAndInstall(
 	}
 
 	q := u.Query()
-	q.Set("slug", slug)
+	q.Set("slug", bareSlug)
+	if owner != "" {
+		q.Set("ownerHandle", owner)
+	}
 	if installVersion != "latest" {
 		q.Set("version", installVersion)
 	}
