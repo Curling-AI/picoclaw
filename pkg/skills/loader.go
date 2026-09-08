@@ -153,6 +153,9 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 			if !isDirEntry(dir, d) {
 				continue
 			}
+			if strings.HasPrefix(d.Name(), ".") {
+				continue
+			}
 			skillFile := filepath.Join(dir, d.Name(), "SKILL.md")
 			if _, err := os.Stat(skillFile); err != nil {
 				continue
