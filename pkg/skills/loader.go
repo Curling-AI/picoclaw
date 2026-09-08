@@ -425,6 +425,7 @@ func (sl *SkillsLoader) stripFrontmatter(content string) string {
 
 func splitFrontmatter(content string) (frontmatter, body string) {
 	normalized := string(parser.NormalizeNewlines([]byte(content)))
+	normalized = strings.TrimPrefix(normalized, "\ufeff")
 	lines := strings.Split(normalized, "\n")
 	if len(lines) == 0 || lines[0] != "---" {
 		return "", content
