@@ -153,6 +153,9 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 			if !isDirEntry(dir, d) {
 				continue
 			}
+			if strings.HasPrefix(d.Name(), ".") {
+				continue
+			}
 			skillFile := filepath.Join(dir, d.Name(), "SKILL.md")
 			if _, err := os.Stat(skillFile); err != nil {
 				continue
@@ -425,6 +428,7 @@ func (sl *SkillsLoader) stripFrontmatter(content string) string {
 
 func splitFrontmatter(content string) (frontmatter, body string) {
 	normalized := string(parser.NormalizeNewlines([]byte(content)))
+	normalized = strings.TrimPrefix(normalized, "\ufeff")
 	lines := strings.Split(normalized, "\n")
 	if len(lines) == 0 || lines[0] != "---" {
 		return "", content

@@ -21,6 +21,7 @@ type SearchResult struct {
 	DisplayName  string  `json:"display_name"`
 	Summary      string  `json:"summary"`
 	Version      string  `json:"version"`
+	OwnerHandle  string  `json:"owner_handle,omitempty"`
 	RegistryName string  `json:"registry_name"`
 }
 

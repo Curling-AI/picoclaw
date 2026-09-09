@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -416,4 +417,36 @@ func TestGetSkillMetadata_IgnoresHTMLCommentBlocks(t *testing.T) {
 	require.NotNil(t, meta)
 	assert.Equal(t, "biomed-skill", meta.Name)
 	assert.Equal(t, "Summarize biomedical papers.", meta.Description)
+}
+
+func TestSplitFrontmatterAcceptsByteOrderMark(t *testing.T) {
+	const body = "# Frontend Design\n\nBody."
+	fm, got := splitFrontmatter("\ufeff---\nname: frontend-design\ndescription: X\n---\n" + body)
+
+	if !strings.Contains(fm, "name: frontend-design") {
+		t.Fatalf("frontmatter not detected with BOM: %q", fm)
+	}
+	if strings.Contains(got, "name: frontend-design") {
+		t.Errorf("frontmatter leaked into the body: %q", got)
+	}
+}
+
+func TestListSkillsSkipsHiddenDirectories(t *testing.T) {
+	ws := t.TempDir()
+	skills := filepath.Join(ws, "skills")
+
+	write := func(dir string) {
+		require.NoError(t, os.MkdirAll(filepath.Join(skills, dir), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(skills, dir, "SKILL.md"),
+			[]byte("---\nname: frontend-design\ndescription: X\n---\n# body\n"), 0o644))
+	}
+	write("frontend-design")
+	write(".frontend-design.picoclaw-backup-123")
+
+	listed := NewSkillsLoader(ws, "", "").ListSkills()
+	dirs := make([]string, 0, len(listed))
+	for _, s := range listed {
+		dirs = append(dirs, filepath.Base(filepath.Dir(s.Path)))
+	}
+	assert.Equal(t, []string{"frontend-design"}, dirs)
 }

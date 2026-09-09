@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,9 +119,11 @@ func TestClawHubRegistryGetSkillMeta(t *testing.T) {
 
 func TestClawHubRegistryGetSkillMetaUnsafeSlug(t *testing.T) {
 	reg := newTestRegistry("https://example.com", "")
-	_, err := reg.GetSkillMeta(context.Background(), "../etc/passwd")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid slug")
+	for _, target := range []string{"../etc/passwd", "..", "paudyyin/..", "paudyyin/../../etc/passwd"} {
+		_, err := reg.GetSkillMeta(context.Background(), target)
+		require.Error(t, err, "target %q must be refused", target)
+		assert.Contains(t, err.Error(), "must not contain path separators or '..'", "target %q", target)
+	}
 }
 
 func TestClawHubRegistryDownloadAndInstall(t *testing.T) {
@@ -335,4 +338,105 @@ func createTestZip(t *testing.T, files map[string]string) []byte {
 
 	require.NoError(t, zw.Close())
 	return buf.Bytes()
+}
+
+func TestClawHubRegistrySearchCarriesOwnerHandle(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slug := "frontend-design"
+		name := "Frontend Design"
+		summary := "Create distinctive interfaces"
+		owner := "@paudyyin"
+		json.NewEncoder(w).Encode(clawhubSearchResponse{
+			Results: []clawhubSearchResult{
+				{Score: 0.9, Slug: &slug, DisplayName: &name, Summary: &summary, OwnerHandle: &owner},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	results, err := newTestRegistry(srv.URL, "").Search(context.Background(), "frontend-design", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "paudyyin", results[0].OwnerHandle)
+	assert.Equal(t, "frontend-design", results[0].Slug)
+}
+
+func TestClawHubRegistrySkillURLIsPublisherCanonical(t *testing.T) {
+	reg := newTestRegistry("https://clawhub.ai", "")
+	assert.Equal(t, "https://clawhub.ai/paudyyin/skills/frontend-design",
+		reg.SkillURL("paudyyin/frontend-design", ""))
+	assert.Equal(t, "https://clawhub.ai/skills/frontend-design",
+		reg.SkillURL("frontend-design", ""))
+	assert.Equal(t, "", reg.SkillURL("../etc/passwd", ""))
+}
+
+func TestClawHubRegistryInstallDirNameDropsOwner(t *testing.T) {
+	reg := newTestRegistry("https://clawhub.ai", "")
+	dir, err := reg.ResolveInstallDirName("paudyyin/frontend-design")
+	require.NoError(t, err)
+	assert.Equal(t, "frontend-design", dir)
+}
+
+func TestClawHubRegistryDownloadAndInstallSendsOwnerHandle(t *testing.T) {
+	zipBuf := createTestZip(t, map[string]string{
+		"SKILL.md": "---\nname: frontend-design\ndescription: A test\n---\nHello skill",
+	})
+
+	var metaQuery, downloadQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/skills/frontend-design":
+			metaQuery = r.URL.Query()
+			json.NewEncoder(w).Encode(clawhubSkillResponse{
+				Slug:          "frontend-design",
+				DisplayName:   "Frontend Design",
+				LatestVersion: &clawhubVersionInfo{Version: "1.0.0"},
+			})
+		case "/api/v1/download":
+			downloadQuery = r.URL.Query()
+			w.Header().Set("Content-Type", "application/zip")
+			w.Write(zipBuf)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	targetDir := filepath.Join(t.TempDir(), "frontend-design")
+	_, err := newTestRegistry(srv.URL, "").
+		DownloadAndInstall(context.Background(), "paudyyin/frontend-design", "1.0.0", targetDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "paudyyin", metaQuery.Get("ownerHandle"))
+	assert.Equal(t, "frontend-design", downloadQuery.Get("slug"))
+	assert.Equal(t, "paudyyin", downloadQuery.Get("ownerHandle"))
+}
+
+func TestClawHubRegistryDownloadAndInstallBareSlugSendsNoOwner(t *testing.T) {
+	zipBuf := createTestZip(t, map[string]string{
+		"SKILL.md": "---\nname: solo\ndescription: A test\n---\nHello skill",
+	})
+
+	var downloadQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/skills/solo":
+			json.NewEncoder(w).Encode(clawhubSkillResponse{Slug: "solo", DisplayName: "Solo"})
+		case "/api/v1/download":
+			downloadQuery = r.URL.Query()
+			w.Header().Set("Content-Type", "application/zip")
+			w.Write(zipBuf)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	targetDir := filepath.Join(t.TempDir(), "solo")
+	_, err := newTestRegistry(srv.URL, "").
+		DownloadAndInstall(context.Background(), "solo", "", targetDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "solo", downloadQuery.Get("slug"))
+	assert.False(t, downloadQuery.Has("ownerHandle"))
 }
