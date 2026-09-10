@@ -1,9 +1,13 @@
 package openai_compat
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 )
+
+// frameSeparator joins captured SSE frames in one log field.
+const frameSeparator = " | "
 
 // requestIDOption carries a caller-minted trace id. It never reaches the
 // request body — buildRequestBody copies named keys only.
@@ -15,9 +19,13 @@ const requestIDHeader = "X-Request-Id"
 
 const (
 	frameTailSize = 12
-	// 320 cut the gateway's provider_metadata frame exactly at the resolved
-	// provider — the one field worth having when a stream comes back empty.
-	frameTailFrameSize = 1024
+	// Per-frame ceiling is only a memory guard. What actually gets logged is
+	// decided by the budget below, so a short stream lands verbatim.
+	frameTailFrameCeiling = 8192
+	// Budget for one log line. An empty stream is a handful of small frames and
+	// fits whole — which is the point: a truncated frame cannot be handed to a
+	// gateway team as evidence. Only a long stream loses its oldest frames.
+	frameTailBudget = 16384
 )
 
 func requestIDFromOptions(options map[string]any) string {
@@ -52,8 +60,8 @@ func (f *frameTail) add(data string) {
 	if f == nil {
 		return
 	}
-	if len(data) > frameTailFrameSize {
-		data = strings.ToValidUTF8(data[:frameTailFrameSize], "") + "…"
+	if len(data) > frameTailFrameCeiling {
+		data = strings.ToValidUTF8(data[:frameTailFrameCeiling], "") + "…"
 	}
 	if len(f.frames) == frameTailSize {
 		f.frames = append(f.frames[:0], f.frames[1:]...)
@@ -62,8 +70,24 @@ func (f *frameTail) add(data string) {
 }
 
 func (f *frameTail) String() string {
-	if f == nil {
+	if f == nil || len(f.frames) == 0 {
 		return ""
 	}
-	return strings.Join(f.frames, " | ")
+	// Newest frames first into the budget: the end of a stream is what explains
+	// how it ended.
+	kept := 0
+	total := 0
+	for i := len(f.frames) - 1; i >= 0; i-- {
+		next := total + len(f.frames[i]) + len(frameSeparator)
+		if kept > 0 && next > frameTailBudget {
+			break
+		}
+		total = next
+		kept++
+	}
+	out := strings.Join(f.frames[len(f.frames)-kept:], frameSeparator)
+	if dropped := len(f.frames) - kept; dropped > 0 {
+		out = fmt.Sprintf("…(%d earlier frames dropped)%s%s", dropped, frameSeparator, out)
+	}
+	return out
 }

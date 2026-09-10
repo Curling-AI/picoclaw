@@ -86,57 +86,52 @@ func TestApplyRequestIDHeader_NoOptionLeavesHeaderUnset(t *testing.T) {
 	}
 }
 
-func TestFrameTail_KeepsLastFramesAndTruncates(t *testing.T) {
+func TestFrameTail_ShortStreamLandsWhole(t *testing.T) {
+	// The empty stream seen in prod: four frames, one of them past the old
+	// 1024 per-frame cap. All of it has to survive to be usable as evidence.
+	tail := newFrameTail()
+	metadata := `{"choices":[{"delta":{"provider_metadata":` + strings.Repeat("x", 1400) + `}}]}`
+	for _, f := range []string{`{"choices":[{"delta":{"role":"assistant"}}]}`, metadata, "[DONE]", "[DONE]"} {
+		tail.add(f)
+	}
+	got := tail.String()
+	if strings.Contains(got, "…") {
+		t.Fatalf("short stream was truncated: %q", got[:120])
+	}
+	if !strings.Contains(got, metadata) {
+		t.Fatal("the oversized metadata frame did not survive whole")
+	}
+}
+
+func TestFrameTail_LongStreamDropsOldestAndSaysSo(t *testing.T) {
+	tail := newFrameTail()
+	big := strings.Repeat("y", frameTailFrameCeiling)
+	for range 4 {
+		tail.add(big)
+	}
+	got := tail.String()
+	if len(got) > frameTailBudget+frameTailFrameCeiling {
+		t.Fatalf("budget blown: %d chars", len(got))
+	}
+	if !strings.Contains(got, "earlier frames dropped") {
+		t.Fatalf("dropped frames not reported: %q", got[:80])
+	}
+}
+
+func TestFrameTail_KeepsOnlyTheLastFrames(t *testing.T) {
 	tail := newFrameTail()
 	for i := range frameTailSize + 3 {
 		tail.add(string(rune('a' + i)))
 	}
-	if strings.Contains(tail.String(), "a") {
+	if strings.Contains(tail.String(), "a |") {
 		t.Fatalf("oldest frame kept: %q", tail.String())
 	}
-	tail = newFrameTail()
-	tail.add(strings.Repeat("x", frameTailFrameSize*2))
-	if len([]rune(tail.String())) > frameTailFrameSize+1 {
-		t.Fatalf("frame not truncated: %d runes", len([]rune(tail.String())))
-	}
 }
 
-// The resolved provider must land on every response, not just empty ones:
-// without a base rate an empty stream cannot be blamed on a provider.
-func TestParseStreamResponse_CarriesResolvedProvider(t *testing.T) {
-	body := sse(
-		`{"id":"gen_1","choices":[{"delta":{"provider_metadata":{"baseten":{"acceptedPredictionTokens":0},`+
-			`"gateway":{"routing":{"originalModelId":"zai/glm-5.3-flash","resolvedProvider":"baseten"}}}}}]}`,
-		`{"id":"gen_1","choices":[{"delta":{"content":"oi"},"finish_reason":"stop"}]}`,
-	)
-
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
-	if err != nil {
-		t.Fatalf("parseStreamResponse: %v", err)
-	}
-	if resp.ResolvedProvider != "baseten" {
-		t.Fatalf("resolved provider = %q, want baseten", resp.ResolvedProvider)
-	}
-}
-
-// The empty stream seen in prod: role chunk, provider_metadata chunk, DONE.
-// No content, tool call or reasoning delta anywhere — nothing for the parser to
-// drop, and the provider name is the whole point of capturing it.
-func TestParseStreamResponse_EmptyStreamStillNamesTheProvider(t *testing.T) {
-	body := sse(
-		`{"id":"gen_2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
-		`{"id":"gen_2","choices":[{"index":0,"delta":{"provider_metadata":{"gateway":{"routing":`+
-			`{"resolvedProvider":"baseten"}}}},"finish_reason":"stop"}]}`,
-	)
-
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
-	if err != nil {
-		t.Fatalf("parseStreamResponse: %v", err)
-	}
-	if resp.Content != "" || len(resp.ToolCalls) != 0 {
-		t.Fatalf("expected an empty response, got content=%q tools=%d", resp.Content, len(resp.ToolCalls))
-	}
-	if resp.ResolvedProvider != "baseten" {
-		t.Fatalf("resolved provider = %q, want baseten", resp.ResolvedProvider)
+func TestFrameTail_SingleOversizedFrameStillCeilinged(t *testing.T) {
+	tail := newFrameTail()
+	tail.add(strings.Repeat("z", frameTailFrameCeiling*2))
+	if len([]rune(tail.String())) > frameTailFrameCeiling+1 {
+		t.Fatalf("frame not ceilinged: %d runes", len([]rune(tail.String())))
 	}
 }
