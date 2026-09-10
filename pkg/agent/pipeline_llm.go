@@ -743,6 +743,7 @@ func (p *Pipeline) CallLLM(
 			CompletionTokens:    responseCompletionTokens(exec.response),
 			RequestID:           exec.response.ProviderRequestID,
 			UpstreamID:          exec.response.UpstreamID,
+			ResolvedProvider:    exec.response.ResolvedProvider,
 		},
 	)
 
@@ -839,6 +840,7 @@ func (p *Pipeline) CallLLM(
 				"completion_tokens":      responseCompletionTokens(exec.response),
 				"request_id":             exec.response.ProviderRequestID,
 				"upstream_id":            exec.response.UpstreamID,
+				"resolved_provider":      exec.response.ResolvedProvider,
 			})
 			return ControlContinue, nil
 		}

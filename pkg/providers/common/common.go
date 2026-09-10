@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -263,6 +264,7 @@ func ParseResponse(body io.Reader) (*LLMResponse, error) {
 				ReasoningContent string            `json:"reasoning_content"`
 				Reasoning        string            `json:"reasoning"`
 				ReasoningDetails []ReasoningDetail `json:"reasoning_details"`
+				ProviderMetadata json.RawMessage   `json:"provider_metadata"`
 				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -354,6 +356,7 @@ func ParseResponse(body io.Reader) (*LLMResponse, error) {
 		FinishReasonMissing: strings.TrimSpace(choice.FinishReason) == "",
 		Usage:               apiResponse.Usage,
 		UpstreamID:          apiResponse.ID,
+		ResolvedProvider:    ResolvedProviderFromMetadata(choice.Message.ProviderMetadata),
 	}, nil
 }
 
@@ -587,4 +590,40 @@ func AsFloat(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// ResolvedProviderFromMetadata reads the upstream that served the call from the
+// AI Gateway's `provider_metadata`, which namespaces the rest of its keys under
+// the provider's own name.
+func ResolvedProviderFromMetadata(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return ""
+	}
+	var gateway struct {
+		Routing struct {
+			ResolvedProvider string `json:"resolvedProvider"`
+		} `json:"routing"`
+	}
+	if g, ok := meta["gateway"]; ok {
+		if err := json.Unmarshal(g, &gateway); err == nil {
+			if p := strings.TrimSpace(gateway.Routing.ResolvedProvider); p != "" {
+				return p
+			}
+		}
+	}
+	names := make([]string, 0, len(meta))
+	for k := range meta {
+		if k != "gateway" {
+			names = append(names, k)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	slices.Sort(names)
+	return names[0]
 }

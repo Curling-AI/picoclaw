@@ -82,6 +82,7 @@ type LLMResponsePayload struct {
 	CompletionTokens int
 	RequestID        string
 	UpstreamID       string
+	ResolvedProvider string
 }
 
 // LLMDeltaPayload describes a streamed LLM delta.

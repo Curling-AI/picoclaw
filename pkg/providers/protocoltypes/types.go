@@ -43,6 +43,10 @@ type LLMResponse struct {
 	ProviderRequestID string `json:"provider_request_id,omitempty"`
 	// UpstreamID is the provider's own completion id; a gateway mints its own.
 	UpstreamID string `json:"upstream_id,omitempty"`
+	// ResolvedProvider is the upstream the gateway actually routed to, from
+	// `provider_metadata`. Needed on EVERY call: without a base rate an empty
+	// stream cannot be blamed on a provider.
+	ResolvedProvider string `json:"resolved_provider,omitempty"`
 	// FinishReasonMissing keeps "never reported" apart from a real stop —
 	// FinishReason still defaults to "stop" for existing readers.
 	FinishReasonMissing bool `json:"finish_reason_missing,omitempty"`
