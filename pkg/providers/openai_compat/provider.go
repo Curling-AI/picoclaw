@@ -664,6 +664,7 @@ func parseStreamResponse(
 	var finishReason string
 	var usage *UsageInfo
 	var upstreamID string
+	var resolvedProvider string
 	finishReasonReported := false
 	frames := newFrameTail()
 
@@ -693,6 +694,7 @@ func parseStreamResponse(
 					ReasoningContent string            `json:"reasoning_content"`
 					Reasoning        string            `json:"reasoning"`
 					ReasoningDetails []ReasoningDetail `json:"reasoning_details"`
+					ProviderMetadata json.RawMessage   `json:"provider_metadata"`
 					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
@@ -724,6 +726,10 @@ func parseStreamResponse(
 		}
 
 		choice := chunk.Choices[0]
+
+		if resolvedProvider == "" {
+			resolvedProvider = common.ResolvedProviderFromMetadata(choice.Delta.ProviderMetadata)
+		}
 
 		if choice.Delta.ReasoningContent != "" {
 			reasoningContent.WriteString(choice.Delta.ReasoningContent)
@@ -926,6 +932,7 @@ func parseStreamResponse(
 		logger.WarnCF("provider.openai_compat", "stream produced no content, tool calls or reasoning",
 			map[string]any{
 				"upstream_id":            upstreamID,
+				"resolved_provider":      resolvedProvider,
 				"finish_reason":          finishReason,
 				"finish_reason_reported": finishReasonReported,
 				"completion_tokens":      usageCompletionTokens(usage),
@@ -943,6 +950,7 @@ func parseStreamResponse(
 		FinishReasonMissing: !finishReasonReported,
 		Usage:               usage,
 		UpstreamID:          upstreamID,
+		ResolvedProvider:    resolvedProvider,
 	}, nil
 }
 

@@ -818,3 +818,25 @@ func TestParseResponse_WithFunctionThoughtSignature(t *testing.T) {
 		)
 	}
 }
+
+func TestResolvedProviderFromMetadata(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"gateway routing wins", `{"baseten":{},"gateway":{"routing":{"resolvedProvider":"fireworks"}}}`, "fireworks"},
+		{"falls back to the namespace", `{"baseten":{"acceptedPredictionTokens":0}}`, "baseten"},
+		{"deterministic with several", `{"zai":{},"baseten":{}}`, "baseten"},
+		{"absent", ``, ""},
+		{"malformed", `not json`, ""},
+		{"gateway only", `{"gateway":{"routing":{}}}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolvedProviderFromMetadata([]byte(tc.raw)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

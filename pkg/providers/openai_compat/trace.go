@@ -14,8 +14,10 @@ const requestIDOption = "request_id"
 const requestIDHeader = "X-Request-Id"
 
 const (
-	frameTailSize      = 12
-	frameTailFrameSize = 320
+	frameTailSize = 12
+	// 320 cut the gateway's provider_metadata frame exactly at the resolved
+	// provider — the one field worth having when a stream comes back empty.
+	frameTailFrameSize = 1024
 )
 
 func requestIDFromOptions(options map[string]any) string {

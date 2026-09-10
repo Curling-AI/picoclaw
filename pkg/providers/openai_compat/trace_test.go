@@ -100,3 +100,43 @@ func TestFrameTail_KeepsLastFramesAndTruncates(t *testing.T) {
 		t.Fatalf("frame not truncated: %d runes", len([]rune(tail.String())))
 	}
 }
+
+// The resolved provider must land on every response, not just empty ones:
+// without a base rate an empty stream cannot be blamed on a provider.
+func TestParseStreamResponse_CarriesResolvedProvider(t *testing.T) {
+	body := sse(
+		`{"id":"gen_1","choices":[{"delta":{"provider_metadata":{"baseten":{"acceptedPredictionTokens":0},`+
+			`"gateway":{"routing":{"originalModelId":"zai/glm-5.3-flash","resolvedProvider":"baseten"}}}}}]}`,
+		`{"id":"gen_1","choices":[{"delta":{"content":"oi"},"finish_reason":"stop"}]}`,
+	)
+
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse: %v", err)
+	}
+	if resp.ResolvedProvider != "baseten" {
+		t.Fatalf("resolved provider = %q, want baseten", resp.ResolvedProvider)
+	}
+}
+
+// The empty stream seen in prod: role chunk, provider_metadata chunk, DONE.
+// No content, tool call or reasoning delta anywhere — nothing for the parser to
+// drop, and the provider name is the whole point of capturing it.
+func TestParseStreamResponse_EmptyStreamStillNamesTheProvider(t *testing.T) {
+	body := sse(
+		`{"id":"gen_2","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		`{"id":"gen_2","choices":[{"index":0,"delta":{"provider_metadata":{"gateway":{"routing":`+
+			`{"resolvedProvider":"baseten"}}}},"finish_reason":"stop"}]}`,
+	)
+
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse: %v", err)
+	}
+	if resp.Content != "" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected an empty response, got content=%q tools=%d", resp.Content, len(resp.ToolCalls))
+	}
+	if resp.ResolvedProvider != "baseten" {
+		t.Fatalf("resolved provider = %q, want baseten", resp.ResolvedProvider)
+	}
+}
