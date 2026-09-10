@@ -160,10 +160,12 @@ func (p *Pipeline) CallLLM(
 		return ControlBreak, err
 	}
 
+	requestID := newLLMRequestID()
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,
 		"temperature":      ts.agent.Temperature,
 		"prompt_cache_key": ts.agent.ID,
+		llmRequestIDOption: requestID,
 	}
 	if exec.useNativeSearch {
 		exec.llmOpts["native_search"] = true
@@ -251,6 +253,7 @@ func (p *Pipeline) CallLLM(
 			ToolsCount:    len(exec.providerToolDefs),
 			MaxTokens:     ts.agent.MaxTokens,
 			Temperature:   ts.agent.Temperature,
+			RequestID:     requestID,
 		},
 	)
 
@@ -732,9 +735,14 @@ func (p *Pipeline) CallLLM(
 		runtimeevents.KindAgentLLMResponse,
 		ts.eventMeta("runTurn", "turn.llm.response"),
 		LLMResponsePayload{
-			ContentLen:   len(exec.response.Content),
-			ToolCalls:    len(exec.response.ToolCalls),
-			HasReasoning: exec.response.Reasoning != "" || exec.response.ReasoningContent != "",
+			ContentLen:          len(exec.response.Content),
+			ToolCalls:           len(exec.response.ToolCalls),
+			HasReasoning:        exec.response.Reasoning != "" || exec.response.ReasoningContent != "",
+			FinishReason:        exec.response.FinishReason,
+			FinishReasonMissing: exec.response.FinishReasonMissing,
+			CompletionTokens:    responseCompletionTokens(exec.response),
+			RequestID:           exec.response.ProviderRequestID,
+			UpstreamID:          exec.response.UpstreamID,
 		},
 	)
 
@@ -822,10 +830,15 @@ func (p *Pipeline) CallLLM(
 			exec.emptyResponseRetries++
 			cancelConfiguredStreamingLLM(turnCtx, exec)
 			logger.WarnCF("agent", "LLM returned empty response (no content, no tool calls); retrying", map[string]any{
-				"agent_id":      ts.agent.ID,
-				"iteration":     iteration,
-				"retry":         exec.emptyResponseRetries,
-				"has_reasoning": exec.response.ReasoningContent != "" || exec.response.Reasoning != "",
+				"agent_id":               ts.agent.ID,
+				"iteration":              iteration,
+				"retry":                  exec.emptyResponseRetries,
+				"has_reasoning":          exec.response.ReasoningContent != "" || exec.response.Reasoning != "",
+				"finish_reason":          exec.response.FinishReason,
+				"finish_reason_reported": !exec.response.FinishReasonMissing,
+				"completion_tokens":      responseCompletionTokens(exec.response),
+				"request_id":             exec.response.ProviderRequestID,
+				"upstream_id":            exec.response.UpstreamID,
 			})
 			return ControlContinue, nil
 		}
