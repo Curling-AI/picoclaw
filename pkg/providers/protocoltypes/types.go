@@ -38,6 +38,14 @@ type LLMResponse struct {
 	Usage            *UsageInfo        `json:"usage,omitempty"`
 	Reasoning        string            `json:"reasoning"`
 	ReasoningDetails []ReasoningDetail `json:"reasoning_details"`
+	// ProviderRequestID is the gateway's X-Request-Id: joins a turn to the
+	// upstream attempt (hulk exposes it as request_id).
+	ProviderRequestID string `json:"provider_request_id,omitempty"`
+	// UpstreamID is the provider's own completion id; a gateway mints its own.
+	UpstreamID string `json:"upstream_id,omitempty"`
+	// FinishReasonMissing keeps "never reported" apart from a real stop —
+	// FinishReason still defaults to "stop" for existing readers.
+	FinishReasonMissing bool `json:"finish_reason_missing,omitempty"`
 }
 
 type StreamChunk struct {

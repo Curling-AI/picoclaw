@@ -282,6 +282,7 @@ func ParseResponse(body io.Reader) (*LLMResponse, error) {
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *UsageInfo `json:"usage"`
+		ID    string     `json:"id"`
 	}
 
 	if err := json.NewDecoder(body).Decode(&apiResponse); err != nil {
@@ -290,8 +291,10 @@ func ParseResponse(body io.Reader) (*LLMResponse, error) {
 
 	if len(apiResponse.Choices) == 0 {
 		return &LLMResponse{
-			Content:      "",
-			FinishReason: "stop",
+			Content:             "",
+			FinishReason:        "stop",
+			FinishReasonMissing: true,
+			UpstreamID:          apiResponse.ID,
 		}, nil
 	}
 
@@ -342,13 +345,15 @@ func ParseResponse(body io.Reader) (*LLMResponse, error) {
 	}
 
 	return &LLMResponse{
-		Content:          choice.Message.Content,
-		ReasoningContent: choice.Message.ReasoningContent,
-		Reasoning:        choice.Message.Reasoning,
-		ReasoningDetails: choice.Message.ReasoningDetails,
-		ToolCalls:        toolCalls,
-		FinishReason:     normalizeFinishReason(choice.FinishReason),
-		Usage:            apiResponse.Usage,
+		Content:             choice.Message.Content,
+		ReasoningContent:    choice.Message.ReasoningContent,
+		Reasoning:           choice.Message.Reasoning,
+		ReasoningDetails:    choice.Message.ReasoningDetails,
+		ToolCalls:           toolCalls,
+		FinishReason:        normalizeFinishReason(choice.FinishReason),
+		FinishReasonMissing: strings.TrimSpace(choice.FinishReason) == "",
+		Usage:               apiResponse.Usage,
+		UpstreamID:          apiResponse.ID,
 	}, nil
 }
 

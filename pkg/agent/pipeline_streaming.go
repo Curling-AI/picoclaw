@@ -166,6 +166,10 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 				logger.WarnCF("agent", "ChatStream update failed after visible output", logFields)
 				return nil, true, configuredStreamingVisibleError{err: updateErr}
 			}
+			// Fresh trace id: the gateway keys idempotency on it, so the
+			// fallback must not reuse the stream's.
+			fallbackOpts, fallbackID := optsWithFreshRequestID(exec.llmOpts)
+			logFields["fallback_request_id"] = fallbackID
 			logger.WarnCF("agent", "ChatStream update failed before visible output; retrying with Chat", logFields)
 			publisher.Cancel(ctx)
 			fallbackResponse, err := exec.activeProvider.Chat(
@@ -173,7 +177,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 				messagesForCall,
 				toolDefsForCall,
 				exec.llmModel,
-				exec.llmOpts,
+				fallbackOpts,
 			)
 			if err == nil && fallbackResponse != nil {
 				exec.streamingFallback = true
@@ -183,11 +187,13 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	}
 	if streamErr != nil {
 		if !publisher.Published() {
+			fallbackOpts, fallbackID := optsWithFreshRequestID(exec.llmOpts)
 			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", map[string]any{
-				"agent_id": ts.agent.ID,
-				"channel":  ts.channel,
-				"model":    exec.llmModel,
-				"error":    streamErr.Error(),
+				"agent_id":            ts.agent.ID,
+				"channel":             ts.channel,
+				"model":               exec.llmModel,
+				"error":               streamErr.Error(),
+				"fallback_request_id": fallbackID,
 			})
 			publisher.Cancel(ctx)
 			fallbackResponse, err := exec.activeProvider.Chat(
@@ -195,7 +201,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 				messagesForCall,
 				toolDefsForCall,
 				exec.llmModel,
-				exec.llmOpts,
+				fallbackOpts,
 			)
 			if err == nil && fallbackResponse != nil {
 				exec.streamingFallback = true

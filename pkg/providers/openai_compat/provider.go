@@ -500,6 +500,7 @@ func (p *Provider) Chat(
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	p.applyCustomHeaders(req)
+	applyRequestIDHeader(req, options)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -511,7 +512,12 @@ func (p *Provider) Chat(
 		return nil, common.HandleErrorResponse(resp, p.apiBase)
 	}
 
-	return common.ReadAndParseResponse(resp, p.apiBase)
+	out, err := common.ReadAndParseResponse(resp, p.apiBase)
+	if err != nil {
+		return nil, err
+	}
+	out.ProviderRequestID = resp.Header.Get(requestIDHeader)
+	return out, nil
 }
 
 // ChatStream implements streaming via OpenAI-compatible SSE (stream: true).
@@ -572,6 +578,7 @@ func (p *Provider) ChatStreamEvents(
 		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 	p.applyCustomHeaders(req)
+	applyRequestIDHeader(req, options)
 
 	// Use a client without Timeout for streaming — the http.Client.Timeout covers
 	// the entire request lifecycle including body reads, which would kill long streams.
@@ -587,7 +594,16 @@ func (p *Provider) ChatStreamEvents(
 		return nil, common.HandleErrorResponse(resp, p.apiBase)
 	}
 
-	return parseStreamResponse(ctx, withStreamingReadIdleTimeout(resp.Body, defaultStreamingReadIdleTimeout), onChunk)
+	out, err := parseStreamResponse(
+		ctx,
+		withStreamingReadIdleTimeout(resp.Body, defaultStreamingReadIdleTimeout),
+		onChunk,
+	)
+	if err != nil {
+		return nil, err
+	}
+	out.ProviderRequestID = resp.Header.Get(requestIDHeader)
+	return out, nil
 }
 
 func withStreamingReadIdleTimeout(body io.ReadCloser, timeout time.Duration) io.ReadCloser {
@@ -647,6 +663,9 @@ func parseStreamResponse(
 	var reasoningDetails []ReasoningDetail
 	var finishReason string
 	var usage *UsageInfo
+	var upstreamID string
+	finishReasonReported := false
+	frames := newFrameTail()
 
 	// Tool call assembly: OpenAI streams tool calls as incremental deltas
 	type toolAccum struct {
@@ -659,6 +678,7 @@ func parseStreamResponse(
 	markupSuppressed := false
 
 	processEvent := func(data string) error {
+		frames.add(data)
 		if strings.TrimSpace(data) == "" {
 			return nil
 		}
@@ -685,6 +705,7 @@ func parseStreamResponse(
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage *UsageInfo `json:"usage"`
+			ID    string     `json:"id"`
 		}
 
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -693,6 +714,9 @@ func parseStreamResponse(
 
 		if chunk.Usage != nil {
 			usage = chunk.Usage
+		}
+		if upstreamID == "" {
+			upstreamID = chunk.ID
 		}
 
 		if len(chunk.Choices) == 0 {
@@ -782,6 +806,7 @@ func parseStreamResponse(
 
 		if choice.FinishReason != nil {
 			finishReason = *choice.FinishReason
+			finishReasonReported = true
 		}
 
 		return nil
@@ -894,14 +919,30 @@ func parseStreamResponse(
 		}
 	}
 
+	// Raw frames are the only way to tell reasoning-only from a dropped final
+	// chunk or broken framing after the fact.
+	if content == "" && len(toolCalls) == 0 &&
+		reasoningContent.Len() == 0 && reasoning.Len() == 0 {
+		logger.WarnCF("provider.openai_compat", "stream produced no content, tool calls or reasoning",
+			map[string]any{
+				"upstream_id":            upstreamID,
+				"finish_reason":          finishReason,
+				"finish_reason_reported": finishReasonReported,
+				"completion_tokens":      usageCompletionTokens(usage),
+				"frames":                 frames.String(),
+			})
+	}
+
 	return &LLMResponse{
-		Content:          content,
-		ReasoningContent: reasoningContent.String(),
-		Reasoning:        reasoning.String(),
-		ReasoningDetails: reasoningDetails,
-		ToolCalls:        toolCalls,
-		FinishReason:     finishReason,
-		Usage:            usage,
+		Content:             content,
+		ReasoningContent:    reasoningContent.String(),
+		Reasoning:           reasoning.String(),
+		ReasoningDetails:    reasoningDetails,
+		ToolCalls:           toolCalls,
+		FinishReason:        finishReason,
+		FinishReasonMissing: !finishReasonReported,
+		Usage:               usage,
+		UpstreamID:          upstreamID,
 	}, nil
 }
 

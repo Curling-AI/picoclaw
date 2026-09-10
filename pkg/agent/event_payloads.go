@@ -66,13 +66,22 @@ type LLMRequestPayload struct {
 	ToolsCount    int
 	MaxTokens     int
 	Temperature   float64
+	// RequestID is the trace id sent upstream; the only record of a call whose
+	// response never arrives.
+	RequestID string
 }
 
 // LLMResponsePayload describes an inbound LLM response.
 type LLMResponsePayload struct {
-	ContentLen   int
-	ToolCalls    int
-	HasReasoning bool
+	ContentLen          int
+	ToolCalls           int
+	HasReasoning        bool
+	FinishReason        string
+	FinishReasonMissing bool
+	// CompletionTokens is -1 when the provider reported no usage.
+	CompletionTokens int
+	RequestID        string
+	UpstreamID       string
 }
 
 // LLMDeltaPayload describes a streamed LLM delta.
