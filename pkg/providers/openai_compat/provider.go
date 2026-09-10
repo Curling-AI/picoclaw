@@ -830,13 +830,13 @@ func parseStreamResponse(
 		line := scanner.Text()
 		if line == "" {
 			err := processEvent(eventData.String())
+			eventData.Reset()
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
 				return nil, err
 			}
-			eventData.Reset()
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
@@ -925,8 +925,7 @@ func parseStreamResponse(
 		}
 	}
 
-	// Raw frames are the only way to tell reasoning-only from a dropped final
-	// chunk or broken framing after the fact.
+	// The bounded event tail aids diagnosis but is not a complete wire capture.
 	if content == "" && len(toolCalls) == 0 &&
 		reasoningContent.Len() == 0 && reasoning.Len() == 0 {
 		logger.WarnCF("provider.openai_compat", "stream produced no content, tool calls or reasoning",
@@ -937,6 +936,10 @@ func parseStreamResponse(
 				"finish_reason_reported": finishReasonReported,
 				"completion_tokens":      usageCompletionTokens(usage),
 				"frames":                 frames.String(),
+				"frames_seen":            frames.seen,
+				"frames_omitted":         frames.omitted,
+				"frames_truncated":       frames.truncated,
+				"frame_byte_limit":       frameTailFrameSize,
 			})
 	}
 

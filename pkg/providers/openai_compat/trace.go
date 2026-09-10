@@ -38,10 +38,13 @@ func usageCompletionTokens(usage *UsageInfo) int {
 	return usage.CompletionTokens
 }
 
-// frameTail keeps the last few raw SSE frames so a stream that yielded nothing
-// can still be read after the fact.
+// frameTail keeps a bounded, possibly truncated tail of SSE data events.
+// It does not retain event boundaries, comments, or the complete HTTP body.
 type frameTail struct {
-	frames []string
+	frames    []string
+	seen      int
+	omitted   int
+	truncated int
 }
 
 func newFrameTail() *frameTail {
@@ -49,13 +52,16 @@ func newFrameTail() *frameTail {
 }
 
 func (f *frameTail) add(data string) {
-	if f == nil {
+	if f == nil || strings.TrimSpace(data) == "" {
 		return
 	}
+	f.seen++
 	if len(data) > frameTailFrameSize {
+		f.truncated++
 		data = strings.ToValidUTF8(data[:frameTailFrameSize], "") + "…"
 	}
 	if len(f.frames) == frameTailSize {
+		f.omitted++
 		f.frames = append(f.frames[:0], f.frames[1:]...)
 	}
 	f.frames = append(f.frames, data)

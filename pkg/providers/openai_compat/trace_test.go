@@ -94,10 +94,20 @@ func TestFrameTail_KeepsLastFramesAndTruncates(t *testing.T) {
 	if strings.Contains(tail.String(), "a") {
 		t.Fatalf("oldest frame kept: %q", tail.String())
 	}
+	if tail.seen != frameTailSize+3 || tail.omitted != 3 || tail.truncated != 0 {
+		t.Fatalf("incorrect event retention counts: %+v", tail)
+	}
 	tail = newFrameTail()
 	tail.add(strings.Repeat("x", frameTailFrameSize*2))
 	if len([]rune(tail.String())) > frameTailFrameSize+1 {
 		t.Fatalf("frame not truncated: %d runes", len([]rune(tail.String())))
+	}
+	if tail.seen != 1 || tail.omitted != 0 || tail.truncated != 1 {
+		t.Fatalf("truncation was not explicit: %+v", tail)
+	}
+	tail.add("  \n\t")
+	if tail.seen != 1 {
+		t.Fatal("empty keepalive was counted as a data event")
 	}
 }
 
