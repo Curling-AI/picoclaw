@@ -34,14 +34,14 @@ func (o *rearmableOnce) Do(f func()) {
 	o.done = true
 }
 
-// Reset re-arms Do. clear runs under the same lock, so the state it clears
+// Reset re-arms Do. clearState runs under the same lock, so the state it clears
 // cannot be rebuilt by an init that slipped in between the re-arm and the
 // clear. It may be nil.
-func (o *rearmableOnce) Reset(clear func()) {
+func (o *rearmableOnce) Reset(clearState func()) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.done = false
-	if clear != nil {
-		clear()
+	if clearState != nil {
+		clearState()
 	}
 }
