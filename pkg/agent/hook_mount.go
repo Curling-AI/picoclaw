@@ -12,7 +12,9 @@ import (
 )
 
 type hookRuntime struct {
-	initOnce sync.Once
+	// initOnce gates ensureHooksInitialized; re-armed on reload (see
+	// rearmableOnce for why this is not a sync.Once).
+	initOnce rearmableOnce
 	mu       sync.Mutex
 	initErr  error
 	mounted  []string
@@ -37,12 +39,14 @@ func (r *hookRuntime) setMounted(names []string) {
 }
 
 func (r *hookRuntime) reset(al *AgentLoop) {
-	r.mu.Lock()
-	names := append([]string(nil), r.mounted...)
-	r.mounted = nil
-	r.initErr = nil
-	r.initOnce = sync.Once{}
-	r.mu.Unlock()
+	var names []string
+	r.initOnce.Reset(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		names = append([]string(nil), r.mounted...)
+		r.mounted = nil
+		r.initErr = nil
+	})
 
 	for _, name := range names {
 		al.UnmountHook(name)
