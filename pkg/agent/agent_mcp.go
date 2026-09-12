@@ -22,7 +22,9 @@ import (
 )
 
 type mcpRuntime struct {
-	initOnce sync.Once
+	// initOnce gates ensureMCPInitialized. It is re-armed on every reload,
+	// which a plain sync.Once cannot survive (see rearmableOnce).
+	initOnce rearmableOnce
 	mu       sync.Mutex
 	manager  *mcp.Manager
 	initErr  error
@@ -37,18 +39,7 @@ type mcpRuntime struct {
 }
 
 func (r *mcpRuntime) reset() *mcp.Manager {
-	r.mu.Lock()
-	manager := r.manager
-	r.manager = nil
-	r.initErr = nil
-	r.fingerprint = ""
-	r.initOnce = sync.Once{}
-	cancel := r.retryCancel
-	r.retryCancel = nil
-	r.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
+	manager, _ := r.resetForReload("")
 	return manager
 }
 
@@ -67,16 +58,28 @@ func (r *mcpRuntime) reset() *mcp.Manager {
 // in-memory and must happen every time) without reconnecting anything. The
 // returned manager is the one the caller must close; on a carried reload there
 // is none.
+//
+// The re-arm and the state clear run inside initOnce.Reset: it waits for an
+// init that is still dialing servers, and no init can start between the two.
+// Lock order is initOnce.mu then r.mu, the same order an init's callback uses.
 func (r *mcpRuntime) resetForReload(fingerprint string) (old *mcp.Manager, carried bool) {
-	r.mu.Lock()
-	if fingerprint != "" && r.manager != nil && r.fingerprint == fingerprint {
+	var cancel context.CancelFunc
+	r.initOnce.Reset(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.initErr = nil
-		r.initOnce = sync.Once{}
-		r.mu.Unlock()
-		return nil, true
+		if fingerprint != "" && r.manager != nil && r.fingerprint == fingerprint {
+			carried = true
+			return
+		}
+		old, r.manager = r.manager, nil
+		r.fingerprint = ""
+		cancel, r.retryCancel = r.retryCancel, nil
+	})
+	if cancel != nil {
+		cancel()
 	}
-	r.mu.Unlock()
-	return r.reset(), false
+	return old, carried
 }
 
 func (r *mcpRuntime) setRetryCancel(cancel context.CancelFunc) {
