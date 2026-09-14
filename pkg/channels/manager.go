@@ -1935,8 +1935,16 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 	added, removed := compareChannels(m.channelHashes, list)
 
 	for _, name := range removed {
-		// Stop all channels
-		channel := m.channels[name]
+		// channelHashes tracks every channel ENABLED in the config, but a
+		// channel only reaches m.channels when its factory succeeded. One that
+		// never came up (no factory, init error, settings not ready) has nothing
+		// to stop — calling Stop on the nil interface was the SIGSEGV that took
+		// the gateway down on ApplyConfig.
+		channel, ok := m.channels[name]
+		if !ok || channel == nil {
+			m.unregisterChannelLocked(name)
+			continue
+		}
 		logger.InfoCF("channels", "Stopping channel", map[string]any{
 			"channel": name,
 		})
@@ -1965,7 +1973,16 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	for _, name := range added {
-		channel := m.channels[name]
+		// initChannels skips a channel it cannot build and only logs it, so the
+		// name can be in `added` with no entry here. Same nil interface, same
+		// crash, this time on Start.
+		channel, ok := m.channels[name]
+		if !ok || channel == nil {
+			logger.WarnCF("channels", "Channel enabled in config but not initialized; skipping start", map[string]any{
+				"channel": name,
+			})
+			continue
+		}
 		logger.InfoCF("channels", "Starting channel", map[string]any{
 			"channel": name,
 		})
