@@ -1454,7 +1454,8 @@ func (cb *ContextBuilder) buildActiveSkillsContext(skillNames []string, scope Lo
 
 	return fmt.Sprintf(`# Active Skills
 
-The following skills are active for this request. Follow them when relevant.
+The user EXPLICITLY selected the skills below in the composer for THIS request.
+Use them as the primary path, do not look for a closer match.
 
 %s`, content)
 }

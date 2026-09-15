@@ -591,3 +591,81 @@ func TestSkillDiscovery_DefersCatalogToHint(t *testing.T) {
 		t.Fatalf("discovery on should list the skill name: %q", sys)
 	}
 }
+
+func TestContextBuilder_ActiveSkillsBlockStatesUserSelectionAndForbidsRediscovery(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	workspace := t.TempDir()
+	writeTurnProfileSkill(
+		t,
+		workspace,
+		"frontend-design",
+		"---\nname: frontend-design\ndescription: Build polished frontend interfaces\n---\n# frontend-design\n\nDesign with a deliberate type scale.",
+	)
+	cb := NewContextBuilder(workspace)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{
+		CurrentMessage: "hello",
+		ActiveSkills:   []string{"frontend-design"},
+	})
+	system := messages[0].Content
+
+	if !strings.Contains(system, "# Active Skills") {
+		t.Fatalf("system prompt missing active skills section:\n%s", system)
+	}
+	if !strings.Contains(system, "EXPLICITLY selected") {
+		t.Fatalf("active skills block does not state the user selected the skills:\n%s", system)
+	}
+	if !strings.Contains(system, "primary path") {
+		t.Fatalf("active skills block does not make the selection the primary path:\n%s", system)
+	}
+	if !strings.Contains(system, "do not look for a closer match") {
+		t.Fatalf("active skills block does not forbid shopping for a closer match:\n%s", system)
+	}
+}
+
+func TestContextBuilder_ActiveSkillsBlockEmbedsSelectedSkillContent(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	workspace := t.TempDir()
+	writeTurnProfileSkill(
+		t,
+		workspace,
+		"frontend-design",
+		"---\nname: frontend-design\ndescription: Build polished frontend interfaces\n---\n# frontend-design\n\nDesign with a deliberate type scale.",
+	)
+	cb := NewContextBuilder(workspace)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{
+		CurrentMessage: "hello",
+		ActiveSkills:   []string{"frontend-design"},
+	})
+	system := messages[0].Content
+
+	if !strings.Contains(system, "### Skill: frontend-design") {
+		t.Fatalf("active skills block missing the selected skill heading:\n%s", system)
+	}
+	if !strings.Contains(system, "Design with a deliberate type scale.") {
+		t.Fatalf("active skills block missing the selected SKILL.md body:\n%s", system)
+	}
+}
+
+func TestContextBuilder_NoActiveSkillsProducesNoBlock(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	workspace := t.TempDir()
+	writeTurnProfileSkill(
+		t,
+		workspace,
+		"frontend-design",
+		"---\nname: frontend-design\ndescription: Build polished frontend interfaces\n---\n# frontend-design\n\nDesign with a deliberate type scale.",
+	)
+	cb := NewContextBuilder(workspace)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hello"})
+	system := messages[0].Content
+
+	if strings.Contains(system, "# Active Skills") {
+		t.Fatalf("system prompt should not include an active skills block without a selection:\n%s", system)
+	}
+	if strings.Contains(system, "do not look for a closer match") {
+		t.Fatalf("system prompt should not carry the active skills instruction without a selection:\n%s", system)
+	}
+}

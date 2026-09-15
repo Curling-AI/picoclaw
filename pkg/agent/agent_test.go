@@ -1094,6 +1094,10 @@ func TestProcessMessage_UseCommandLoadsRequestedSkill(t *testing.T) {
 	if !strings.Contains(systemPrompt, "# Active Skills") {
 		t.Fatalf("system prompt missing active skills section:\n%s", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "EXPLICITLY selected") ||
+		!strings.Contains(systemPrompt, "do not look for a closer match") {
+		t.Fatalf("system prompt missing explicit selection instruction:\n%s", systemPrompt)
+	}
 	if !strings.Contains(systemPrompt, "### Skill: shell") {
 		t.Fatalf("system prompt missing requested skill content:\n%s", systemPrompt)
 	}
