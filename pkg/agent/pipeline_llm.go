@@ -161,7 +161,6 @@ func (p *Pipeline) CallLLM(
 	}
 
 	requestID := newLLMRequestID()
-	exec.llmRequestID = requestID
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,
 		"temperature":      ts.agent.Temperature,
@@ -244,6 +243,8 @@ func (p *Pipeline) CallLLM(
 	} else {
 		delete(exec.llmOpts, "native_search")
 	}
+
+	exec.llmRequestID = requestIDFromOptions(exec.llmOpts)
 
 	al.emitEvent(
 		runtimeevents.KindAgentLLMRequest,

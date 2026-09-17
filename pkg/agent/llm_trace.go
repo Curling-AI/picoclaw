@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"maps"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -30,6 +31,11 @@ func optsWithFreshRequestID(opts map[string]any) (map[string]any, string) {
 	}
 	next[llmRequestIDOption] = id
 	return next, id
+}
+
+func requestIDFromOptions(opts map[string]any) string {
+	id, _ := opts[llmRequestIDOption].(string)
+	return strings.TrimSpace(id)
 }
 
 func llmCallRecord(requestID string, resp *providers.LLMResponse) *providers.LLMCall {
