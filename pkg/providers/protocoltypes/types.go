@@ -186,11 +186,22 @@ type Message struct {
 	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
 
+	LLMCall *LLMCall `json:"llm_call,omitempty"`
+
 	// Prompt metadata is internal to the agent runtime. It records where a
 	// message or system part came from without changing provider/session JSON.
 	PromptLayer  string `json:"-"`
 	PromptSlot   string `json:"-"`
 	PromptSource string `json:"-"`
+}
+
+type LLMCall struct {
+	RequestID           string `json:"request_id,omitempty"`
+	ProviderRequestID   string `json:"provider_request_id,omitempty"`
+	UpstreamID          string `json:"upstream_id,omitempty"`
+	ResolvedProvider    string `json:"resolved_provider,omitempty"`
+	FinishReason        string `json:"finish_reason,omitempty"`
+	FinishReasonMissing bool   `json:"finish_reason_missing,omitempty"`
 }
 
 type ToolDefinition struct {

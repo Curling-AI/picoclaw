@@ -11,6 +11,7 @@ type (
 	ToolCall               = protocoltypes.ToolCall
 	FunctionCall           = protocoltypes.FunctionCall
 	LLMResponse            = protocoltypes.LLMResponse
+	LLMCall                = protocoltypes.LLMCall
 	StreamChunk            = protocoltypes.StreamChunk
 	UsageInfo              = protocoltypes.UsageInfo
 	Message                = protocoltypes.Message
