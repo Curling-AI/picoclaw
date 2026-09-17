@@ -2,11 +2,9 @@ package session_test
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -469,6 +467,52 @@ func TestJSONLBackend_ListSessionRecordsUsesCanonicalKeyForAliasedSession(t *tes
 	}
 }
 
+type metaListCountingStore struct {
+	*memory.JSONLStore
+	listCalls int
+}
+
+func (s *metaListCountingStore) ListSessionMetas() []memory.SessionMeta {
+	s.listCalls++
+	return s.JSONLStore.ListSessionMetas()
+}
+
+func TestJSONLBackend_ListSessionRecordsScansMetaDirectoryOnce(t *testing.T) {
+	store, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	counting := &metaListCountingStore{JSONLStore: store}
+	b := session.NewJSONLBackend(counting)
+
+	const sessions = 25
+	for i := range sessions {
+		key := fmt.Sprintf("agent:main:chat:%d", i)
+		b.EnsureSessionMetadata(key, &session.SessionScope{
+			Version: session.ScopeVersionV1,
+			AgentID: "main",
+			Channel: "telegram",
+			Values:  map[string]string{"chat": fmt.Sprintf("direct:%d", i)},
+		}, nil)
+	}
+
+	counting.listCalls = 0
+	records := b.ListSessionRecords()
+	if len(records) != sessions {
+		t.Fatalf("len(records) = %d, want %d", len(records), sessions)
+	}
+	if counting.listCalls != 1 {
+		t.Errorf("ListSessionMetas called %d times for one listing, want 1", counting.listCalls)
+	}
+	for _, rec := range records {
+		if rec.Scope == nil || rec.Scope.Channel != "telegram" {
+			t.Fatalf("record %q carries scope %+v, want channel telegram", rec.SessionKey, rec.Scope)
+		}
+	}
+}
+
 func TestJSONLBackend_ListSessionRecordsCarriesAliasesOfCanonicalSession(t *testing.T) {
 	b := newBackend(t)
 
@@ -504,54 +548,5 @@ func TestJSONLBackend_ListSessionRecordsCarriesAliasesOfCanonicalSession(t *test
 	}
 	if alias.Scope != nil {
 		t.Errorf("alias scope = %+v, want nil so callers must resolve it through the canonical aliases", alias.Scope)
-	}
-}
-
-func listSessionRecordsCostPerSession(t *testing.T, sessions int) time.Duration {
-	t.Helper()
-
-	b := newBackend(t)
-	for i := range sessions {
-		key := fmt.Sprintf("agent:main:chat:%d", i)
-		b.EnsureSessionMetadata(key, &session.SessionScope{
-			Version: session.ScopeVersionV1,
-			AgentID: "main",
-			Channel: "telegram",
-			Values:  map[string]string{"chat": fmt.Sprintf("direct:%d", i)},
-		}, nil)
-	}
-
-	best := time.Duration(math.MaxInt64)
-	for range 5 {
-		start := time.Now()
-		records := b.ListSessionRecords()
-		elapsed := time.Since(start)
-		if len(records) != sessions {
-			t.Fatalf("len(records) = %d, want %d", len(records), sessions)
-		}
-		if elapsed < best {
-			best = elapsed
-		}
-	}
-	return best / time.Duration(sessions)
-}
-
-func TestJSONLBackend_ListSessionRecordsCostPerSessionDoesNotGrowWithSessionCount(t *testing.T) {
-	const (
-		smallCount = 40
-		largeCount = 240
-		tolerated  = 2.5
-	)
-
-	small := listSessionRecordsCostPerSession(t, smallCount)
-	large := listSessionRecordsCostPerSession(t, largeCount)
-	if small <= 0 {
-		t.Fatalf("cost per session at %d sessions is %v, want a positive measurement", smallCount, small)
-	}
-
-	growth := float64(large) / float64(small)
-	if growth > tolerated {
-		t.Errorf("cost per session grew %.2fx between %d and %d sessions (%v -> %v), want at most %.1fx",
-			growth, smallCount, largeCount, small, large, tolerated)
 	}
 }
