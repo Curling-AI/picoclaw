@@ -150,6 +150,66 @@ func (p *toolCallRespProvider) GetDefaultModel() string {
 	return "tool-model"
 }
 
+func makeTestProcessOptsWithHistory(sessionKey string) processOptions {
+	opts := makeTestProcessOpts(sessionKey)
+	opts.Dispatch = DispatchRequest{
+		SessionKey:  sessionKey,
+		UserMessage: opts.UserMessage,
+		InboundContext: &bus.InboundContext{
+			Channel:  opts.Channel,
+			ChatID:   opts.ChatID,
+			ChatType: "direct",
+		},
+	}
+	return opts
+}
+
+type llmCallTraceProvider struct {
+	responses  []*providers.LLMResponse
+	requestIDs []string
+	callCount  int
+	mu         sync.Mutex
+}
+
+func (p *llmCallTraceProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	id, _ := opts["request_id"].(string)
+	p.requestIDs = append(p.requestIDs, id)
+	idx := p.callCount
+	p.callCount++
+	if idx < len(p.responses) && p.responses[idx] != nil {
+		return p.responses[idx], nil
+	}
+	return &providers.LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+}
+
+func (p *llmCallTraceProvider) GetDefaultModel() string { return "trace-model" }
+
+func (p *llmCallTraceProvider) sentRequestIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.requestIDs...)
+}
+
+func assistantLLMCalls(history []providers.Message) []*providers.LLMCall {
+	var calls []*providers.LLMCall
+	for _, m := range history {
+		if m.Role != "assistant" {
+			continue
+		}
+		calls = append(calls, m.LLMCall)
+	}
+	return calls
+}
+
 // errorProvider simulates various error conditions
 type errorProvider struct {
 	errType   string
@@ -1205,6 +1265,155 @@ func TestRunTurn_TwoStageBudgetWarnings(t *testing.T) {
 	for _, m := range agent.Sessions.GetHistory("test-session-two-stage") {
 		if strings.Contains(m.Content, "[System] Tool-budget") {
 			t.Fatalf("tool-budget nudge was persisted to session history: %q", m.Content)
+		}
+	}
+}
+
+func TestRunTurn_AssistantMessageCarriesTheIDsOfItsLLMCall(t *testing.T) {
+	provider := &llmCallTraceProvider{
+		responses: []*providers.LLMResponse{{
+			Content:           "the answer",
+			FinishReason:      "stop",
+			ProviderRequestID: "pc-echoed-by-the-gateway",
+			UpstreamID:        "chatcmpl-abc123",
+			ResolvedProvider:  "acme-inference",
+		}},
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	opts := makeTestProcessOptsWithHistory("test-session-llm-call")
+	ts := newTurnState(agent, opts, turnEventScope{
+		turnID:  "turn-llm-call",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	if _, err := al.runTurn(context.Background(), ts, NewPipeline(al)); err != nil {
+		t.Fatalf("runTurn failed: %v", err)
+	}
+
+	calls := assistantLLMCalls(agent.Sessions.GetHistory(opts.Dispatch.SessionKey))
+	if len(calls) != 1 {
+		t.Fatalf("assistant messages = %d, want 1", len(calls))
+	}
+	call := calls[0]
+	if call == nil {
+		t.Fatal("assistant message carries no llm call record")
+	}
+	sent := provider.sentRequestIDs()
+	if len(sent) != 1 || sent[0] == "" {
+		t.Fatalf("request ids sent upstream = %v, want one non-empty", sent)
+	}
+	if call.RequestID != sent[0] {
+		t.Errorf("RequestID = %q, want the id sent upstream %q", call.RequestID, sent[0])
+	}
+	if call.ProviderRequestID != "pc-echoed-by-the-gateway" {
+		t.Errorf("ProviderRequestID = %q, want the echoed id", call.ProviderRequestID)
+	}
+	if call.UpstreamID != "chatcmpl-abc123" {
+		t.Errorf("UpstreamID = %q, want the completion id", call.UpstreamID)
+	}
+	if call.ResolvedProvider != "acme-inference" {
+		t.Errorf("ResolvedProvider = %q, want the upstream that served it", call.ResolvedProvider)
+	}
+	if call.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want %q", call.FinishReason, "stop")
+	}
+	if call.FinishReasonMissing {
+		t.Error("FinishReasonMissing set although the provider reported one")
+	}
+}
+
+func TestRunTurn_EachLLMCallIDsLandOnTheMessageItProduced(t *testing.T) {
+	provider := &llmCallTraceProvider{
+		responses: []*providers.LLMResponse{
+			{
+				Content: "Let me look that up.",
+				ToolCalls: []providers.ToolCall{{
+					ID:        "call_1",
+					Name:      "web_search",
+					Arguments: map[string]any{"query": "test"},
+				}},
+				FinishReason:      "tool_calls",
+				ProviderRequestID: "pc-first-echoed",
+				UpstreamID:        "chatcmpl-first",
+			},
+			{
+				Content:           "here it is",
+				FinishReason:      "stop",
+				ProviderRequestID: "pc-second-echoed",
+				UpstreamID:        "chatcmpl-second",
+			},
+		},
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	opts := makeTestProcessOptsWithHistory("test-session-llm-call-per-call")
+	ts := newTurnState(agent, opts, turnEventScope{
+		turnID:  "turn-llm-call-per-call",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	if _, err := al.runTurn(context.Background(), ts, NewPipeline(al)); err != nil {
+		t.Fatalf("runTurn failed: %v", err)
+	}
+
+	sent := provider.sentRequestIDs()
+	if len(sent) < 2 {
+		t.Fatalf("upstream calls = %d, want at least 2", len(sent))
+	}
+	if sent[0] == sent[1] {
+		t.Fatalf("both calls carried the same trace id %q", sent[0])
+	}
+
+	calls := assistantLLMCalls(agent.Sessions.GetHistory(opts.Dispatch.SessionKey))
+	if len(calls) < 2 {
+		t.Fatalf("assistant messages = %d, want at least 2", len(calls))
+	}
+	if calls[0] == nil || calls[1] == nil {
+		t.Fatalf("assistant messages without a call record: %v", calls)
+	}
+	if calls[0].RequestID != sent[0] {
+		t.Errorf("first message RequestID = %q, want %q", calls[0].RequestID, sent[0])
+	}
+	if calls[1].RequestID != sent[1] {
+		t.Errorf("second message RequestID = %q, want %q", calls[1].RequestID, sent[1])
+	}
+	if calls[0].UpstreamID != "chatcmpl-first" {
+		t.Errorf("first message UpstreamID = %q, want %q", calls[0].UpstreamID, "chatcmpl-first")
+	}
+	if calls[1].UpstreamID != "chatcmpl-second" {
+		t.Errorf("second message UpstreamID = %q, want %q", calls[1].UpstreamID, "chatcmpl-second")
+	}
+	if calls[0].ProviderRequestID != "pc-first-echoed" {
+		t.Errorf("first message ProviderRequestID = %q, want %q", calls[0].ProviderRequestID, "pc-first-echoed")
+	}
+	if calls[1].ProviderRequestID != "pc-second-echoed" {
+		t.Errorf("second message ProviderRequestID = %q, want %q", calls[1].ProviderRequestID, "pc-second-echoed")
+	}
+}
+
+func TestRunTurn_MessageWithoutTraceKeepsNoCallRecord(t *testing.T) {
+	provider := &llmCallTraceProvider{
+		responses: []*providers.LLMResponse{{Content: "plain answer"}},
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	opts := makeTestProcessOptsWithHistory("test-session-llm-call-absent")
+	ts := newTurnState(agent, opts, turnEventScope{
+		turnID:  "turn-llm-call-absent",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	if _, err := al.runTurn(context.Background(), ts, NewPipeline(al)); err != nil {
+		t.Fatalf("runTurn failed: %v", err)
+	}
+
+	for _, m := range agent.Sessions.GetHistory(opts.Dispatch.SessionKey) {
+		if m.Role == "user" && m.LLMCall != nil {
+			t.Fatalf("user message carries a call record: %+v", m.LLMCall)
 		}
 	}
 }
