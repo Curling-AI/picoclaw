@@ -2,9 +2,11 @@ package session_test
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -376,5 +378,142 @@ func TestJSONLBackend_ListSessionRecordsUsesMetaOnly(t *testing.T) {
 	}
 	if counts["s2"] != 1 {
 		t.Errorf("s2 count = %d, want 1", counts["s2"])
+	}
+}
+
+func TestJSONLBackend_ListSessionRecordsCarriesSessionScope(t *testing.T) {
+	b := newBackend(t)
+
+	scope := &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "telegram",
+		Account:    "default",
+		Dimensions: []string{"chat"},
+		Values: map[string]string{
+			"chat": "direct:42",
+		},
+	}
+	b.EnsureSessionMetadata("scoped", scope, nil)
+	b.AddMessage("scoped", "user", "hello")
+
+	var record *session.SessionRecord
+	for _, r := range b.ListSessionRecords() {
+		if r.SessionKey == "scoped" {
+			record = &r
+			break
+		}
+	}
+	if record == nil {
+		t.Fatal("ListSessionRecords() did not return the scoped session")
+	}
+	if record.Scope == nil {
+		t.Fatal("record.Scope is nil, want the persisted scope")
+	}
+	if record.Scope.Channel != scope.Channel {
+		t.Errorf("record.Scope.Channel = %q, want %q", record.Scope.Channel, scope.Channel)
+	}
+	if record.Scope.AgentID != scope.AgentID {
+		t.Errorf("record.Scope.AgentID = %q, want %q", record.Scope.AgentID, scope.AgentID)
+	}
+	if got := record.Scope.Values["chat"]; got != scope.Values["chat"] {
+		t.Errorf("record.Scope.Values[chat] = %q, want %q", got, scope.Values["chat"])
+	}
+}
+
+func TestJSONLBackend_ListSessionRecordsWithoutScopeReturnsEmptyScope(t *testing.T) {
+	b := newBackend(t)
+
+	b.AddMessage("unscoped", "user", "hello")
+
+	records := b.ListSessionRecords()
+	if len(records) != 1 {
+		t.Fatalf("len(records) = %d, want 1", len(records))
+	}
+	if records[0].SessionKey != "unscoped" {
+		t.Fatalf("records[0].SessionKey = %q, want %q", records[0].SessionKey, "unscoped")
+	}
+	if records[0].Scope != nil {
+		t.Errorf("records[0].Scope = %+v, want nil", records[0].Scope)
+	}
+	if records[0].MessageCount != 1 {
+		t.Errorf("records[0].MessageCount = %d, want 1", records[0].MessageCount)
+	}
+}
+
+func TestJSONLBackend_ListSessionRecordsUsesCanonicalKeyForAliasedSession(t *testing.T) {
+	b := newBackend(t)
+
+	scope := &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "whatsapp",
+		Values:  map[string]string{"chat": "direct:7"},
+	}
+	b.EnsureSessionMetadata("canonical", scope, []string{"agent:main:direct:7"})
+	b.AddMessage("agent:main:direct:7", "user", "hello through alias")
+
+	if got := b.ResolveSessionKey("agent:main:direct:7"); got != "canonical" {
+		t.Fatalf("ResolveSessionKey() = %q, want %q", got, "canonical")
+	}
+
+	records := b.ListSessionRecords()
+	if len(records) != 1 {
+		t.Fatalf("len(records) = %d, want 1", len(records))
+	}
+	if records[0].SessionKey != "canonical" {
+		t.Errorf("records[0].SessionKey = %q, want %q", records[0].SessionKey, "canonical")
+	}
+	if records[0].Scope == nil || records[0].Scope.Channel != "whatsapp" {
+		t.Errorf("records[0].Scope = %+v, want channel %q", records[0].Scope, "whatsapp")
+	}
+}
+
+func listSessionRecordsCostPerSession(t *testing.T, sessions int) time.Duration {
+	t.Helper()
+
+	b := newBackend(t)
+	for i := range sessions {
+		key := fmt.Sprintf("agent:main:chat:%d", i)
+		b.EnsureSessionMetadata(key, &session.SessionScope{
+			Version: session.ScopeVersionV1,
+			AgentID: "main",
+			Channel: "telegram",
+			Values:  map[string]string{"chat": fmt.Sprintf("direct:%d", i)},
+		}, nil)
+	}
+
+	best := time.Duration(math.MaxInt64)
+	for range 5 {
+		start := time.Now()
+		records := b.ListSessionRecords()
+		elapsed := time.Since(start)
+		if len(records) != sessions {
+			t.Fatalf("len(records) = %d, want %d", len(records), sessions)
+		}
+		if elapsed < best {
+			best = elapsed
+		}
+	}
+	return best / time.Duration(sessions)
+}
+
+func TestJSONLBackend_ListSessionRecordsCostPerSessionDoesNotGrowWithSessionCount(t *testing.T) {
+	const (
+		smallCount = 40
+		largeCount = 240
+		tolerated  = 2.5
+	)
+
+	small := listSessionRecordsCostPerSession(t, smallCount)
+	large := listSessionRecordsCostPerSession(t, largeCount)
+	if small <= 0 {
+		t.Fatalf("cost per session at %d sessions is %v, want a positive measurement", smallCount, small)
+	}
+
+	growth := float64(large) / float64(small)
+	if growth > tolerated {
+		t.Errorf("cost per session grew %.2fx between %d and %d sessions (%v -> %v), want at most %.1fx",
+			growth, smallCount, largeCount, small, large, tolerated)
 	}
 }
