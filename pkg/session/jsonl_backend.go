@@ -210,6 +210,7 @@ func (b *JSONLBackend) ListSessionRecords() []SessionRecord {
 			records = append(records, SessionRecord{
 				SessionKey:   key,
 				MessageCount: len(b.GetHistory(key)),
+				Scope:        b.GetSessionScope(key),
 			})
 		}
 		return records
@@ -228,6 +229,7 @@ func (b *JSONLBackend) ListSessionRecords() []SessionRecord {
 			Created:      m.CreatedAt,
 			Updated:      m.UpdatedAt,
 			Scope:        decodeSessionScope(m.Scope),
+			Aliases:      m.Aliases,
 		})
 	}
 	return records

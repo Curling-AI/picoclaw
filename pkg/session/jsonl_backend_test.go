@@ -469,6 +469,44 @@ func TestJSONLBackend_ListSessionRecordsUsesCanonicalKeyForAliasedSession(t *tes
 	}
 }
 
+func TestJSONLBackend_ListSessionRecordsCarriesAliasesOfCanonicalSession(t *testing.T) {
+	b := newBackend(t)
+
+	scope := &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "telegram",
+		Values:  map[string]string{"chat": "direct:123"},
+	}
+	b.AddMessage("agent:main:direct:123", "user", "legacy history")
+	b.EnsureSessionMetadata("sk_v1_canonical", scope, []string{"agent:main:direct:123"})
+
+	records := b.ListSessionRecords()
+	byKey := make(map[string]session.SessionRecord, len(records))
+	for _, rec := range records {
+		byKey[rec.SessionKey] = rec
+	}
+
+	canonical, ok := byKey["sk_v1_canonical"]
+	if !ok {
+		t.Fatalf("canonical session missing from %+v", records)
+	}
+	if canonical.Scope == nil || canonical.Scope.Channel != "telegram" {
+		t.Errorf("canonical scope = %+v, want channel telegram", canonical.Scope)
+	}
+	if len(canonical.Aliases) != 1 || canonical.Aliases[0] != "agent:main:direct:123" {
+		t.Errorf("canonical aliases = %v, want [agent:main:direct:123]", canonical.Aliases)
+	}
+
+	alias, ok := byKey["agent:main:direct:123"]
+	if !ok {
+		t.Fatalf("alias session missing from %+v", records)
+	}
+	if alias.Scope != nil {
+		t.Errorf("alias scope = %+v, want nil so callers must resolve it through the canonical aliases", alias.Scope)
+	}
+}
+
 func listSessionRecordsCostPerSession(t *testing.T, sessions int) time.Duration {
 	t.Helper()
 
