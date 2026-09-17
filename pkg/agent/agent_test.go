@@ -7942,3 +7942,95 @@ func TestRunWorkerPanicReleasesSessionTurnState(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func promptCacheKeyForTurn(t *testing.T, al *AgentLoop, provider *thinkingRecordingProvider, sessionKey string) string {
+	t.Helper()
+	if _, err := al.ProcessDirect(context.Background(), "hello", sessionKey); err != nil {
+		t.Fatalf("ProcessDirect(%q) error = %v", sessionKey, err)
+	}
+	key, ok := provider.lastOptions["prompt_cache_key"].(string)
+	if !ok {
+		t.Fatalf("prompt_cache_key = %#v, want a string", provider.lastOptions["prompt_cache_key"])
+	}
+	return key
+}
+
+func newPromptCacheKeyLoop(t *testing.T) (*AgentLoop, *thinkingRecordingProvider) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &thinkingRecordingProvider{}
+	return NewAgentLoop(cfg, bus.NewMessageBus(), provider), provider
+}
+
+func TestPromptCacheKeyDerivesFromTheSession(t *testing.T) {
+	al, provider := newPromptCacheKeyLoop(t)
+
+	first := promptCacheKeyForTurn(t, al, provider, "agent:main:telegram:direct:alice")
+	second := promptCacheKeyForTurn(t, al, provider, "agent:main:telegram:direct:bob")
+	again := promptCacheKeyForTurn(t, al, provider, "agent:main:telegram:direct:alice")
+
+	if first == second {
+		t.Errorf("two different sessions share prompt_cache_key %q", first)
+	}
+	if first != again {
+		t.Errorf("the same session produced %q then %q, want a stable key", first, again)
+	}
+	for _, agentID := range al.GetRegistry().ListAgentIDs() {
+		if strings.Contains(first, agentID) {
+			t.Errorf("prompt_cache_key %q still carries the agent id %q", first, agentID)
+		}
+	}
+}
+
+func TestPromptCacheKeyHidesLegacySessionKeyContents(t *testing.T) {
+	al, provider := newPromptCacheKeyLoop(t)
+
+	const phone = "5511999998888"
+	sessionKey := "agent:main:whatsapp:direct:" + phone
+
+	key := promptCacheKeyForTurn(t, al, provider, sessionKey)
+
+	if strings.Contains(key, phone) {
+		t.Errorf("prompt_cache_key %q leaks the chat id %q", key, phone)
+	}
+	if strings.Contains(key, "agent:") {
+		t.Errorf("prompt_cache_key %q leaks the legacy session key format", key)
+	}
+	if want := session.BuildOpaqueSessionKey(sessionKey); key != want {
+		t.Errorf("prompt_cache_key = %q, want the opaque session key %q", key, want)
+	}
+}
+
+func TestPromptCacheKeySuffixesSeparateUsesWithinOneSession(t *testing.T) {
+	const sessionKey = "agent:main:telegram:direct:alice"
+	opaque := session.BuildOpaqueSessionKey(sessionKey)
+
+	main := promptCacheKeyForSession(sessionKey, "")
+	vision := promptCacheKeyForSession(sessionKey, "vision")
+	btw := promptCacheKeyForSession(sessionKey, "btw")
+
+	if main != opaque {
+		t.Errorf("main key = %q, want %q", main, opaque)
+	}
+	if vision != opaque+":vision" {
+		t.Errorf("vision key = %q, want %q", vision, opaque+":vision")
+	}
+	if btw != opaque+":btw" {
+		t.Errorf("btw key = %q, want %q", btw, opaque+":btw")
+	}
+	if vision == btw || vision == main || btw == main {
+		t.Errorf("the three uses collided: main=%q vision=%q btw=%q", main, vision, btw)
+	}
+	for _, key := range []string{main, vision, btw} {
+		if len(key) > 256 {
+			t.Errorf("prompt_cache_key %q is %d characters, over the gateway limit", key, len(key))
+		}
+	}
+}
+
+func TestPromptCacheKeyIsEmptyWithoutASession(t *testing.T) {
+	if got := promptCacheKeyForSession("", "vision"); got != "" {
+		t.Errorf("promptCacheKeyForSession(\"\", \"vision\") = %q, want an empty key so the field is dropped", got)
+	}
+}

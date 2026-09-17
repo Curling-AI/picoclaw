@@ -15,7 +15,19 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
+
+func promptCacheKeyForSession(sessionKey, suffix string) string {
+	opaque := session.BuildOpaqueSessionKey(sessionKey)
+	if opaque == "" {
+		return ""
+	}
+	if suffix == "" {
+		return opaque
+	}
+	return opaque + ":" + suffix
+}
 
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
@@ -164,7 +176,7 @@ func (p *Pipeline) CallLLM(
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,
 		"temperature":      ts.agent.Temperature,
-		"prompt_cache_key": ts.agent.ID,
+		"prompt_cache_key": promptCacheKeyForSession(ts.sessionKey, ""),
 		llmRequestIDOption: requestID,
 	}
 	if exec.useNativeSearch {
