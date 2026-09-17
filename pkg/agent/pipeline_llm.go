@@ -161,6 +161,7 @@ func (p *Pipeline) CallLLM(
 	}
 
 	requestID := newLLMRequestID()
+	exec.llmRequestID = requestID
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,
 		"temperature":      ts.agent.Temperature,
@@ -1003,6 +1004,7 @@ func (p *Pipeline) CallLLM(
 		Content:          exec.response.Content,
 		ModelName:        exec.llmModelName,
 		ReasoningContent: reasoningContent,
+		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
 	}
 	for _, tc := range exec.normalizedToolCalls {
 		argumentsJSON, _ := json.Marshal(tc.Arguments)

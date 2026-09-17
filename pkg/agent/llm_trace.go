@@ -32,6 +32,27 @@ func optsWithFreshRequestID(opts map[string]any) (map[string]any, string) {
 	return next, id
 }
 
+func llmCallRecord(requestID string, resp *providers.LLMResponse) *providers.LLMCall {
+	if resp == nil {
+		if requestID == "" {
+			return nil
+		}
+		return &providers.LLMCall{RequestID: requestID}
+	}
+	call := &providers.LLMCall{
+		RequestID:           requestID,
+		ProviderRequestID:   resp.ProviderRequestID,
+		UpstreamID:          resp.UpstreamID,
+		ResolvedProvider:    resp.ResolvedProvider,
+		FinishReason:        resp.FinishReason,
+		FinishReasonMissing: resp.FinishReasonMissing,
+	}
+	if *call == (providers.LLMCall{}) {
+		return nil
+	}
+	return call
+}
+
 // responseCompletionTokens returns -1 when the provider reported no usage, so
 // "billed nothing" stays distinguishable from "did not say".
 func responseCompletionTokens(resp *providers.LLMResponse) int {
