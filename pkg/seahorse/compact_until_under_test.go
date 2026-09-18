@@ -46,7 +46,7 @@ func TestCompactUntilUnderIterationCap(t *testing.T) {
 	// The function should stop after maxCompactIterations, not loop forever
 	ce.config = Config{} // ensure defaults
 
-	result, err := ce.CompactUntilUnder(context.Background(), convID, 1)
+	result, err := ce.CompactUntilUnder(context.Background(), convID, "sk_v1_teste", 1)
 	if err != nil {
 		// Should not error — should stop gracefully
 		t.Fatalf("CompactUntilUnder with budget=0: %v", err)

@@ -403,10 +403,13 @@ func TestProviderToCompleteFn(t *testing.T) {
 		},
 	}
 
+	const sessionKey = "agent:main:whatsapp:direct:5511999999999"
+
 	completeFn := providerToCompleteFn(mp, "test-model-v1")
 	result, err := completeFn(context.Background(), "Summarize this text", seahorse.CompleteOptions{
 		MaxTokens:   500,
 		Temperature: 0.3,
+		SessionKey:  sessionKey,
 	})
 	if err != nil {
 		t.Fatalf("completeFn: %v", err)
@@ -438,8 +441,33 @@ func TestProviderToCompleteFn(t *testing.T) {
 	if capturedOptions["temperature"] != 0.3 {
 		t.Errorf("temperature = %v, want 0.3", capturedOptions["temperature"])
 	}
-	if capturedOptions["prompt_cache_key"] != "seahorse" {
-		t.Errorf("prompt_cache_key = %v, want 'seahorse'", capturedOptions["prompt_cache_key"])
+	// A constante antiga era UMA partição de cache para todo resumo de todo
+	// assistente de todo inquilino. A chave tem de sair da sessão resumida.
+	if got := capturedOptions["prompt_cache_key"]; got != promptCacheKeyForSession(sessionKey, "seahorse") {
+		t.Errorf("prompt_cache_key = %v, want the key derived from the session", got)
+	}
+	if got := capturedOptions["prompt_cache_key"]; got == "seahorse" {
+		t.Error("prompt_cache_key is still the platform-wide constant")
+	}
+}
+
+// Sem sessão não há partição a nomear, e o campo tem de sumir em vez de virar
+// uma constante vazia compartilhada.
+func TestProviderToCompleteFnSemSessaoNaoMandaChave(t *testing.T) {
+	var capturedOptions map[string]any
+	mp := &seahorseTestProvider{
+		chatFn: func(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string, options map[string]any) (*providers.LLMResponse, error) {
+			capturedOptions = options
+			return &providers.LLMResponse{Content: "resumo"}, nil
+		},
+	}
+
+	completeFn := providerToCompleteFn(mp, "test-model-v1")
+	if _, err := completeFn(context.Background(), "texto", seahorse.CompleteOptions{MaxTokens: 500}); err != nil {
+		t.Fatalf("completeFn: %v", err)
+	}
+	if got := capturedOptions["prompt_cache_key"]; got != "" {
+		t.Errorf("prompt_cache_key = %v, want empty so the provider drops the field", got)
 	}
 }
 
