@@ -246,6 +246,11 @@ func turnContextWindow(ts *turnState, exec *turnExecution) int {
 // the literal in pkg/tools/cron.go.
 const CronModelSessionPrefix = "agent:cronmodel-"
 
+// CronSessionPrefix marca um turno de cron comum. Mesma sincronia manual do
+// CronModelSessionPrefix com tools.cron, e aqui ele serve para achar o uuid por
+// execução que não pode entrar na chave de cache (ver promptCacheScopeForSession).
+const CronSessionPrefix = "agent:cron-"
+
 // routeCronModelTurn swaps the active model to the agent's pre-built
 // CronCandidates for cron jobs whose session key carries CronModelSessionPrefix
 // (i.e. the job opted in via Payload.Model). Mirrors routeMediaTurn's swap, but

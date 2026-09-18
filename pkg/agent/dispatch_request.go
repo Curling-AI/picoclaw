@@ -18,6 +18,10 @@ type DispatchRequest struct {
 	SessionScope   *session.SessionScope
 	UserMessage    string
 	Media          []string
+	// PromptCacheScope nomeia a partição de cache quando a SessionKey é
+	// sintética e por execução — um subturno, por exemplo, cuja chave é um
+	// contador do processo. Vazio = a própria sessão nomeia a partição.
+	PromptCacheScope string
 }
 
 func (r DispatchRequest) Channel() string {

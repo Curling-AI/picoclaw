@@ -383,10 +383,14 @@ func spawnSubTurn(
 
 	// Create processOptions for the child turn
 	dispatch := DispatchRequest{
-		SessionKey:     childID,
-		UserMessage:    cfg.SystemPrompt,
-		Media:          nil,
-		InboundContext: cloneInboundContext(parentTS.opts.Dispatch.InboundContext),
+		SessionKey: childID,
+		// childID é um contador do PROCESSO: reinicia em 1 a cada restart do
+		// pod e não identifica conversa nenhuma. Quem nomeia a partição de
+		// cache é o turno que gerou este.
+		PromptCacheScope: parentTS.promptCacheScope(),
+		UserMessage:      cfg.SystemPrompt,
+		Media:            nil,
+		InboundContext:   cloneInboundContext(parentTS.opts.Dispatch.InboundContext),
 	}
 	opts := processOptions{
 		Dispatch:                dispatch,

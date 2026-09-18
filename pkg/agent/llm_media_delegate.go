@@ -179,7 +179,7 @@ func (p *Pipeline) callVisionDelegate(
 	opts := map[string]any{
 		"max_tokens":       maxDelegationOutputTokens,
 		"temperature":      0.2,
-		"prompt_cache_key": promptCacheKeyForSession(ts.sessionKey, "vision"),
+		"prompt_cache_key": promptCacheKeyForSession(ts.promptCacheScope(), "vision"),
 	}
 	resp, err := provider.Chat(ctx, msgs, nil, model, opts)
 	if err != nil {
