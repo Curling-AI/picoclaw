@@ -107,11 +107,15 @@ func (b *JSONLBackend) GetSessionScope(sessionKey string) *SessionScope {
 		log.Printf("session: get session metadata: %v", err)
 		return nil
 	}
-	if len(meta.Scope) == 0 {
+	return decodeSessionScope(meta.Scope)
+}
+
+func decodeSessionScope(raw json.RawMessage) *SessionScope {
+	if len(raw) == 0 {
 		return nil
 	}
 	var scope SessionScope
-	if err := json.Unmarshal(meta.Scope, &scope); err != nil {
+	if err := json.Unmarshal(raw, &scope); err != nil {
 		log.Printf("session: decode session scope: %v", err)
 		return nil
 	}
@@ -206,6 +210,7 @@ func (b *JSONLBackend) ListSessionRecords() []SessionRecord {
 			records = append(records, SessionRecord{
 				SessionKey:   key,
 				MessageCount: len(b.GetHistory(key)),
+				Scope:        b.GetSessionScope(key),
 			})
 		}
 		return records
@@ -223,6 +228,8 @@ func (b *JSONLBackend) ListSessionRecords() []SessionRecord {
 			MessageCount: count,
 			Created:      m.CreatedAt,
 			Updated:      m.UpdatedAt,
+			Scope:        decodeSessionScope(m.Scope),
+			Aliases:      m.Aliases,
 		})
 	}
 	return records

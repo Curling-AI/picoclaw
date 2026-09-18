@@ -378,3 +378,175 @@ func TestJSONLBackend_ListSessionRecordsUsesMetaOnly(t *testing.T) {
 		t.Errorf("s2 count = %d, want 1", counts["s2"])
 	}
 }
+
+func TestJSONLBackend_ListSessionRecordsCarriesSessionScope(t *testing.T) {
+	b := newBackend(t)
+
+	scope := &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "telegram",
+		Account:    "default",
+		Dimensions: []string{"chat"},
+		Values: map[string]string{
+			"chat": "direct:42",
+		},
+	}
+	b.EnsureSessionMetadata("scoped", scope, nil)
+	b.AddMessage("scoped", "user", "hello")
+
+	var record *session.SessionRecord
+	for _, r := range b.ListSessionRecords() {
+		if r.SessionKey == "scoped" {
+			record = &r
+			break
+		}
+	}
+	if record == nil {
+		t.Fatal("ListSessionRecords() did not return the scoped session")
+	}
+	if record.Scope == nil {
+		t.Fatal("record.Scope is nil, want the persisted scope")
+	}
+	if record.Scope.Channel != scope.Channel {
+		t.Errorf("record.Scope.Channel = %q, want %q", record.Scope.Channel, scope.Channel)
+	}
+	if record.Scope.AgentID != scope.AgentID {
+		t.Errorf("record.Scope.AgentID = %q, want %q", record.Scope.AgentID, scope.AgentID)
+	}
+	if got := record.Scope.Values["chat"]; got != scope.Values["chat"] {
+		t.Errorf("record.Scope.Values[chat] = %q, want %q", got, scope.Values["chat"])
+	}
+}
+
+func TestJSONLBackend_ListSessionRecordsWithoutScopeReturnsEmptyScope(t *testing.T) {
+	b := newBackend(t)
+
+	b.AddMessage("unscoped", "user", "hello")
+
+	records := b.ListSessionRecords()
+	if len(records) != 1 {
+		t.Fatalf("len(records) = %d, want 1", len(records))
+	}
+	if records[0].SessionKey != "unscoped" {
+		t.Fatalf("records[0].SessionKey = %q, want %q", records[0].SessionKey, "unscoped")
+	}
+	if records[0].Scope != nil {
+		t.Errorf("records[0].Scope = %+v, want nil", records[0].Scope)
+	}
+	if records[0].MessageCount != 1 {
+		t.Errorf("records[0].MessageCount = %d, want 1", records[0].MessageCount)
+	}
+}
+
+func TestJSONLBackend_ListSessionRecordsUsesCanonicalKeyForAliasedSession(t *testing.T) {
+	b := newBackend(t)
+
+	scope := &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "whatsapp",
+		Values:  map[string]string{"chat": "direct:7"},
+	}
+	b.EnsureSessionMetadata("canonical", scope, []string{"agent:main:direct:7"})
+	b.AddMessage("agent:main:direct:7", "user", "hello through alias")
+
+	if got := b.ResolveSessionKey("agent:main:direct:7"); got != "canonical" {
+		t.Fatalf("ResolveSessionKey() = %q, want %q", got, "canonical")
+	}
+
+	records := b.ListSessionRecords()
+	if len(records) != 1 {
+		t.Fatalf("len(records) = %d, want 1", len(records))
+	}
+	if records[0].SessionKey != "canonical" {
+		t.Errorf("records[0].SessionKey = %q, want %q", records[0].SessionKey, "canonical")
+	}
+	if records[0].Scope == nil || records[0].Scope.Channel != "whatsapp" {
+		t.Errorf("records[0].Scope = %+v, want channel %q", records[0].Scope, "whatsapp")
+	}
+}
+
+type metaListCountingStore struct {
+	*memory.JSONLStore
+	listCalls int
+}
+
+func (s *metaListCountingStore) ListSessionMetas() []memory.SessionMeta {
+	s.listCalls++
+	return s.JSONLStore.ListSessionMetas()
+}
+
+func TestJSONLBackend_ListSessionRecordsScansMetaDirectoryOnce(t *testing.T) {
+	store, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	counting := &metaListCountingStore{JSONLStore: store}
+	b := session.NewJSONLBackend(counting)
+
+	const sessions = 25
+	for i := range sessions {
+		key := fmt.Sprintf("agent:main:chat:%d", i)
+		b.EnsureSessionMetadata(key, &session.SessionScope{
+			Version: session.ScopeVersionV1,
+			AgentID: "main",
+			Channel: "telegram",
+			Values:  map[string]string{"chat": fmt.Sprintf("direct:%d", i)},
+		}, nil)
+	}
+
+	counting.listCalls = 0
+	records := b.ListSessionRecords()
+	if len(records) != sessions {
+		t.Fatalf("len(records) = %d, want %d", len(records), sessions)
+	}
+	if counting.listCalls != 1 {
+		t.Errorf("ListSessionMetas called %d times for one listing, want 1", counting.listCalls)
+	}
+	for _, rec := range records {
+		if rec.Scope == nil || rec.Scope.Channel != "telegram" {
+			t.Fatalf("record %q carries scope %+v, want channel telegram", rec.SessionKey, rec.Scope)
+		}
+	}
+}
+
+func TestJSONLBackend_ListSessionRecordsCarriesAliasesOfCanonicalSession(t *testing.T) {
+	b := newBackend(t)
+
+	scope := &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "telegram",
+		Values:  map[string]string{"chat": "direct:123"},
+	}
+	b.AddMessage("agent:main:direct:123", "user", "legacy history")
+	b.EnsureSessionMetadata("sk_v1_canonical", scope, []string{"agent:main:direct:123"})
+
+	records := b.ListSessionRecords()
+	byKey := make(map[string]session.SessionRecord, len(records))
+	for _, rec := range records {
+		byKey[rec.SessionKey] = rec
+	}
+
+	canonical, ok := byKey["sk_v1_canonical"]
+	if !ok {
+		t.Fatalf("canonical session missing from %+v", records)
+	}
+	if canonical.Scope == nil || canonical.Scope.Channel != "telegram" {
+		t.Errorf("canonical scope = %+v, want channel telegram", canonical.Scope)
+	}
+	if len(canonical.Aliases) != 1 || canonical.Aliases[0] != "agent:main:direct:123" {
+		t.Errorf("canonical aliases = %v, want [agent:main:direct:123]", canonical.Aliases)
+	}
+
+	alias, ok := byKey["agent:main:direct:123"]
+	if !ok {
+		t.Fatalf("alias session missing from %+v", records)
+	}
+	if alias.Scope != nil {
+		t.Errorf("alias scope = %+v, want nil so callers must resolve it through the canonical aliases", alias.Scope)
+	}
+}

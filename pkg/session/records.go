@@ -15,6 +15,8 @@ type SessionRecord struct {
 	MessageCount int
 	Created      time.Time
 	Updated      time.Time
+	Scope        *SessionScope
+	Aliases      []string
 }
 
 // ListSessionRecords returns metadata for every loaded session. NewSessionManager
