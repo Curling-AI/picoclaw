@@ -348,7 +348,7 @@ func (m *legacyContextManager) retryLLMCall(
 				map[string]any{
 					"max_tokens":       agent.MaxTokens,
 					"temperature":      llmTemperature,
-					"prompt_cache_key": promptCacheKeyForSession(sessionKey, ""),
+					"prompt_cache_key": promptCacheKeyForSession(sessionKey, "summarize"),
 				},
 			)
 		}()
