@@ -2013,6 +2013,10 @@ func TestSupportsPromptCacheKey(t *testing.T) {
 		{"https://maestro.adapta.one/llm-proxy/1b6f523c/gateway", true},
 		{"https://maestro.adapta.one/llm-proxy/1b6f523c/crof", true},
 		{"http://seucaranguejo.default.svc.cluster.local:8080/llm-proxy/1b6f523c/hulk", true},
+		// INTERNAL_BASE_URL behind an ingress subpath. A prefix match would
+		// answer false here and prompt caching would disappear fleet-wide with
+		// no error and no failing test.
+		{"https://maestro.adapta.one/api/llm-proxy/1b6f523c/hulk", true},
 		{"https://api.mistral.ai/llm-proxy", false},
 		{"https://api.mistral.ai/v1?next=/llm-proxy/x/hulk", false},
 		// Malformed or empty

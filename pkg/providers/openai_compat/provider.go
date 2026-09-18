@@ -1013,12 +1013,20 @@ func isNativeSearchHost(apiBase string) bool {
 
 const controlPlaneLLMProxyPathPrefix = "/llm-proxy/"
 
+// isControlPlaneLLMProxyEndpoint reports whether this base is our own proxy.
+//
+// Contains and not HasPrefix: the control plane's base comes from
+// INTERNAL_BASE_URL, and putting it behind any ingress subpath would turn the
+// path into /<subpath>/llm-proxy/... A prefix match would then silently answer
+// false and prompt caching would disappear fleet-wide with no error, no log and
+// no failing test — a cost regression nobody would trace back to an ingress
+// change.
 func isControlPlaneLLMProxyEndpoint(apiBase string) bool {
 	u, err := url.Parse(apiBase)
 	if err != nil {
 		return false
 	}
-	return strings.HasPrefix(u.Path, controlPlaneLLMProxyPathPrefix)
+	return strings.Contains(u.Path, controlPlaneLLMProxyPathPrefix)
 }
 
 // supportsPromptCacheKey reports whether the given API base is known to
