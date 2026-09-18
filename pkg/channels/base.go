@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +34,17 @@ func init() {
 	}
 	uniqueIDPrefix = hex.EncodeToString(b[:])
 }
+
+const (
+	// dedupWindow bounds how long a MessageID is remembered. It only needs to
+	// cover near-simultaneous redeliveries of the same logical message (e.g.
+	// Slack emitting both `message` and `app_mention` for one post), not
+	// retries after a process restart.
+	dedupWindow = 5 * time.Second
+	// dedupMaxEntries caps the dedup map so memory stays bounded under a burst
+	// without a background janitor goroutine.
+	dedupMaxEntries = 4096
+)
 
 // audioAnnotationRe matches audio/voice annotations injected by channels (e.g. [voice], [audio: file.ogg]).
 var audioAnnotationRe = regexp.MustCompile(`\[(voice|audio)(?::[^\]]*)?\]`)
@@ -94,6 +107,10 @@ type BaseChannel struct {
 	placeholderRecorder PlaceholderRecorder
 	owner               Channel // the concrete channel that embeds this BaseChannel
 	reasoningChannelID  string
+
+	dedupMu    sync.Mutex
+	dedupSeen  map[string]time.Time
+	dedupPrune time.Time
 }
 
 func NewBaseChannel(
@@ -364,7 +381,74 @@ func (c *BaseChannel) HandleInboundContext(
 	inboundCtx bus.InboundContext,
 	senderOpts ...bus.SenderInfo,
 ) error {
+	if c.seenMessage(inboundCtx.MessageID) {
+		logger.DebugCF("channels", "Duplicate inbound message suppressed", map[string]any{
+			"channel":    c.name,
+			"chat_id":    deliveryChatID,
+			"message_id": inboundCtx.MessageID,
+		})
+		return nil
+	}
 	return c.HandleMessageWithContext(ctx, deliveryChatID, content, media, inboundCtx, senderOpts...)
+}
+
+// seenMessage reports whether messageID was already accepted within dedupWindow
+// and records it otherwise. An empty messageID is never deduplicated: some
+// channels don't set it, and collapsing all of those into one key would swallow
+// unrelated messages. Safe for concurrent use.
+func (c *BaseChannel) seenMessage(messageID string) bool {
+	if messageID == "" {
+		return false
+	}
+
+	c.dedupMu.Lock()
+	defer c.dedupMu.Unlock()
+
+	now := time.Now()
+	if c.dedupSeen == nil {
+		c.dedupSeen = make(map[string]time.Time)
+		c.dedupPrune = now
+	}
+
+	if ts, ok := c.dedupSeen[messageID]; ok && now.Sub(ts) < dedupWindow {
+		return true
+	}
+
+	if len(c.dedupSeen) >= dedupMaxEntries || now.Sub(c.dedupPrune) >= dedupWindow {
+		c.pruneDedupLocked(now)
+	}
+
+	c.dedupSeen[messageID] = now
+	return false
+}
+
+// pruneDedupLocked drops expired entries and, if the map is still at capacity
+// (a burst of fresh IDs), evicts the oldest quarter so the sort cost is
+// amortized over many inserts instead of paid on every one.
+// Caller must hold dedupMu.
+func (c *BaseChannel) pruneDedupLocked(now time.Time) {
+	c.dedupPrune = now
+	for id, ts := range c.dedupSeen {
+		if now.Sub(ts) >= dedupWindow {
+			delete(c.dedupSeen, id)
+		}
+	}
+	if len(c.dedupSeen) < dedupMaxEntries {
+		return
+	}
+
+	type entry struct {
+		id string
+		ts time.Time
+	}
+	entries := make([]entry, 0, len(c.dedupSeen))
+	for id, ts := range c.dedupSeen {
+		entries = append(entries, entry{id: id, ts: ts})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ts.Before(entries[j].ts) })
+	for _, e := range entries[:dedupMaxEntries/4] {
+		delete(c.dedupSeen, e.id)
+	}
 }
 
 func (c *BaseChannel) SetRunning(running bool) {
