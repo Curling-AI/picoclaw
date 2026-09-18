@@ -7992,6 +7992,8 @@ func TestPromptCacheKeyDerivesFromTheSession(t *testing.T) {
 // um template público, então um alias de baixa entropia (id do agente + número
 // de telefone) é quebrável por força bruta. É pseudônimo, não supressão, e o
 // nome do teste não pode prometer mais do que isso.
+//
+//nolint:misspell // "supressão" é português, não o "suppress" do dicionário
 func TestPromptCacheKeyDoesNotCarryTheLegacySessionKeyVerbatim(t *testing.T) {
 	al, provider := newPromptCacheKeyLoop(t)
 
