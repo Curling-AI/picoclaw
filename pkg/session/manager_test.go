@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 func TestSanitizeFilename(t *testing.T) {
@@ -110,5 +112,83 @@ func TestLoadSessions_NormalizesMissingCreatedAt(t *testing.T) {
 	}
 	if history[0].CreatedAt == nil || history[0].CreatedAt.IsZero() {
 		t.Fatalf("history[0].CreatedAt = %v, want non-zero timestamp", history[0].CreatedAt)
+	}
+}
+
+func TestLoadSessions_SessionWrittenBeforeCallTraceStillLoads(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "telegram_no_trace.json")
+	stored := `{
+  "key": "telegram:no-trace",
+  "messages": [
+    {
+      "role": "user",
+      "content": "hello"
+    },
+    {
+      "role": "assistant",
+      "content": "hi there",
+      "model_name": "old-model"
+    }
+  ],
+  "created": "2026-01-01T00:00:00Z",
+  "updated": "2026-01-01T00:00:00Z"
+}`
+
+	if err := os.WriteFile(sessionPath, []byte(stored), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	sm := NewSessionManager(tmpDir)
+	history := sm.GetHistory("telegram:no-trace")
+	if len(history) != 2 {
+		t.Fatalf("history = %d, want 2", len(history))
+	}
+	for i, msg := range history {
+		if msg.LLMCall != nil {
+			t.Errorf("history[%d].LLMCall = %+v, want nil for a message stored without one", i, msg.LLMCall)
+		}
+	}
+	if history[1].Content != "hi there" || history[1].ModelName != "old-model" {
+		t.Errorf("assistant message lost fields: %+v", history[1])
+	}
+}
+
+func TestSaveAndLoad_KeepsTheCallTraceOfAnAssistantMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	sm := NewSessionManager(tmpDir)
+	sm.AddFullMessage("web:trace", providers.Message{
+		Role:      "assistant",
+		Content:   "answer",
+		ModelName: "some-model",
+		LLMCall: &providers.LLMCall{
+			RequestID:         "pc-sent",
+			ProviderRequestID: "pc-echoed",
+			UpstreamID:        "chatcmpl-1",
+			ResolvedProvider:  "acme-inference",
+			FinishReason:      "stop",
+		},
+	})
+	if err := sm.Save("web:trace"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded := NewSessionManager(tmpDir)
+	history := reloaded.GetHistory("web:trace")
+	if len(history) != 1 {
+		t.Fatalf("history = %d, want 1", len(history))
+	}
+	call := history[0].LLMCall
+	if call == nil {
+		t.Fatal("reloaded assistant message carries no call trace")
+	}
+	if call.RequestID != "pc-sent" || call.ProviderRequestID != "pc-echoed" {
+		t.Errorf("trace ids = %+v, want the persisted ones", call)
+	}
+	if call.UpstreamID != "chatcmpl-1" || call.ResolvedProvider != "acme-inference" {
+		t.Errorf("trace = %+v, want the persisted completion id and provider", call)
+	}
+	if call.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want %q", call.FinishReason, "stop")
 	}
 }

@@ -207,6 +207,7 @@ type turnExecution struct {
 	llmModel                  string
 	llmModelName              string
 	llmOpts                   map[string]any
+	llmRequestID              string
 	gracefulTerminal          bool
 	useNativeSearch           bool
 	ownedProviders            []providers.LLMProvider

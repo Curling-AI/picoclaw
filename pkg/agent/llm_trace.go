@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"maps"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -30,6 +31,32 @@ func optsWithFreshRequestID(opts map[string]any) (map[string]any, string) {
 	}
 	next[llmRequestIDOption] = id
 	return next, id
+}
+
+func requestIDFromOptions(opts map[string]any) string {
+	id, _ := opts[llmRequestIDOption].(string)
+	return strings.TrimSpace(id)
+}
+
+func llmCallRecord(requestID string, resp *providers.LLMResponse) *providers.LLMCall {
+	if resp == nil {
+		if requestID == "" {
+			return nil
+		}
+		return &providers.LLMCall{RequestID: requestID}
+	}
+	call := &providers.LLMCall{
+		RequestID:           requestID,
+		ProviderRequestID:   resp.ProviderRequestID,
+		UpstreamID:          resp.UpstreamID,
+		ResolvedProvider:    resp.ResolvedProvider,
+		FinishReason:        resp.FinishReason,
+		FinishReasonMissing: resp.FinishReasonMissing,
+	}
+	if *call == (providers.LLMCall{}) {
+		return nil
+	}
+	return call
 }
 
 // responseCompletionTokens returns -1 when the provider reported no usage, so

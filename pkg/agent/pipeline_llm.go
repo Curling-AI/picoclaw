@@ -244,6 +244,8 @@ func (p *Pipeline) CallLLM(
 		delete(exec.llmOpts, "native_search")
 	}
 
+	exec.llmRequestID = requestIDFromOptions(exec.llmOpts)
+
 	al.emitEvent(
 		runtimeevents.KindAgentLLMRequest,
 		ts.eventMeta("runTurn", "turn.llm.request"),
@@ -1003,6 +1005,7 @@ func (p *Pipeline) CallLLM(
 		Content:          exec.response.Content,
 		ModelName:        exec.llmModelName,
 		ReasoningContent: reasoningContent,
+		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
 	}
 	for _, tc := range exec.normalizedToolCalls {
 		argumentsJSON, _ := json.Marshal(tc.Arguments)
