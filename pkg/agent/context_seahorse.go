@@ -71,6 +71,11 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 }
 
 // providerToCompleteFn wraps providers.LLMProvider as a seahorse.CompleteFn.
+//
+// A chave de cache sai da sessão que está sendo resumida, como nos outros
+// pontos de chamada. Era uma constante — quer dizer UMA partição para todo
+// resumo de todo assistente de todo inquilino, que é exatamente o que o resto
+// deste commit existe para não fazer.
 func providerToCompleteFn(provider providers.LLMProvider, model string) seahorse.CompleteFn {
 	return func(ctx context.Context, prompt string, opts seahorse.CompleteOptions) (string, error) {
 		resp, err := provider.Chat(
@@ -81,7 +86,7 @@ func providerToCompleteFn(provider providers.LLMProvider, model string) seahorse
 			map[string]any{
 				"max_tokens":       opts.MaxTokens,
 				"temperature":      opts.Temperature,
-				"prompt_cache_key": "seahorse",
+				"prompt_cache_key": promptCacheKeyForSession(opts.SessionKey, "seahorse"),
 			},
 		)
 		if err != nil {

@@ -1011,10 +1011,30 @@ func isNativeSearchHost(apiBase string) bool {
 	return isNativeOpenAIOrAzureEndpoint(apiBase)
 }
 
+const controlPlaneLLMProxyPathPrefix = "/llm-proxy/"
+
+// isControlPlaneLLMProxyEndpoint reports whether this base is our own proxy.
+//
+// Contains and not HasPrefix: the control plane's base comes from
+// INTERNAL_BASE_URL, and putting it behind any ingress subpath would turn the
+// path into /<subpath>/llm-proxy/... A prefix match would then silently answer
+// false and prompt caching would disappear fleet-wide with no error, no log and
+// no failing test — a cost regression nobody would trace back to an ingress
+// change.
+func isControlPlaneLLMProxyEndpoint(apiBase string) bool {
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(u.Path, controlPlaneLLMProxyPathPrefix)
+}
+
 // supportsPromptCacheKey reports whether the given API base is known to
-// support the prompt_cache_key request field. Currently only OpenAI's own
-// API and Azure OpenAI support this. All other OpenAI-compatible providers
-// (Mistral, Gemini, DeepSeek, Groq, etc.) reject unknown fields with 422 errors.
+// support the prompt_cache_key request field. OpenAI's own API and Azure
+// OpenAI support it, and so does the control plane's /llm-proxy, which drops
+// the field for the backends that do not take it. All other
+// OpenAI-compatible providers (Mistral, Gemini, DeepSeek, Groq, etc.) reject
+// unknown fields with 422 errors.
 func supportsPromptCacheKey(apiBase string) bool {
-	return isNativeOpenAIOrAzureEndpoint(apiBase)
+	return isNativeOpenAIOrAzureEndpoint(apiBase) || isControlPlaneLLMProxyEndpoint(apiBase)
 }

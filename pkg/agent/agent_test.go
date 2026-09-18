@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -7940,5 +7942,229 @@ func TestRunWorkerPanicReleasesSessionTurnState(t *testing.T) {
 			t.Fatal("second message did not start a new turn after panic cleanup")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func promptCacheKeyForTurn(t *testing.T, al *AgentLoop, provider *thinkingRecordingProvider, sessionKey string) string {
+	t.Helper()
+	if _, err := al.ProcessDirect(context.Background(), "hello", sessionKey); err != nil {
+		t.Fatalf("ProcessDirect(%q) error = %v", sessionKey, err)
+	}
+	key, ok := provider.lastOptions["prompt_cache_key"].(string)
+	if !ok {
+		t.Fatalf("prompt_cache_key = %#v, want a string", provider.lastOptions["prompt_cache_key"])
+	}
+	return key
+}
+
+func newPromptCacheKeyLoop(t *testing.T) (*AgentLoop, *thinkingRecordingProvider) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &thinkingRecordingProvider{}
+	return NewAgentLoop(cfg, bus.NewMessageBus(), provider), provider
+}
+
+func TestPromptCacheKeyDerivesFromTheSession(t *testing.T) {
+	al, provider := newPromptCacheKeyLoop(t)
+
+	first := promptCacheKeyForTurn(t, al, provider, "agent:main:telegram:direct:alice")
+	second := promptCacheKeyForTurn(t, al, provider, "agent:main:telegram:direct:bob")
+	again := promptCacheKeyForTurn(t, al, provider, "agent:main:telegram:direct:alice")
+
+	if first == second {
+		t.Errorf("two different sessions share prompt_cache_key %q", first)
+	}
+	if first != again {
+		t.Errorf("the same session produced %q then %q, want a stable key", first, again)
+	}
+	// Antes do commit a chave ERA o id do agente, igual para todas as sessões.
+	// Afirmar contra a derivação da sessão é direto; procurar o id do agente
+	// dentro de 64 caracteres hexadecimais só funciona enquanto ele tiver
+	// letras fora de a-f, o que é sorte e não invariante.
+	if want := session.BuildOpaqueSessionKey("agent:main:telegram:direct:alice"); first != want {
+		t.Errorf("prompt_cache_key = %q, want the key derived from the session (%q)", first, want)
+	}
+}
+
+// O que se garante é que a chave de sessão LEGADA não viaja literalmente — não
+// que ela fique irrecuperável. BuildOpaqueSessionKey é um sha256 SEM sal sobre
+// um template público, então um alias de baixa entropia (id do agente + número
+// de telefone) é quebrável por força bruta. É pseudônimo, não supressão, e o
+// nome do teste não pode prometer mais do que isso.
+//
+//nolint:misspell // "supressão" é português, não o "suppress" do dicionário
+func TestPromptCacheKeyDoesNotCarryTheLegacySessionKeyVerbatim(t *testing.T) {
+	al, provider := newPromptCacheKeyLoop(t)
+
+	const phone = "5511999998888"
+	sessionKey := "agent:main:whatsapp:direct:" + phone
+
+	key := promptCacheKeyForTurn(t, al, provider, sessionKey)
+
+	if want := session.BuildOpaqueSessionKey(sessionKey); key != want {
+		t.Errorf("prompt_cache_key = %q, want the opaque session key %q", key, want)
+	}
+}
+
+func TestPromptCacheKeySuffixesSeparateUsesWithinOneSession(t *testing.T) {
+	const sessionKey = "agent:main:telegram:direct:alice"
+	opaque := session.BuildOpaqueSessionKey(sessionKey)
+
+	main := promptCacheKeyForSession(sessionKey, "")
+	vision := promptCacheKeyForSession(sessionKey, "vision")
+	btw := promptCacheKeyForSession(sessionKey, "btw")
+
+	if main != opaque {
+		t.Errorf("main key = %q, want %q", main, opaque)
+	}
+	if vision != opaque+":vision" {
+		t.Errorf("vision key = %q, want %q", vision, opaque+":vision")
+	}
+	if btw != opaque+":btw" {
+		t.Errorf("btw key = %q, want %q", btw, opaque+":btw")
+	}
+	if vision == btw || vision == main || btw == main {
+		t.Errorf("the three uses collided: main=%q vision=%q btw=%q", main, vision, btw)
+	}
+}
+
+// Uma chave JÁ opaca tem de passar direto: rehashear inventaria um segundo
+// nome para a MESMA sessão, e é assim que um alias legado e a sua chave
+// canônica caíam em partições diferentes.
+func TestPromptCacheKeyDoesNotRehashAnOpaqueSessionKey(t *testing.T) {
+	const alias = "agent:main:telegram:direct:alice"
+	canonica := session.BuildOpaqueSessionKey(alias)
+
+	if got := promptCacheKeyForSession(canonica, ""); got != canonica {
+		t.Errorf("promptCacheKeyForSession(canonical) = %q, want it untouched (%q)", got, canonica)
+	}
+	if got := promptCacheKeyForSession(alias, ""); got != canonica {
+		t.Errorf("alias landed on %q, want the same partition as its canonical key %q", got, canonica)
+	}
+	if got := promptCacheKeyForSession(canonica, "vision"); got != canonica+":vision" {
+		t.Errorf("suffixed key = %q, want %q", got, canonica+":vision")
+	}
+}
+
+// Um turno de cron recebe um uuid novo a cada tique, e hasheá-lo daria uma
+// partição nova a cada execução — cache morto justamente nos prompts que mais
+// se repetem no produto.
+func TestPromptCacheKeyIsStableAcrossCronTicks(t *testing.T) {
+	const jobID = "0f1f4a4a-1111-2222-3333-444455556666"
+
+	for _, prefixo := range []string{CronSessionPrefix, CronModelSessionPrefix} {
+		t.Run(prefixo, func(t *testing.T) {
+			primeiro := promptCacheScopeForSession(prefixo + jobID + "-" + uuid.NewString())
+			segundo := promptCacheScopeForSession(prefixo + jobID + "-" + uuid.NewString())
+
+			if primeiro != segundo {
+				t.Errorf("dois tiques do mesmo job produziram escopos diferentes: %q e %q", primeiro, segundo)
+			}
+			if want := prefixo + jobID; primeiro != want {
+				t.Errorf("escopo = %q, want %q — o job tem de sobreviver inteiro ao corte do uuid", primeiro, want)
+			}
+			outroJob := prefixo + "9999" + jobID[4:] + "-" + uuid.NewString()
+			if outro := promptCacheScopeForSession(outroJob); outro == primeiro {
+				t.Error("jobs diferentes caíram no mesmo escopo")
+			}
+		})
+	}
+}
+
+// Só a sessão de cron é sintética; qualquer outra nomeia a própria partição.
+func TestPromptCacheScopeLeavesOrdinarySessionsAlone(t *testing.T) {
+	for _, sessionKey := range []string{
+		"agent:main:telegram:direct:alice",
+		session.BuildOpaqueSessionKey("agent:main:telegram:direct:alice"),
+		"agent:cron-sem-uuid-no-fim",
+		"",
+	} {
+		if got := promptCacheScopeForSession(sessionKey); got != sessionKey {
+			t.Errorf("promptCacheScopeForSession(%q) = %q, want it untouched", sessionKey, got)
+		}
+	}
+}
+
+// Um subturno é numerado por um contador do PROCESSO, que reinicia a cada
+// restart do pod: quem nomeia a partição é o turno que o gerou.
+func TestPromptCacheScopeOfASubTurnIsTheParents(t *testing.T) {
+	pai := &turnState{sessionKey: "agent:main:telegram:direct:alice"}
+	filho := &turnState{sessionKey: "subturn-1", promptCacheScopeOverride: pai.promptCacheScope()}
+
+	if filho.promptCacheScope() != pai.promptCacheScope() {
+		t.Errorf("escopo do subturno = %q, want o do pai %q", filho.promptCacheScope(), pai.promptCacheScope())
+	}
+	semPai := &turnState{sessionKey: "subturn-1"}
+	if semPai.promptCacheScope() == pai.promptCacheScope() {
+		t.Error("um subturno sem pai não pode herdar a partição por acidente")
+	}
+}
+
+// Os sufixos são o que mudou nos pontos de chamada, e afirmá-los contra a
+// expressão que a própria função calcula não detecta um sufixo errado LÁ. Aqui
+// a sub-chamada de visão passa pelo caminho de produção e o que se confere é o
+// que chegou ao provider.
+func TestVisionDelegateUsesTheVisionSuffix(t *testing.T) {
+	const sessionKey = "agent:main:telegram:direct:alice"
+	provider := &thinkingRecordingProvider{}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+
+	p := &Pipeline{al: al, Cfg: al.GetConfig()}
+	ts := &turnState{agent: al.GetRegistry().GetDefaultAgent(), sessionKey: sessionKey}
+
+	if _, err := p.callVisionDelegate(
+		context.Background(), ts, provider, "test-model", "", []string{"data:image/png;base64,abc"},
+	); err != nil {
+		t.Fatalf("callVisionDelegate: %v", err)
+	}
+
+	want := promptCacheKeyForSession(sessionKey, "vision")
+	if got := provider.lastOptions["prompt_cache_key"]; got != want {
+		t.Errorf("prompt_cache_key = %v, want %q", got, want)
+	}
+}
+
+// Mesmo motivo do teste acima, do lado do /btw.
+func TestSideQuestionUsesTheBtwSuffix(t *testing.T) {
+	provider := &thinkingRecordingProvider{}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				ModelName:         "lb-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{{ModelName: "lb-model", Model: "openai/lb-model-a"}},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	useTestSideQuestionProvider(al, provider)
+
+	if _, err := al.processMessage(context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "telegram:123",
+		ChatID:   "chat-1",
+		Content:  "/btw explain load balancing",
+	}); err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+
+	chave, _ := provider.lastOptions["prompt_cache_key"].(string)
+	if chave == "" {
+		t.Fatalf("prompt_cache_key = %#v, want a chave do /btw", provider.lastOptions["prompt_cache_key"])
+	}
+	if !strings.HasSuffix(chave, ":btw") {
+		t.Errorf("prompt_cache_key = %q, want o sufixo \":btw\" — sem ele o /btw "+
+			"divide a partição com o turno principal", chave)
+	}
+}
+
+func TestPromptCacheKeyIsEmptyWithoutASession(t *testing.T) {
+	if got := promptCacheKeyForSession("", "vision"); got != "" {
+		t.Errorf("promptCacheKeyForSession(\"\", \"vision\") = %q, want an empty key so the field is dropped", got)
 	}
 }

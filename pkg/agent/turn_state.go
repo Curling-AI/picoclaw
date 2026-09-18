@@ -259,10 +259,13 @@ type turnState struct {
 	profile config.EffectiveTurnProfile
 	scope   turnEventScope
 
-	turnID       string
-	agentID      string
-	sessionKey   string
-	activeSkills []string
+	turnID     string
+	agentID    string
+	sessionKey string
+	// promptCacheScopeOverride: identidade ESTÁVEL que nomeia a partição de
+	// cache upstream quando a sessionKey é por execução. Ver promptCacheScope().
+	promptCacheScopeOverride string
+	activeSkills             []string
 	// modelTier: tier escolhido pelo usuário para ESTE turno; "" = modelo
 	// principal. Lido por routeModelTierTurn. (seucaranguejo fork)
 	modelTier         string
@@ -341,23 +344,24 @@ type turnState struct {
 
 func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScope) *turnState {
 	ts := &turnState{
-		agent:        agent,
-		opts:         opts,
-		profile:      opts.TurnProfile,
-		scope:        scope,
-		turnID:       scope.turnID,
-		agentID:      agent.ID,
-		sessionKey:   opts.Dispatch.SessionKey,
-		activeSkills: activeSkillNames(agent, opts),
-		modelTier:    opts.ModelTier,
-		turnCtx:      cloneTurnContext(scope.context),
-		channel:      opts.Dispatch.Channel(),
-		chatID:       opts.Dispatch.ChatID(),
-		workspace:    agent.Workspace,
-		userMessage:  opts.Dispatch.UserMessage,
-		media:        append([]string(nil), opts.Dispatch.Media...),
-		phase:        TurnPhaseSetup,
-		startedAt:    time.Now(),
+		agent:                    agent,
+		opts:                     opts,
+		profile:                  opts.TurnProfile,
+		scope:                    scope,
+		turnID:                   scope.turnID,
+		agentID:                  agent.ID,
+		sessionKey:               opts.Dispatch.SessionKey,
+		promptCacheScopeOverride: opts.Dispatch.PromptCacheScope,
+		activeSkills:             activeSkillNames(agent, opts),
+		modelTier:                opts.ModelTier,
+		turnCtx:                  cloneTurnContext(scope.context),
+		channel:                  opts.Dispatch.Channel(),
+		chatID:                   opts.Dispatch.ChatID(),
+		workspace:                agent.Workspace,
+		userMessage:              opts.Dispatch.UserMessage,
+		media:                    append([]string(nil), opts.Dispatch.Media...),
+		phase:                    TurnPhaseSetup,
+		startedAt:                time.Now(),
 	}
 
 	// Bind session store and capture initial history length for rollback logic

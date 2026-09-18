@@ -31,6 +31,11 @@ type CompleteOptions struct {
 	Model       string
 	MaxTokens   int
 	Temperature float64
+	// SessionKey identifies the conversation being summarized. It names the
+	// upstream prompt cache partition, so it travels down from the engine
+	// entry points instead of being a constant: one constant here is ONE
+	// partition for every session of every tenant.
+	SessionKey string
 }
 
 // IngestResult is the result of message ingestion.
@@ -343,7 +348,7 @@ func (e *Engine) Compact(ctx context.Context, sessionKey string, input CompactIn
 	}
 
 	e.initCompactionOnce()
-	return e.compaction.Compact(ctx, conv.ConversationID, input)
+	return e.compaction.Compact(ctx, conv.ConversationID, sessionKey, input)
 }
 
 // CompactUntilUnder aggressively compacts until context is under budget.
@@ -359,7 +364,7 @@ func (e *Engine) CompactUntilUnder(ctx context.Context, sessionKey string, budge
 	}
 
 	e.initCompactionOnce()
-	return e.compaction.CompactUntilUnder(ctx, conv.ConversationID, budget)
+	return e.compaction.CompactUntilUnder(ctx, conv.ConversationID, sessionKey, budget)
 }
 
 // initCompactionOnce lazily initializes the compaction engine.

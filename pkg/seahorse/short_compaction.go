@@ -43,11 +43,16 @@ func (e *CompactionEngine) Close() {
 }
 
 // Compact runs leaf compaction (sync) and optionally condensed compaction.
-func (e *CompactionEngine) Compact(ctx context.Context, convID int64, input CompactInput) (*CompactResult, error) {
+func (e *CompactionEngine) Compact(
+	ctx context.Context,
+	convID int64,
+	sessionKey string,
+	input CompactInput,
+) (*CompactResult, error) {
 	result := &CompactResult{}
 
 	// Phase 1: leaf compaction (synchronous, every turn)
-	summaryID, err := e.compactLeaf(ctx, convID)
+	summaryID, err := e.compactLeaf(ctx, convID, sessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("compact leaf: %w", err)
 	}
@@ -79,7 +84,7 @@ func (e *CompactionEngine) Compact(ctx context.Context, convID int64, input Comp
 		if _, loaded := e.condensing.LoadOrStore(convID, struct{}{}); !loaded {
 			go func() {
 				defer e.condensing.Delete(convID)
-				e.runCondensedLoop(e.shutdownCtx, convID)
+				e.runCondensedLoop(e.shutdownCtx, convID, sessionKey)
 			}()
 		}
 	}
@@ -93,7 +98,12 @@ func (e *CompactionEngine) Compact(ctx context.Context, convID int64, input Comp
 }
 
 // CompactUntilUnder aggressively compacts until context is under budget.
-func (e *CompactionEngine) CompactUntilUnder(ctx context.Context, convID int64, budget int) (*CompactResult, error) {
+func (e *CompactionEngine) CompactUntilUnder(
+	ctx context.Context,
+	convID int64,
+	sessionKey string,
+	budget int,
+) (*CompactResult, error) {
 	result := &CompactResult{}
 	prevTokens := 0
 	logger.InfoCF("seahorse", "compact_until_under: start", map[string]any{"conv_id": convID, "budget": budget})
@@ -115,7 +125,7 @@ func (e *CompactionEngine) CompactUntilUnder(ctx context.Context, convID int64, 
 		}
 
 		// Try leaf first
-		summaryID, err := e.compactLeaf(ctx, convID, true)
+		summaryID, err := e.compactLeaf(ctx, convID, sessionKey, true)
 		if err != nil {
 			return result, err
 		}
@@ -130,7 +140,7 @@ func (e *CompactionEngine) CompactUntilUnder(ctx context.Context, convID int64, 
 		}
 
 		// Try condensed with forced fanout
-		condensedID, err := e.compactCondensed(ctx, convID)
+		condensedID, err := e.compactCondensed(ctx, convID, sessionKey)
 		if err != nil {
 			return result, err
 		}
@@ -168,7 +178,12 @@ func (e *CompactionEngine) CompactUntilUnder(ctx context.Context, convID int64, 
 
 // compactLeaf compresses the oldest contiguous message chunk into a leaf summary.
 // When force is true, FreshTailCount protection is bypassed (used by CompactUntilUnder).
-func (e *CompactionEngine) compactLeaf(ctx context.Context, convID int64, force ...bool) (*string, error) {
+func (e *CompactionEngine) compactLeaf(
+	ctx context.Context,
+	convID int64,
+	sessionKey string,
+	force ...bool,
+) (*string, error) {
 	items, err := e.store.GetContextItems(ctx, convID)
 	if err != nil {
 		return nil, err
@@ -256,7 +271,7 @@ func (e *CompactionEngine) compactLeaf(ctx context.Context, convID int64, force 
 	}
 
 	// Generate summary
-	content, err := e.generateLeafSummary(ctx, messages, priorSummary)
+	content, err := e.generateLeafSummary(ctx, sessionKey, messages, priorSummary)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +319,7 @@ func (e *CompactionEngine) compactLeaf(ctx context.Context, convID int64, force 
 }
 
 // compactCondensed compresses multiple summaries into one higher-level summary.
-func (e *CompactionEngine) compactCondensed(ctx context.Context, convID int64) (*string, error) {
+func (e *CompactionEngine) compactCondensed(ctx context.Context, convID int64, sessionKey string) (*string, error) {
 	// Try ordinal-aware selection first (respects consecutive ordering)
 	var candidates []Summary
 
@@ -337,7 +352,7 @@ func (e *CompactionEngine) compactCondensed(ctx context.Context, convID int64) (
 	}
 
 	// Generate condensed summary
-	content, err := e.generateCondensedSummary(ctx, candidates)
+	content, err := e.generateCondensedSummary(ctx, sessionKey, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -571,6 +586,7 @@ func (e *CompactionEngine) selectOldestChunkAtDepth(
 // Level 1: normal LLM prompt. Level 2: aggressive prompt. Level 3: deterministic truncation.
 func (e *CompactionEngine) generateLeafSummary(
 	ctx context.Context,
+	sessionKey string,
 	messages []Message,
 	previousSummary string,
 ) (string, error) {
@@ -587,6 +603,7 @@ func (e *CompactionEngine) generateLeafSummary(
 	content, err := e.complete(ctx, prompt, CompleteOptions{
 		MaxTokens:   LeafTargetTokens * 2,
 		Temperature: 0.3,
+		SessionKey:  sessionKey,
 	})
 	if err != nil {
 		return "", err
@@ -596,6 +613,7 @@ func (e *CompactionEngine) generateLeafSummary(
 		content, err = e.complete(ctx, prompt, CompleteOptions{
 			MaxTokens:   LeafTargetTokens * 2,
 			Temperature: 0,
+			SessionKey:  sessionKey,
 		})
 		if err != nil {
 			return "", err
@@ -613,6 +631,7 @@ func (e *CompactionEngine) generateLeafSummary(
 	content, err = e.complete(ctx, aggressivePrompt, CompleteOptions{
 		MaxTokens:   aggressiveTarget * 2,
 		Temperature: 0.3,
+		SessionKey:  sessionKey,
 	})
 	if err != nil {
 		return "", err
@@ -622,6 +641,7 @@ func (e *CompactionEngine) generateLeafSummary(
 		content, err = e.complete(ctx, aggressivePrompt, CompleteOptions{
 			MaxTokens:   aggressiveTarget * 2,
 			Temperature: 0,
+			SessionKey:  sessionKey,
 		})
 		if err != nil {
 			return "", err
@@ -636,7 +656,11 @@ func (e *CompactionEngine) generateLeafSummary(
 }
 
 // generateCondensedSummary calls the LLM to generate a condensed summary with 3-level escalation.
-func (e *CompactionEngine) generateCondensedSummary(ctx context.Context, summaries []Summary) (string, error) {
+func (e *CompactionEngine) generateCondensedSummary(
+	ctx context.Context,
+	sessionKey string,
+	summaries []Summary,
+) (string, error) {
 	if e.complete == nil {
 		return truncateCondensedSummaries(summaries), nil
 	}
@@ -650,6 +674,7 @@ func (e *CompactionEngine) generateCondensedSummary(ctx context.Context, summari
 	content, err := e.complete(ctx, prompt, CompleteOptions{
 		MaxTokens:   CondensedTargetTokens * 2,
 		Temperature: 0.3,
+		SessionKey:  sessionKey,
 	})
 	if err != nil {
 		return "", err
@@ -658,6 +683,7 @@ func (e *CompactionEngine) generateCondensedSummary(ctx context.Context, summari
 		content, err = e.complete(ctx, prompt, CompleteOptions{
 			MaxTokens:   CondensedTargetTokens * 2,
 			Temperature: 0,
+			SessionKey:  sessionKey,
 		})
 		if err != nil {
 			return "", err
@@ -673,6 +699,7 @@ func (e *CompactionEngine) generateCondensedSummary(ctx context.Context, summari
 	content, err = e.complete(ctx, aggressivePrompt, CompleteOptions{
 		MaxTokens:   aggressiveTarget * 2,
 		Temperature: 0.3,
+		SessionKey:  sessionKey,
 	})
 	if err != nil {
 		return "", err
@@ -690,7 +717,7 @@ func (e *CompactionEngine) generateCondensedSummary(ctx context.Context, summari
 // b) No candidate found (nothing to condense), OR
 // c) tokensAfter >= tokensBefore (no progress this iteration), OR
 // d) tokensAfter >= previousTokens (no improvement over last iteration)
-func (e *CompactionEngine) runCondensedLoop(ctx context.Context, convID int64) {
+func (e *CompactionEngine) runCondensedLoop(ctx context.Context, convID int64, sessionKey string) {
 	var prevTokens int
 	for {
 		select {
@@ -705,7 +732,7 @@ func (e *CompactionEngine) runCondensedLoop(ctx context.Context, convID int64) {
 			return
 		}
 
-		condensedID, err := e.compactCondensed(ctx, convID)
+		condensedID, err := e.compactCondensed(ctx, convID, sessionKey)
 		if err != nil {
 			logger.ErrorCF("seahorse", "condensed: compact", map[string]any{"error": err.Error()})
 			return

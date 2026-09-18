@@ -504,10 +504,14 @@ func (al *AgentLoop) askSideQuestion(
 	activeCandidates, activeModel, usedLight := al.selectCandidates(agent, question, messages)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
 
+	sideSessionKey := ""
+	if opts != nil {
+		sideSessionKey = opts.SessionKey
+	}
 	llmOpts := map[string]any{
 		"max_tokens":       agent.MaxTokens,
 		"temperature":      agent.Temperature,
-		"prompt_cache_key": agent.ID + ":btw",
+		"prompt_cache_key": promptCacheKeyForSession(sideSessionKey, "btw"),
 	}
 
 	hookModelChanged := false

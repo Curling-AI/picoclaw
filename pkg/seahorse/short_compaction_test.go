@@ -133,7 +133,7 @@ func TestCompactLeaf(t *testing.T) {
 	}
 
 	// Compact
-	result, err := ce.Compact(ctx, convID, CompactInput{})
+	result, err := ce.Compact(ctx, convID, "sk_v1_teste", CompactInput{})
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestCompactLeafNoCandidate(t *testing.T) {
 	m, _ := ce.store.AddMessage(ctx, convID, "user", "short", 10)
 	ce.store.AppendContextMessage(ctx, convID, m.ID)
 
-	result, err := ce.Compact(ctx, convID, CompactInput{})
+	result, err := ce.Compact(ctx, convID, "sk_v1_teste", CompactInput{})
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestCompactCondensed(t *testing.T) {
 	}
 
 	// Compact with force to trigger condensation
-	_, err := ce.Compact(ctx, convID, CompactInput{Force: true})
+	_, err := ce.Compact(ctx, convID, "sk_v1_teste", CompactInput{Force: true})
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestCompactCondensedDoesNotOrphanSummaryWhenCandidatesRemovedConcurrently(t
 	}
 	resultCh := make(chan compactResult, 1)
 	go func() {
-		sid, err := ce.compactCondensed(context.Background(), convID)
+		sid, err := ce.compactCondensed(context.Background(), convID, "sk_v1_teste")
 		resultCh <- compactResult{summaryID: sid, err: err}
 	}()
 
@@ -376,7 +376,7 @@ func TestCompactUntilUnder(t *testing.T) {
 	}
 
 	// Force compact until under budget
-	result, err := ce.CompactUntilUnder(ctx, convID, 2000)
+	result, err := ce.CompactUntilUnder(ctx, convID, "sk_v1_teste", 2000)
 	if err != nil {
 		t.Fatalf("CompactUntilUnder: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestCompactCondensedUsesSelectOldestChunk(t *testing.T) {
 	s.AppendContextMessage(ctx, convID, msg.ID)
 
 	// Run compactCondensed
-	result, err := ce.compactCondensed(ctx, convID)
+	result, err := ce.compactCondensed(ctx, convID, "sk_v1_teste")
 	if err != nil {
 		t.Fatalf("compactCondensed: %v", err)
 	}
@@ -638,7 +638,7 @@ func TestGenerateLeafSummary(t *testing.T) {
 		{Role: "assistant", Content: "hi there", TokenCount: 5},
 	}
 
-	content, err := ce.generateLeafSummary(ctx, msgs, "")
+	content, err := ce.generateLeafSummary(ctx, "sk_v1_teste", msgs, "")
 	if err != nil {
 		t.Fatalf("generateLeafSummary: %v", err)
 	}
@@ -672,7 +672,7 @@ func TestGenerateLeafSummaryEscalationToAggressive(t *testing.T) {
 		{Role: "assistant", Content: "response", TokenCount: 10},
 	}
 
-	content, err := ce.generateLeafSummary(context.Background(), msgs, "")
+	content, err := ce.generateLeafSummary(context.Background(), "sk_v1_teste", msgs, "")
 	if err != nil {
 		t.Fatalf("generateLeafSummary: %v", err)
 	}
@@ -719,7 +719,7 @@ func TestGenerateLeafSummaryEscalatesWhenLevel1MissesTarget(t *testing.T) {
 		{Role: "assistant", Content: "response", TokenCount: 500},
 	}
 
-	content, err := ce.generateLeafSummary(context.Background(), msgs, "")
+	content, err := ce.generateLeafSummary(context.Background(), "sk_v1_teste", msgs, "")
 	if err != nil {
 		t.Fatalf("generateLeafSummary: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestGenerateLeafSummaryAcceptsContentAtTargetBoundary(t *testing.T) {
 		{Role: "assistant", Content: "response", TokenCount: 286},
 	}
 
-	content, err := ce.generateLeafSummary(context.Background(), msgs, "")
+	content, err := ce.generateLeafSummary(context.Background(), "sk_v1_teste", msgs, "")
 	if err != nil {
 		t.Fatalf("generateLeafSummary: %v", err)
 	}
@@ -775,7 +775,7 @@ func TestGenerateLeafSummaryEscalationToTruncation(t *testing.T) {
 		{Role: "assistant", Content: "response text here", TokenCount: 10},
 	}
 
-	content, err := ce.generateLeafSummary(context.Background(), msgs, "")
+	content, err := ce.generateLeafSummary(context.Background(), "sk_v1_teste", msgs, "")
 	if err != nil {
 		t.Fatalf("generateLeafSummary: %v", err)
 	}
@@ -797,7 +797,7 @@ func TestGenerateCondensedSummary(t *testing.T) {
 		{SummaryID: "sum_b", Content: "second summary", TokenCount: 100},
 	}
 
-	content, err := ce.generateCondensedSummary(ctx, summaries)
+	content, err := ce.generateCondensedSummary(ctx, "sk_v1_teste", summaries)
 	if err != nil {
 		t.Fatalf("generateCondensedSummary: %v", err)
 	}
@@ -820,7 +820,7 @@ func TestGenerateCondensedSummaryEscalation(t *testing.T) {
 		{SummaryID: "sum_b", Content: "second summary text", TokenCount: 50},
 	}
 
-	content, err := ce.generateCondensedSummary(context.Background(), summaries)
+	content, err := ce.generateCondensedSummary(context.Background(), "sk_v1_teste", summaries)
 	if err != nil {
 		t.Fatalf("generateCondensedSummary: %v", err)
 	}
@@ -873,7 +873,7 @@ func TestCompactAsyncReturnsBeforeCondensed(t *testing.T) {
 
 	// Compact with force — should return quickly, condensed runs async
 	start := time.Now()
-	result, err := ce.Compact(ctx, convID, CompactInput{Force: true})
+	result, err := ce.Compact(ctx, convID, "sk_v1_teste", CompactInput{Force: true})
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -944,8 +944,8 @@ func TestCompactAsyncDedup(t *testing.T) {
 	}
 
 	// Call Compact twice rapidly
-	ce.Compact(ctx, convID, CompactInput{Force: true})
-	ce.Compact(ctx, convID, CompactInput{Force: true})
+	ce.Compact(ctx, convID, "sk_v1_teste", CompactInput{Force: true})
+	ce.Compact(ctx, convID, "sk_v1_teste", CompactInput{Force: true})
 
 	// Wait for async to finish
 	time.Sleep(600 * time.Millisecond)
@@ -974,7 +974,7 @@ func TestCompactLeafForceBypassesFreshTail(t *testing.T) {
 	}
 
 	// Without force: should return nil (all in fresh tail)
-	summaryID, err := ce.compactLeaf(ctx, convID)
+	summaryID, err := ce.compactLeaf(ctx, convID, "sk_v1_teste")
 	if err != nil {
 		t.Fatalf("compactLeaf no-force: %v", err)
 	}
@@ -983,7 +983,7 @@ func TestCompactLeafForceBypassesFreshTail(t *testing.T) {
 	}
 
 	// With force: should compact despite fresh tail protection
-	summaryID, err = ce.compactLeaf(ctx, convID, true)
+	summaryID, err = ce.compactLeaf(ctx, convID, "sk_v1_teste", true)
 	if err != nil {
 		t.Fatalf("compactLeaf force: %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestCompactLeafAccumulatesUpToLeafChunkTokens(t *testing.T) {
 		s.AppendContextMessage(ctx, convID, m.ID)
 	}
 
-	summaryID, err := ce.compactLeaf(ctx, convID)
+	summaryID, err := ce.compactLeaf(ctx, convID, "sk_v1_teste")
 	if err != nil {
 		t.Fatalf("compactLeaf: %v", err)
 	}

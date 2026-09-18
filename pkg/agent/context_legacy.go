@@ -262,22 +262,22 @@ func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey
 		part1 := validMessages[:mid]
 		part2 := validMessages[mid:]
 
-		s1, _ := m.summarizeBatch(ctx, agent, part1, "")
-		s2, _ := m.summarizeBatch(ctx, agent, part2, "")
+		s1, _ := m.summarizeBatch(ctx, agent, sessionKey, part1, "")
+		s2, _ := m.summarizeBatch(ctx, agent, sessionKey, part2, "")
 
 		mergePrompt := fmt.Sprintf(
 			"Merge these two conversation summaries into one cohesive summary:\n\n1: %s\n\n2: %s",
 			s1, s2,
 		)
 
-		resp, err := m.retryLLMCall(ctx, agent, mergePrompt, llmMaxRetries)
+		resp, err := m.retryLLMCall(ctx, agent, sessionKey, mergePrompt, llmMaxRetries)
 		if err == nil && resp.Content != "" {
 			finalSummary = resp.Content
 		} else {
 			finalSummary = s1 + " " + s2
 		}
 	} else {
-		finalSummary, _ = m.summarizeBatch(ctx, agent, validMessages, summary)
+		finalSummary, _ = m.summarizeBatch(ctx, agent, sessionKey, validMessages, summary)
 	}
 
 	if omitted && finalSummary != "" {
@@ -327,6 +327,7 @@ func (m *legacyContextManager) findNearestUserMessage(messages []providers.Messa
 func (m *legacyContextManager) retryLLMCall(
 	ctx context.Context,
 	agent *AgentInstance,
+	sessionKey string,
 	prompt string,
 	maxRetries int,
 ) (*providers.LLMResponse, error) {
@@ -347,7 +348,7 @@ func (m *legacyContextManager) retryLLMCall(
 				map[string]any{
 					"max_tokens":       agent.MaxTokens,
 					"temperature":      llmTemperature,
-					"prompt_cache_key": agent.ID,
+					"prompt_cache_key": promptCacheKeyForSession(sessionKey, "summarize"),
 				},
 			)
 		}()
@@ -371,6 +372,7 @@ func (m *legacyContextManager) retryLLMCall(
 func (m *legacyContextManager) summarizeBatch(
 	ctx context.Context,
 	agent *AgentInstance,
+	sessionKey string,
 	batch []providers.Message,
 	existingSummary string,
 ) (string, error) {
@@ -393,7 +395,7 @@ func (m *legacyContextManager) summarizeBatch(
 	}
 	prompt := sb.String()
 
-	response, err := m.retryLLMCall(ctx, agent, prompt, llmMaxRetries)
+	response, err := m.retryLLMCall(ctx, agent, sessionKey, prompt, llmMaxRetries)
 	if err == nil && response.Content != "" {
 		return strings.TrimSpace(response.Content), nil
 	}

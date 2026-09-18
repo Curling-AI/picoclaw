@@ -1975,6 +1975,22 @@ func TestProviderChat_PromptCacheKeyOmittedForNonOpenAI(t *testing.T) {
 	}
 }
 
+func TestProviderChat_PromptCacheKeySentThroughControlPlaneProxy(t *testing.T) {
+	bases := map[string]string{
+		"assistant route": "https://maestro.adapta.one/llm-proxy/1b6f523c-38e9-4adc-ad16-f52ab99829ba/hulk",
+		"local control plane": "http://seucaranguejo.default.svc.cluster.local:8080" +
+			"/llm-proxy/1b6f523c-38e9-4adc-ad16-f52ab99829ba/hulk",
+	}
+	for name, apiBase := range bases {
+		t.Run(name, func(t *testing.T) {
+			body := chatWithCacheKey(t, apiBase)
+			if body["prompt_cache_key"] != "agent-main" {
+				t.Fatalf("prompt_cache_key = %v, want %q", body["prompt_cache_key"], "agent-main")
+			}
+		})
+	}
+}
+
 func TestSupportsPromptCacheKey(t *testing.T) {
 	tests := []struct {
 		apiBase string
@@ -1993,6 +2009,16 @@ func TestSupportsPromptCacheKey(t *testing.T) {
 		// Edge cases: proxy URLs with openai.com in path should NOT match
 		{"https://my-proxy.com/api.openai.com/v1", false},
 		{"https://proxy.example.com/openai.azure.com/v1", false},
+		{"https://maestro.adapta.one/llm-proxy/1b6f523c/hulk", true},
+		{"https://maestro.adapta.one/llm-proxy/1b6f523c/gateway", true},
+		{"https://maestro.adapta.one/llm-proxy/1b6f523c/crof", true},
+		{"http://seucaranguejo.default.svc.cluster.local:8080/llm-proxy/1b6f523c/hulk", true},
+		// INTERNAL_BASE_URL behind an ingress subpath. A prefix match would
+		// answer false here and prompt caching would disappear fleet-wide with
+		// no error and no failing test.
+		{"https://maestro.adapta.one/api/llm-proxy/1b6f523c/hulk", true},
+		{"https://api.mistral.ai/llm-proxy", false},
+		{"https://api.mistral.ai/v1?next=/llm-proxy/x/hulk", false},
 		// Malformed or empty
 		{"", false},
 		{"not-a-url", false},

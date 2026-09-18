@@ -10,12 +10,78 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
+
+// promptCacheKeyForSession names the upstream cache partition of one session.
+//
+// A key that is ALREADY opaque passes through: hashing an sk_v1_ a second time
+// only invents a second name for the same session, and that is how one logical
+// session reached through a legacy alias and through its canonical key landed
+// in two different partitions — BuildOpaqueSessionKey(alias) IS the canonical
+// key, so leaving it alone makes the two converge.
+//
+// The digest is a pseudonym, not a redaction: it is an unsalted SHA-256 over a
+// public alias template, so a low-entropy alias (an agent id plus a phone
+// number) is brute-forceable. It is here to avoid shipping the raw alias, not
+// to make the session unknowable.
+func promptCacheKeyForSession(sessionKey, suffix string) string {
+	opaque := strings.ToLower(strings.TrimSpace(sessionKey))
+	if !session.IsOpaqueSessionKey(opaque) {
+		opaque = session.BuildOpaqueSessionKey(opaque)
+	}
+	if opaque == "" {
+		return ""
+	}
+	if suffix == "" {
+		return opaque
+	}
+	return opaque + ":" + suffix
+}
+
+// promptCacheScope devolve a identidade que deve nomear a partição de cache
+// deste turno: a sessão, salvo quando ela é sintética e por execução.
+func (ts *turnState) promptCacheScope() string {
+	if ts == nil {
+		return ""
+	}
+	if escopo := strings.TrimSpace(ts.promptCacheScopeOverride); escopo != "" {
+		return escopo
+	}
+	return promptCacheScopeForSession(ts.sessionKey)
+}
+
+// promptCacheScopeForSession reduz uma chave de sessão POR EXECUÇÃO à
+// identidade estável por trás dela.
+//
+// Um turno de cron carrega um uuid novo a cada tique (ver tools.cron: a sessão
+// é descartável de propósito, o histórico não pode acumular entre execuções).
+// Hashear essa chave daria uma partição de cache NOVA a cada 5 minutos, para
+// sempre — e justamente nos prompts mais repetitivos do produto, o que é uma
+// regressão contra o comportamento anterior, em que a chave era o id do agente.
+// O job é o que se repete, então é ele que fica.
+func promptCacheScopeForSession(sessionKey string) string {
+	if !strings.HasPrefix(sessionKey, CronSessionPrefix) && !strings.HasPrefix(sessionKey, CronModelSessionPrefix) {
+		return sessionKey
+	}
+	// O id do job também é um uuid, então cortar no primeiro "-" pegaria o job
+	// pela metade: o que sai é o ÚLTIMO uuid, e só se ele for mesmo um uuid.
+	const tamanhoUUID = 36
+	if len(sessionKey) < tamanhoUUID+2 || sessionKey[len(sessionKey)-tamanhoUUID-1] != '-' {
+		return sessionKey
+	}
+	if _, err := uuid.Parse(sessionKey[len(sessionKey)-tamanhoUUID:]); err != nil {
+		return sessionKey
+	}
+	return sessionKey[:len(sessionKey)-tamanhoUUID-1]
+}
 
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
@@ -164,7 +230,7 @@ func (p *Pipeline) CallLLM(
 	exec.llmOpts = map[string]any{
 		"max_tokens":       ts.agent.MaxTokens,
 		"temperature":      ts.agent.Temperature,
-		"prompt_cache_key": ts.agent.ID,
+		"prompt_cache_key": promptCacheKeyForSession(ts.promptCacheScope(), ""),
 		llmRequestIDOption: requestID,
 	}
 	if exec.useNativeSearch {
