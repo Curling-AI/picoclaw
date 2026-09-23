@@ -821,6 +821,11 @@ func TestEvolutionBridge_TurnEndUsesPayloadWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newEvolutionBridge: %v", err)
 	}
+	// Close the bridge before the test returns: the turn-end record is written
+	// asynchronously, and a live goroutine writing into t.TempDir() during the
+	// testing package's RemoveAll cleanup makes the test flake with
+	// "TempDir RemoveAll cleanup: ... directory not empty" (seen in CI).
+	defer bridge.Close()
 
 	err = bridge.OnEvent(context.Background(), Event{
 		Kind: EventKindTurnEnd,
