@@ -16,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -430,6 +431,41 @@ func toolCallNamesFromMessages(messages []providers.Message) []string {
 			}
 			seen[name] = struct{}{}
 			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// discoveredToolNamesFromMessages collects the distinct tool names listed by
+// discovery results in messages, most recent search first.
+func discoveredToolNamesFromMessages(messages []providers.Message) []string {
+	discoveryCalls := map[string]struct{}{}
+	for _, msg := range messages {
+		for _, tc := range msg.ToolCalls {
+			name := tc.Name
+			if name == "" && tc.Function != nil {
+				name = tc.Function.Name
+			}
+			if tools.IsToolDiscoveryToolName(name) {
+				discoveryCalls[tc.ID] = struct{}{}
+			}
+		}
+	}
+	seen := map[string]struct{}{}
+	var names []string
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role != "tool" {
+			continue
+		}
+		if _, ok := discoveryCalls[msg.ToolCallID]; !ok {
+			continue
+		}
+		for _, name := range tools.ParseDiscoveryResult(msg.Content) {
+			if _, ok := seen[name]; !ok {
+				seen[name] = struct{}{}
+				names = append(names, name)
+			}
 		}
 	}
 	return names

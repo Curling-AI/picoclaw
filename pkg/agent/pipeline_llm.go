@@ -898,6 +898,7 @@ func (p *Pipeline) CallLLM(
 			exec.emptyResponseRetries < maxEmptyResponseRetries {
 			exec.emptyResponseRetries++
 			cancelConfiguredStreamingLLM(turnCtx, exec)
+			p.reviveDiscoveredTools(ts, exec, iteration)
 			logger.WarnCF("agent", "LLM returned empty response (no content, no tool calls); retrying", map[string]any{
 				"agent_id":               ts.agent.ID,
 				"iteration":              iteration,
@@ -991,6 +992,7 @@ func (p *Pipeline) CallLLM(
 			if exec.undeliveredAnnouncementRetries < maxUndeliveredAnnouncementRetries {
 				exec.undeliveredAnnouncementRetries++
 				cancelConfiguredStreamingLLM(turnCtx, exec)
+				p.reviveDiscoveredTools(ts, exec, iteration)
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role:    "user",
 					Content: undeliveredAnnouncementNudge,

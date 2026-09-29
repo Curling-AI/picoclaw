@@ -57,3 +57,17 @@ func TestTouchTools_DoesNotReviveExpired(t *testing.T) {
 		t.Fatal("TouchTools must not revive an expired tool — that is EnsureVisible's job")
 	}
 }
+
+func TestReviveExpired_KeepsOrderAndStopsAtLimit(t *testing.T) {
+	r := newTTLTestRegistry(t)
+	r.RegisterHidden(&mockRegistryTool{name: "mcp_c", desc: "hidden c"})
+	r.PromoteTools([]string{"mcp_b"}, 20)
+
+	revived := r.ReviveExpired([]string{"mcp_b", "core_tool", "mcp_c", "mcp_a"}, 20, 1)
+	if len(revived) != 1 || revived[0] != "mcp_c" {
+		t.Fatalf("revived = %v, want [mcp_c] (live, core skipped; limit 1)", revived)
+	}
+	if _, ok := r.Get("mcp_a"); ok {
+		t.Fatal("mcp_a is past the limit and must stay hidden")
+	}
+}
