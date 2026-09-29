@@ -43,6 +43,27 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 			true,
 		},
 		{
+			"prod: stops on a colon after the action",
+			"Rodando — duas queries em paralelo (spend/requests/cache + active users):",
+			true,
+		},
+		{
+			"prod: stops on a colon, gerund first",
+			"Executando agora — as duas queries em paralelo:",
+			true,
+		},
+		{
+			"prod: stops on a colon mid-sentence gerund",
+			"Fechando — rodando a query de validação agora:",
+			true,
+		},
+		// A colon alone is not a promise: no tool action is named.
+		{
+			"answer that ends on a colon without an action",
+			"Os números batem com o dashboard:",
+			false,
+		},
+		{
 			"english promise",
 			"Sure — let me open the changelog and pull the exact version.",
 			true,

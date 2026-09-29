@@ -194,6 +194,12 @@ func (r *ToolRegistry) TouchTools(names []string, ttl int) {
 // Re-promoting whatever the outgoing messages reference guarantees that any
 // tool the model can see itself using is also callable.
 func (r *ToolRegistry) EnsureVisible(names []string, ttl int) []string {
+	return r.ReviveExpired(names, ttl, 0)
+}
+
+// ReviveExpired re-promotes, in the given order, the names that are registered,
+// non-core and expired, stopping after limit revivals (limit <= 0: no cap).
+func (r *ToolRegistry) ReviveExpired(names []string, ttl, limit int) []string {
 	if ttl <= 0 || len(names) == 0 {
 		return nil
 	}
@@ -201,6 +207,9 @@ func (r *ToolRegistry) EnsureVisible(names []string, ttl int) []string {
 	defer r.mu.Unlock()
 	var revived []string
 	for _, name := range names {
+		if limit > 0 && len(revived) >= limit {
+			break
+		}
 		if entry, exists := r.tools[name]; exists && !entry.IsCore && entry.TTL <= 0 {
 			entry.TTL = ttl
 			revived = append(revived, name)
@@ -218,7 +227,7 @@ func (r *ToolRegistry) toolAllowedLocked(name string) bool {
 	if r.allowlist == nil {
 		return true
 	}
-	if isToolDiscoveryToolName(name) {
+	if IsToolDiscoveryToolName(name) {
 		// Discovery tools are part of the MCP control plane: they must remain
 		// available whenever configured so deferred MCP tools can still be
 		// unlocked. Per-agent allowlists still apply to the hidden MCP tools

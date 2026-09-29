@@ -450,3 +450,32 @@ func TestBM25FindsFilePatchByParts(t *testing.T) {
 		t.Errorf("file_patch missing from the top-5: %v", names)
 	}
 }
+
+func TestParseDiscoveryResult(t *testing.T) {
+	r := NewToolRegistry()
+	r.RegisterHidden(&mockRegistryTool{name: "mcp_a", desc: "a"})
+	res := formatDiscoveryResponse(r, []ToolSearchResult{{Name: "mcp_a"}, {Name: "mcp_b"}}, 5, 8)
+
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{"current format", res.ForLLM, []string{"mcp_a", "mcp_b"}},
+		{
+			"legacy format from persisted history",
+			"Found 1 tools:\n[{\"name\":\"mcp_nekt_execute_sql\",\"description\":\"x\"}]\n\nSUCCESS: These tools " +
+				"have been temporarily UNLOCKED as native tools! In your next response, you can call them directly",
+			[]string{"mcp_nekt_execute_sql"},
+		},
+		{"no matches", "No tools found matching the query.", nil},
+		{"unrelated tool output", "Found 3 repositories", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ParseDiscoveryResult(tt.content); strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("ParseDiscoveryResult = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

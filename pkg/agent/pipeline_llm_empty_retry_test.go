@@ -123,6 +123,11 @@ func directSessionHistory(t *testing.T, al *AgentLoop) []providers.Message {
 	if defaultAgent == nil {
 		t.Fatal("no default agent found")
 	}
+	return defaultAgent.Sessions.GetHistory(directSessionKey(al))
+}
+
+// directSessionKey is the session key a ProcessDirect call resolves to.
+func directSessionKey(al *AgentLoop) string {
 	route := al.registry.ResolveRoute(bus.InboundContext{
 		Channel:  "cli",
 		ChatType: "direct",
@@ -133,7 +138,7 @@ func directSessionHistory(t *testing.T, al *AgentLoop) []providers.Message {
 		SenderID: "cron",
 		ChatID:   "direct",
 	}))
-	return defaultAgent.Sessions.GetHistory(alloc.SessionKey)
+	return alloc.SessionKey
 }
 
 // A synthesized empty-response fallback must never enter session history:

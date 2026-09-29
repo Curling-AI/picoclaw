@@ -228,7 +228,10 @@ func formatDiscoveryResponse(
 	}
 
 	msg := fmt.Sprintf(
-		"Found %d tools:\n%s\n\nSUCCESS: These tools have been temporarily UNLOCKED as native tools! In your next response, you can call them directly just like any normal tool",
+		discoveryResultHeader+"%s\n\nSUCCESS: These tools have been temporarily UNLOCKED as native tools! "+
+			"In your next response, you can call them directly just like any normal tool. "+
+			"The unlock expires after a period of disuse: if one of them is later missing from your tools, "+
+			"search for it again before calling it instead of announcing the call.",
 		len(results),
 		string(b),
 	)
@@ -353,7 +356,33 @@ func (t *BM25SearchTool) getOrBuildEngine() *bm25CachedEngine {
 	return cached
 }
 
-func isToolDiscoveryToolName(name string) bool {
+// discoveryResultHeader opens every discovery result; ParseDiscoveryResult
+// reads it back from session history, so persisted results must stay parseable.
+const discoveryResultHeader = "Found %d tools:\n"
+
+// ParseDiscoveryResult returns the tool names listed in a discovery result, or
+// nil if content is not one.
+func ParseDiscoveryResult(content string) []string {
+	var count int
+	if _, err := fmt.Sscanf(content, discoveryResultHeader, &count); err != nil || count <= 0 {
+		return nil
+	}
+	start := strings.IndexByte(content, '\n')
+	var results []ToolSearchResult
+	if err := json.NewDecoder(strings.NewReader(content[start+1:])).Decode(&results); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.Name != "" {
+			names = append(names, r.Name)
+		}
+	}
+	return names
+}
+
+// IsToolDiscoveryToolName reports whether name is one of the discovery tools.
+func IsToolDiscoveryToolName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case BM25SearchToolName, RegexSearchToolName:
 		return true

@@ -37,5 +37,7 @@ func looksLikeUndeliveredAnnouncement(text string) bool {
 	if runes := []rune(tail); len(runes) > announcementTailWindow {
 		tail = string(runes[len(runes)-announcementTailWindow:])
 	}
-	return announcementIntent.MatchString(tail) && announcementAction.MatchString(tail)
+	// A reply that stops on a colon promised something that never followed.
+	intent := announcementIntent.MatchString(tail) || strings.HasSuffix(tail, ":")
+	return intent && announcementAction.MatchString(tail)
 }

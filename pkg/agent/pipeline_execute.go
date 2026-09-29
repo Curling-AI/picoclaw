@@ -592,6 +592,12 @@ toolLoop:
 			ts.sessionKey,
 			ts.opts.Dispatch.SessionScope,
 		)
+		// The model can still name a deferred tool whose promotion expired;
+		// honor the call instead of answering "tool not found".
+		if revived := ts.agent.Tools.EnsureVisible([]string{toolName}, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
+			logger.InfoCF("agent", "Revived expired deferred tool called by the model",
+				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
+		}
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
