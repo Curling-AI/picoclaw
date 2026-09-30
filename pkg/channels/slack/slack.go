@@ -59,6 +59,11 @@ func NewSlackChannel(
 	sendOnly := cfg.AppToken.String() == ""
 
 	opts := []slack.Option{}
+	if apiURL := strings.TrimSpace(cfg.APIURL); apiURL != "" {
+		// O slack-go concatena o método direto na base, então a barra final é
+		// obrigatória.
+		opts = append(opts, slack.OptionAPIURL(strings.TrimRight(apiURL, "/")+"/"))
+	}
 	if !sendOnly {
 		opts = append(opts, slack.OptionAppLevelToken(cfg.AppToken.String()))
 	}

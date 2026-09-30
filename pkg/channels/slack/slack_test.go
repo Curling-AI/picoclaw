@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -171,6 +173,34 @@ func TestNewSlackChannel(t *testing.T) {
 		}
 		if ch.socketClient == nil {
 			t.Error("faltou o cliente de socket")
+		}
+	})
+
+	t.Run("api_url troca a base da Web API", func(t *testing.T) {
+		var caminho, autorizacao string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			caminho = r.URL.Path
+			_ = r.ParseForm()
+			autorizacao = r.PostForm.Get("token")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"user_id":"UBOT","team_id":"T1"}`))
+		}))
+		defer srv.Close()
+
+		cfg := &config.SlackSettings{APIURL: srv.URL + "/slack-proxy/c1/api"}
+		cfg.BotToken = *config.NewSecureString("token-do-proxy")
+		ch, err := NewSlackChannel(bc, cfg, msgBus)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, err := ch.api.AuthTest(); err != nil {
+			t.Fatalf("auth.test pelo proxy: %v", err)
+		}
+		if caminho != "/slack-proxy/c1/api/auth.test" {
+			t.Errorf("caminho = %q, want /slack-proxy/c1/api/auth.test", caminho)
+		}
+		if autorizacao != "token-do-proxy" {
+			t.Errorf("token = %q, want o token do proxy", autorizacao)
 		}
 	})
 
