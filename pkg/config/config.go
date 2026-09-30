@@ -683,6 +683,8 @@ type DingTalkSettings struct {
 type SlackSettings struct {
 	BotToken SecureString `json:"bot_token,omitzero" yaml:"bot_token,omitempty" env:"PICOCLAW_CHANNELS_SLACK_BOT_TOKEN"`
 	AppToken SecureString `json:"app_token,omitzero" yaml:"app_token,omitempty" env:"PICOCLAW_CHANNELS_SLACK_APP_TOKEN"`
+	// APIURL overrides the Web API base URL (default https://slack.com/api/).
+	APIURL string `json:"api_url,omitempty" yaml:"-" env:"PICOCLAW_CHANNELS_SLACK_API_URL"`
 }
 
 type MatrixSettings struct {
