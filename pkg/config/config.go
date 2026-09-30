@@ -683,9 +683,7 @@ type DingTalkSettings struct {
 type SlackSettings struct {
 	BotToken SecureString `json:"bot_token,omitzero" yaml:"bot_token,omitempty" env:"PICOCLAW_CHANNELS_SLACK_BOT_TOKEN"`
 	AppToken SecureString `json:"app_token,omitzero" yaml:"app_token,omitempty" env:"PICOCLAW_CHANNELS_SLACK_APP_TOKEN"`
-	// APIURL troca a base da Web API (https://slack.com/api/). Vazio mantém a
-	// da Slack. O Ethos aponta para o proxy dele, que guarda o token real do
-	// bot: o pod recebe só uma credencial que não vale fora do proxy.
+	// APIURL overrides the Web API base URL (default https://slack.com/api/).
 	APIURL string `json:"api_url,omitempty" yaml:"-" env:"PICOCLAW_CHANNELS_SLACK_API_URL"`
 }
 
