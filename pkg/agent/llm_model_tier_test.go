@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -132,6 +131,7 @@ func mediaTierFixture(
 		ID:              "tier-agent",
 		Provider:        vision,
 		MediaDelegation: delegation,
+		Model:           "maestro-flash",
 		Candidates:      main,
 		ImageCandidates: []providers.FallbackCandidate{{Provider: "openai", Model: "maestro-vision"}},
 		TierCandidates: map[string][]providers.FallbackCandidate{
@@ -193,29 +193,6 @@ func TestRouteTurnModel_SwappedImageStaysOnVisionModel(t *testing.T) {
 	}
 }
 
-// flakyVisionProvider fails its first `failures` calls and then describes the
-// image: the vision sub-call failing in one iteration and working in the next.
-type flakyVisionProvider struct {
-	failures int
-	calls    int
-}
-
-func (p *flakyVisionProvider) Chat(
-	_ context.Context,
-	_ []providers.Message,
-	_ []providers.ToolDefinition,
-	_ string,
-	_ map[string]any,
-) (*providers.LLMResponse, error) {
-	p.calls++
-	if p.calls <= p.failures {
-		return nil, errors.New("vision upstream rejected the request")
-	}
-	return &providers.LLMResponse{Content: "a slide with a chat screenshot"}, nil
-}
-
-func (p *flakyVisionProvider) GetDefaultModel() string { return "vision-model" }
-
 func imageCallMessages() []providers.Message {
 	return []providers.Message{
 		{Role: "system", Content: "system prompt"},
@@ -226,8 +203,7 @@ func imageCallMessages() []providers.Message {
 // The production fallback: delegation is on, the vision sub-call fails, and
 // routeMediaTurn swaps the whole turn to the vision model. The tier yields.
 func TestRouteTurnModel_FailedDelegationStaysOnVisionModel(t *testing.T) {
-	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
-	ts.agent.Provider = &flakyVisionProvider{failures: 1}
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{failures: 1}, testImageDataURL)
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("routeTurnModel: %v", err)
 	}
@@ -240,8 +216,8 @@ func TestRouteTurnModel_FailedDelegationStaysOnVisionModel(t *testing.T) {
 // over between calls. A call pinned to vision must not keep the NEXT call there
 // once the image is text: the tier comes back, with the main context budget.
 func TestRouteTurnModel_TierReturnsOnceTheImageIsDescribed(t *testing.T) {
-	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
-	ts.agent.Provider = &flakyVisionProvider{failures: 1}
+	vision := &recordingVisionProvider{failures: 1, resp: "a slide with a chat screenshot"}
+	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
 	ts.agent.ImageContextWindow = 128_000
 
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
@@ -293,5 +269,37 @@ func TestRouteTurnModel_VisionModelSharedWithMainStillFollowsTier(t *testing.T) 
 	}
 	if exec.llmModelName != "gpt-6.1-sol" {
 		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (a text turn needs no vision)", exec.llmModelName)
+	}
+}
+
+// Without an image model, the main model is the only one the config trusts
+// with images: an image turn stays on it instead of going raw to the tier —
+// directly, or after routeMediaTurn bypassed the light model.
+func TestRouteTurnModel_ImageWithoutVisionModelStaysOnMainModel(t *testing.T) {
+	cases := []struct {
+		name    string
+		onLight bool
+	}{
+		{"main model", false},
+		{"light model bypassed", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
+			ts.agent.ImageCandidates = nil
+			if tc.onLight {
+				exec.usedLight = true
+				exec.activeCandidates = []providers.FallbackCandidate{{Provider: "openai", Model: "light-model"}}
+				exec.activeModel = "light-model"
+				exec.llmModelName = "light-model"
+			}
+			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+				t.Fatalf("routeTurnModel: %v", err)
+			}
+			if exec.llmModelName != "maestro-flash" {
+				t.Fatalf("llmModelName = %q, want maestro-flash (no image model; only the main model sees)",
+					exec.llmModelName)
+			}
+		})
 	}
 }

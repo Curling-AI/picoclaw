@@ -144,8 +144,10 @@ func messagesContainCurrentTurnMediaTurn(messages []providers.Message) bool {
 	return false
 }
 
-// routeMediaTurn reports whether it pinned THIS call to the vision model, which
-// the user's tier must not override. (seucaranguejo fork)
+// routeMediaTurn reports whether THIS call carries media that needs eyes. Such
+// a call stays on the model routed here — the vision model, or the main model
+// when none is configured, the only one the config then trusts with images —
+// and the user's tier must not move it. (seucaranguejo fork)
 func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, error) {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil ||
 		!messagesContainCurrentTurnMediaTurn(currentTurnMessages(exec.callMessages, exec.currentTurnStart)) {
@@ -155,14 +157,12 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, err
 	var targetCandidates []providers.FallbackCandidate
 	var targetModelName string
 	var routeReason string
-	toVision := false
 
 	switch {
 	case len(ts.agent.ImageCandidates) > 0:
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.ImageCandidates...)
 		targetModelName = strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel)
 		routeReason = "configured_image_model"
-		toVision = true
 		// The vision model's context window is typically far smaller than the main
 		// model's (e.g. glm-4.6v 128K vs glm-5.2 1M). Pin the turn's context budget
 		// to it so compaction/trim targets the real limit — otherwise a big
@@ -177,11 +177,11 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, err
 		targetModelName = strings.TrimSpace(ts.agent.Model)
 		routeReason = "bypass_light_model_for_media"
 	default:
-		return false, nil
+		return true, nil
 	}
 
 	if len(targetCandidates) == 0 {
-		return false, nil
+		return true, nil
 	}
 
 	targetModel := resolvedCandidateModel(targetCandidates, targetModelName)
@@ -202,7 +202,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, err
 	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
 		exec.activeModel == targetModel &&
 		exec.llmModelName == resolvedModelName {
-		return toVision, nil
+		return true, nil
 	}
 
 	exec.activeCandidates = targetCandidates
@@ -227,7 +227,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, err
 		"messages_count": len(exec.callMessages),
 	})
 
-	return toVision, nil
+	return true, nil
 }
 
 // turnContextWindow returns the context budget for the model actually serving
@@ -327,9 +327,9 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	if err != nil {
 		return err
 	}
-	onVision := false
+	needsEyes := false
 	if !delegated {
-		if onVision, err = p.routeMediaTurn(ts, exec); err != nil {
+		if needsEyes, err = p.routeMediaTurn(ts, exec); err != nil {
 			return err
 		}
 	}
@@ -337,9 +337,9 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 		return err
 	}
 	// Decided per call, not from the active model: that one carries over from
-	// the previous call, and a call that needed vision does not make the next
-	// one need it.
-	if onVision {
+	// the previous call, and a call that needed eyes does not make the next
+	// one need them.
+	if needsEyes {
 		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)
@@ -349,11 +349,12 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 // composer (turnState.modelTier, armed via SetPendingModelTier). Third sibling
 // of routeMediaTurn/routeCronModelTurn, and the same swap.
 //
-// It gives way to both of them, on purpose: a call routeMediaTurn pinned to the
-// vision model and a cron turn pinned to the cron model are CAPABILITY
-// constraints, while the tier is a user preference. Preference does not get to
-// override capability — a photo sent while "Ultra" is selected still has to go
-// to a model that can see it. routeTurnModel enforces the vision half.
+// It gives way to both of them, on purpose: a call carrying an image that
+// routeMediaTurn kept on a model that can see it, and a cron turn pinned to the
+// cron model, are CAPABILITY constraints, while the tier is a user preference.
+// Preference does not get to override capability — a photo sent while "Ultra"
+// is selected still has to go to a model that can see it. routeTurnModel
+// enforces the media half.
 //
 // Carrying media is not the same as needing vision: a document is read through
 // tools, and an image delegateMediaTurn already described is text by now. Both

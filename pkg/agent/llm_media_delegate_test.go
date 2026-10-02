@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,9 +11,11 @@ import (
 )
 
 // recordingVisionProvider records Chat calls and returns a fixed description,
-// standing in for the image model in delegation tests.
+// standing in for the image model in delegation tests. Its first `failures`
+// calls fail, like a vision upstream rejecting the request.
 type recordingVisionProvider struct {
 	calls        int
+	failures     int
 	lastMessages []providers.Message
 	resp         string
 }
@@ -26,6 +29,9 @@ func (p *recordingVisionProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.calls++
 	p.lastMessages = messages
+	if p.calls <= p.failures {
+		return nil, errors.New("vision upstream rejected the request")
+	}
 	return &providers.LLMResponse{Content: p.resp}, nil
 }
 
