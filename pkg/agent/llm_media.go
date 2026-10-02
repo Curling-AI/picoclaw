@@ -144,21 +144,25 @@ func messagesContainCurrentTurnMediaTurn(messages []providers.Message) bool {
 	return false
 }
 
-func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
+// routeMediaTurn reports whether it pinned THIS call to the vision model, which
+// the user's tier must not override. (seucaranguejo fork)
+func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, error) {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil ||
 		!messagesContainCurrentTurnMediaTurn(currentTurnMessages(exec.callMessages, exec.currentTurnStart)) {
-		return nil
+		return false, nil
 	}
 
 	var targetCandidates []providers.FallbackCandidate
 	var targetModelName string
 	var routeReason string
+	toVision := false
 
 	switch {
 	case len(ts.agent.ImageCandidates) > 0:
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.ImageCandidates...)
 		targetModelName = strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel)
 		routeReason = "configured_image_model"
+		toVision = true
 		// The vision model's context window is typically far smaller than the main
 		// model's (e.g. glm-4.6v 128K vs glm-5.2 1M). Pin the turn's context budget
 		// to it so compaction/trim targets the real limit — otherwise a big
@@ -173,11 +177,11 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		targetModelName = strings.TrimSpace(ts.agent.Model)
 		routeReason = "bypass_light_model_for_media"
 	default:
-		return nil
+		return false, nil
 	}
 
 	if len(targetCandidates) == 0 {
-		return nil
+		return false, nil
 	}
 
 	targetModel := resolvedCandidateModel(targetCandidates, targetModelName)
@@ -189,7 +193,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		ts.agent.Candidates,
 		firstCandidate,
 	); err != nil {
-		return err
+		return false, err
 	} else if provider != nil {
 		targetProvider = provider
 	}
@@ -198,7 +202,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
 		exec.activeModel == targetModel &&
 		exec.llmModelName == resolvedModelName {
-		return nil
+		return toVision, nil
 	}
 
 	exec.activeCandidates = targetCandidates
@@ -223,7 +227,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		"messages_count": len(exec.callMessages),
 	})
 
-	return nil
+	return toVision, nil
 }
 
 // turnContextWindow returns the context budget for the model actually serving
@@ -312,12 +316,6 @@ func (p *Pipeline) routeCronModelTurn(ts *turnState, exec *turnExecution) error 
 	return nil
 }
 
-// onVisionModel reports whether routeMediaTurn swapped this turn to the vision
-// model. Only that router puts the image candidates in charge of a turn.
-func onVisionModel(agent *AgentInstance, exec *turnExecution) bool {
-	return len(agent.ImageCandidates) > 0 && sameCandidateSet(exec.activeCandidates, agent.ImageCandidates)
-}
-
 // routeTurnModel picks the model for this LLM call. The order is the contract:
 // the routers that enforce a CAPABILITY (vision, cron) run before the user's
 // tier, which is only a preference. (seucaranguejo fork)
@@ -329,13 +327,20 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	if err != nil {
 		return err
 	}
+	onVision := false
 	if !delegated {
-		if err := p.routeMediaTurn(ts, exec); err != nil {
+		if onVision, err = p.routeMediaTurn(ts, exec); err != nil {
 			return err
 		}
 	}
 	if err := p.routeCronModelTurn(ts, exec); err != nil {
 		return err
+	}
+	// Decided per call, not from the active model: that one carries over from
+	// the previous call, and a call that needed vision does not make the next
+	// one need it.
+	if onVision {
+		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)
 }
@@ -344,15 +349,15 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 // composer (turnState.modelTier, armed via SetPendingModelTier). Third sibling
 // of routeMediaTurn/routeCronModelTurn, and the same swap.
 //
-// It gives way to both of them, on purpose: a turn routeMediaTurn swapped to the
+// It gives way to both of them, on purpose: a call routeMediaTurn pinned to the
 // vision model and a cron turn pinned to the cron model are CAPABILITY
 // constraints, while the tier is a user preference. Preference does not get to
 // override capability — a photo sent while "Ultra" is selected still has to go
-// to a model that can see it.
+// to a model that can see it. routeTurnModel enforces the vision half.
 //
-// Carrying media is not the same as being on the vision model: a document is
-// read through tools, and an image delegateMediaTurn already described is text
-// by now. Both stay on the main model, and the main model is the picked tier.
+// Carrying media is not the same as needing vision: a document is read through
+// tools, and an image delegateMediaTurn already described is text by now. Both
+// stay on the main model, and the main model is the picked tier.
 // (seucaranguejo fork)
 func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
@@ -365,9 +370,6 @@ func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error 
 	// Cron pins its own model; a cron session never carries a user tier anyway,
 	// but the guard keeps it true if that ever changes.
 	if strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) {
-		return nil
-	}
-	if onVisionModel(ts.agent, exec) {
 		return nil
 	}
 	targetCandidates := ts.agent.TierCandidates[tier]
@@ -415,6 +417,9 @@ func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error 
 	)
 	exec.llmModelName = resolvedModelName
 	exec.usedLight = false
+	// The vision budget routeMediaTurn may have pinned on an earlier call belongs
+	// to the vision model, not to the tier taking over.
+	exec.effectiveContextWindow = 0
 
 	logger.InfoCF("agent", "Model tier routing selected model", map[string]any{
 		"agent_id":    ts.agent.ID,

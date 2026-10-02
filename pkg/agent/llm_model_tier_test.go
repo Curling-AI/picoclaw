@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -189,5 +190,108 @@ func TestRouteTurnModel_SwappedImageStaysOnVisionModel(t *testing.T) {
 	}
 	if exec.llmModelName != "maestro-vision" {
 		t.Fatalf("llmModelName = %q, want maestro-vision (vision outranks the tier)", exec.llmModelName)
+	}
+}
+
+// flakyVisionProvider fails its first `failures` calls and then describes the
+// image: the vision sub-call failing in one iteration and working in the next.
+type flakyVisionProvider struct {
+	failures int
+	calls    int
+}
+
+func (p *flakyVisionProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls++
+	if p.calls <= p.failures {
+		return nil, errors.New("vision upstream rejected the request")
+	}
+	return &providers.LLMResponse{Content: "a slide with a chat screenshot"}, nil
+}
+
+func (p *flakyVisionProvider) GetDefaultModel() string { return "vision-model" }
+
+func imageCallMessages() []providers.Message {
+	return []providers.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "use the attachment", Media: []string{testImageDataURL}},
+	}
+}
+
+// The production fallback: delegation is on, the vision sub-call fails, and
+// routeMediaTurn swaps the whole turn to the vision model. The tier yields.
+func TestRouteTurnModel_FailedDelegationStaysOnVisionModel(t *testing.T) {
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
+	ts.agent.Provider = &flakyVisionProvider{failures: 1}
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" {
+		t.Fatalf("llmModelName = %q, want maestro-vision (delegation failed)", exec.llmModelName)
+	}
+}
+
+// The routers run on every LLM call of the turn and the active model carries
+// over between calls. A call pinned to vision must not keep the NEXT call there
+// once the image is text: the tier comes back, with the main context budget.
+func TestRouteTurnModel_TierReturnsOnceTheImageIsDescribed(t *testing.T) {
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
+	ts.agent.Provider = &flakyVisionProvider{failures: 1}
+	ts.agent.ImageContextWindow = 128_000
+
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" || exec.effectiveContextWindow != 128_000 {
+		t.Fatalf("first call on %q with window %d, want maestro-vision with 128000",
+			exec.llmModelName, exec.effectiveContextWindow)
+	}
+
+	// Next iteration: the pipeline rebuilds the call from the untouched working
+	// set, and this time the sub-call describes the image.
+	exec.callMessages = imageCallMessages()
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("second call on %q, want gpt-6.1-sol (the image is text now)", exec.llmModelName)
+	}
+	if exec.effectiveContextWindow != 0 {
+		t.Fatalf("effectiveContextWindow = %d, want 0 (the vision budget left with the vision model)",
+			exec.effectiveContextWindow)
+	}
+}
+
+// An image a TOOL loaded (no attachment from the user) still needs eyes. Before,
+// the tier only checked the user's attachments and took this one off vision.
+func TestRouteTurnModel_ToolLoadedImageStaysOnVisionModel(t *testing.T) {
+	p, ts, exec := mediaTierFixture(false, &recordingVisionProvider{resp: "unused"})
+	exec.callMessages = append(exec.callMessages,
+		providers.Message{Role: "tool", Content: "Image loaded: slide.png"},
+		providers.Message{Role: "user", Content: toolImageFollowUpPlaceholder, Media: []string{testImageDataURL}},
+	)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" {
+		t.Fatalf("llmModelName = %q, want maestro-vision (a tool loaded an image)", exec.llmModelName)
+	}
+}
+
+// A multimodal main model can be the image model too. A text turn is then
+// "on the vision candidates" from the start, and still follows the pick.
+func TestRouteTurnModel_VisionModelSharedWithMainStillFollowsTier(t *testing.T) {
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"})
+	ts.agent.ImageCandidates = ts.agent.Candidates
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (a text turn needs no vision)", exec.llmModelName)
 	}
 }
