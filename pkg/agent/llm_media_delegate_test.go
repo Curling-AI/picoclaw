@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,9 +11,11 @@ import (
 )
 
 // recordingVisionProvider records Chat calls and returns a fixed description,
-// standing in for the image model in delegation tests.
+// standing in for the image model in delegation tests. Its first `failures`
+// calls fail, like a vision upstream rejecting the request.
 type recordingVisionProvider struct {
 	calls        int
+	failures     int
 	lastMessages []providers.Message
 	resp         string
 }
@@ -26,6 +29,9 @@ func (p *recordingVisionProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.calls++
 	p.lastMessages = messages
+	if p.calls <= p.failures {
+		return nil, errors.New("vision upstream rejected the request")
+	}
 	return &providers.LLMResponse{Content: p.resp}, nil
 }
 
@@ -66,12 +72,12 @@ func TestDelegateMediaTurn_Disabled(t *testing.T) {
 	vision := &recordingVisionProvider{resp: "a receipt"}
 	p, ts, exec := delegationFixture(false, vision)
 
-	handled, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
 	if err != nil {
 		t.Fatalf("delegateMediaTurn: %v", err)
 	}
-	if handled {
-		t.Fatal("handled = true, want false when MediaDelegation is disabled")
+	if outcome != delegationSkipped {
+		t.Fatalf("outcome = %v, want delegationSkipped when MediaDelegation is disabled", outcome)
 	}
 	if vision.calls != 0 {
 		t.Errorf("vision calls = %d, want 0 (delegation off)", vision.calls)
@@ -86,12 +92,12 @@ func TestDelegateMediaTurn_AnalyzesAndInjects(t *testing.T) {
 	vision := &recordingVisionProvider{resp: "Total: R$ 42,00. Vendor: Padaria."}
 	p, ts, exec := delegationFixture(true, vision)
 
-	handled, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
 	if err != nil {
 		t.Fatalf("delegateMediaTurn: %v", err)
 	}
-	if !handled {
-		t.Fatal("handled = false, want true (an image was delegated)")
+	if outcome != delegationDone {
+		t.Fatalf("outcome = %v, want delegationDone (an image was delegated)", outcome)
 	}
 	if vision.calls != 1 {
 		t.Fatalf("vision calls = %d, want 1", vision.calls)
@@ -128,6 +134,24 @@ func TestDelegateMediaTurn_AnalyzesAndInjects(t *testing.T) {
 	// The main model must NOT be swapped to the vision model.
 	if exec.activeModel != "" {
 		t.Errorf("activeModel = %q, want empty (no swap under delegation)", exec.activeModel)
+	}
+}
+
+// The vision model refusing the image is not the same as having nothing to
+// delegate: routeTurnModel must know the vision model already said no.
+func TestDelegateMediaTurn_ReportsRefusedImage(t *testing.T) {
+	vision := &recordingVisionProvider{failures: 1}
+	p, ts, exec := delegationFixture(true, vision)
+
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	if err != nil {
+		t.Fatalf("delegateMediaTurn: %v", err)
+	}
+	if outcome != delegationFailed {
+		t.Fatalf("outcome = %v, want delegationFailed (the vision sub-call failed)", outcome)
+	}
+	if len(exec.callMessages[3].Media) != 1 {
+		t.Errorf("image Media was modified although nothing was analyzed")
 	}
 }
 
