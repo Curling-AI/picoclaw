@@ -27,8 +27,6 @@ var retryBackoffSchedule = []time.Duration{
 	5 * time.Minute,
 }
 
-const retryConnectTimeout = 30 * time.Second
-
 // RetryPendingServers keeps trying to connect the named servers until each one
 // connects, ctx is canceled, or the manager closes. A server that failed at
 // load time (expired OAuth grant, connector briefly down) would otherwise stay
@@ -67,9 +65,8 @@ func (m *Manager) RetryPendingServers(
 			}
 			resolved, err := resolveServerEnvFile(serverCfg, workspacePath)
 			if err == nil {
-				connectCtx, cancel := context.WithTimeout(ctx, retryConnectTimeout)
-				err = m.ConnectServer(connectCtx, name, resolved)
-				cancel()
+				// connectServer bounds the handshake with mcpHandshakeTimeout.
+				err = m.ConnectServer(ctx, name, resolved)
 			}
 			if err != nil {
 				if ctx.Err() != nil || m.closed.Load() {

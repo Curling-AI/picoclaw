@@ -35,6 +35,7 @@ func (t *isolatedCommandTransport) Connect(ctx context.Context) (sdkmcp.Connecti
 	if err != nil {
 		return nil, err
 	}
+	startInOwnProcessGroup(t.Command)
 	if err := isolation.Start(t.Command); err != nil {
 		return nil, err
 	}
@@ -61,6 +62,11 @@ func (s *isolatedPipeRWC) Write(p []byte) (n int, err error) {
 }
 
 func (s *isolatedPipeRWC) Close() error {
+	// Launchers such as `npx mcp-remote` exit and leave the real server behind
+	// (npm → sh → node); nothing the server started may outlive its session.
+	defer func() {
+		_ = signalProcessGroup(s.cmd, syscall.SIGKILL)
+	}()
 	if err := s.stdin.Close(); err != nil {
 		return fmt.Errorf("closing stdin: %w", err)
 	}
@@ -79,12 +85,12 @@ func (s *isolatedPipeRWC) Close() error {
 	if err, ok := wait(); ok {
 		return err
 	}
-	if err := s.cmd.Process.Signal(syscall.SIGTERM); err == nil {
+	if err := signalProcessGroup(s.cmd, syscall.SIGTERM); err == nil {
 		if err, ok := wait(); ok {
 			return err
 		}
 	}
-	if err := s.cmd.Process.Kill(); err != nil {
+	if err := signalProcessGroup(s.cmd, syscall.SIGKILL); err != nil {
 		return err
 	}
 	if err, ok := wait(); ok {
