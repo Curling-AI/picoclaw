@@ -323,12 +323,12 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	// Auto-delegation: for image turns, prefer a bounded vision sub-call over
 	// swapping the whole turn to the vision model. Falls back to routeMediaTurn's
 	// swap when disabled or when nothing was delegated.
-	delegated, err := p.delegateMediaTurn(ctx, ts, exec)
+	delegation, err := p.delegateMediaTurn(ctx, ts, exec)
 	if err != nil {
 		return err
 	}
 	needsEyes := false
-	if !delegated {
+	if delegation != delegationDone {
 		if needsEyes, err = p.routeMediaTurn(ts, exec); err != nil {
 			return err
 		}
@@ -338,8 +338,11 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	}
 	// Decided per call, not from the active model: that one carries over from
 	// the previous call, and a call that needed eyes does not make the next
-	// one need them.
-	if needsEyes {
+	// one need them. A vision model that has just refused this call's image
+	// holds no claim on it either: the same image would be refused again (prod:
+	// 400 "Provided image is not valid" on tool screenshots) and end the turn,
+	// so the swap above is only the fallback for a turn with no tier picked.
+	if needsEyes && delegation != delegationFailed {
 		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)
@@ -354,7 +357,8 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 // cron model, are CAPABILITY constraints, while the tier is a user preference.
 // Preference does not get to override capability — a photo sent while "Ultra"
 // is selected still has to go to a model that can see it. routeTurnModel
-// enforces the media half.
+// enforces the media half, and lets the tier back in when the vision model has
+// refused the image.
 //
 // Carrying media is not the same as needing vision: a document is read through
 // tools, and an image delegateMediaTurn already described is text by now. Both

@@ -57,18 +57,33 @@ type mediaImageTarget struct {
 	images []string
 }
 
-// delegateMediaTurn implements auto-delegation. It returns (true, nil) when it
-// analyzed >=1 image and rewrote exec.callMessages (the caller then SKIPS
-// routeMediaTurn). It returns (false, nil) when delegation is disabled, no
-// vision model is configured, the current turn carries no resolved image, or a
-// sub-call failed before anything was analyzed — in every such case the caller
-// falls back to the legacy routeMediaTurn swap (graceful degradation).
-func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *turnExecution) (bool, error) {
+// delegationOutcome is what delegateMediaTurn did with the call's images.
+type delegationOutcome int
+
+const (
+	// delegationSkipped: delegation is off, no vision model is configured, or
+	// the call carries no resolved image.
+	delegationSkipped delegationOutcome = iota
+	// delegationDone: >=1 image was analyzed and exec.callMessages rewritten.
+	delegationDone
+	// delegationFailed: the vision sub-call failed before anything was analyzed.
+	delegationFailed
+)
+
+// delegateMediaTurn implements auto-delegation. On delegationDone the caller
+// SKIPS routeMediaTurn. On delegationSkipped and delegationFailed it falls back
+// to the legacy routeMediaTurn swap (graceful degradation); a failure also
+// tells it the vision model has just refused this call's image.
+func (p *Pipeline) delegateMediaTurn(
+	ctx context.Context,
+	ts *turnState,
+	exec *turnExecution,
+) (delegationOutcome, error) {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
-		return false, nil
+		return delegationSkipped, nil
 	}
 	if !ts.agent.MediaDelegation || len(ts.agent.ImageCandidates) == 0 {
-		return false, nil
+		return delegationSkipped, nil
 	}
 
 	start := normalizeCurrentTurnStart(exec.callMessages, exec.currentTurnStart)
@@ -86,7 +101,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 	}
 	if len(targets) == 0 {
 		// Path-tag-only (image not loaded yet) or no media: nothing to analyze.
-		return false, nil
+		return delegationSkipped, nil
 	}
 
 	// Resolve the vision provider/model, mirroring routeMediaTurn.
@@ -103,7 +118,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 			"agent_id": ts.agent.ID,
 			"error":    fmt.Sprint(err),
 		})
-		return false, nil
+		return delegationSkipped, nil
 	}
 
 	brief := delegationBrief(exec.callMessages, start, targets)
@@ -131,7 +146,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 				})
 				if analyzed == 0 {
 					// Nothing salvaged: let the whole turn fall back to the swap.
-					return false, nil
+					return delegationFailed, nil
 				}
 				continue
 			}
@@ -145,7 +160,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 		analyzed++
 	}
 	if analyzed == 0 {
-		return false, nil
+		return delegationFailed, nil
 	}
 
 	exec.callMessages = rewritten
@@ -155,7 +170,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 		"images":         len(targets),
 		"messages_count": len(exec.callMessages),
 	})
-	return true, nil
+	return delegationDone, nil
 }
 
 // callVisionDelegate makes the bounded, one-shot vision sub-call.

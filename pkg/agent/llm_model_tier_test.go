@@ -200,15 +200,34 @@ func imageCallMessages() []providers.Message {
 	}
 }
 
-// The production fallback: delegation is on, the vision sub-call fails, and
-// routeMediaTurn swaps the whole turn to the vision model. The tier yields.
-func TestRouteTurnModel_FailedDelegationStaysOnVisionModel(t *testing.T) {
+// The production fallback: delegation is on and the vision model refuses the
+// image (prod: 400 "Provided image is not valid" on tool screenshots). Sending
+// the same image to the same model only repeats the refusal and ends the turn,
+// so the picked tier takes the call, with the main context budget.
+func TestRouteTurnModel_RefusedImageFollowsPickedTier(t *testing.T) {
 	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{failures: 1}, testImageDataURL)
+	ts.agent.ImageContextWindow = 128_000
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (the vision model refused the image)", exec.llmModelName)
+	}
+	if exec.effectiveContextWindow != 0 {
+		t.Fatalf("effectiveContextWindow = %d, want 0 (the call left the vision model)", exec.effectiveContextWindow)
+	}
+}
+
+// With no tier picked nothing else claims the call, and the swap to the vision
+// model stays the fallback it was before.
+func TestRouteTurnModel_RefusedImageWithoutTierFallsBackToVisionSwap(t *testing.T) {
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{failures: 1}, testImageDataURL)
+	ts.modelTier = ""
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("routeTurnModel: %v", err)
 	}
 	if exec.llmModelName != "maestro-vision" {
-		t.Fatalf("llmModelName = %q, want maestro-vision (delegation failed)", exec.llmModelName)
+		t.Fatalf("llmModelName = %q, want maestro-vision (no tier, legacy swap)", exec.llmModelName)
 	}
 }
 
@@ -216,9 +235,15 @@ func TestRouteTurnModel_FailedDelegationStaysOnVisionModel(t *testing.T) {
 // over between calls. A call pinned to vision must not keep the NEXT call there
 // once the image is text: the tier comes back, with the main context budget.
 func TestRouteTurnModel_TierReturnsOnceTheImageIsDescribed(t *testing.T) {
-	vision := &recordingVisionProvider{failures: 1, resp: "a slide with a chat screenshot"}
-	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+	vision := &recordingVisionProvider{resp: "a slide with a chat screenshot"}
+	p, ts, exec := mediaTierFixture(true, vision)
 	ts.agent.ImageContextWindow = 128_000
+	// First call: the image is only a path tag, so there is nothing to delegate
+	// yet and routeMediaTurn swaps the call to the vision model.
+	exec.callMessages = []providers.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "what is on [image:/workspace/slide.png]?"},
+	}
 
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("first call: %v", err)
@@ -228,8 +253,7 @@ func TestRouteTurnModel_TierReturnsOnceTheImageIsDescribed(t *testing.T) {
 			exec.llmModelName, exec.effectiveContextWindow)
 	}
 
-	// Next iteration: the pipeline rebuilds the call from the untouched working
-	// set, and this time the sub-call describes the image.
+	// Next iteration: the image is resolved, and the sub-call describes it.
 	exec.callMessages = imageCallMessages()
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("second call: %v", err)
