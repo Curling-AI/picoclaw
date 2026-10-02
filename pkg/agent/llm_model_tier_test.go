@@ -297,25 +297,29 @@ func TestRouteTurnModel_VisionModelSharedWithMainStillFollowsTier(t *testing.T) 
 }
 
 // Without an image model, the main model is the only one the config trusts
-// with images: an image turn stays on it instead of going raw to the tier —
-// directly, or after routeMediaTurn bypassed the light model.
+// with images: an image call goes to it instead of going raw to the tier —
+// from the main model itself, from the light model, or from the tier an
+// earlier call of the turn picked (a document call, say, before a tool loaded
+// the image).
 func TestRouteTurnModel_ImageWithoutVisionModelStaysOnMainModel(t *testing.T) {
 	cases := []struct {
-		name    string
-		onLight bool
+		name     string
+		onLight  bool
+		previous string
 	}{
-		{"main model", false},
-		{"light model bypassed", true},
+		{"main model", false, ""},
+		{"light model bypassed", true, "light-model"},
+		{"tier of an earlier call", false, "gpt-6.1-sol"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
 			ts.agent.ImageCandidates = nil
-			if tc.onLight {
-				exec.usedLight = true
-				exec.activeCandidates = []providers.FallbackCandidate{{Provider: "openai", Model: "light-model"}}
-				exec.activeModel = "light-model"
-				exec.llmModelName = "light-model"
+			exec.usedLight = tc.onLight
+			if tc.previous != "" {
+				exec.activeCandidates = []providers.FallbackCandidate{{Provider: "openai", Model: tc.previous}}
+				exec.activeModel = tc.previous
+				exec.llmModelName = tc.previous
 			}
 			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 				t.Fatalf("routeTurnModel: %v", err)

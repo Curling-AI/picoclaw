@@ -172,10 +172,16 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, err
 		if ts.agent.ImageContextWindow > 0 {
 			exec.effectiveContextWindow = ts.agent.ImageContextWindow
 		}
-	case exec.usedLight && len(ts.agent.Candidates) > 0:
+	case len(ts.agent.Candidates) > 0:
+		// No image model: the main model is the only one the config trusts with
+		// images. The active model can be the light one, or a tier an earlier
+		// call of the turn picked; both come back to it.
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.Candidates...)
 		targetModelName = strings.TrimSpace(ts.agent.Model)
-		routeReason = "bypass_light_model_for_media"
+		routeReason = "main_model_for_media"
+		if exec.usedLight {
+			routeReason = "bypass_light_model_for_media"
+		}
 	default:
 		return true, nil
 	}
