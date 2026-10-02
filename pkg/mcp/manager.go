@@ -369,19 +369,11 @@ func connectServer(
 				"disableStandaloneSSE": disableStandaloneSSE,
 			})
 
-		sseTransport := &mcp.StreamableClientTransport{
-			Endpoint:             cfg.URL,
-			DisableStandaloneSSE: disableStandaloneSSE,
-		}
-
-		// Add custom headers if provided
+		roundTripper := http.DefaultTransport
 		if len(cfg.Headers) > 0 {
-			// Create a custom HTTP client with header-injecting transport
-			sseTransport.HTTPClient = &http.Client{
-				Transport: &headerTransport{
-					base:    http.DefaultTransport,
-					headers: cfg.Headers,
-				},
+			roundTripper = &headerTransport{
+				base:    http.DefaultTransport,
+				headers: cfg.Headers,
 			}
 			logger.DebugCF("mcp", "Added custom HTTP headers",
 				map[string]any{
@@ -390,7 +382,13 @@ func connectServer(
 				})
 		}
 
-		transport = sseTransport
+		transport = &mcp.StreamableClientTransport{
+			Endpoint:             cfg.URL,
+			DisableStandaloneSSE: disableStandaloneSSE,
+			HTTPClient: &http.Client{
+				Transport: &boundedDeleteTransport{base: roundTripper},
+			},
+		}
 	case "stdio":
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("command is required for stdio transport")
@@ -400,8 +398,10 @@ func connectServer(
 				"server":  name,
 				"command": cfg.Command,
 			})
-		// Create command with context
-		cmd := exec.CommandContext(ctx, expandHomeCommandPath(cfg.Command), cfg.Args...)
+		// Not bound to ctx: the retry loop and CallTool reconnects dial with
+		// contexts that end right after the connect, and the process has to
+		// live as long as the session. Closing the session stops it.
+		cmd := exec.Command(expandHomeCommandPath(cfg.Command), cfg.Args...)
 
 		// Build environment variables with proper override semantics
 		// Use a map to ensure config variables override file variables
@@ -450,9 +450,18 @@ func connectServer(
 		)
 	}
 
-	// Connect to server
-	session, err := client.Connect(ctx, transport, nil)
+	// The session itself outlives handshakeCtx: the SDK detaches it from the
+	// connect context.
+	handshakeCtx, cancel := context.WithTimeout(ctx, mcpHandshakeTimeout)
+	defer cancel()
+
+	tracked := &trackedTransport{Transport: transport}
+	session, err := client.Connect(handshakeCtx, tracked, nil)
 	if err != nil {
+		tracked.closeAbandoned()
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("no answer to the MCP handshake within %s: %w", mcpHandshakeTimeout, err)
+		}
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
@@ -467,7 +476,7 @@ func connectServer(
 		})
 
 	// List available tools if supported
-	tools, err := listServerTools(ctx, name, session, initResult)
+	tools, err := listServerTools(handshakeCtx, name, session, initResult)
 	if err != nil {
 		_ = session.Close()
 		return nil, err
@@ -576,6 +585,11 @@ func listServerTools(
 
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
+			// Listing stops at the first error; past the deadline that
+			// would pass for a server with fewer tools.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("listing tools: %w: %w", ctxErr, err)
+			}
 			logger.WarnCF("mcp", "Error listing tool",
 				map[string]any{
 					"server": name,
