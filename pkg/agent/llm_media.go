@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -311,15 +312,48 @@ func (p *Pipeline) routeCronModelTurn(ts *turnState, exec *turnExecution) error 
 	return nil
 }
 
+// onVisionModel reports whether routeMediaTurn swapped this turn to the vision
+// model. Only that router puts the image candidates in charge of a turn.
+func onVisionModel(agent *AgentInstance, exec *turnExecution) bool {
+	return len(agent.ImageCandidates) > 0 && sameCandidateSet(exec.activeCandidates, agent.ImageCandidates)
+}
+
+// routeTurnModel picks the model for this LLM call. The order is the contract:
+// the routers that enforce a CAPABILITY (vision, cron) run before the user's
+// tier, which is only a preference. (seucaranguejo fork)
+func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turnExecution) error {
+	// Auto-delegation: for image turns, prefer a bounded vision sub-call over
+	// swapping the whole turn to the vision model. Falls back to routeMediaTurn's
+	// swap when disabled or when nothing was delegated.
+	delegated, err := p.delegateMediaTurn(ctx, ts, exec)
+	if err != nil {
+		return err
+	}
+	if !delegated {
+		if err := p.routeMediaTurn(ts, exec); err != nil {
+			return err
+		}
+	}
+	if err := p.routeCronModelTurn(ts, exec); err != nil {
+		return err
+	}
+	return p.routeModelTierTurn(ts, exec)
+}
+
 // routeModelTierTurn swaps the active model to the tier the USER picked in the
 // composer (turnState.modelTier, armed via SetPendingModelTier). Third sibling
 // of routeMediaTurn/routeCronModelTurn, and the same swap.
 //
-// It gives way to both of them, on purpose: a media turn is pinned to the
-// vision model and a cron turn to the cron model because those are CAPABILITY
+// It gives way to both of them, on purpose: a turn routeMediaTurn swapped to the
+// vision model and a cron turn pinned to the cron model are CAPABILITY
 // constraints, while the tier is a user preference. Preference does not get to
 // override capability — a photo sent while "Ultra" is selected still has to go
-// to a model that can see it. (seucaranguejo fork)
+// to a model that can see it.
+//
+// Carrying media is not the same as being on the vision model: a document is
+// read through tools, and an image delegateMediaTurn already described is text
+// by now. Both stay on the main model, and the main model is the picked tier.
+// (seucaranguejo fork)
 func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
 		return nil
@@ -333,8 +367,7 @@ func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error 
 	if strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) {
 		return nil
 	}
-	// Media already swapped this turn to the vision model.
-	if len(ts.media) > 0 {
+	if onVisionModel(ts.agent, exec) {
 		return nil
 	}
 	targetCandidates := ts.agent.TierCandidates[tier]

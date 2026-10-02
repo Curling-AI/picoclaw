@@ -207,22 +207,7 @@ func (p *Pipeline) CallLLM(
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}
-	// Auto-delegation (seucaranguejo fork): for image turns, prefer a bounded
-	// vision sub-call over swapping the whole turn to the vision model. Falls
-	// back to routeMediaTurn's swap when disabled or when nothing was delegated.
-	if delegated, derr := p.delegateMediaTurn(ctx, ts, exec); derr != nil {
-		return ControlBreak, derr
-	} else if !delegated {
-		if err := p.routeMediaTurn(ts, exec); err != nil {
-			return ControlBreak, err
-		}
-	}
-	if err := p.routeCronModelTurn(ts, exec); err != nil {
-		return ControlBreak, err
-	}
-	// Por último: o tier escolhido pelo usuário cede aos dois acima, que são
-	// restrições de capacidade (visão, cron) e não preferência.
-	if err := p.routeModelTierTurn(ts, exec); err != nil {
+	if err := p.routeTurnModel(ctx, ts, exec); err != nil {
 		return ControlBreak, err
 	}
 
