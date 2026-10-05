@@ -44,6 +44,7 @@ type scriptedTierProvider struct {
 	visionErrs      []error
 	visionResp      string
 	tierContextErrs int
+	visionCallErr   error // returned by every full (non-delegation) call to the vision model
 	calls           []scriptedCall
 }
 
@@ -73,6 +74,8 @@ func (p *scriptedTierProvider) Chat(
 			return nil, err
 		}
 		return &providers.LLMResponse{Content: p.visionResp}, nil
+	case model == "vision-model" && p.visionCallErr != nil:
+		return nil, p.visionCallErr
 	case model == "text-tier" && call.media:
 		return nil, errors.New("API request failed: Status: 400 Body: text-tier does not support image input")
 	case model == "text-tier" && p.tierContextErrs > 0:
@@ -114,6 +117,7 @@ type tierTurn struct {
 	textOnly   bool                // the turn carries no attachment
 	history    []providers.Message // earlier turns of the session
 	maxRetries int                 // agents.defaults.max_llm_retries; 0 keeps the default
+	noTier     bool                // the user picked no tier
 }
 
 // runTextTierTurn sends a turn to an agent whose user picked the text-only
@@ -184,7 +188,9 @@ func runTextTierTurn(t *testing.T, provider *scriptedTierProvider, turn tierTurn
 	if len(turn.history) > 0 {
 		agent.Sessions.SetHistory(sessionKey, turn.history)
 	}
-	al.SetPendingModelTier(sessionKey, "text")
+	if !turn.noTier {
+		al.SetPendingModelTier(sessionKey, "text")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
 	return al.processMessage(ctx, testInboundMessage(bus.InboundMessage{
@@ -369,5 +375,27 @@ func TestTieredImageTurn_RejectionThatIsNotAboutTheImageReachesTheTier(t *testin
 	}
 	if last := calls[len(calls)-1]; last.media || !strings.Contains(last.content, imageNotSeenNote) {
 		t.Fatal("the answering call should go without the image, with the note")
+	}
+}
+
+// No tier picked and the vision model rejecting calls for a reason that is not
+// the image: the main model answers instead of the vision model getting the
+// same call it would reject again.
+func TestTieredImageTurn_RejectionWithoutTierIsAnsweredByTheMainModel(t *testing.T) {
+	provider := &scriptedTierProvider{
+		visionErrs:    []error{errVisionInvalidArgument},
+		visionCallErr: errVisionInvalidArgument,
+	}
+	resp, err := runTextTierTurn(t, provider, tierTurn{noTier: true})
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if resp != "answered by main-model" {
+		t.Fatalf("response = %q, want the main model to answer", resp)
+	}
+	for _, c := range provider.turnCalls() {
+		if c.model == "vision-model" {
+			t.Fatal("the call went back to the vision model that rejected the sub-call")
+		}
 	}
 }

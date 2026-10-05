@@ -366,7 +366,17 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 		return err
 	}
 	needsEyes := false
-	if delegation != delegationDone {
+	switch delegation {
+	case delegationDone:
+	case delegationRejected:
+		// The vision model rejected the sub-call for a reason that is not the
+		// image and would reject this call too: the image goes to the main
+		// model, or to the tier picked below, and one that cannot see gets the
+		// call again without it (CallLLM).
+		if err = p.routeOffVisionModel(ts, exec); err != nil {
+			return err
+		}
+	default:
 		if needsEyes, err = p.routeMediaTurn(ts, exec); err != nil {
 			return err
 		}
@@ -376,15 +386,80 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	}
 	// Decided per call, not from the active model: that one carries over from
 	// the previous call, and a call that needed eyes does not make the next
-	// one need them. An image the vision model refused is a note by now. One
+	// one need them. An image the vision model refused is a note by now; one
 	// left raw by an upstream failing for a moment stays with the vision model,
-	// whose retries can still read it; one left raw by a rejection that is not
-	// about the image goes to the picked tier, since the vision model would
-	// only reject it again.
-	if needsEyes && delegation != delegationRejected {
+	// whose retries can still read it.
+	if needsEyes {
 		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)
+}
+
+// routeOffVisionModel puts the call on the main model, whatever an earlier
+// call of the turn left active. (seucaranguejo fork)
+func (p *Pipeline) routeOffVisionModel(ts *turnState, exec *turnExecution) error {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil || len(ts.agent.Candidates) == 0 {
+		return nil
+	}
+	changed, err := p.activateModel(ts, exec, ts.agent.Candidates, strings.TrimSpace(ts.agent.Model))
+	if err != nil || !changed {
+		return err
+	}
+	logger.InfoCF("agent", "Media turn routing selected model", map[string]any{
+		"agent_id":   ts.agent.ID,
+		"reason":     "vision_rejected_the_call",
+		"model":      exec.activeModel,
+		"model_name": exec.llmModelName,
+	})
+	return nil
+}
+
+// activateModel makes candidates the model of this call, with the agent's
+// context budget rather than the vision model's, and reports whether anything
+// changed. (seucaranguejo fork)
+func (p *Pipeline) activateModel(
+	ts *turnState,
+	exec *turnExecution,
+	candidates []providers.FallbackCandidate,
+	modelName string,
+) (bool, error) {
+	candidates = append([]providers.FallbackCandidate(nil), candidates...)
+	targetModel := resolvedCandidateModel(candidates, modelName)
+	targetProvider := exec.activeProvider
+	if provider, err := providerForFallbackCandidate(
+		ts.agent,
+		ts.agent.Provider,
+		candidates,
+		candidates[0],
+	); err != nil {
+		return false, err
+	} else if provider != nil {
+		targetProvider = provider
+	}
+
+	resolvedModelName := resolvedCandidateModelName(candidates, modelName)
+	if sameCandidateSet(exec.activeCandidates, candidates) &&
+		exec.activeModel == targetModel &&
+		exec.llmModelName == resolvedModelName {
+		return false, nil
+	}
+
+	exec.activeCandidates = candidates
+	exec.activeModel = targetModel
+	exec.activeProvider = targetProvider
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		candidates,
+		targetModel,
+		p.Cfg.Agents.Defaults.Provider,
+	)
+	exec.llmModelName = resolvedModelName
+	exec.usedLight = false
+	// A vision budget routeMediaTurn pinned on an earlier call belongs to the
+	// vision model, not to the model taking over.
+	exec.effectiveContextWindow = 0
+	return true, nil
 }
 
 // routeModelTierTurn swaps the active model to the tier the USER picked in the
@@ -426,44 +501,10 @@ func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error 
 		})
 		return nil
 	}
-	targetCandidates = append([]providers.FallbackCandidate(nil), targetCandidates...)
-
-	firstCandidate := targetCandidates[0]
-	targetModel := resolvedCandidateModel(targetCandidates, firstCandidate.Model)
-	targetProvider := exec.activeProvider
-	if provider, err := providerForFallbackCandidate(
-		ts.agent,
-		ts.agent.Provider,
-		targetCandidates,
-		firstCandidate,
-	); err != nil {
+	changed, err := p.activateModel(ts, exec, targetCandidates, targetCandidates[0].Model)
+	if err != nil || !changed {
 		return err
-	} else if provider != nil {
-		targetProvider = provider
 	}
-
-	resolvedModelName := resolvedCandidateModelName(targetCandidates, firstCandidate.Model)
-	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
-		exec.activeModel == targetModel &&
-		exec.llmModelName == resolvedModelName {
-		return nil
-	}
-
-	exec.activeCandidates = targetCandidates
-	exec.activeModel = targetModel
-	exec.activeProvider = targetProvider
-	exec.activeModelConfig = resolveActiveModelConfig(
-		p.Cfg,
-		ts.agent.Workspace,
-		targetCandidates,
-		targetModel,
-		p.Cfg.Agents.Defaults.Provider,
-	)
-	exec.llmModelName = resolvedModelName
-	exec.usedLight = false
-	// The vision budget routeMediaTurn may have pinned on an earlier call belongs
-	// to the vision model, not to the tier taking over.
-	exec.effectiveContextWindow = 0
 
 	logger.InfoCF("agent", "Model tier routing selected model", map[string]any{
 		"agent_id":    ts.agent.ID,

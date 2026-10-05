@@ -281,6 +281,33 @@ func TestRouteTurnModel_RejectionNotAboutTheImageFollowsPickedTier(t *testing.T)
 	}
 }
 
+// With no tier picked, the same rejection keeps the image on the main model
+// instead of resending it to the vision model, even when an earlier call of
+// the turn left the vision model active.
+func TestRouteTurnModel_RejectionWithoutTierStaysOffTheVisionModel(t *testing.T) {
+	for _, visionActive := range []bool{false, true} {
+		t.Run(map[bool]string{false: "from the main model", true: "vision active from an earlier call"}[visionActive],
+			func(t *testing.T) {
+				vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionInvalidArgument}}
+				p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+				ts.modelTier = ""
+				if visionActive {
+					exec.activeCandidates = ts.agent.ImageCandidates
+					exec.activeModel = "maestro-vision"
+					exec.llmModelName = "maestro-vision"
+					exec.effectiveContextWindow = 128_000
+				}
+				if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+					t.Fatalf("routeTurnModel: %v", err)
+				}
+				if exec.llmModelName != "maestro-flash" || exec.effectiveContextWindow != 0 {
+					t.Fatalf("on %q with window %d, want maestro-flash with the main budget",
+						exec.llmModelName, exec.effectiveContextWindow)
+				}
+			})
+	}
+}
+
 // With no tier picked, a refused image no longer sends the call to the vision
 // model that refused it: the image is a note and the main model answers. This
 // was the cron turns' failure (49 "LLM call failed" in 7 days).
