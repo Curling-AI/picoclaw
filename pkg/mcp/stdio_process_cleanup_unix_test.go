@@ -5,6 +5,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,29 @@ func TestConnectServerStopsServerWithUnsupportedProtocol(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsupported protocol version") {
 		t.Fatalf("connectServer() error = %v, want unsupported protocol version", err)
+	}
+
+	assertProcessEnds(t, readHelperPID(t, pidFile))
+}
+
+// The server stops reading its stdin while the client still has replies and
+// the tools listing to write; those writes block in the pipe and ignore ctx.
+func TestConnectServerGivesUpOnStdioServerThatStopsReading(t *testing.T) {
+	shrinkHandshakeTimeout(t, 300*time.Millisecond)
+	shrinkSessionCloseTimeout(t, 300*time.Millisecond)
+	originalTerminate := isolatedCommandTerminateDuration
+	isolatedCommandTerminateDuration = 200 * time.Millisecond
+	t.Cleanup(func() {
+		isolatedCommandTerminateDuration = originalTerminate
+	})
+	server, pidFile := stdioHelperConfigWithPIDFile(t, stdioHelperFlood)
+
+	err := runWithin(t, 10*time.Second, func() error {
+		_, err := connectServer(context.Background(), "flood", server)
+		return err
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connectServer() error = %v, want context.DeadlineExceeded", err)
 	}
 
 	assertProcessEnds(t, readHelperPID(t, pidFile))

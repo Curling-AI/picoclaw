@@ -341,7 +341,10 @@ func connectServer(
 
 	// Create transport based on configuration
 	// Auto-detect transport type if not explicitly specified
-	var transport mcp.Transport
+	var (
+		transport mcp.Transport
+		httpConns *connTracker
+	)
 	transportType := config.EffectiveMCPTransportType(cfg)
 	if transportType == "" {
 		return nil, fmt.Errorf("either URL or command must be provided")
@@ -352,43 +355,7 @@ func connectServer(
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("URL is required for SSE/HTTP transport")
 		}
-
-		// Configure DisableStandaloneSSE based on transport type.
-		// - "http": Streamable HTTP request-response mode. Disable the standalone
-		//   SSE stream to avoid compatibility issues with servers that don't
-		//   support the optional GET listener.
-		// - "sse": Bidirectional mode. Enable the standalone SSE stream to receive
-		//   server-initiated notifications (e.g., ToolListChangedNotification).
-		// - Empty or auto-detected: Defaults to "sse" behavior (standalone SSE enabled).
-		disableStandaloneSSE := transportType == "http"
-
-		logger.DebugCF("mcp", "Using SSE/HTTP transport",
-			map[string]any{
-				"server":               name,
-				"url":                  cfg.URL,
-				"disableStandaloneSSE": disableStandaloneSSE,
-			})
-
-		roundTripper := http.DefaultTransport
-		if len(cfg.Headers) > 0 {
-			roundTripper = &headerTransport{
-				base:    http.DefaultTransport,
-				headers: cfg.Headers,
-			}
-			logger.DebugCF("mcp", "Added custom HTTP headers",
-				map[string]any{
-					"server":       name,
-					"header_count": len(cfg.Headers),
-				})
-		}
-
-		transport = &mcp.StreamableClientTransport{
-			Endpoint:             cfg.URL,
-			DisableStandaloneSSE: disableStandaloneSSE,
-			HTTPClient: &http.Client{
-				Transport: &boundedDeleteTransport{base: roundTripper},
-			},
-		}
+		transport, httpConns = newStreamableTransport(name, cfg, transportType)
 	case "stdio":
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("command is required for stdio transport")
@@ -456,38 +423,25 @@ func connectServer(
 	defer cancel()
 
 	tracked := &trackedTransport{Transport: transport}
-	session, err := connectWithin(handshakeCtx, client, tracked)
-	if err != nil {
-		tracked.closeAbandoned()
-		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+	result := handshakeWithin(handshakeCtx, name, client, tracked)
+	if err := result.err; err != nil {
+		abandonConnection(name, tracked, result.session, httpConns)
+		switch {
+		case ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded):
 			return nil, fmt.Errorf("no answer to the MCP handshake within %s: %w", mcpHandshakeTimeout, err)
+		case result.session == nil:
+			return nil, fmt.Errorf("failed to connect: %w", err)
+		default:
+			return nil, err
 		}
-		return nil, fmt.Errorf("failed to connect: %w", err)
-	}
-
-	// Get server info
-	initResult := session.InitializeResult()
-	logger.InfoCF("mcp", "Connected to MCP server",
-		map[string]any{
-			"server":        name,
-			"serverName":    initResult.ServerInfo.Name,
-			"serverVersion": initResult.ServerInfo.Version,
-			"protocol":      initResult.ProtocolVersion,
-		})
-
-	// List available tools if supported
-	tools, err := listServerTools(handshakeCtx, name, session, initResult)
-	if err != nil {
-		_ = session.Close()
-		return nil, err
 	}
 
 	return &ServerConnection{
 		Name:    name,
 		Config:  cfg,
 		Client:  client,
-		Session: session,
-		Tools:   tools,
+		Session: result.session,
+		Tools:   result.tools,
 	}, nil
 }
 

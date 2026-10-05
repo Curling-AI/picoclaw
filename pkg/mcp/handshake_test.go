@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +39,9 @@ const (
 	// stdioHelperOldProtocol answers initialize with a protocol version the
 	// SDK refuses, and then waits for its stdin to close.
 	stdioHelperOldProtocol = "old-protocol"
+	// stdioHelperFlood answers initialize, then floods the client with pings
+	// and never reads its stdin again, so the client's writes end up blocked.
+	stdioHelperFlood = "flood"
 )
 
 func TestMain(m *testing.M) {
@@ -57,6 +63,9 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case stdioHelperOldProtocol:
 		runStdioHelperOldProtocol()
+		os.Exit(0)
+	case stdioHelperFlood:
+		runStdioHelperFlood()
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
@@ -118,6 +127,35 @@ func stdioHelperConfig(t *testing.T, mode string) config.MCPServerConfig {
 		Command: executable,
 		Env:     map[string]string{stdioHelperEnv: mode},
 	}
+}
+
+func runStdioHelperFlood() {
+	writeHelperPID(os.Getpid())
+	var initialize struct {
+		ID     json.RawMessage `json:"id"`
+		Params struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		} `json:"params"`
+	}
+	if err := json.NewDecoder(os.Stdin).Decode(&initialize); err != nil {
+		return
+	}
+	fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":%q,"capabilities":{"tools":{}},`+
+		`"serverInfo":{"name":"stdio-helper","version":"1.0.0"}}}`+"\n", initialize.ID, initialize.Params.ProtocolVersion)
+	for id := 1; ; id++ {
+		if _, err := fmt.Printf(`{"jsonrpc":"2.0","id":"flood-%d","method":"ping"}`+"\n", id); err != nil {
+			return
+		}
+	}
+}
+
+func shrinkSessionCloseTimeout(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	original := mcpSessionCloseTimeout
+	mcpSessionCloseTimeout = timeout
+	t.Cleanup(func() {
+		mcpSessionCloseTimeout = original
+	})
 }
 
 func shrinkHandshakeTimeout(t *testing.T, timeout time.Duration) {
@@ -191,11 +229,7 @@ func TestConnectServerGivesUpOnStdioServerThatNeverAnswers(t *testing.T) {
 
 func TestConnectServerGivesUpOnHTTPServerThatNeverAnswers(t *testing.T) {
 	shrinkHandshakeTimeout(t, 300*time.Millisecond)
-	originalCloseTimeout := mcpSessionCloseTimeout
-	mcpSessionCloseTimeout = 300 * time.Millisecond
-	t.Cleanup(func() {
-		mcpSessionCloseTimeout = originalCloseTimeout
-	})
+	shrinkSessionCloseTimeout(t, 300*time.Millisecond)
 
 	// Takes every request and answers none, the session-ending DELETE included.
 	release := make(chan struct{})
@@ -279,6 +313,130 @@ func TestConnectServerGivesUpWhenStandaloneSSEStreamNeverAnswers(t *testing.T) {
 				t.Fatalf("connectServer() error = %v, want a connection (no standalone GET)", err)
 			}
 		})
+	}
+}
+
+func isJSONRPCResponse(body []byte) bool {
+	var msg map[string]json.RawMessage
+	if json.Unmarshal(body, &msg) != nil {
+		return false
+	}
+	_, hasMethod := msg["method"]
+	_, hasResult := msg["result"]
+	_, hasError := msg["error"]
+	return !hasMethod && (hasResult || hasError)
+}
+
+// The server pings the client in the middle of tools/list and never answers
+// the POST that carries the client's reply. The SDK sends that reply on a
+// context nothing cancels.
+func TestConnectServerCutsTheReplyPOSTOfAnAbandonedHandshake(t *testing.T) {
+	shrinkHandshakeTimeout(t, 300*time.Millisecond)
+	shrinkSessionCloseTimeout(t, 300*time.Millisecond)
+
+	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "ping-test-server", Version: "1.0.0"}, nil)
+	sdkmcp.AddTool(sdkServer, &sdkmcp.Tool{Name: "echo", Description: "Echo test tool"},
+		func(context.Context, *sdkmcp.CallToolRequest, map[string]any) (*sdkmcp.CallToolResult, any, error) {
+			return &sdkmcp.CallToolResult{}, nil, nil
+		})
+	sdkServer.AddReceivingMiddleware(func(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
+		return func(ctx context.Context, method string, req sdkmcp.Request) (sdkmcp.Result, error) {
+			if method == "tools/list" {
+				if session, ok := req.GetSession().(*sdkmcp.ServerSession); ok {
+					_ = session.Ping(ctx, nil)
+				}
+			}
+			return next(ctx, method, req)
+		}
+	})
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		return sdkServer
+	}, nil)
+
+	release := make(chan struct{})
+	replyCut := make(chan struct{})
+	var replyCutOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if r.Method == http.MethodPost && isJSONRPCResponse(body) {
+			select {
+			case <-r.Context().Done():
+				replyCutOnce.Do(func() { close(replyCut) })
+			case <-release:
+			}
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		close(release)
+	})
+
+	err := runWithin(t, 10*time.Second, func() error {
+		conn, err := connectServer(context.Background(), "ping", config.MCPServerConfig{
+			Enabled: true,
+			Type:    "http",
+			URL:     server.URL,
+		})
+		if conn != nil {
+			_ = conn.Session.Close()
+		}
+		return err
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connectServer() error = %v, want context.DeadlineExceeded", err)
+	}
+	select {
+	case <-replyCut:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the reply POST is still open after the handshake was abandoned")
+	}
+}
+
+// An auth gateway that ignores initialize and answers the session DELETE with
+// a redirect to a login page that never answers either.
+func TestConnectServerDoesNotFollowARedirectedSessionDelete(t *testing.T) {
+	shrinkHandshakeTimeout(t, 300*time.Millisecond)
+	shrinkSessionCloseTimeout(t, 300*time.Millisecond)
+
+	release := make(chan struct{})
+	var loginRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/login" {
+			loginRequests.Add(1)
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		close(release)
+	})
+
+	err := runWithin(t, 10*time.Second, func() error {
+		_, err := connectServer(context.Background(), "gateway", config.MCPServerConfig{
+			Enabled: true,
+			Type:    "http",
+			URL:     server.URL + "/mcp",
+		})
+		return err
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("connectServer() error = %v, want context.DeadlineExceeded", err)
+	}
+	// The DELETE goes out while the handshake is abandoned; a followed
+	// redirect would reach the login page right after.
+	time.Sleep(500 * time.Millisecond)
+	if got := loginRequests.Load(); got != 0 {
+		t.Fatalf("login page requested %d times; the session DELETE followed its redirect", got)
 	}
 }
 

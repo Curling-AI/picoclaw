@@ -3,27 +3,28 @@ package mcp
 import (
 	"context"
 	"errors"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // mcpHandshakeTimeout bounds how long one server gets to answer initialize and
 // list its tools. The agent waits for every configured server before it takes
 // messages, so a server that never answers (a bridge parked on a browser login,
 // for one) would otherwise hold every conversation of the assistant. Giving up
-// still costs closing the connection: up to mcpSessionCloseTimeout more over
-// HTTP, and the stdin grace of isolatedPipeRWC.Close for a stdio process.
+// adds at most mcpSessionCloseTimeout for closing what the server left open.
 var mcpHandshakeTimeout = 30 * time.Second
 
-// mcpSessionCloseTimeout bounds the DELETE that ends a streamable HTTP session.
+// mcpSessionCloseTimeout bounds the DELETE that ends a streamable HTTP session
+// and how long an abandoned handshake waits for its connection to close.
 var mcpSessionCloseTimeout = 5 * time.Second
 
 var errConnectAbandoned = errors.New("connect abandoned after the handshake deadline")
 
-// trackedTransport remembers the connection it opened, so a connect that
+// trackedTransport remembers the connection it opened, so a handshake that
 // failed or ran out of time can be closed from outside the SDK.
 type trackedTransport struct {
 	mcp.Transport
@@ -49,65 +50,107 @@ func (t *trackedTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 	return conn, nil
 }
 
-// closeAbandoned closes the connection of a connect that failed or was given
+// closeAbandoned closes the connection of a handshake that failed or was given
 // up on. Client.Connect does not close it on every failure (an unsupported
 // protocol version returns with it open). Both connection types close once,
 // so one the SDK already closed is left as it is.
-func (t *trackedTransport) closeAbandoned() {
+func (t *trackedTransport) closeAbandoned() error {
 	t.mu.Lock()
 	t.abandoned = true
 	conn := t.conn
 	t.mu.Unlock()
-	if conn != nil {
-		_ = conn.Close()
+	if conn == nil {
+		return nil
 	}
+	return conn.Close()
 }
 
-// connectWithin runs Client.Connect and stops waiting for it when ctx ends.
-// Parts of Connect run on the connection's own detached context and ignore
-// ctx (the standalone SSE GET it sends right after initialize, for one), so
-// closing the connection is what releases them; a session that still comes
-// back late is closed.
-func connectWithin(ctx context.Context, client *mcp.Client, transport *trackedTransport) (*mcp.ClientSession, error) {
-	type outcome struct {
-		session *mcp.ClientSession
-		err     error
-	}
-	done := make(chan outcome, 1)
+type handshakeResult struct {
+	session *mcp.ClientSession
+	tools   []*mcp.Tool
+	err     error
+}
+
+// handshakeWithin runs initialize and the tools listing as one unit and stops
+// waiting for it when ctx ends. Parts of it run on the connection's own
+// detached context and ignore ctx (the standalone SSE GET the SDK opens inside
+// Connect, its replies to requests from the server, a write to a stdio server
+// that stopped reading), so abandonConnection is what releases them. A session
+// that still comes back late is closed.
+func handshakeWithin(
+	ctx context.Context,
+	name string,
+	client *mcp.Client,
+	transport *trackedTransport,
+) handshakeResult {
+	done := make(chan handshakeResult, 1)
 	go func() {
-		session, err := client.Connect(ctx, transport, nil)
-		done <- outcome{session: session, err: err}
+		done <- runHandshake(ctx, name, client, transport)
 	}()
 
 	select {
 	case result := <-done:
-		return result.session, result.err
+		return result
 	case <-ctx.Done():
-		transport.closeAbandoned()
 		go func() {
 			if late := <-done; late.session != nil {
 				_ = late.session.Close()
 			}
 		}()
-		return nil, ctx.Err()
+		return handshakeResult{err: ctx.Err()}
 	}
 }
 
-// boundedDeleteTransport caps the DELETE that ends a streamable HTTP session.
-// The SDK sends it from Close on a context detached from every caller, so a
-// server that took the connection and never answers would hold Close, and the
-// connect that already gave up on it, forever.
-type boundedDeleteTransport struct {
-	base http.RoundTripper
+func runHandshake(ctx context.Context, name string, client *mcp.Client, transport *trackedTransport) handshakeResult {
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		return handshakeResult{err: err}
+	}
+
+	initResult := session.InitializeResult()
+	logger.InfoCF("mcp", "Connected to MCP server",
+		map[string]any{
+			"server":        name,
+			"serverName":    initResult.ServerInfo.Name,
+			"serverVersion": initResult.ServerInfo.Version,
+			"protocol":      initResult.ProtocolVersion,
+		})
+
+	tools, err := listServerTools(ctx, name, session, initResult)
+	if err != nil {
+		return handshakeResult{session: session, err: err}
+	}
+	return handshakeResult{session: session, tools: tools}
 }
 
-func (t *boundedDeleteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Method != http.MethodDelete {
-		return t.base.RoundTrip(req)
+// abandonConnection closes what a failed handshake left open, waiting at most
+// mcpSessionCloseTimeout: the close can stall on the server itself (a DELETE,
+// a stdio process that ignores its stdin), and then it carries on in the
+// background. conns, for an HTTP server, is cut either way.
+func abandonConnection(name string, transport *trackedTransport, session *mcp.ClientSession, conns *connTracker) {
+	closed := make(chan error, 1)
+	go func() {
+		var err error
+		if session != nil {
+			err = session.Close()
+		}
+		if closeErr := transport.closeAbandoned(); err == nil {
+			err = closeErr
+		}
+		closed <- err
+	}()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			logger.WarnCF("mcp", "Failed to close abandoned MCP connection",
+				map[string]any{"server": name, "error": err.Error()})
+		}
+	case <-time.After(mcpSessionCloseTimeout):
+		logger.WarnCF("mcp", "Abandoned MCP connection is still closing; continuing in the background",
+			map[string]any{"server": name})
 	}
-	// The SDK drops the DELETE response unread, so ending the context once
-	// RoundTrip returns loses nothing.
-	ctx, cancel := context.WithTimeout(req.Context(), mcpSessionCloseTimeout)
-	defer cancel()
-	return t.base.RoundTrip(req.WithContext(ctx))
+	if conns != nil {
+		conns.closeAll()
+	}
 }
