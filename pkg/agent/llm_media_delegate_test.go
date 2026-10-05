@@ -142,22 +142,24 @@ func TestDelegateMediaTurn_AnalyzesAndInjects(t *testing.T) {
 	}
 }
 
-// A failed sub-call is not the same as having nothing to delegate, and a
-// refusal is not the same as an upstream failing for a moment: routeTurnModel
-// sends the first to the tier and keeps the second on the vision model.
+// A refused image is unreadable for the turn: it becomes a note right away,
+// so no model gets it raw again. An upstream failing for a moment leaves the
+// image raw for the vision fallback, which can still read it.
 func TestDelegateMediaTurn_ReportsHowTheSubCallFailed(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want delegationOutcome
+		raw  bool
 	}{
-		{"refused image", errVisionRefusedImage, delegationRefused},
-		{"generic rejection", errors.New("vision upstream rejected the request"), delegationRefused},
-		{"upstream unavailable", errVisionUnavailable, delegationFailed},
+		{"refused image", errVisionRefusedImage, delegationDone, false},
+		{"generic rejection", errors.New("vision upstream rejected the request"), delegationDone, false},
+		{"upstream unavailable", errVisionUnavailable, delegationFailed, true},
 		{
 			"timeout",
 			errors.New("Post \"http://gateway/v1/chat/completions\": context deadline exceeded"),
 			delegationFailed,
+			true,
 		},
 	}
 	for _, tc := range cases {
@@ -170,10 +172,34 @@ func TestDelegateMediaTurn_ReportsHowTheSubCallFailed(t *testing.T) {
 			if outcome != tc.want {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
 			}
-			if len(exec.callMessages[3].Media) != 1 {
-				t.Errorf("image Media was modified although nothing was analyzed")
+			img := exec.callMessages[3]
+			if raw := len(img.Media) == 1; raw != tc.raw {
+				t.Fatalf("image raw = %v, want %v", raw, tc.raw)
+			}
+			if noted := strings.Contains(img.Content, unreadableImageNote); noted == tc.raw {
+				t.Fatalf("note present = %v, want %v", noted, !tc.raw)
 			}
 		})
+	}
+}
+
+// A turn being canceled is not the vision model refusing the image: stop
+// calling it and leave the image raw, without marking it unreadable.
+func TestDelegateMediaTurn_CancelledTurnIsNotARefusal(t *testing.T) {
+	vision := &recordingVisionProvider{resp: "unused"}
+	p, ts, exec := delegationFixture(true, vision)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	vision.errAt = map[int]error{1: context.Canceled}
+	outcome, err := p.delegateMediaTurn(ctx, ts, exec)
+	if err != nil {
+		t.Fatalf("delegateMediaTurn: %v", err)
+	}
+	if outcome != delegationFailed {
+		t.Fatalf("outcome = %v, want delegationFailed", outcome)
+	}
+	if len(exec.unreadableImages) != 0 {
+		t.Fatalf("unreadable images = %v, want none (the turn was canceled)", exec.unreadableImages)
 	}
 }
 
@@ -187,35 +213,30 @@ func twoImageMessages() []providers.Message {
 	}
 }
 
-// One image refused, another failing for a moment: the vision model already
-// said no to one of them, so the call must not go back to it.
-func TestDelegateMediaTurn_RefusalOutlivesALaterTransientFailure(t *testing.T) {
-	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable}}
-	p, ts, exec := delegationFixture(true, vision)
-	exec.callMessages = twoImageMessages()
-	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
-	if err != nil {
-		t.Fatalf("delegateMediaTurn: %v", err)
-	}
-	if outcome != delegationRefused {
-		t.Fatalf("outcome = %v, want delegationRefused", outcome)
-	}
-}
-
-// One image described, the other not: the described one stays text, the other
-// stays raw, and the outcome says why it is raw.
+// One image described, the other not. The described one stays text; a refused
+// one becomes the note, and one the upstream failed on stays raw for the
+// vision fallback, the only image that fallback gets.
 func TestDelegateMediaTurn_PartialKeepsWhatWasDescribed(t *testing.T) {
 	cases := []struct {
-		name string
-		err  error
-		want delegationOutcome
+		name      string
+		errs      map[int]error
+		want      delegationOutcome
+		firstText string
+		secondRaw bool
 	}{
-		{"second refused", errVisionRefusedImage, delegationRefused},
-		{"second unavailable", errVisionUnavailable, delegationFailed},
+		{"second refused", map[int]error{2: errVisionRefusedImage}, delegationDone, "a receipt", false},
+		{"second unavailable", map[int]error{2: errVisionUnavailable}, delegationFailed, "a receipt", true},
+		{
+			"first refused, second unavailable",
+			map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable},
+			delegationFailed,
+			unreadableImageNote,
+			true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			vision := &recordingVisionProvider{resp: "a receipt", errAt: map[int]error{2: tc.err}}
+			vision := &recordingVisionProvider{resp: "a receipt", errAt: tc.errs}
 			p, ts, exec := delegationFixture(true, vision)
 			exec.callMessages = twoImageMessages()
 			outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
@@ -226,13 +247,56 @@ func TestDelegateMediaTurn_PartialKeepsWhatWasDescribed(t *testing.T) {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
 			}
 			first, second := exec.callMessages[1], exec.callMessages[3]
-			if len(first.Media) != 0 || !strings.Contains(first.Content, "a receipt") {
-				t.Errorf("described image not rewritten: media=%v content=%q", first.Media, first.Content)
+			if len(first.Media) != 0 || !strings.Contains(first.Content, tc.firstText) {
+				t.Errorf("first image not turned into text: media=%v content=%q", first.Media, first.Content)
 			}
-			if len(second.Media) != 1 {
-				t.Errorf("undescribed image media = %v, want it kept raw", second.Media)
+			if raw := len(second.Media) == 1; raw != tc.secondRaw {
+				t.Errorf("second image raw = %v, want %v", raw, tc.secondRaw)
 			}
 		})
+	}
+}
+
+// The refusal is remembered for the turn: the next iteration rebuilds the
+// call with the same image, and the vision model is not asked again, not even
+// when it would now answer with a 503.
+func TestDelegateMediaTurn_RemembersRefusalsAcrossIterations(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable}}
+	p, ts, exec := delegationFixture(true, vision)
+	if _, err := p.delegateMediaTurn(context.Background(), ts, exec); err != nil {
+		t.Fatalf("first delegateMediaTurn: %v", err)
+	}
+	exec.callMessages = freshMediaMessages()
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	if err != nil {
+		t.Fatalf("second delegateMediaTurn: %v", err)
+	}
+	if outcome != delegationDone || vision.calls != 1 {
+		t.Fatalf("outcome = %v after %d vision calls, want delegationDone after 1", outcome, vision.calls)
+	}
+	if img := exec.callMessages[3]; len(img.Media) != 0 || !strings.Contains(img.Content, unreadableImageNote) {
+		t.Fatalf("second iteration image: media=%v content=%q, want the note", img.Media, img.Content)
+	}
+}
+
+// After the upstream fails, images the turn already described are still
+// rewritten from the memo; only the ones that need a new sub-call stay raw.
+func TestDelegateMediaTurn_UpstreamFailureStillUsesTheMemo(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionUnavailable}}
+	p, ts, exec := delegationFixture(true, vision)
+	exec.callMessages = twoImageMessages()
+	exec.mediaAnalysisCache = map[string]string{
+		hashImages([]string{testImageDataURL + "Zm9v"}): "a cached receipt",
+	}
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	if err != nil {
+		t.Fatalf("delegateMediaTurn: %v", err)
+	}
+	if outcome != delegationFailed || vision.calls != 1 {
+		t.Fatalf("outcome = %v after %d vision calls, want delegationFailed after 1", outcome, vision.calls)
+	}
+	if second := exec.callMessages[3]; len(second.Media) != 0 || !strings.Contains(second.Content, "a cached receipt") {
+		t.Fatalf("cached image not rewritten: media=%v content=%q", second.Media, second.Content)
 	}
 }
 
@@ -307,21 +371,21 @@ func TestDelegationBrief_ExcludesImagesAndBounds(t *testing.T) {
 	}
 }
 
-func TestStripUnreadableImages_KeepsOtherAttachments(t *testing.T) {
+func TestStripImages_KeepsOtherAttachments(t *testing.T) {
 	const pdf = "data:application/pdf;base64,JVBERi0x"
 	in := []providers.Message{
 		{Role: "user", Content: "read both", Media: []string{testImageDataURL, pdf}},
 		{Role: "user", Content: "just text"},
 		{Role: "user", Content: "only a pdf", Media: []string{pdf}},
 	}
-	out, changed := stripUnreadableImages(in)
+	out, changed := stripImages(in, imageNotSeenNote)
 	if !changed {
 		t.Fatal("changed = false, want true (an image was removed)")
 	}
 	if got := out[0].Media; len(got) != 1 || got[0] != pdf {
 		t.Errorf("media = %v, want only the pdf kept", got)
 	}
-	if !strings.Contains(out[0].Content, unreadableImageNote) {
+	if !strings.Contains(out[0].Content, imageNotSeenNote) {
 		t.Errorf("content = %q, want the note where the image was", out[0].Content)
 	}
 	for i := 1; i < len(in); i++ {
@@ -332,7 +396,7 @@ func TestStripUnreadableImages_KeepsOtherAttachments(t *testing.T) {
 	if len(in[0].Media) != 2 {
 		t.Error("the input was mutated")
 	}
-	if _, changed := stripUnreadableImages(out); changed {
+	if _, changed := stripImages(out, imageNotSeenNote); changed {
 		t.Error("second pass changed = true, want false (no image left)")
 	}
 }

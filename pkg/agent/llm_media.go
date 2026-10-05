@@ -35,26 +35,26 @@ func stripMessageMedia(messages []providers.Message) []providers.Message {
 	return stripped
 }
 
-// unreadableImageNote stands in for an image no model of the call could
-// read, so the model answers knowing there was one.
+// unreadableImageNote stands in for an image the vision model refused, so
+// the model answers knowing there was one.
 const unreadableImageNote = "[An image was attached here, but it could not be read.]"
 
-// stripUnreadableImages drops the resolved images of every message, keeps any
-// other attachment, and leaves unreadableImageNote where an image was. It
-// reports whether it removed anything.
-func stripUnreadableImages(messages []providers.Message) ([]providers.Message, bool) {
+// imageNotSeenNote stands in for an image the model of the call cannot see.
+const imageNotSeenNote = "[An image was attached here, but the model answering cannot see images.]"
+
+// stripImages drops the resolved images of every message, keeps any other
+// attachment, and leaves note where an image was. It reports whether it
+// removed anything.
+func stripImages(messages []providers.Message, note string) ([]providers.Message, bool) {
 	var stripped []providers.Message
 	for i, msg := range messages {
-		kept := stripDataImages(msg.Media)
-		if len(kept) == len(msg.Media) {
+		if len(dataImages(msg.Media)) == 0 {
 			continue
 		}
 		if stripped == nil {
 			stripped = append([]providers.Message(nil), messages...)
 		}
-		msg.Media = kept
-		msg.Content = strings.TrimSpace(msg.Content + "\n\n" + unreadableImageNote)
-		stripped[i] = msg
+		stripped[i] = withImageText(msg, note)
 	}
 	if stripped == nil {
 		return messages, false
@@ -99,9 +99,11 @@ func isVisionUnsupportedError(err error) bool {
 	return false
 }
 
-func visionUnsupportedModelError(modelName string, imageModelConfigured bool) error {
+// visionUnsupportedModelError explains a model refusing image input. Only
+// the image model itself, or a config without one, is an image_model problem.
+func visionUnsupportedModelError(modelName string, onImageModel, imageModelConfigured bool) error {
 	modelName = strings.TrimSpace(modelName)
-	if imageModelConfigured {
+	if onImageModel {
 		if modelName != "" {
 			return fmt.Errorf(
 				"selected vision model %q does not support image input; update agents.defaults.image_model to a multimodal model",
@@ -111,6 +113,9 @@ func visionUnsupportedModelError(modelName string, imageModelConfigured bool) er
 		return fmt.Errorf(
 			"selected vision model does not support image input; update agents.defaults.image_model to a multimodal model",
 		)
+	}
+	if imageModelConfigured {
+		return fmt.Errorf("active model %q does not support image input", modelName)
 	}
 	if modelName != "" {
 		return fmt.Errorf(
@@ -371,13 +376,10 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	}
 	// Decided per call, not from the active model: that one carries over from
 	// the previous call, and a call that needed eyes does not make the next
-	// one need them. A vision model that has just refused this call's image
-	// holds no claim on it either: the same image would be refused again (prod:
-	// 400 "Provided image is not valid" on tool screenshots) and end the turn,
-	// so the swap above is only the fallback for a turn with no tier picked. A
-	// vision upstream that failed for a moment keeps the call, as it did before
-	// the tier: its retries can still read the image.
-	if needsEyes && delegation != delegationRefused {
+	// one need them. An image the vision model refused is a note by now, so
+	// only an upstream that failed for a moment leaves one raw here, and the
+	// vision model's retries can still read it.
+	if needsEyes {
 		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)
@@ -392,8 +394,8 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 // cron model, are CAPABILITY constraints, while the tier is a user preference.
 // Preference does not get to override capability — a photo sent while "Ultra"
 // is selected still has to go to a model that can see it. routeTurnModel
-// enforces the media half, and lets the tier back in when the vision model has
-// refused the image.
+// enforces the media half; an image the vision model refused is a note and
+// needs nobody's eyes.
 //
 // Carrying media is not the same as needing vision: a document is read through
 // tools, and an image delegateMediaTurn already described is text by now. Both

@@ -481,14 +481,17 @@ func (p *Pipeline) CallLLM(
 		}
 
 		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {
-			// With a vision model configured, an image only reaches another model
-			// after the vision model could not describe it. The config does not say
-			// which models read images, so this is where we learn it: answer
-			// without the image instead of ending the turn, as askSideQuestion
-			// does. (seucaranguejo fork)
-			withoutImages, stripped := stripUnreadableImages(exec.callMessages)
-			if stripped && retry < maxRetries && len(ts.agent.ImageCandidates) > 0 &&
-				!sameCandidateSet(exec.activeCandidates, ts.agent.ImageCandidates) {
+			onImageModel := len(ts.agent.ImageCandidates) > 0 &&
+				sameCandidateSet(exec.activeCandidates, ts.agent.ImageCandidates)
+			// With a vision model configured, a raw image can still reach another
+			// model: one the vision model could not take for a moment, or an
+			// inline image from an earlier turn, which delegation never sees. The
+			// config does not say which models read images, so this is where we
+			// learn it: answer without them instead of ending the turn, as
+			// askSideQuestion does. Once per call, and outside the retry budget,
+			// which belongs to the provider errors below. (seucaranguejo fork)
+			withoutImages, stripped := stripImages(exec.callMessages, imageNotSeenNote)
+			if stripped && !imagesUnreadable && len(ts.agent.ImageCandidates) > 0 && !onImageModel {
 				al.emitEvent(
 					runtimeevents.KindAgentLLMRetry,
 					ts.eventMeta("runTurn", "turn.llm.retry"),
@@ -499,21 +502,19 @@ func (p *Pipeline) CallLLM(
 						Error:      err.Error(),
 					},
 				)
-				logger.WarnCF(
-					"agent",
-					"Model cannot read the image the vision model could not describe; retrying without it",
-					map[string]any{
-						"agent_id":   ts.agent.ID,
-						"model_name": exec.llmModelName,
-						"error":      err.Error(),
-					},
-				)
+				logger.WarnCF("agent", "Model cannot read images; retrying the call without them", map[string]any{
+					"agent_id":   ts.agent.ID,
+					"model_name": exec.llmModelName,
+					"error":      err.Error(),
+				})
 				exec.callMessages = withoutImages
 				imagesUnreadable = true
+				retry--
 				continue
 			}
 			return ControlBreak, visionUnsupportedModelError(
 				exec.llmModelName,
+				onImageModel,
 				len(ts.agent.ImageCandidates) > 0,
 			)
 		}
@@ -697,7 +698,7 @@ func (p *Pipeline) CallLLM(
 			// the rest. (seucaranguejo fork)
 			p.redescribeImages(ts, exec)
 			if imagesUnreadable {
-				exec.callMessages, _ = stripUnreadableImages(exec.callMessages)
+				exec.callMessages, _ = stripImages(exec.callMessages, imageNotSeenNote)
 			}
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
 				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{

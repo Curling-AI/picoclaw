@@ -189,6 +189,10 @@ type turnExecution struct {
 	// once even though the agentic loop re-resolves it every iteration.
 	// (seucaranguejo fork)
 	mediaAnalysisCache map[string]string
+	// unreadableImages holds, by the same hash, the images the vision model
+	// refused this turn. They become unreadableImageNote in every later call
+	// instead of going back to any model. (seucaranguejo fork)
+	unreadableImages map[string]struct{}
 
 	// LLM call per-iteration state
 	response            *providers.LLMResponse
@@ -854,6 +858,9 @@ func messagesEquivalent(a, b providers.Message) bool {
 }
 
 func normalizeMessageForComparison(msg providers.Message) providers.Message {
+	// The session stamps CreatedAt on what it stores, and the JSONL round trip
+	// drops the monotonic clock; neither is part of the message.
+	msg.CreatedAt = nil
 	msg.PromptLayer = ""
 	msg.PromptSlot = ""
 	msg.PromptSource = ""

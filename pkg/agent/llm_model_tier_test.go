@@ -232,9 +232,9 @@ func TestRouteTurnModel_TransientDelegationFailureStaysOnVisionModel(t *testing.
 	}
 }
 
-// Partial delegation follows the image left raw: refused goes to the tier,
-// failed for a moment stays on the vision model, and a refusal wins over a
-// failure: the vision model must not get back an image it refused.
+// Partial delegation follows what is left raw: a refused image is a note, so
+// the tier answers; an image the upstream failed on keeps the call on the
+// vision model, which never gets back an image it refused.
 func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
 	cases := []struct {
 		name string
@@ -246,7 +246,7 @@ func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
 		{
 			"first refused, second unavailable",
 			map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable},
-			"gpt-6.1-sol",
+			"maestro-vision",
 		},
 	}
 	for _, tc := range cases {
@@ -264,16 +264,17 @@ func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
 	}
 }
 
-// With no tier picked nothing else claims the call, and the swap to the vision
-// model stays the fallback it was before.
-func TestRouteTurnModel_RefusedImageWithoutTierFallsBackToVisionSwap(t *testing.T) {
+// With no tier picked, a refused image no longer sends the call to the vision
+// model that refused it: the image is a note and the main model answers. This
+// was the cron turns' failure (49 "LLM call failed" in 7 days).
+func TestRouteTurnModel_RefusedImageWithoutTierStaysOnMainModel(t *testing.T) {
 	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{failures: 1}, testImageDataURL)
 	ts.modelTier = ""
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("routeTurnModel: %v", err)
 	}
-	if exec.llmModelName != "maestro-vision" {
-		t.Fatalf("llmModelName = %q, want maestro-vision (no tier, legacy swap)", exec.llmModelName)
+	if exec.llmModelName != "maestro-flash" {
+		t.Fatalf("llmModelName = %q, want maestro-flash (the refused image is a note now)", exec.llmModelName)
 	}
 }
 
