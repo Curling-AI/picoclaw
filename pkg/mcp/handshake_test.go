@@ -227,6 +227,61 @@ func TestConnectServerGivesUpOnHTTPServerThatNeverAnswers(t *testing.T) {
 	}
 }
 
+// The SDK opens the standalone SSE stream synchronously inside Connect, right
+// after initialize, on a context that ignores the connect deadline.
+func TestConnectServerGivesUpWhenStandaloneSSEStreamNeverAnswers(t *testing.T) {
+	shrinkHandshakeTimeout(t, 300*time.Millisecond)
+
+	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "sse-test-server", Version: "1.0.0"}, nil)
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		return sdkServer
+	}, nil)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		close(release)
+	})
+
+	for _, tc := range []struct {
+		transportType string
+		wantTimeout   bool
+	}{
+		{transportType: "", wantTimeout: true},
+		{transportType: "sse", wantTimeout: true},
+		{transportType: "http", wantTimeout: false},
+	} {
+		t.Run("type="+tc.transportType, func(t *testing.T) {
+			err := runWithin(t, 10*time.Second, func() error {
+				conn, err := connectServer(context.Background(), "sse", config.MCPServerConfig{
+					Enabled: true,
+					Type:    tc.transportType,
+					URL:     server.URL,
+				})
+				if conn != nil {
+					_ = conn.Session.Close()
+				}
+				return err
+			})
+			if tc.wantTimeout && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("connectServer() error = %v, want context.DeadlineExceeded", err)
+			}
+			if !tc.wantTimeout && err != nil {
+				t.Fatalf("connectServer() error = %v, want a connection (no standalone GET)", err)
+			}
+		})
+	}
+}
+
 func TestLoadFromMCPConfigDoesNotWaitOnStdioServerThatNeverAnswers(t *testing.T) {
 	shrinkHandshakeTimeout(t, 300*time.Millisecond)
 	mgr := newClosingManager(t)

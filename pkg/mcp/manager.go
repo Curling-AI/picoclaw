@@ -456,7 +456,7 @@ func connectServer(
 	defer cancel()
 
 	tracked := &trackedTransport{Transport: transport}
-	session, err := client.Connect(handshakeCtx, tracked, nil)
+	session, err := connectWithin(handshakeCtx, client, tracked)
 	if err != nil {
 		tracked.closeAbandoned()
 		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
