@@ -12,10 +12,12 @@ import (
 
 // recordingVisionProvider records Chat calls and returns a fixed description,
 // standing in for the image model in delegation tests. Its first `failures`
-// calls fail, like a vision upstream rejecting the request.
+// calls fail, like a vision upstream rejecting the request; errAt fails a
+// given call (1-based) with a given error instead.
 type recordingVisionProvider struct {
 	calls        int
 	failures     int
+	errAt        map[int]error
 	lastMessages []providers.Message
 	resp         string
 }
@@ -29,6 +31,9 @@ func (p *recordingVisionProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.calls++
 	p.lastMessages = messages
+	if err := p.errAt[p.calls]; err != nil {
+		return nil, err
+	}
 	if p.calls <= p.failures {
 		return nil, errors.New("vision upstream rejected the request")
 	}
@@ -137,21 +142,82 @@ func TestDelegateMediaTurn_AnalyzesAndInjects(t *testing.T) {
 	}
 }
 
-// The vision model refusing the image is not the same as having nothing to
-// delegate: routeTurnModel must know the vision model already said no.
-func TestDelegateMediaTurn_ReportsRefusedImage(t *testing.T) {
-	vision := &recordingVisionProvider{failures: 1}
-	p, ts, exec := delegationFixture(true, vision)
+// A failed sub-call is not the same as having nothing to delegate, and a
+// refusal is not the same as an upstream failing for a moment: routeTurnModel
+// sends the first to the tier and keeps the second on the vision model.
+func TestDelegateMediaTurn_ReportsHowTheSubCallFailed(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want delegationOutcome
+	}{
+		{"refused image", errVisionRefusedImage, delegationRefused},
+		{"generic rejection", errors.New("vision upstream rejected the request"), delegationRefused},
+		{"upstream unavailable", errVisionUnavailable, delegationFailed},
+		{
+			"timeout",
+			errors.New("Post \"http://gateway/v1/chat/completions\": context deadline exceeded"),
+			delegationFailed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, ts, exec := delegationFixture(true, &recordingVisionProvider{errAt: map[int]error{1: tc.err}})
+			outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+			if err != nil {
+				t.Fatalf("delegateMediaTurn: %v", err)
+			}
+			if outcome != tc.want {
+				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
+			}
+			if len(exec.callMessages[3].Media) != 1 {
+				t.Errorf("image Media was modified although nothing was analyzed")
+			}
+		})
+	}
+}
 
-	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
-	if err != nil {
-		t.Fatalf("delegateMediaTurn: %v", err)
+// twoImageMessages is a turn with an attached image and one a tool loaded.
+func twoImageMessages() []providers.Message {
+	return []providers.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "compare these", Media: []string{testImageDataURL}},
+		{Role: "tool", Content: "Image loaded: second.png"},
+		{Role: "user", Content: toolImageFollowUpPlaceholder, Media: []string{testImageDataURL + "Zm9v"}},
 	}
-	if outcome != delegationFailed {
-		t.Fatalf("outcome = %v, want delegationFailed (the vision sub-call failed)", outcome)
+}
+
+// One image described, the other not: the described one stays text, the other
+// stays raw, and the outcome says why it is raw.
+func TestDelegateMediaTurn_PartialKeepsWhatWasDescribed(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want delegationOutcome
+	}{
+		{"second refused", errVisionRefusedImage, delegationRefused},
+		{"second unavailable", errVisionUnavailable, delegationFailed},
 	}
-	if len(exec.callMessages[3].Media) != 1 {
-		t.Errorf("image Media was modified although nothing was analyzed")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vision := &recordingVisionProvider{resp: "a receipt", errAt: map[int]error{2: tc.err}}
+			p, ts, exec := delegationFixture(true, vision)
+			exec.callMessages = twoImageMessages()
+			outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+			if err != nil {
+				t.Fatalf("delegateMediaTurn: %v", err)
+			}
+			if outcome != tc.want {
+				t.Fatalf("outcome = %v, want %v", outcome, tc.want)
+			}
+			first, second := exec.callMessages[1], exec.callMessages[3]
+			if len(first.Media) != 0 || !strings.Contains(first.Content, "a receipt") {
+				t.Errorf("described image not rewritten: media=%v content=%q", first.Media, first.Content)
+			}
+			if len(second.Media) != 1 {
+				t.Errorf("undescribed image media = %v, want it kept raw", second.Media)
+			}
+		})
 	}
 }
 

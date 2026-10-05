@@ -35,6 +35,25 @@ func stripMessageMedia(messages []providers.Message) []providers.Message {
 	return stripped
 }
 
+// unreadableImageNote stands in for an image no model of the call could
+// read, so the model answers knowing there was one.
+const unreadableImageNote = "[An image was attached here, but it could not be read.]"
+
+// stripUnreadableMedia drops the media of every message and leaves
+// unreadableImageNote where it was.
+func stripUnreadableMedia(messages []providers.Message) []providers.Message {
+	stripped := make([]providers.Message, len(messages))
+	for i, msg := range messages {
+		stripped[i] = msg
+		if len(msg.Media) == 0 {
+			continue
+		}
+		stripped[i].Media = nil
+		stripped[i].Content = strings.TrimSpace(msg.Content + "\n\n" + unreadableImageNote)
+	}
+	return stripped
+}
+
 func isVisionUnsupportedError(err error) bool {
 	if err == nil {
 		return false
@@ -347,8 +366,10 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	// one need them. A vision model that has just refused this call's image
 	// holds no claim on it either: the same image would be refused again (prod:
 	// 400 "Provided image is not valid" on tool screenshots) and end the turn,
-	// so the swap above is only the fallback for a turn with no tier picked.
-	if needsEyes && delegation != delegationFailed {
+	// so the swap above is only the fallback for a turn with no tier picked. A
+	// vision upstream that failed for a moment keeps the call, as it did before
+	// the tier: its retries can still read the image.
+	if needsEyes && delegation != delegationRefused {
 		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)

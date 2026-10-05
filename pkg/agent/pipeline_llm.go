@@ -478,6 +478,35 @@ func (p *Pipeline) CallLLM(
 		}
 
 		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {
+			// With a vision model configured, an image only reaches another model
+			// after the vision model could not describe it. The config does not say
+			// which models read images, so this is where we learn it: answer
+			// without the image instead of ending the turn, as askSideQuestion
+			// does. (seucaranguejo fork)
+			if retry < maxRetries && len(ts.agent.ImageCandidates) > 0 &&
+				!sameCandidateSet(exec.activeCandidates, ts.agent.ImageCandidates) {
+				al.emitEvent(
+					runtimeevents.KindAgentLLMRetry,
+					ts.eventMeta("runTurn", "turn.llm.retry"),
+					LLMRetryPayload{
+						Attempt:    retry + 1,
+						MaxRetries: maxRetries,
+						Reason:     "vision_unsupported",
+						Error:      err.Error(),
+					},
+				)
+				logger.WarnCF(
+					"agent",
+					"Model cannot read the image the vision model could not describe; retrying without it",
+					map[string]any{
+						"agent_id":   ts.agent.ID,
+						"model_name": exec.llmModelName,
+						"error":      err.Error(),
+					},
+				)
+				exec.callMessages = stripUnreadableMedia(exec.callMessages)
+				continue
+			}
 			return ControlBreak, visionUnsupportedModelError(
 				exec.llmModelName,
 				len(ts.agent.ImageCandidates) > 0,
@@ -658,6 +687,9 @@ func (p *Pipeline) CallLLM(
 				msgs := append([]providers.Message(nil), exec.messages...)
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
 			}
+			// The rebuild resolves images again, raw, but the model was picked
+			// for the described call. (seucaranguejo fork)
+			p.redescribeImages(ts, exec)
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
 				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{
 					"session_key":     ts.sessionKey,

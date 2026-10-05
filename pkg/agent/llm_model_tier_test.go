@@ -218,6 +218,46 @@ func TestRouteTurnModel_RefusedImageFollowsPickedTier(t *testing.T) {
 	}
 }
 
+// A vision upstream that failed for a moment can still read the image on the
+// swap's retries: the call stays on the vision model, as before the tier.
+func TestRouteTurnModel_TransientDelegationFailureStaysOnVisionModel(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionUnavailable}}
+	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" {
+		t.Fatalf("llmModelName = %q, want maestro-vision (the upstream failed, the image is not refused)",
+			exec.llmModelName)
+	}
+}
+
+// Partial delegation follows the image left raw: refused goes to the tier,
+// failed for a moment stays on the vision model.
+func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"second refused", errVisionRefusedImage, "gpt-6.1-sol"},
+		{"second unavailable", errVisionUnavailable, "maestro-vision"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vision := &recordingVisionProvider{resp: "a receipt", errAt: map[int]error{2: tc.err}}
+			p, ts, exec := mediaTierFixture(true, vision)
+			exec.callMessages = twoImageMessages()
+			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+				t.Fatalf("routeTurnModel: %v", err)
+			}
+			if exec.llmModelName != tc.want {
+				t.Fatalf("llmModelName = %q, want %q", exec.llmModelName, tc.want)
+			}
+		})
+	}
+}
+
 // With no tier picked nothing else claims the call, and the swap to the vision
 // model stays the fallback it was before.
 func TestRouteTurnModel_RefusedImageWithoutTierFallsBackToVisionSwap(t *testing.T) {
