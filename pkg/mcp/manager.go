@@ -341,7 +341,10 @@ func connectServer(
 
 	// Create transport based on configuration
 	// Auto-detect transport type if not explicitly specified
-	var transport mcp.Transport
+	var (
+		transport mcp.Transport
+		httpConns *connTracker
+	)
 	transportType := config.EffectiveMCPTransportType(cfg)
 	if transportType == "" {
 		return nil, fmt.Errorf("either URL or command must be provided")
@@ -352,45 +355,7 @@ func connectServer(
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("URL is required for SSE/HTTP transport")
 		}
-
-		// Configure DisableStandaloneSSE based on transport type.
-		// - "http": Streamable HTTP request-response mode. Disable the standalone
-		//   SSE stream to avoid compatibility issues with servers that don't
-		//   support the optional GET listener.
-		// - "sse": Bidirectional mode. Enable the standalone SSE stream to receive
-		//   server-initiated notifications (e.g., ToolListChangedNotification).
-		// - Empty or auto-detected: Defaults to "sse" behavior (standalone SSE enabled).
-		disableStandaloneSSE := transportType == "http"
-
-		logger.DebugCF("mcp", "Using SSE/HTTP transport",
-			map[string]any{
-				"server":               name,
-				"url":                  cfg.URL,
-				"disableStandaloneSSE": disableStandaloneSSE,
-			})
-
-		sseTransport := &mcp.StreamableClientTransport{
-			Endpoint:             cfg.URL,
-			DisableStandaloneSSE: disableStandaloneSSE,
-		}
-
-		// Add custom headers if provided
-		if len(cfg.Headers) > 0 {
-			// Create a custom HTTP client with header-injecting transport
-			sseTransport.HTTPClient = &http.Client{
-				Transport: &headerTransport{
-					base:    http.DefaultTransport,
-					headers: cfg.Headers,
-				},
-			}
-			logger.DebugCF("mcp", "Added custom HTTP headers",
-				map[string]any{
-					"server":       name,
-					"header_count": len(cfg.Headers),
-				})
-		}
-
-		transport = sseTransport
+		transport, httpConns = newStreamableTransport(name, cfg, transportType)
 	case "stdio":
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("command is required for stdio transport")
@@ -400,8 +365,10 @@ func connectServer(
 				"server":  name,
 				"command": cfg.Command,
 			})
-		// Create command with context
-		cmd := exec.CommandContext(ctx, expandHomeCommandPath(cfg.Command), cfg.Args...)
+		// Not bound to ctx: the retry loop and CallTool reconnects dial with
+		// contexts that end right after the connect, and the process has to
+		// live as long as the session. Closing the session stops it.
+		cmd := exec.Command(expandHomeCommandPath(cfg.Command), cfg.Args...)
 
 		// Build environment variables with proper override semantics
 		// Use a map to ensure config variables override file variables
@@ -450,35 +417,31 @@ func connectServer(
 		)
 	}
 
-	// Connect to server
-	session, err := client.Connect(ctx, transport, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
-	}
+	// The session itself outlives handshakeCtx: the SDK detaches it from the
+	// connect context.
+	handshakeCtx, cancel := context.WithTimeout(ctx, mcpHandshakeTimeout)
+	defer cancel()
 
-	// Get server info
-	initResult := session.InitializeResult()
-	logger.InfoCF("mcp", "Connected to MCP server",
-		map[string]any{
-			"server":        name,
-			"serverName":    initResult.ServerInfo.Name,
-			"serverVersion": initResult.ServerInfo.Version,
-			"protocol":      initResult.ProtocolVersion,
-		})
-
-	// List available tools if supported
-	tools, err := listServerTools(ctx, name, session, initResult)
-	if err != nil {
-		_ = session.Close()
-		return nil, err
+	tracked := &trackedTransport{Transport: transport}
+	result := handshakeWithin(handshakeCtx, name, client, tracked)
+	if err := result.err; err != nil {
+		abandonConnection(name, tracked, result.session, httpConns)
+		switch {
+		case ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded):
+			return nil, fmt.Errorf("no answer to the MCP handshake within %s: %w", mcpHandshakeTimeout, err)
+		case result.session == nil:
+			return nil, fmt.Errorf("failed to connect: %w", err)
+		default:
+			return nil, err
+		}
 	}
 
 	return &ServerConnection{
 		Name:    name,
 		Config:  cfg,
 		Client:  client,
-		Session: session,
-		Tools:   tools,
+		Session: result.session,
+		Tools:   result.tools,
 	}, nil
 }
 
@@ -576,6 +539,11 @@ func listServerTools(
 
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
+			// Listing stops at the first error; past the deadline that
+			// would pass for a server with fewer tools.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("listing tools: %w: %w", ctxErr, err)
+			}
 			logger.WarnCF("mcp", "Error listing tool",
 				map[string]any{
 					"server": name,
