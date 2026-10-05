@@ -35,6 +35,8 @@ func (t *isolatedCommandTransport) Connect(ctx context.Context) (sdkmcp.Connecti
 	if err != nil {
 		return nil, err
 	}
+	// Set before isolation.Start, which keeps SysProcAttr; a backend that
+	// replaced it would leave Close signaling only the server itself.
 	startInOwnProcessGroup(t.Command)
 	if err := isolation.Start(t.Command); err != nil {
 		return nil, err
@@ -80,13 +82,23 @@ func (s *isolatedPipeRWC) Close() error {
 			return false
 		}
 	}
+	// A server that outlives the waits below (stuck in uninterruptible I/O,
+	// say) is still reaped, and its group killed, whenever it does exit.
+	finishLate := func() {
+		go func() {
+			<-exited
+			_ = s.finishExited(reaped)
+		}()
+	}
 	if !wait() {
 		_ = signalProcessGroup(s.cmd, syscall.SIGTERM)
 		if !wait() {
 			if err := signalProcessGroup(s.cmd, syscall.SIGKILL); err != nil {
+				finishLate()
 				return err
 			}
 			if !wait() {
+				finishLate()
 				return fmt.Errorf("unresponsive subprocess")
 			}
 		}
