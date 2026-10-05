@@ -217,19 +217,24 @@ func (p *Pipeline) delegateMediaTurn(
 	return outcome, nil
 }
 
-// redescribeImages puts back what this turn already knows about every image
-// a rebuild of the call (context retry) brought back raw, wherever it sits in
-// the call: its description, or unreadableImageNote. Memo only: no vision call.
-func (p *Pipeline) redescribeImages(ts *turnState, exec *turnExecution) {
+// withKnownImageText returns messages with what this turn already knows about
+// each image a rebuild of the call (context retry) brought back raw, wherever
+// it sits: its description, or unreadableImageNote. Memo only: no vision
+// call, and messages itself is left untouched.
+func (p *Pipeline) withKnownImageText(
+	ts *turnState,
+	exec *turnExecution,
+	messages []providers.Message,
+) []providers.Message {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
-		return
+		return messages
 	}
 	modelName := resolvedCandidateModelName(
 		ts.agent.ImageCandidates,
 		strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel),
 	)
 	var rewritten []providers.Message
-	for i, msg := range exec.callMessages {
+	for i, msg := range messages {
 		images := dataImages(msg.Media)
 		if len(images) == 0 {
 			continue
@@ -239,13 +244,14 @@ func (p *Pipeline) redescribeImages(ts *turnState, exec *turnExecution) {
 			continue
 		}
 		if rewritten == nil {
-			rewritten = append([]providers.Message(nil), exec.callMessages...)
+			rewritten = append([]providers.Message(nil), messages...)
 		}
 		rewritten[i] = withImageText(msg, text)
 	}
-	if rewritten != nil {
-		exec.callMessages = rewritten
+	if rewritten == nil {
+		return messages
 	}
+	return rewritten
 }
 
 // knownImageText is what the turn already knows about the image(s) behind

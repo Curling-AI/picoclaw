@@ -461,6 +461,18 @@ func (p *Pipeline) CallLLM(
 	// Set once this call learned that its model cannot read the images the
 	// vision model left raw; a context rebuild brings them back. (fork)
 	imagesUnreadable := false
+	// callView is what a context rebuild actually sends: the rebuild resolves
+	// images again, raw, but the model was picked for the described call and
+	// may already have shown it cannot read the rest. The guard and the trim
+	// measure through it, so a description longer than the raw image's
+	// estimate still makes room for itself. (seucaranguejo fork)
+	callView := func(messages []providers.Message) []providers.Message {
+		messages = p.withKnownImageText(ts, exec, messages)
+		if imagesUnreadable {
+			messages, _ = stripImages(messages, imageNotSeenNote)
+		}
+		return messages
+	}
 	for retry := 0; retry <= maxRetries; retry++ {
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
@@ -603,7 +615,7 @@ func (p *Pipeline) CallLLM(
 				req := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				req.ActiveSkills = append([]string(nil), guardSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
-				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail))
+				return callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail)))
 			}
 			// Compact/trim to the model actually serving this turn: a media turn
 			// routed to the small-context vision model needs its (128K) budget, not
@@ -676,7 +688,7 @@ func (p *Pipeline) CallLLM(
 			trimmedStableHistory, exec.callMessages, fit = trimHistoryToFitContextWindow(
 				stableHistory,
 				func(trimmedHistory []providers.Message) []providers.Message {
-					rebuilt := buildMessages(trimmedHistory)
+					rebuilt := callView(buildMessages(trimmedHistory))
 					if exec.gracefulTerminal {
 						return append(append([]providers.Message(nil), rebuilt...), ts.interruptHintMessage())
 					}
@@ -690,15 +702,8 @@ func (p *Pipeline) CallLLM(
 			exec.messages = buildMessages(trimmedStableHistory)
 			exec.currentTurnStart = len(exec.messages) - len(protectedTurnTail)
 			if exec.gracefulTerminal {
-				msgs := append([]providers.Message(nil), exec.messages...)
+				msgs := append([]providers.Message(nil), callView(exec.messages)...)
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
-			}
-			// The rebuild resolves images again, raw, but the model was picked
-			// for the described call, and may already have shown it cannot read
-			// the rest. (seucaranguejo fork)
-			p.redescribeImages(ts, exec)
-			if imagesUnreadable {
-				exec.callMessages, _ = stripImages(exec.callMessages, imageNotSeenNote)
 			}
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
 				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{

@@ -34,6 +34,7 @@ type scriptedCall struct {
 	delegation bool
 	media      bool
 	content    string
+	tokens     int // estimated like the pipeline does: messages + tools + max_tokens
 }
 
 // scriptedTierProvider stands in for every model of the agent: the vision
@@ -45,15 +46,16 @@ type scriptedTierProvider struct {
 	visionResp      string
 	tierContextErrs int
 	visionCallErr   error // returned by every full (non-delegation) call to the vision model
+	window          int   // when set, text-tier rejects calls estimated above it
 	calls           []scriptedCall
 }
 
 func (p *scriptedTierProvider) Chat(
 	_ context.Context,
 	messages []providers.Message,
-	_ []providers.ToolDefinition,
+	tools []providers.ToolDefinition,
 	model string,
-	_ map[string]any,
+	opts map[string]any,
 ) (*providers.LLMResponse, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -64,6 +66,11 @@ func (p *scriptedTierProvider) Chat(
 	}
 	for _, m := range messages {
 		call.content += m.Content + "\n"
+		call.tokens += EstimateMessageTokens(m)
+	}
+	call.tokens += EstimateToolDefsTokens(tools)
+	if maxTokens, ok := opts["max_tokens"].(int); ok {
+		call.tokens += maxTokens
 	}
 	p.calls = append(p.calls, call)
 	switch {
@@ -78,6 +85,8 @@ func (p *scriptedTierProvider) Chat(
 		return nil, p.visionCallErr
 	case model == "text-tier" && call.media:
 		return nil, errors.New("API request failed: Status: 400 Body: text-tier does not support image input")
+	case model == "text-tier" && p.window > 0 && call.tokens > p.window:
+		return nil, errors.New("context_length_exceeded: prompt is too long")
 	case model == "text-tier" && p.tierContextErrs > 0:
 		p.tierContextErrs--
 		return nil, errors.New("context_length_exceeded: prompt is too long")
@@ -118,6 +127,7 @@ type tierTurn struct {
 	history    []providers.Message // earlier turns of the session
 	maxRetries int                 // agents.defaults.max_llm_retries; 0 keeps the default
 	noTier     bool                // the user picked no tier
+	window     int                 // agents.defaults.context_window; 0 keeps the default
 }
 
 // runTextTierTurn sends a turn to an agent whose user picked the text-only
@@ -135,6 +145,7 @@ func runTextTierTurn(t *testing.T, provider *scriptedTierProvider, turn tierTurn
 				MaxTokens:         4096,
 				MaxToolIterations: 3,
 				MaxLLMRetries:     turn.maxRetries,
+				ContextWindow:     turn.window,
 				ModelTiers:        map[string]string{"flash": "main-model", "text": "text-tier"},
 			},
 		},
@@ -397,5 +408,52 @@ func TestTieredImageTurn_RejectionWithoutTierIsAnsweredByTheMainModel(t *testing
 		if c.model == "vision-model" {
 			t.Fatal("the call went back to the vision model that rejected the sub-call")
 		}
+	}
+}
+
+// The description is far longer than the estimate of the raw image it
+// replaces. A context retry must measure the call it really sends, or it keeps
+// history that no longer fits and overflows again. Sizes are calibrated on
+// the agent's own prompt: the window fits the described turn without the
+// earlier ones, not with them.
+func TestTieredImageTurn_ContextRetryMakesRoomForTheDescription(t *testing.T) {
+	longDescription := strings.Repeat("a dense chart with many labeled series ", 300)
+	firstTokens := func(history []providers.Message) int {
+		t.Helper()
+		provider := &scriptedTierProvider{visionResp: longDescription}
+		if _, err := runTextTierTurn(t, provider, tierTurn{history: history}); err != nil {
+			t.Fatalf("calibration: %v", err)
+		}
+		return provider.turnCalls()[0].tokens
+	}
+	// Eight short earlier turns, then a long one, as in the reproduction.
+	var history []providers.Message
+	for i := 0; i < 8; i++ {
+		history = append(history,
+			providers.Message{Role: "user", Content: "short question"},
+			providers.Message{Role: "assistant", Content: "short answer"})
+	}
+	history = append(history,
+		providers.Message{Role: "user", Content: "tell me everything"},
+		providers.Message{Role: "assistant", Content: strings.Repeat("a long earlier answer ", 250)})
+
+	alone, withHistory := firstTokens(nil), firstTokens(history)
+	if withHistory-alone < 600 {
+		t.Fatalf("history adds %d tokens, want enough to overflow", withHistory-alone)
+	}
+	window := alone + 200
+
+	provider := &scriptedTierProvider{visionResp: longDescription, window: window}
+	resp, err := runTextTierTurn(t, provider, tierTurn{history: history, window: window})
+	if err != nil {
+		t.Fatalf("processMessage: %v (calls: %d)", err, len(provider.turnCalls()))
+	}
+	if resp != "answered by text-tier" {
+		t.Fatalf("response = %q, want the picked tier to answer", resp)
+	}
+	last := provider.turnCalls()[len(provider.turnCalls())-1]
+	if last.tokens > window || !strings.Contains(last.content, "a dense chart") {
+		t.Fatalf("answering call: %d tokens for a %d window, description kept = %v",
+			last.tokens, window, strings.Contains(last.content, "a dense chart"))
 	}
 }
