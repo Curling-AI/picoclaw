@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// Windows has no process-group signals; only the server itself is signalled.
+// Windows has no process-group signals; only the server itself is signaled.
 func startInOwnProcessGroup(*exec.Cmd) {}
 
 func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {

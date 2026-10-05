@@ -62,41 +62,57 @@ func (s *isolatedPipeRWC) Write(p []byte) (n int, err error) {
 }
 
 func (s *isolatedPipeRWC) Close() error {
-	// Launchers such as `npx mcp-remote` exit and leave the real server behind
-	// (npm → sh → node); nothing the server started may outlive its session.
-	defer func() {
-		_ = signalProcessGroup(s.cmd, syscall.SIGKILL)
-	}()
-	if err := s.stdin.Close(); err != nil {
-		return fmt.Errorf("closing stdin: %w", err)
-	}
-	resChan := make(chan error, 1)
+	stdinErr := s.stdin.Close()
+
+	exited := make(chan struct{})
+	reaped := make(chan error, 1)
 	go func() {
-		resChan <- s.cmd.Wait()
+		defer close(exited)
+		if err := waitExitedUnreaped(s.cmd); err != nil {
+			reaped <- s.cmd.Wait()
+		}
 	}()
-	wait := func() (error, bool) {
+	wait := func() bool {
 		select {
-		case err := <-resChan:
-			return err, true
+		case <-exited:
+			return true
 		case <-time.After(s.terminateDuration):
-		}
-		return nil, false
-	}
-	if err, ok := wait(); ok {
-		return err
-	}
-	if err := signalProcessGroup(s.cmd, syscall.SIGTERM); err == nil {
-		if err, ok := wait(); ok {
-			return err
+			return false
 		}
 	}
-	if err := signalProcessGroup(s.cmd, syscall.SIGKILL); err != nil {
-		return err
+	if !wait() {
+		_ = signalProcessGroup(s.cmd, syscall.SIGTERM)
+		if !wait() {
+			if err := signalProcessGroup(s.cmd, syscall.SIGKILL); err != nil {
+				return err
+			}
+			if !wait() {
+				return fmt.Errorf("unresponsive subprocess")
+			}
+		}
 	}
-	if err, ok := wait(); ok {
-		return err
+
+	waitErr := s.finishExited(reaped)
+	if stdinErr != nil {
+		return fmt.Errorf("closing stdin: %w", stdinErr)
 	}
-	return fmt.Errorf("unresponsive subprocess")
+	return waitErr
+}
+
+// finishExited reaps a server that has exited. Launchers such as
+// `npx mcp-remote` exit and leave the real server behind (npm → sh → node),
+// so what is left of the group is killed first: while the server is unreaped
+// its PID, which is also the group ID, cannot go to another process. Where it
+// was reaped already (no unreaped wait on this platform), that signal could
+// reach a stranger, so it is skipped.
+func (s *isolatedPipeRWC) finishExited(reaped <-chan error) error {
+	select {
+	case err := <-reaped:
+		return err
+	default:
+	}
+	_ = signalProcessGroup(s.cmd, syscall.SIGKILL)
+	return s.cmd.Wait()
 }
 
 type isolatedIOConn struct {
