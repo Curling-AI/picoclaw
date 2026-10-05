@@ -187,6 +187,21 @@ func twoImageMessages() []providers.Message {
 	}
 }
 
+// One image refused, another failing for a moment: the vision model already
+// said no to one of them, so the call must not go back to it.
+func TestDelegateMediaTurn_RefusalOutlivesALaterTransientFailure(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable}}
+	p, ts, exec := delegationFixture(true, vision)
+	exec.callMessages = twoImageMessages()
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	if err != nil {
+		t.Fatalf("delegateMediaTurn: %v", err)
+	}
+	if outcome != delegationRefused {
+		t.Fatalf("outcome = %v, want delegationRefused", outcome)
+	}
+}
+
 // One image described, the other not: the described one stays text, the other
 // stays raw, and the outcome says why it is raw.
 func TestDelegateMediaTurn_PartialKeepsWhatWasDescribed(t *testing.T) {
@@ -289,5 +304,35 @@ func TestDelegationBrief_ExcludesImagesAndBounds(t *testing.T) {
 	}
 	if strings.Contains(brief, "system prompt") {
 		t.Errorf("brief should start at currentTurnStart, not include history: %q", brief)
+	}
+}
+
+func TestStripUnreadableImages_KeepsOtherAttachments(t *testing.T) {
+	const pdf = "data:application/pdf;base64,JVBERi0x"
+	in := []providers.Message{
+		{Role: "user", Content: "read both", Media: []string{testImageDataURL, pdf}},
+		{Role: "user", Content: "just text"},
+		{Role: "user", Content: "only a pdf", Media: []string{pdf}},
+	}
+	out, changed := stripUnreadableImages(in)
+	if !changed {
+		t.Fatal("changed = false, want true (an image was removed)")
+	}
+	if got := out[0].Media; len(got) != 1 || got[0] != pdf {
+		t.Errorf("media = %v, want only the pdf kept", got)
+	}
+	if !strings.Contains(out[0].Content, unreadableImageNote) {
+		t.Errorf("content = %q, want the note where the image was", out[0].Content)
+	}
+	for i := 1; i < len(in); i++ {
+		if out[i].Content != in[i].Content || len(out[i].Media) != len(in[i].Media) {
+			t.Errorf("message %d changed: %+v", i, out[i])
+		}
+	}
+	if len(in[0].Media) != 2 {
+		t.Error("the input was mutated")
+	}
+	if _, changed := stripUnreadableImages(out); changed {
+		t.Error("second pass changed = true, want false (no image left)")
 	}
 }

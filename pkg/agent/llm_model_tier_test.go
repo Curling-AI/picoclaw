@@ -233,19 +233,25 @@ func TestRouteTurnModel_TransientDelegationFailureStaysOnVisionModel(t *testing.
 }
 
 // Partial delegation follows the image left raw: refused goes to the tier,
-// failed for a moment stays on the vision model.
+// failed for a moment stays on the vision model, and a refusal wins over a
+// failure: the vision model must not get back an image it refused.
 func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
 	cases := []struct {
 		name string
-		err  error
+		errs map[int]error
 		want string
 	}{
-		{"second refused", errVisionRefusedImage, "gpt-6.1-sol"},
-		{"second unavailable", errVisionUnavailable, "maestro-vision"},
+		{"second refused", map[int]error{2: errVisionRefusedImage}, "gpt-6.1-sol"},
+		{"second unavailable", map[int]error{2: errVisionUnavailable}, "maestro-vision"},
+		{
+			"first refused, second unavailable",
+			map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable},
+			"gpt-6.1-sol",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			vision := &recordingVisionProvider{resp: "a receipt", errAt: map[int]error{2: tc.err}}
+			vision := &recordingVisionProvider{resp: "a receipt", errAt: tc.errs}
 			p, ts, exec := mediaTierFixture(true, vision)
 			exec.callMessages = twoImageMessages()
 			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {

@@ -71,7 +71,7 @@ const (
 	delegationFailed
 	// delegationRefused: an image stayed raw because the vision model refused
 	// it (prod: 400 "Provided image is not valid"). Resending it to the same
-	// model gets the same answer.
+	// model gets the same answer, so this wins over a failure in the same call.
 	delegationRefused
 )
 
@@ -153,14 +153,18 @@ func (p *Pipeline) delegateMediaTurn(
 					"transient":  transient,
 					"error":      callErr.Error(),
 				})
-				if transient {
-					// The upstream is struggling: leave the remaining images to
-					// the swap instead of piling more sub-calls on it.
-					outcome = delegationFailed
-					break
+				if !transient {
+					outcome = delegationRefused
+					continue
 				}
-				outcome = delegationRefused
-				continue
+				// A refusal already seen stands: the vision model must not get
+				// back an image it said no to.
+				if outcome != delegationRefused {
+					outcome = delegationFailed
+				}
+				// The upstream is struggling: leave the remaining images to the
+				// swap instead of piling more sub-calls on it.
+				break
 			}
 			analysis = a
 			exec.mediaAnalysisCache[key] = analysis

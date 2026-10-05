@@ -39,19 +39,27 @@ func stripMessageMedia(messages []providers.Message) []providers.Message {
 // read, so the model answers knowing there was one.
 const unreadableImageNote = "[An image was attached here, but it could not be read.]"
 
-// stripUnreadableMedia drops the media of every message and leaves
-// unreadableImageNote where it was.
-func stripUnreadableMedia(messages []providers.Message) []providers.Message {
-	stripped := make([]providers.Message, len(messages))
+// stripUnreadableImages drops the resolved images of every message, keeps any
+// other attachment, and leaves unreadableImageNote where an image was. It
+// reports whether it removed anything.
+func stripUnreadableImages(messages []providers.Message) ([]providers.Message, bool) {
+	var stripped []providers.Message
 	for i, msg := range messages {
-		stripped[i] = msg
-		if len(msg.Media) == 0 {
+		kept := stripDataImages(msg.Media)
+		if len(kept) == len(msg.Media) {
 			continue
 		}
-		stripped[i].Media = nil
-		stripped[i].Content = strings.TrimSpace(msg.Content + "\n\n" + unreadableImageNote)
+		if stripped == nil {
+			stripped = append([]providers.Message(nil), messages...)
+		}
+		msg.Media = kept
+		msg.Content = strings.TrimSpace(msg.Content + "\n\n" + unreadableImageNote)
+		stripped[i] = msg
 	}
-	return stripped
+	if stripped == nil {
+		return messages, false
+	}
+	return stripped, true
 }
 
 func isVisionUnsupportedError(err error) bool {

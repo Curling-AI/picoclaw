@@ -246,3 +246,21 @@ func TestTieredImageTurn_ContextRetryKeepsTheImageDescribed(t *testing.T) {
 		t.Fatalf("vision sub-calls = %d, want 1 (the retry reuses the description)", n)
 	}
 }
+
+// The text-only tier refused the image, the call went on without it and then
+// overflowed the context. The rebuilt call must still leave that image out.
+func TestTieredImageTurn_ContextRetryKeepsTheUnreadableImageOut(t *testing.T) {
+	provider := &scriptedTierProvider{visionErrs: []error{errVisionRefusedImage}, tierContextErrs: 1}
+	resp, err := runTextTierImageTurn(t, provider, true)
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if resp != "answered by text-tier" {
+		t.Fatalf("response = %q, want the picked tier to answer", resp)
+	}
+	calls := provider.turnCalls()
+	if last := calls[len(calls)-1]; last.media || !strings.Contains(last.content, unreadableImageNote) {
+		t.Fatalf("answering call media=%v, note=%v; want the image left out with the note",
+			last.media, strings.Contains(last.content, unreadableImageNote))
+	}
+}

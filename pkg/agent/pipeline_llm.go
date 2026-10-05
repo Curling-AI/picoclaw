@@ -458,6 +458,9 @@ func (p *Pipeline) CallLLM(
 	if backoffSecs <= 0 {
 		backoffSecs = 2
 	}
+	// Set once this call learned that its model cannot read the images the
+	// vision model left raw; a context rebuild brings them back. (fork)
+	imagesUnreadable := false
 	for retry := 0; retry <= maxRetries; retry++ {
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
@@ -483,7 +486,8 @@ func (p *Pipeline) CallLLM(
 			// which models read images, so this is where we learn it: answer
 			// without the image instead of ending the turn, as askSideQuestion
 			// does. (seucaranguejo fork)
-			if retry < maxRetries && len(ts.agent.ImageCandidates) > 0 &&
+			withoutImages, stripped := stripUnreadableImages(exec.callMessages)
+			if stripped && retry < maxRetries && len(ts.agent.ImageCandidates) > 0 &&
 				!sameCandidateSet(exec.activeCandidates, ts.agent.ImageCandidates) {
 				al.emitEvent(
 					runtimeevents.KindAgentLLMRetry,
@@ -504,7 +508,8 @@ func (p *Pipeline) CallLLM(
 						"error":      err.Error(),
 					},
 				)
-				exec.callMessages = stripUnreadableMedia(exec.callMessages)
+				exec.callMessages = withoutImages
+				imagesUnreadable = true
 				continue
 			}
 			return ControlBreak, visionUnsupportedModelError(
@@ -688,8 +693,12 @@ func (p *Pipeline) CallLLM(
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
 			}
 			// The rebuild resolves images again, raw, but the model was picked
-			// for the described call. (seucaranguejo fork)
+			// for the described call, and may already have shown it cannot read
+			// the rest. (seucaranguejo fork)
 			p.redescribeImages(ts, exec)
+			if imagesUnreadable {
+				exec.callMessages, _ = stripUnreadableImages(exec.callMessages)
+			}
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
 				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{
 					"session_key":     ts.sessionKey,
