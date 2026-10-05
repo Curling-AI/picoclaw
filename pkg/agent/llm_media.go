@@ -376,10 +376,12 @@ func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turn
 	}
 	// Decided per call, not from the active model: that one carries over from
 	// the previous call, and a call that needed eyes does not make the next
-	// one need them. An image the vision model refused is a note by now, so
-	// only an upstream that failed for a moment leaves one raw here, and the
-	// vision model's retries can still read it.
-	if needsEyes {
+	// one need them. An image the vision model refused is a note by now. One
+	// left raw by an upstream failing for a moment stays with the vision model,
+	// whose retries can still read it; one left raw by a rejection that is not
+	// about the image goes to the picked tier, since the vision model would
+	// only reject it again.
+	if needsEyes && delegation != delegationRejected {
 		return nil
 	}
 	return p.routeModelTierTurn(ts, exec)

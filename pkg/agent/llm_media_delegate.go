@@ -71,16 +71,35 @@ const (
 	// for a moment (timeout, 5xx, 429, network) or the turn was canceled.
 	// Another try can work.
 	delegationFailed
+	// delegationRejected: an image stayed raw because the vision model rejected
+	// the sub-call for a reason that says nothing about the image (prod: 400
+	// "Request contains an invalid argument"). Sending it back would get the
+	// same answer, but another model may still read the image.
+	delegationRejected
 )
+
+// isImageRefusal reports whether a vision sub-call error is about the image
+// itself, the only kind that makes it unreadable for the turn. These are the
+// rejections seen in prod; anything else is not proof against the image.
+func isImageRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "provided image is not valid") ||
+		strings.Contains(msg, "malformed or corrupted") ||
+		strings.Contains(msg, "could not be decoded") ||
+		strings.Contains(msg, "status: 413") ||
+		strings.Contains(msg, "request entity too large")
+}
 
 // delegateMediaTurn implements auto-delegation. Every image it can settle
 // becomes text in exec.callMessages, even when another one of the call
 // fails: a description, or unreadableImageNote for an image the vision model
-// refused, which then stays refused for the rest of the turn (prod: 400
-// "Provided image is not valid" on tool screenshots; resending it only gets
-// the same answer). On delegationDone the caller SKIPS routeMediaTurn; on the
-// other outcomes it falls back to the legacy routeMediaTurn swap (graceful
-// degradation).
+// refused as such (isImageRefusal; prod: 400 "Provided image is not valid" on
+// tool screenshots), which then stays refused for the rest of the turn. On
+// delegationDone the caller SKIPS routeMediaTurn; on the other outcomes it
+// falls back to the legacy routeMediaTurn swap (graceful degradation).
 func (p *Pipeline) delegateMediaTurn(
 	ctx context.Context,
 	ts *turnState,
@@ -137,7 +156,7 @@ func (p *Pipeline) delegateMediaTurn(
 	rewritten := append([]providers.Message(nil), exec.callMessages...)
 
 	settled := 0
-	upstreamDown := false
+	upstreamDown, rejected := false, false
 	for _, t := range targets {
 		key := hashImages(t.images)
 		text, known := knownImageText(exec, key, resolvedModelName)
@@ -149,19 +168,22 @@ func (p *Pipeline) delegateMediaTurn(
 			switch {
 			case callErr == nil:
 				exec.mediaAnalysisCache[key] = a
-			case transient:
-				// The upstream is struggling: no more sub-calls this time, but
-				// what the memo already knows still applies.
-				upstreamDown = true
-			default:
+			case isImageRefusal(callErr):
 				exec.unreadableImages[key] = struct{}{}
+			default:
+				// The upstream is struggling, or rejecting calls for a reason
+				// that is not this image: no more sub-calls this time, but what
+				// the memo already knows still applies.
+				upstreamDown = true
+				rejected = rejected || !transient
 			}
 			if callErr != nil {
 				logger.WarnCF("agent", "Media delegation sub-call failed", map[string]any{
-					"agent_id":   ts.agent.ID,
-					"model_name": resolvedModelName,
-					"transient":  transient,
-					"error":      callErr.Error(),
+					"agent_id":      ts.agent.ID,
+					"model_name":    resolvedModelName,
+					"transient":     transient,
+					"image_refused": isImageRefusal(callErr),
+					"error":         callErr.Error(),
 				})
 			}
 			text, known = knownImageText(exec, key, resolvedModelName)
@@ -174,7 +196,11 @@ func (p *Pipeline) delegateMediaTurn(
 	}
 
 	outcome := delegationDone
-	if settled < len(targets) {
+	switch {
+	case settled == len(targets):
+	case rejected:
+		outcome = delegationRejected
+	default:
 		outcome = delegationFailed
 	}
 	if settled == 0 {

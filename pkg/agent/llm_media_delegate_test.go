@@ -142,9 +142,10 @@ func TestDelegateMediaTurn_AnalyzesAndInjects(t *testing.T) {
 	}
 }
 
-// A refused image is unreadable for the turn: it becomes a note right away,
-// so no model gets it raw again. An upstream failing for a moment leaves the
-// image raw for the vision fallback, which can still read it.
+// Only an error about the image itself makes it unreadable for the turn: it
+// becomes a note right away, so no model gets it raw again. Any other
+// rejection leaves it raw and unmarked, and so does an upstream failing for a
+// moment, for the vision fallback that can still read it.
 func TestDelegateMediaTurn_ReportsHowTheSubCallFailed(t *testing.T) {
 	cases := []struct {
 		name string
@@ -153,7 +154,22 @@ func TestDelegateMediaTurn_ReportsHowTheSubCallFailed(t *testing.T) {
 		raw  bool
 	}{
 		{"refused image", errVisionRefusedImage, delegationDone, false},
-		{"generic rejection", errors.New("vision upstream rejected the request"), delegationDone, false},
+		{
+			"corrupted file",
+			errors.New(
+				"API request failed: Status: 400 Body: The provided file is malformed or corrupted and could not be decoded.",
+			),
+			delegationDone,
+			false,
+		},
+		{
+			"too large",
+			errors.New("API request failed:\n  Status: 413\n  Body: Request Entity Too Large"),
+			delegationDone,
+			false,
+		},
+		{"rejection not about the image", errVisionInvalidArgument, delegationRejected, true},
+		{"generic rejection", errors.New("vision upstream rejected the request"), delegationRejected, true},
 		{"upstream unavailable", errVisionUnavailable, delegationFailed, true},
 		{
 			"timeout",
@@ -398,5 +414,26 @@ func TestStripImages_KeepsOtherAttachments(t *testing.T) {
 	}
 	if _, changed := stripImages(out, imageNotSeenNote); changed {
 		t.Error("second pass changed = true, want false (no image left)")
+	}
+}
+
+// A rejection that is not about the image must not poison the turn: the next
+// iteration asks the vision model again.
+func TestDelegateMediaTurn_DoesNotRememberRejectionsThatAreNotAboutTheImage(t *testing.T) {
+	vision := &recordingVisionProvider{resp: "a receipt", errAt: map[int]error{1: errVisionInvalidArgument}}
+	p, ts, exec := delegationFixture(true, vision)
+	if _, err := p.delegateMediaTurn(context.Background(), ts, exec); err != nil {
+		t.Fatalf("first delegateMediaTurn: %v", err)
+	}
+	if len(exec.unreadableImages) != 0 {
+		t.Fatalf("unreadable images = %v, want none", exec.unreadableImages)
+	}
+	exec.callMessages = freshMediaMessages()
+	outcome, err := p.delegateMediaTurn(context.Background(), ts, exec)
+	if err != nil {
+		t.Fatalf("second delegateMediaTurn: %v", err)
+	}
+	if outcome != delegationDone || vision.calls != 2 {
+		t.Fatalf("outcome = %v after %d vision calls, want delegationDone after 2", outcome, vision.calls)
 	}
 }

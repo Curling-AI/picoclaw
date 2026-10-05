@@ -23,6 +23,10 @@ var (
 		"API request failed:\n  Status: 400\n  Body:   {\"error\":{\"message\":\"Provided image is not valid.\"}}")
 	errVisionUnavailable = errors.New(
 		"API request failed:\n  Status: 503\n  Body:   {\"error\":{\"message\":\"Service Unavailable\"}}")
+	// A rejection that says nothing about the image (prod: Gemini's generic 400).
+	errVisionInvalidArgument = errors.New(
+		"API request failed:\n  Status: 400\n  Body:   {\"error\":{\"message\":\"Request contains an invalid argument.\"}}",
+	)
 )
 
 type scriptedCall struct {
@@ -343,5 +347,27 @@ func TestVisionUnsupportedModelError_NamesTheRightModel(t *testing.T) {
 				t.Fatalf("error = %q, image_model hint = %v, want %v", got, hint, tc.wantHint)
 			}
 		})
+	}
+}
+
+// The vision model rejected the call for a reason that says nothing about the
+// image. The image is not marked unreadable and does not go back to the
+// vision model: the picked tier gets it, and one that cannot see images gets
+// the call again without it.
+func TestTieredImageTurn_RejectionThatIsNotAboutTheImageReachesTheTier(t *testing.T) {
+	provider := &scriptedTierProvider{visionErrs: []error{errVisionInvalidArgument}}
+	resp, err := runTextTierTurn(t, provider, tierTurn{})
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if resp != "answered by text-tier" {
+		t.Fatalf("response = %q, want the picked tier to answer", resp)
+	}
+	calls := provider.turnCalls()
+	if len(calls) < 2 || calls[0].model != "text-tier" || !calls[0].media {
+		t.Fatalf("turn calls = %+v, want the tier to get the image first", calls)
+	}
+	if last := calls[len(calls)-1]; last.media || !strings.Contains(last.content, imageNotSeenNote) {
+		t.Fatal("the answering call should go without the image, with the note")
 	}
 }

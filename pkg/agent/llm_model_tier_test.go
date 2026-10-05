@@ -205,7 +205,11 @@ func imageCallMessages() []providers.Message {
 // the same image to the same model only repeats the refusal and ends the turn,
 // so the picked tier takes the call, with the main context budget.
 func TestRouteTurnModel_RefusedImageFollowsPickedTier(t *testing.T) {
-	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{failures: 1}, testImageDataURL)
+	p, ts, exec := mediaTierFixture(
+		true,
+		&recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
+		testImageDataURL,
+	)
 	ts.agent.ImageContextWindow = 128_000
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("routeTurnModel: %v", err)
@@ -264,11 +268,28 @@ func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
 	}
 }
 
+// A rejection that is not about the image: resending to the vision model
+// would get the same answer, so the picked tier takes the raw image.
+func TestRouteTurnModel_RejectionNotAboutTheImageFollowsPickedTier(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionInvalidArgument}}
+	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol", exec.llmModelName)
+	}
+}
+
 // With no tier picked, a refused image no longer sends the call to the vision
 // model that refused it: the image is a note and the main model answers. This
 // was the cron turns' failure (49 "LLM call failed" in 7 days).
 func TestRouteTurnModel_RefusedImageWithoutTierStaysOnMainModel(t *testing.T) {
-	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{failures: 1}, testImageDataURL)
+	p, ts, exec := mediaTierFixture(
+		true,
+		&recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
+		testImageDataURL,
+	)
 	ts.modelTier = ""
 	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
 		t.Fatalf("routeTurnModel: %v", err)
