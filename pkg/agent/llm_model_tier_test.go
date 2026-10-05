@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -9,7 +10,7 @@ import (
 
 // tierFixture builds a pipeline whose agent knows the three user-facing tiers,
 // with the turn starting on the main model.
-func tierFixture(tier, sessionKey string, media []string) (*Pipeline, *turnState, *turnExecution) {
+func tierFixture(tier, sessionKey string) (*Pipeline, *turnState, *turnExecution) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.ModelTiers = map[string]string{
 		"otimizado": "deepseek-v4-flash",
@@ -27,7 +28,7 @@ func tierFixture(tier, sessionKey string, media []string) (*Pipeline, *turnState
 			"ultra":     {{Provider: "openai", Model: "kimi-k3"}},
 		},
 	}
-	ts := &turnState{agent: agent, modelTier: tier, sessionKey: sessionKey, media: media}
+	ts := &turnState{agent: agent, modelTier: tier, sessionKey: sessionKey}
 	exec := &turnExecution{
 		activeCandidates: agent.Candidates,
 		activeModel:      "glm-5.2",
@@ -37,7 +38,7 @@ func tierFixture(tier, sessionKey string, media []string) (*Pipeline, *turnState
 }
 
 func TestRouteModelTierTurn_SwapsToPickedTier(t *testing.T) {
-	p, ts, exec := tierFixture("ultra", "agent:web-abc", nil)
+	p, ts, exec := tierFixture("ultra", "agent:web-abc")
 	if err := p.routeModelTierTurn(ts, exec); err != nil {
 		t.Fatalf("routeModelTierTurn: %v", err)
 	}
@@ -57,18 +58,16 @@ func TestRouteModelTierTurn_NoopCases(t *testing.T) {
 		name       string
 		tier       string
 		sessionKey string
-		media      []string
 	}{
-		{"sem tier escolhido", "", "agent:web-abc", nil},
-		{"tier desconhecido", "turbo", "agent:web-abc", nil},
-		// Visão e cron são restrição de CAPACIDADE; o tier é preferência, e
-		// preferência não sobrepõe capacidade.
-		{"turno com mídia", "ultra", "agent:web-abc", []string{"uploads/foto.png"}},
-		{"sessão de cron", "ultra", CronModelSessionPrefix + "job-1-uuid", nil},
+		{"sem tier escolhido", "", "agent:web-abc"},
+		{"tier desconhecido", "turbo", "agent:web-abc"},
+		// Cron é restrição de CAPACIDADE; o tier é preferência, e preferência
+		// não sobrepõe capacidade. A visão está nos TestRouteTurnModel_*.
+		{"sessão de cron", "ultra", CronModelSessionPrefix + "job-1-uuid"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, ts, exec := tierFixture(tc.tier, tc.sessionKey, tc.media)
+			p, ts, exec := tierFixture(tc.tier, tc.sessionKey)
 			if err := p.routeModelTierTurn(ts, exec); err != nil {
 				t.Fatalf("routeModelTierTurn: %v", err)
 			}
@@ -81,7 +80,7 @@ func TestRouteModelTierTurn_NoopCases(t *testing.T) {
 
 // Tiers desligados (control-plane sem a tabela): o roteador não pode nem tentar.
 func TestRouteModelTierTurn_DisabledWhenNoTiers(t *testing.T) {
-	p, ts, exec := tierFixture("ultra", "agent:web-abc", nil)
+	p, ts, exec := tierFixture("ultra", "agent:web-abc")
 	ts.agent.TierCandidates = nil
 	if err := p.routeModelTierTurn(ts, exec); err != nil {
 		t.Fatalf("routeModelTierTurn: %v", err)
@@ -114,5 +113,316 @@ func TestPendingModelTier_IsPerTurn(t *testing.T) {
 	al.SetPendingModelTier("agent:web-zzz", "")
 	if got := al.takePendingModelTier("agent:web-zzz"); got != "" {
 		t.Fatalf("tier vazio não deveria armar: %q", got)
+	}
+}
+
+// mediaTierFixture mirrors the production shape: the main model is the default
+// tier, the user picked an extra model, and a vision model is configured. The
+// turn runs through routeTurnModel, the same router sequence as the pipeline.
+func mediaTierFixture(
+	delegation bool,
+	vision *recordingVisionProvider,
+	media ...string,
+) (*Pipeline, *turnState, *turnExecution) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ImageModel = "maestro-vision"
+	main := []providers.FallbackCandidate{{Provider: "openai", Model: "maestro-flash"}}
+	agent := &AgentInstance{
+		ID:              "tier-agent",
+		Provider:        vision,
+		MediaDelegation: delegation,
+		Model:           "maestro-flash",
+		Candidates:      main,
+		ImageCandidates: []providers.FallbackCandidate{{Provider: "openai", Model: "maestro-vision"}},
+		TierCandidates: map[string][]providers.FallbackCandidate{
+			"flash":       main,
+			"gpt-6.1-sol": {{Provider: "openai", Model: "gpt-6.1-sol"}},
+		},
+	}
+	ts := &turnState{agent: agent, modelTier: "gpt-6.1-sol", sessionKey: "agent:web-abc", media: media}
+	exec := &turnExecution{
+		activeCandidates: main,
+		activeModel:      "maestro-flash",
+		llmModelName:     "maestro-flash",
+		currentTurnStart: 1,
+		callMessages: []providers.Message{
+			{Role: "system", Content: "system prompt"},
+			{Role: "user", Content: "use the attachment", Media: media},
+		},
+	}
+	return &Pipeline{Cfg: cfg}, ts, exec
+}
+
+// A document never goes to the vision model (it is read through tools), so the
+// turn is a text turn for the main model and must follow the picked tier.
+func TestRouteTurnModel_DocumentAttachmentFollowsPickedTier(t *testing.T) {
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, "uploads/relatorio.pdf")
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (document turns are text turns)", exec.llmModelName)
+	}
+}
+
+// Delegation already turned the image into text; the main model drives the
+// turn, so the main model is the one the user picked.
+func TestRouteTurnModel_DelegatedImageFollowsPickedTier(t *testing.T) {
+	vision := &recordingVisionProvider{resp: "a slide with a chat screenshot"}
+	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if vision.calls != 1 {
+		t.Fatalf("vision calls = %d, want 1 (the image is delegated)", vision.calls)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (the image was delegated)", exec.llmModelName)
+	}
+}
+
+// Without delegation the whole turn is swapped to the vision model, and that
+// is a capability: the picked tier must not take the image away from it.
+func TestRouteTurnModel_SwappedImageStaysOnVisionModel(t *testing.T) {
+	p, ts, exec := mediaTierFixture(false, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" {
+		t.Fatalf("llmModelName = %q, want maestro-vision (vision outranks the tier)", exec.llmModelName)
+	}
+}
+
+func imageCallMessages() []providers.Message {
+	return []providers.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "use the attachment", Media: []string{testImageDataURL}},
+	}
+}
+
+// The production fallback: delegation is on and the vision model refuses the
+// image (prod: 400 "Provided image is not valid" on tool screenshots). Sending
+// the same image to the same model only repeats the refusal and ends the turn,
+// so the picked tier takes the call, with the main context budget.
+func TestRouteTurnModel_RefusedImageFollowsPickedTier(t *testing.T) {
+	p, ts, exec := mediaTierFixture(
+		true,
+		&recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
+		testImageDataURL,
+	)
+	ts.agent.ImageContextWindow = 128_000
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (the vision model refused the image)", exec.llmModelName)
+	}
+	if exec.effectiveContextWindow != 0 {
+		t.Fatalf("effectiveContextWindow = %d, want 0 (the call left the vision model)", exec.effectiveContextWindow)
+	}
+}
+
+// A vision upstream that failed for a moment can still read the image on the
+// swap's retries: the call stays on the vision model, as before the tier.
+func TestRouteTurnModel_TransientDelegationFailureStaysOnVisionModel(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionUnavailable}}
+	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" {
+		t.Fatalf("llmModelName = %q, want maestro-vision (the upstream failed, the image is not refused)",
+			exec.llmModelName)
+	}
+}
+
+// Partial delegation follows what is left raw: a refused image is a note, so
+// the tier answers; an image the upstream failed on keeps the call on the
+// vision model, which never gets back an image it refused.
+func TestRouteTurnModel_PartialDelegationFollowsTheRawImage(t *testing.T) {
+	cases := []struct {
+		name string
+		errs map[int]error
+		want string
+	}{
+		{"second refused", map[int]error{2: errVisionRefusedImage}, "gpt-6.1-sol"},
+		{"second unavailable", map[int]error{2: errVisionUnavailable}, "maestro-vision"},
+		{
+			"first refused, second unavailable",
+			map[int]error{1: errVisionRefusedImage, 2: errVisionUnavailable},
+			"maestro-vision",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vision := &recordingVisionProvider{resp: "a receipt", errAt: tc.errs}
+			p, ts, exec := mediaTierFixture(true, vision)
+			exec.callMessages = twoImageMessages()
+			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+				t.Fatalf("routeTurnModel: %v", err)
+			}
+			if exec.llmModelName != tc.want {
+				t.Fatalf("llmModelName = %q, want %q", exec.llmModelName, tc.want)
+			}
+		})
+	}
+}
+
+// A rejection that is not about the image: resending to the vision model
+// would get the same answer, so the picked tier takes the raw image.
+func TestRouteTurnModel_RejectionNotAboutTheImageFollowsPickedTier(t *testing.T) {
+	vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionInvalidArgument}}
+	p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol", exec.llmModelName)
+	}
+}
+
+// With no tier picked, the same rejection keeps the image on the main model
+// instead of resending it to the vision model, even when an earlier call of
+// the turn left the vision model active.
+func TestRouteTurnModel_RejectionWithoutTierStaysOffTheVisionModel(t *testing.T) {
+	for _, visionActive := range []bool{false, true} {
+		t.Run(map[bool]string{false: "from the main model", true: "vision active from an earlier call"}[visionActive],
+			func(t *testing.T) {
+				vision := &recordingVisionProvider{errAt: map[int]error{1: errVisionInvalidArgument}}
+				p, ts, exec := mediaTierFixture(true, vision, testImageDataURL)
+				ts.modelTier = ""
+				if visionActive {
+					exec.activeCandidates = ts.agent.ImageCandidates
+					exec.activeModel = "maestro-vision"
+					exec.llmModelName = "maestro-vision"
+					exec.effectiveContextWindow = 128_000
+				}
+				if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+					t.Fatalf("routeTurnModel: %v", err)
+				}
+				if exec.llmModelName != "maestro-flash" || exec.effectiveContextWindow != 0 {
+					t.Fatalf("on %q with window %d, want maestro-flash with the main budget",
+						exec.llmModelName, exec.effectiveContextWindow)
+				}
+			})
+	}
+}
+
+// With no tier picked, a refused image no longer sends the call to the vision
+// model that refused it: the image is a note and the main model answers. This
+// was the cron turns' failure (49 "LLM call failed" in 7 days).
+func TestRouteTurnModel_RefusedImageWithoutTierStaysOnMainModel(t *testing.T) {
+	p, ts, exec := mediaTierFixture(
+		true,
+		&recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
+		testImageDataURL,
+	)
+	ts.modelTier = ""
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-flash" {
+		t.Fatalf("llmModelName = %q, want maestro-flash (the refused image is a note now)", exec.llmModelName)
+	}
+}
+
+// The routers run on every LLM call of the turn and the active model carries
+// over between calls. A call pinned to vision must not keep the NEXT call there
+// once the image is text: the tier comes back, with the main context budget.
+func TestRouteTurnModel_TierReturnsOnceTheImageIsDescribed(t *testing.T) {
+	vision := &recordingVisionProvider{resp: "a slide with a chat screenshot"}
+	p, ts, exec := mediaTierFixture(true, vision)
+	ts.agent.ImageContextWindow = 128_000
+	// First call: the image is only a path tag, so there is nothing to delegate
+	// yet and routeMediaTurn swaps the call to the vision model.
+	exec.callMessages = []providers.Message{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "what is on [image:/workspace/slide.png]?"},
+	}
+
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" || exec.effectiveContextWindow != 128_000 {
+		t.Fatalf("first call on %q with window %d, want maestro-vision with 128000",
+			exec.llmModelName, exec.effectiveContextWindow)
+	}
+
+	// Next iteration: the image is resolved, and the sub-call describes it.
+	exec.callMessages = imageCallMessages()
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("second call on %q, want gpt-6.1-sol (the image is text now)", exec.llmModelName)
+	}
+	if exec.effectiveContextWindow != 0 {
+		t.Fatalf("effectiveContextWindow = %d, want 0 (the vision budget left with the vision model)",
+			exec.effectiveContextWindow)
+	}
+}
+
+// An image a TOOL loaded (no attachment from the user) still needs eyes. Before,
+// the tier only checked the user's attachments and took this one off vision.
+func TestRouteTurnModel_ToolLoadedImageStaysOnVisionModel(t *testing.T) {
+	p, ts, exec := mediaTierFixture(false, &recordingVisionProvider{resp: "unused"})
+	exec.callMessages = append(exec.callMessages,
+		providers.Message{Role: "tool", Content: "Image loaded: slide.png"},
+		providers.Message{Role: "user", Content: toolImageFollowUpPlaceholder, Media: []string{testImageDataURL}},
+	)
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "maestro-vision" {
+		t.Fatalf("llmModelName = %q, want maestro-vision (a tool loaded an image)", exec.llmModelName)
+	}
+}
+
+// A multimodal main model can be the image model too. A text turn is then
+// "on the vision candidates" from the start, and still follows the pick.
+func TestRouteTurnModel_VisionModelSharedWithMainStillFollowsTier(t *testing.T) {
+	p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"})
+	ts.agent.ImageCandidates = ts.agent.Candidates
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want gpt-6.1-sol (a text turn needs no vision)", exec.llmModelName)
+	}
+}
+
+// Without an image model, the main model is the only one the config trusts
+// with images: an image call goes to it instead of going raw to the tier —
+// from the main model itself, from the light model, or from the tier an
+// earlier call of the turn picked (a document call, say, before a tool loaded
+// the image).
+func TestRouteTurnModel_ImageWithoutVisionModelStaysOnMainModel(t *testing.T) {
+	cases := []struct {
+		name     string
+		onLight  bool
+		previous string
+	}{
+		{"main model", false, ""},
+		{"light model bypassed", true, "light-model"},
+		{"tier of an earlier call", false, "gpt-6.1-sol"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, ts, exec := mediaTierFixture(true, &recordingVisionProvider{resp: "unused"}, testImageDataURL)
+			ts.agent.ImageCandidates = nil
+			exec.usedLight = tc.onLight
+			if tc.previous != "" {
+				exec.activeCandidates = []providers.FallbackCandidate{{Provider: "openai", Model: tc.previous}}
+				exec.activeModel = tc.previous
+				exec.llmModelName = tc.previous
+			}
+			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+				t.Fatalf("routeTurnModel: %v", err)
+			}
+			if exec.llmModelName != "maestro-flash" {
+				t.Fatalf("llmModelName = %q, want maestro-flash (no image model; only the main model sees)",
+					exec.llmModelName)
+			}
+		})
 	}
 }

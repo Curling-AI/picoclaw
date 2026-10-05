@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -32,6 +33,33 @@ func stripMessageMedia(messages []providers.Message) []providers.Message {
 		stripped[i].Media = nil
 	}
 	return stripped
+}
+
+// unreadableImageNote stands in for an image the vision model refused, so
+// the model answers knowing there was one.
+const unreadableImageNote = "[An image was attached here, but it could not be read.]"
+
+// imageNotSeenNote stands in for an image the model of the call cannot see.
+const imageNotSeenNote = "[An image was attached here, but the model answering cannot see images.]"
+
+// stripImages drops the resolved images of every message, keeps any other
+// attachment, and leaves note where an image was. It reports whether it
+// removed anything.
+func stripImages(messages []providers.Message, note string) ([]providers.Message, bool) {
+	var stripped []providers.Message
+	for i, msg := range messages {
+		if len(dataImages(msg.Media)) == 0 {
+			continue
+		}
+		if stripped == nil {
+			stripped = append([]providers.Message(nil), messages...)
+		}
+		stripped[i] = withImageText(msg, note)
+	}
+	if stripped == nil {
+		return messages, false
+	}
+	return stripped, true
 }
 
 func isVisionUnsupportedError(err error) bool {
@@ -71,9 +99,11 @@ func isVisionUnsupportedError(err error) bool {
 	return false
 }
 
-func visionUnsupportedModelError(modelName string, imageModelConfigured bool) error {
+// visionUnsupportedModelError explains a model refusing image input. Only
+// the image model itself, or a config without one, is an image_model problem.
+func visionUnsupportedModelError(modelName string, onImageModel, imageModelConfigured bool) error {
 	modelName = strings.TrimSpace(modelName)
-	if imageModelConfigured {
+	if onImageModel {
 		if modelName != "" {
 			return fmt.Errorf(
 				"selected vision model %q does not support image input; update agents.defaults.image_model to a multimodal model",
@@ -83,6 +113,9 @@ func visionUnsupportedModelError(modelName string, imageModelConfigured bool) er
 		return fmt.Errorf(
 			"selected vision model does not support image input; update agents.defaults.image_model to a multimodal model",
 		)
+	}
+	if imageModelConfigured {
+		return fmt.Errorf("active model %q does not support image input", modelName)
 	}
 	if modelName != "" {
 		return fmt.Errorf(
@@ -143,10 +176,14 @@ func messagesContainCurrentTurnMediaTurn(messages []providers.Message) bool {
 	return false
 }
 
-func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
+// routeMediaTurn reports whether THIS call carries media that needs eyes. Such
+// a call stays on the model routed here — the vision model, or the main model
+// when none is configured, the only one the config then trusts with images —
+// and the user's tier must not move it. (seucaranguejo fork)
+func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) (bool, error) {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil ||
 		!messagesContainCurrentTurnMediaTurn(currentTurnMessages(exec.callMessages, exec.currentTurnStart)) {
-		return nil
+		return false, nil
 	}
 
 	var targetCandidates []providers.FallbackCandidate
@@ -167,16 +204,22 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		if ts.agent.ImageContextWindow > 0 {
 			exec.effectiveContextWindow = ts.agent.ImageContextWindow
 		}
-	case exec.usedLight && len(ts.agent.Candidates) > 0:
+	case len(ts.agent.Candidates) > 0:
+		// No image model: the main model is the only one the config trusts with
+		// images. The active model can be the light one, or a tier an earlier
+		// call of the turn picked; both come back to it.
 		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.Candidates...)
 		targetModelName = strings.TrimSpace(ts.agent.Model)
-		routeReason = "bypass_light_model_for_media"
+		routeReason = "main_model_for_media"
+		if exec.usedLight {
+			routeReason = "bypass_light_model_for_media"
+		}
 	default:
-		return nil
+		return true, nil
 	}
 
 	if len(targetCandidates) == 0 {
-		return nil
+		return true, nil
 	}
 
 	targetModel := resolvedCandidateModel(targetCandidates, targetModelName)
@@ -188,7 +231,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		ts.agent.Candidates,
 		firstCandidate,
 	); err != nil {
-		return err
+		return false, err
 	} else if provider != nil {
 		targetProvider = provider
 	}
@@ -197,7 +240,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
 		exec.activeModel == targetModel &&
 		exec.llmModelName == resolvedModelName {
-		return nil
+		return true, nil
 	}
 
 	exec.activeCandidates = targetCandidates
@@ -222,7 +265,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 		"messages_count": len(exec.callMessages),
 	})
 
-	return nil
+	return true, nil
 }
 
 // turnContextWindow returns the context budget for the model actually serving
@@ -311,15 +354,130 @@ func (p *Pipeline) routeCronModelTurn(ts *turnState, exec *turnExecution) error 
 	return nil
 }
 
+// routeTurnModel picks the model for this LLM call. The order is the contract:
+// the routers that enforce a CAPABILITY (vision, cron) run before the user's
+// tier, which is only a preference. (seucaranguejo fork)
+func (p *Pipeline) routeTurnModel(ctx context.Context, ts *turnState, exec *turnExecution) error {
+	// Auto-delegation: for image turns, prefer a bounded vision sub-call over
+	// swapping the whole turn to the vision model. Falls back to routeMediaTurn's
+	// swap when disabled or when nothing was delegated.
+	delegation, err := p.delegateMediaTurn(ctx, ts, exec)
+	if err != nil {
+		return err
+	}
+	needsEyes := false
+	switch delegation {
+	case delegationDone:
+	case delegationRejected:
+		// The vision model rejected the sub-call for a reason that is not the
+		// image and would reject this call too: the image goes to the main
+		// model, or to the tier picked below, and one that cannot see gets the
+		// call again without it (CallLLM).
+		if err = p.routeOffVisionModel(ts, exec); err != nil {
+			return err
+		}
+	default:
+		if needsEyes, err = p.routeMediaTurn(ts, exec); err != nil {
+			return err
+		}
+	}
+	if err := p.routeCronModelTurn(ts, exec); err != nil {
+		return err
+	}
+	// Decided per call, not from the active model: that one carries over from
+	// the previous call, and a call that needed eyes does not make the next
+	// one need them. An image the vision model refused is a note by now; one
+	// left raw by an upstream failing for a moment stays with the vision model,
+	// whose retries can still read it.
+	if needsEyes {
+		return nil
+	}
+	return p.routeModelTierTurn(ts, exec)
+}
+
+// routeOffVisionModel puts the call on the main model, whatever an earlier
+// call of the turn left active. (seucaranguejo fork)
+func (p *Pipeline) routeOffVisionModel(ts *turnState, exec *turnExecution) error {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil || len(ts.agent.Candidates) == 0 {
+		return nil
+	}
+	changed, err := p.activateModel(ts, exec, ts.agent.Candidates, strings.TrimSpace(ts.agent.Model))
+	if err != nil || !changed {
+		return err
+	}
+	logger.InfoCF("agent", "Media turn routing selected model", map[string]any{
+		"agent_id":   ts.agent.ID,
+		"reason":     "vision_rejected_the_call",
+		"model":      exec.activeModel,
+		"model_name": exec.llmModelName,
+	})
+	return nil
+}
+
+// activateModel makes candidates the model of this call, with the agent's
+// context budget rather than the vision model's, and reports whether anything
+// changed. (seucaranguejo fork)
+func (p *Pipeline) activateModel(
+	ts *turnState,
+	exec *turnExecution,
+	candidates []providers.FallbackCandidate,
+	modelName string,
+) (bool, error) {
+	candidates = append([]providers.FallbackCandidate(nil), candidates...)
+	targetModel := resolvedCandidateModel(candidates, modelName)
+	targetProvider := exec.activeProvider
+	if provider, err := providerForFallbackCandidate(
+		ts.agent,
+		ts.agent.Provider,
+		candidates,
+		candidates[0],
+	); err != nil {
+		return false, err
+	} else if provider != nil {
+		targetProvider = provider
+	}
+
+	resolvedModelName := resolvedCandidateModelName(candidates, modelName)
+	if sameCandidateSet(exec.activeCandidates, candidates) &&
+		exec.activeModel == targetModel &&
+		exec.llmModelName == resolvedModelName {
+		return false, nil
+	}
+
+	exec.activeCandidates = candidates
+	exec.activeModel = targetModel
+	exec.activeProvider = targetProvider
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		candidates,
+		targetModel,
+		p.Cfg.Agents.Defaults.Provider,
+	)
+	exec.llmModelName = resolvedModelName
+	exec.usedLight = false
+	// A vision budget routeMediaTurn pinned on an earlier call belongs to the
+	// vision model, not to the model taking over.
+	exec.effectiveContextWindow = 0
+	return true, nil
+}
+
 // routeModelTierTurn swaps the active model to the tier the USER picked in the
 // composer (turnState.modelTier, armed via SetPendingModelTier). Third sibling
 // of routeMediaTurn/routeCronModelTurn, and the same swap.
 //
-// It gives way to both of them, on purpose: a media turn is pinned to the
-// vision model and a cron turn to the cron model because those are CAPABILITY
-// constraints, while the tier is a user preference. Preference does not get to
-// override capability — a photo sent while "Ultra" is selected still has to go
-// to a model that can see it. (seucaranguejo fork)
+// It gives way to both of them, on purpose: a call carrying an image that
+// routeMediaTurn kept on a model that can see it, and a cron turn pinned to the
+// cron model, are CAPABILITY constraints, while the tier is a user preference.
+// Preference does not get to override capability — a photo sent while "Ultra"
+// is selected still has to go to a model that can see it. routeTurnModel
+// enforces the media half; an image the vision model refused is a note and
+// needs nobody's eyes.
+//
+// Carrying media is not the same as needing vision: a document is read through
+// tools, and an image delegateMediaTurn already described is text by now. Both
+// stay on the main model, and the main model is the picked tier.
+// (seucaranguejo fork)
 func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
 		return nil
@@ -333,10 +491,6 @@ func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error 
 	if strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) {
 		return nil
 	}
-	// Media already swapped this turn to the vision model.
-	if len(ts.media) > 0 {
-		return nil
-	}
 	targetCandidates := ts.agent.TierCandidates[tier]
 	if len(targetCandidates) == 0 {
 		// Tier desconhecido (config mudou entre o envio e o turno): fica no
@@ -347,41 +501,10 @@ func (p *Pipeline) routeModelTierTurn(ts *turnState, exec *turnExecution) error 
 		})
 		return nil
 	}
-	targetCandidates = append([]providers.FallbackCandidate(nil), targetCandidates...)
-
-	firstCandidate := targetCandidates[0]
-	targetModel := resolvedCandidateModel(targetCandidates, firstCandidate.Model)
-	targetProvider := exec.activeProvider
-	if provider, err := providerForFallbackCandidate(
-		ts.agent,
-		ts.agent.Provider,
-		targetCandidates,
-		firstCandidate,
-	); err != nil {
+	changed, err := p.activateModel(ts, exec, targetCandidates, targetCandidates[0].Model)
+	if err != nil || !changed {
 		return err
-	} else if provider != nil {
-		targetProvider = provider
 	}
-
-	resolvedModelName := resolvedCandidateModelName(targetCandidates, firstCandidate.Model)
-	if sameCandidateSet(exec.activeCandidates, targetCandidates) &&
-		exec.activeModel == targetModel &&
-		exec.llmModelName == resolvedModelName {
-		return nil
-	}
-
-	exec.activeCandidates = targetCandidates
-	exec.activeModel = targetModel
-	exec.activeProvider = targetProvider
-	exec.activeModelConfig = resolveActiveModelConfig(
-		p.Cfg,
-		ts.agent.Workspace,
-		targetCandidates,
-		targetModel,
-		p.Cfg.Agents.Defaults.Provider,
-	)
-	exec.llmModelName = resolvedModelName
-	exec.usedLight = false
 
 	logger.InfoCF("agent", "Model tier routing selected model", map[string]any{
 		"agent_id":    ts.agent.ID,

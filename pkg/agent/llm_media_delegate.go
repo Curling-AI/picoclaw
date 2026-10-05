@@ -57,36 +57,71 @@ type mediaImageTarget struct {
 	images []string
 }
 
-// delegateMediaTurn implements auto-delegation. It returns (true, nil) when it
-// analyzed >=1 image and rewrote exec.callMessages (the caller then SKIPS
-// routeMediaTurn). It returns (false, nil) when delegation is disabled, no
-// vision model is configured, the current turn carries no resolved image, or a
-// sub-call failed before anything was analyzed — in every such case the caller
+// delegationOutcome is what delegateMediaTurn did with the call's images.
+type delegationOutcome int
+
+const (
+	// delegationSkipped: delegation is off, no vision model is configured, or
+	// the call carries no resolved image.
+	delegationSkipped delegationOutcome = iota
+	// delegationDone: every image of the call is text now, a description or,
+	// for an image the vision model refused, unreadableImageNote.
+	delegationDone
+	// delegationFailed: an image stayed raw because the vision upstream failed
+	// for a moment (timeout, 5xx, 429, network) or the turn was canceled.
+	// Another try can work.
+	delegationFailed
+	// delegationRejected: an image stayed raw because the vision model rejected
+	// the sub-call for a reason that says nothing about the image (prod: 400
+	// "Request contains an invalid argument"). Sending it back would get the
+	// same answer, but another model may still read the image.
+	delegationRejected
+)
+
+// isImageRefusal reports whether a vision sub-call error is about the image
+// itself, the only kind that makes it unreadable for the turn. These are the
+// rejections seen in prod; anything else is not proof against the image.
+func isImageRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "provided image is not valid") ||
+		strings.Contains(msg, "malformed or corrupted") ||
+		strings.Contains(msg, "could not be decoded") ||
+		strings.Contains(msg, "status: 413") ||
+		strings.Contains(msg, "request entity too large")
+}
+
+// delegateMediaTurn implements auto-delegation. Every image it can settle
+// becomes text in exec.callMessages, even when another one of the call
+// fails: a description, or unreadableImageNote for an image the vision model
+// refused as such (isImageRefusal; prod: 400 "Provided image is not valid" on
+// tool screenshots), which then stays refused for the rest of the turn. On
+// delegationDone the caller SKIPS routeMediaTurn; on the other outcomes it
 // falls back to the legacy routeMediaTurn swap (graceful degradation).
-func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *turnExecution) (bool, error) {
+func (p *Pipeline) delegateMediaTurn(
+	ctx context.Context,
+	ts *turnState,
+	exec *turnExecution,
+) (delegationOutcome, error) {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
-		return false, nil
+		return delegationSkipped, nil
 	}
 	if !ts.agent.MediaDelegation || len(ts.agent.ImageCandidates) == 0 {
-		return false, nil
+		return delegationSkipped, nil
 	}
 
 	start := normalizeCurrentTurnStart(exec.callMessages, exec.currentTurnStart)
 	var targets []mediaImageTarget
 	for idx := start; idx < len(exec.callMessages); idx++ {
-		var imgs []string
-		for _, ref := range exec.callMessages[idx].Media {
-			if strings.HasPrefix(ref, dataImageURLPrefix) {
-				imgs = append(imgs, ref)
-			}
-		}
-		if len(imgs) > 0 {
+		if imgs := dataImages(exec.callMessages[idx].Media); len(imgs) > 0 {
 			targets = append(targets, mediaImageTarget{idx: idx, images: imgs})
 		}
 	}
 	if len(targets) == 0 {
 		// Path-tag-only (image not loaded yet) or no media: nothing to analyze.
-		return false, nil
+		return delegationSkipped, nil
 	}
 
 	// Resolve the vision provider/model, mirroring routeMediaTurn.
@@ -103,7 +138,7 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 			"agent_id": ts.agent.ID,
 			"error":    fmt.Sprint(err),
 		})
-		return false, nil
+		return delegationSkipped, nil
 	}
 
 	brief := delegationBrief(exec.callMessages, start, targets)
@@ -111,51 +146,142 @@ func (p *Pipeline) delegateMediaTurn(ctx context.Context, ts *turnState, exec *t
 	if exec.mediaAnalysisCache == nil {
 		exec.mediaAnalysisCache = map[string]string{}
 	}
+	if exec.unreadableImages == nil {
+		exec.unreadableImages = map[string]struct{}{}
+	}
 
 	// Detach callMessages from exec.messages' backing array before rewriting, so
 	// the next iteration re-resolves the image from the untouched working set
 	// (and hits the memo cache rather than re-billing the vision model).
 	rewritten := append([]providers.Message(nil), exec.callMessages...)
 
-	analyzed := 0
+	settled := 0
+	upstreamDown, rejected := false, false
 	for _, t := range targets {
 		key := hashImages(t.images)
-		analysis, ok := exec.mediaAnalysisCache[key]
-		if !ok {
+		text, known := knownImageText(exec, key, resolvedModelName)
+		if !known && !upstreamDown {
 			a, callErr := p.callVisionDelegate(ctx, ts, visionProvider, targetModel, brief, t.images)
+			// A canceled turn is not the vision model refusing the image.
+			_, transient := transientLLMRetryReason(callErr)
+			transient = transient || (callErr != nil && ctx.Err() != nil)
+			switch {
+			case callErr == nil:
+				exec.mediaAnalysisCache[key] = a
+			case isImageRefusal(callErr):
+				exec.unreadableImages[key] = struct{}{}
+			default:
+				// The upstream is struggling, or rejecting calls for a reason
+				// that is not this image: no more sub-calls this time, but what
+				// the memo already knows still applies.
+				upstreamDown = true
+				rejected = rejected || !transient
+			}
 			if callErr != nil {
 				logger.WarnCF("agent", "Media delegation sub-call failed", map[string]any{
-					"agent_id":   ts.agent.ID,
-					"model_name": resolvedModelName,
-					"error":      callErr.Error(),
+					"agent_id":      ts.agent.ID,
+					"model_name":    resolvedModelName,
+					"transient":     transient,
+					"image_refused": isImageRefusal(callErr),
+					"error":         callErr.Error(),
 				})
-				if analyzed == 0 {
-					// Nothing salvaged: let the whole turn fall back to the swap.
-					return false, nil
-				}
-				continue
 			}
-			analysis = a
-			exec.mediaAnalysisCache[key] = analysis
+			text, known = knownImageText(exec, key, resolvedModelName)
 		}
-		msg := rewritten[t.idx]
-		msg.Media = stripDataImages(msg.Media)
-		msg.Content = injectVisionAnalysis(msg.Content, analysis, resolvedModelName)
-		rewritten[t.idx] = msg
-		analyzed++
-	}
-	if analyzed == 0 {
-		return false, nil
+		if !known {
+			continue
+		}
+		rewritten[t.idx] = withImageText(rewritten[t.idx], text)
+		settled++
 	}
 
+	outcome := delegationDone
+	switch {
+	case settled == len(targets):
+	case rejected:
+		outcome = delegationRejected
+	default:
+		outcome = delegationFailed
+	}
+	if settled == 0 {
+		return outcome, nil
+	}
 	exec.callMessages = rewritten
 	logger.InfoCF("agent", "Media turn delegated to vision model", map[string]any{
 		"agent_id":       ts.agent.ID,
 		"model_name":     resolvedModelName,
 		"images":         len(targets),
+		"settled":        settled,
 		"messages_count": len(exec.callMessages),
 	})
-	return true, nil
+	return outcome, nil
+}
+
+// withKnownImageText returns messages with what this turn already knows about
+// each image a rebuild of the call (context retry) brought back raw, wherever
+// it sits: its description, or unreadableImageNote. Memo only: no vision
+// call, and messages itself is left untouched.
+func (p *Pipeline) withKnownImageText(
+	ts *turnState,
+	exec *turnExecution,
+	messages []providers.Message,
+) []providers.Message {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil {
+		return messages
+	}
+	modelName := resolvedCandidateModelName(
+		ts.agent.ImageCandidates,
+		strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel),
+	)
+	var rewritten []providers.Message
+	for i, msg := range messages {
+		images := dataImages(msg.Media)
+		if len(images) == 0 {
+			continue
+		}
+		text, known := knownImageText(exec, hashImages(images), modelName)
+		if !known {
+			continue
+		}
+		if rewritten == nil {
+			rewritten = append([]providers.Message(nil), messages...)
+		}
+		rewritten[i] = withImageText(msg, text)
+	}
+	if rewritten == nil {
+		return messages
+	}
+	return rewritten
+}
+
+// knownImageText is what the turn already knows about the image(s) behind
+// key: the vision model's description, or unreadableImageNote if it refused.
+func knownImageText(exec *turnExecution, key, modelName string) (string, bool) {
+	if analysis, ok := exec.mediaAnalysisCache[key]; ok {
+		return visionAnalysisText(analysis, modelName), true
+	}
+	if _, ok := exec.unreadableImages[key]; ok {
+		return unreadableImageNote, true
+	}
+	return "", false
+}
+
+// dataImages returns the resolved image data URLs among a message's media.
+func dataImages(media []string) []string {
+	var images []string
+	for _, ref := range media {
+		if strings.HasPrefix(ref, dataImageURLPrefix) {
+			images = append(images, ref)
+		}
+	}
+	return images
+}
+
+// withImageText drops msg's resolved images and puts text where they were.
+func withImageText(msg providers.Message, text string) providers.Message {
+	msg.Media = stripDataImages(msg.Media)
+	msg.Content = injectImageText(msg.Content, text)
+	return msg
 }
 
 // callVisionDelegate makes the bounded, one-shot vision sub-call.
@@ -254,15 +380,24 @@ func stripDataImages(media []string) []string {
 // injectVisionAnalysis replaces a throwaway image placeholder with the analysis,
 // or appends the analysis to real content.
 func injectVisionAnalysis(content, analysis, modelName string) string {
+	return injectImageText(content, visionAnalysisText(analysis, modelName))
+}
+
+// visionAnalysisText labels a vision description with the model that wrote it.
+func visionAnalysisText(analysis, modelName string) string {
 	label := "[Vision analysis"
 	if strings.TrimSpace(modelName) != "" {
 		label += " (" + modelName + ")"
 	}
-	label += "]:\n" + analysis
+	return label + "]:\n" + analysis
+}
 
+// injectImageText replaces a throwaway image placeholder with text, or appends
+// it to real content.
+func injectImageText(content, text string) string {
 	content = strings.TrimSpace(content)
 	if content == "" || content == toolImageFollowUpPlaceholder {
-		return label
+		return text
 	}
-	return content + "\n\n" + label
+	return content + "\n\n" + text
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -48,6 +49,24 @@ func TestMatchingTurnMessageTail_IgnoresInternalRuntimeFields(t *testing.T) {
 
 	if got := matchingTurnMessageTail(history, persisted); got != 2 {
 		t.Fatalf("matchingTurnMessageTail() = %d, want 2", got)
+	}
+}
+
+// The session stamps CreatedAt on what it stores and the turn's own copy has
+// none (or one that lost its monotonic clock in the JSONL round trip). That
+// must not hide the active turn, or a context-retry rebuild treats it as
+// history.
+func TestMatchingTurnMessageTail_IgnoresCreatedAt(t *testing.T) {
+	stamped := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	history := []providers.Message{
+		{Role: "user", Content: "older"},
+		{Role: "user", Content: "question", Media: []string{"media://abc"}, CreatedAt: &stamped},
+	}
+	persisted := []providers.Message{
+		{Role: "user", Content: "question", Media: []string{"media://abc"}},
+	}
+	if got := matchingTurnMessageTail(history, persisted); got != 1 {
+		t.Fatalf("matchingTurnMessageTail() = %d, want 1", got)
 	}
 }
 

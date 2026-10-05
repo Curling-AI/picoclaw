@@ -207,22 +207,7 @@ func (p *Pipeline) CallLLM(
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}
-	// Auto-delegation (seucaranguejo fork): for image turns, prefer a bounded
-	// vision sub-call over swapping the whole turn to the vision model. Falls
-	// back to routeMediaTurn's swap when disabled or when nothing was delegated.
-	if delegated, derr := p.delegateMediaTurn(ctx, ts, exec); derr != nil {
-		return ControlBreak, derr
-	} else if !delegated {
-		if err := p.routeMediaTurn(ts, exec); err != nil {
-			return ControlBreak, err
-		}
-	}
-	if err := p.routeCronModelTurn(ts, exec); err != nil {
-		return ControlBreak, err
-	}
-	// Por último: o tier escolhido pelo usuário cede aos dois acima, que são
-	// restrições de capacidade (visão, cron) e não preferência.
-	if err := p.routeModelTierTurn(ts, exec); err != nil {
+	if err := p.routeTurnModel(ctx, ts, exec); err != nil {
 		return ControlBreak, err
 	}
 
@@ -473,6 +458,21 @@ func (p *Pipeline) CallLLM(
 	if backoffSecs <= 0 {
 		backoffSecs = 2
 	}
+	// Set once this call learned that its model cannot read the images the
+	// vision model left raw; a context rebuild brings them back. (fork)
+	imagesUnreadable := false
+	// callView is what a context rebuild actually sends: the rebuild resolves
+	// images again, raw, but the model was picked for the described call and
+	// may already have shown it cannot read the rest. The guard and the trim
+	// measure through it, so a description longer than the raw image's
+	// estimate still makes room for itself. (seucaranguejo fork)
+	callView := func(messages []providers.Message) []providers.Message {
+		messages = p.withKnownImageText(ts, exec, messages)
+		if imagesUnreadable {
+			messages, _ = stripImages(messages, imageNotSeenNote)
+		}
+		return messages
+	}
 	for retry := 0; retry <= maxRetries; retry++ {
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
@@ -493,8 +493,40 @@ func (p *Pipeline) CallLLM(
 		}
 
 		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {
+			onImageModel := len(ts.agent.ImageCandidates) > 0 &&
+				sameCandidateSet(exec.activeCandidates, ts.agent.ImageCandidates)
+			// With a vision model configured, a raw image can still reach another
+			// model: one the vision model could not take for a moment, or an
+			// inline image from an earlier turn, which delegation never sees. The
+			// config does not say which models read images, so this is where we
+			// learn it: answer without them instead of ending the turn, as
+			// askSideQuestion does. Once per call, and outside the retry budget,
+			// which belongs to the provider errors below. (seucaranguejo fork)
+			withoutImages, stripped := stripImages(exec.callMessages, imageNotSeenNote)
+			if stripped && !imagesUnreadable && len(ts.agent.ImageCandidates) > 0 && !onImageModel {
+				al.emitEvent(
+					runtimeevents.KindAgentLLMRetry,
+					ts.eventMeta("runTurn", "turn.llm.retry"),
+					LLMRetryPayload{
+						Attempt:    retry + 1,
+						MaxRetries: maxRetries,
+						Reason:     "vision_unsupported",
+						Error:      err.Error(),
+					},
+				)
+				logger.WarnCF("agent", "Model cannot read images; retrying the call without them", map[string]any{
+					"agent_id":   ts.agent.ID,
+					"model_name": exec.llmModelName,
+					"error":      err.Error(),
+				})
+				exec.callMessages = withoutImages
+				imagesUnreadable = true
+				retry--
+				continue
+			}
 			return ControlBreak, visionUnsupportedModelError(
 				exec.llmModelName,
+				onImageModel,
 				len(ts.agent.ImageCandidates) > 0,
 			)
 		}
@@ -583,7 +615,7 @@ func (p *Pipeline) CallLLM(
 				req := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				req.ActiveSkills = append([]string(nil), guardSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
-				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail))
+				return callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail)))
 			}
 			// Compact/trim to the model actually serving this turn: a media turn
 			// routed to the small-context vision model needs its (128K) budget, not
@@ -656,7 +688,7 @@ func (p *Pipeline) CallLLM(
 			trimmedStableHistory, exec.callMessages, fit = trimHistoryToFitContextWindow(
 				stableHistory,
 				func(trimmedHistory []providers.Message) []providers.Message {
-					rebuilt := buildMessages(trimmedHistory)
+					rebuilt := callView(buildMessages(trimmedHistory))
 					if exec.gracefulTerminal {
 						return append(append([]providers.Message(nil), rebuilt...), ts.interruptHintMessage())
 					}
@@ -670,7 +702,7 @@ func (p *Pipeline) CallLLM(
 			exec.messages = buildMessages(trimmedStableHistory)
 			exec.currentTurnStart = len(exec.messages) - len(protectedTurnTail)
 			if exec.gracefulTerminal {
-				msgs := append([]providers.Message(nil), exec.messages...)
+				msgs := append([]providers.Message(nil), callView(exec.messages)...)
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
 			}
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
