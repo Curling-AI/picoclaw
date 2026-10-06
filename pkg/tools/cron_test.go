@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -857,7 +859,7 @@ func TestCronTool_AllowlistedRemoteCanManageOwnCommandJob(t *testing.T) {
 			tool := newTestCronToolWithConfig(t, cfg)
 			job := addTestCronJob(t, tool, "command", "telegram", "chat-1", "df -h")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			ctx := WithToolContext(context.Background(), "telegram", "chat-1")
 
@@ -939,7 +941,7 @@ func TestCronTool_InternalChannelCanManageAllJobs(t *testing.T) {
 			tool := newTestCronTool(t)
 			job := addTestCronJob(t, tool, "command", "telegram", "chat-1", "df -h")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			ctx := WithToolContext(context.Background(), "cli", "direct")
 
@@ -973,7 +975,7 @@ func TestCronTool_RemoteCanManageOwnNonCommandJob(t *testing.T) {
 			tool := newTestCronTool(t)
 			job := addTestCronJob(t, tool, "reminder", "telegram", "chat-1", "")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			ctx := WithToolContext(context.Background(), "telegram", "chat-1")
 
@@ -993,7 +995,7 @@ func TestCronTool_WildcardRemoteCanManageOwnCommandJob(t *testing.T) {
 			tool := newTestCronToolWithConfig(t, cfg)
 			job := addTestCronJob(t, tool, "command", "telegram", "chat-1", "df -h")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			other := addTestCronJob(t, tool, "other", "telegram", "chat-2", "uptime")
 			ctx := WithToolContext(context.Background(), "telegram", "chat-1")
@@ -1294,5 +1296,151 @@ func TestCronTool_ExecuteJobReturnsErrorWithoutPublish(t *testing.T) {
 
 	if executor.publishedResp != "" {
 		t.Fatalf("unexpected publish on error path: %q", executor.publishedResp)
+	}
+}
+
+// A channel whose chat_id changes on every request (one id per run) used to
+// lose its jobs on the next message: add, then "not accessible" on update.
+func TestCronTool_AccessPolicyReachesJobsFromOtherChats(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(ctx context.Context, _ *cron.CronJob) bool {
+		return ToolChannel(ctx) == "rpc"
+	})
+	job := addTestCronJob(t, tool, "hourly", "rpc", "run-1", "")
+	ctx := WithToolContext(context.Background(), "rpc", "run-2")
+
+	if result := tool.Execute(ctx, map[string]any{"action": "list"}); !strings.Contains(result.ForLLM, job.ID) {
+		t.Fatalf("list should include the job, got: %s", result.ForLLM)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "get", "job_id": job.ID}); result.IsError {
+		t.Fatalf("get failed: %s", result.ForLLM)
+	}
+	update := tool.Execute(ctx, map[string]any{
+		"action": "update", "job_id": job.ID, "every_seconds": float64(1800),
+	})
+	if update.IsError {
+		t.Fatalf("update failed: %s", update.ForLLM)
+	}
+	if got := parseCronJobResult(t, update).Schedule.EveryMS; got == nil || *got != 1_800_000 {
+		t.Fatalf("EveryMS = %v, want 1800000", got)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "disable", "job_id": job.ID}); result.IsError {
+		t.Fatalf("disable failed: %s", result.ForLLM)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "remove", "job_id": job.ID}); result.IsError {
+		t.Fatalf("remove failed: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_AccessPolicyKeepsCommandAllowance(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(context.Context, *cron.CronJob) bool { return true })
+	job := addTestCronJob(t, tool, "command", "rpc", "run-1", "df -h")
+	ctx := WithToolContext(context.Background(), "rpc", "run-2")
+
+	update := tool.Execute(ctx, map[string]any{"action": "update", "job_id": job.ID, "message": "changed"})
+	if !update.IsError || !strings.Contains(update.ForLLM, "not accessible") {
+		t.Fatalf("expected inaccessible update, got: %+v", update)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "list"}); strings.Contains(result.ForLLM, job.ID) {
+		t.Fatalf("list should not include the command job, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_AccessPolicyDoesNotNarrowOwnChat(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(context.Context, *cron.CronJob) bool { return false })
+	job := addTestCronJob(t, tool, "own", "telegram", "chat-1", "")
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+
+	if result := tool.Execute(ctx, map[string]any{"action": "get", "job_id": job.ID}); result.IsError {
+		t.Fatalf("get of own job failed: %s", result.ForLLM)
+	}
+}
+
+// Without this the agent read "not accessible" as "the job is gone" and added
+// a second one next to the original.
+func TestCronTool_RefusalDiscouragesReplacementJob(t *testing.T) {
+	tool := newTestCronTool(t)
+	other := addTestCronJob(t, tool, "other", "telegram", "chat-1", "")
+	ctx := WithToolContext(context.Background(), "telegram", "chat-2")
+
+	for _, action := range []string{"get", "update", "remove", "enable", "disable"} {
+		refusal := tool.Execute(ctx, map[string]any{"action": action, "job_id": other.ID, "message": "x"})
+		if !refusal.IsError || !strings.Contains(refusal.ForLLM, "Do not add a replacement") {
+			t.Fatalf("%s refusal should discourage a replacement, got: %+v", action, refusal)
+		}
+	}
+}
+
+// Jobs without a remote chat run on an internal channel; a policy that let a
+// remote turn edit them would lend it internal privileges.
+func TestCronTool_AccessPolicyNeverCoversJobsWithoutARemoteChat(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(context.Context, *cron.CronJob) bool { return true })
+	ctx := WithToolContext(context.Background(), "rpc", "run-2")
+
+	for _, owner := range []string{"", "cli", "system", "subagent"} {
+		job := addTestCronJob(t, tool, "ownerless-"+owner, owner, "", "")
+		update := tool.Execute(ctx, map[string]any{"action": "update", "job_id": job.ID, "message": "rewritten"})
+		if !update.IsError || !strings.Contains(update.ForLLM, "not accessible") {
+			t.Fatalf("channel %q: expected inaccessible update, got: %+v", owner, update)
+		}
+		if list := tool.Execute(ctx, map[string]any{"action": "list"}); strings.Contains(list.ForLLM, job.ID) {
+			t.Fatalf("channel %q: list should not include the job, got: %s", owner, list.ForLLM)
+		}
+	}
+}
+
+// A job paused in one turn must still be listed in the next, or the agent
+// cannot find it to re-enable and adds a new one instead.
+func TestCronTool_ListShowsDisabledJobsSoTheyCanBeReEnabled(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(ctx context.Context, _ *cron.CronJob) bool {
+		return ToolChannel(ctx) == "rpc"
+	})
+	job := addTestCronJob(t, tool, "hourly", "rpc", "run-1", "")
+	if result := tool.Execute(WithToolContext(context.Background(), "rpc", "run-2"),
+		map[string]any{"action": "disable", "job_id": job.ID}); result.IsError {
+		t.Fatalf("disable failed: %s", result.ForLLM)
+	}
+
+	ctx := WithToolContext(context.Background(), "rpc", "run-3")
+	list := tool.Execute(ctx, map[string]any{"action": "list"})
+	if !strings.Contains(list.ForLLM, fmt.Sprintf("(id: %s, every 60s, disabled)", job.ID)) {
+		t.Fatalf("list should show the disabled job, got: %s", list.ForLLM)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "enable", "job_id": job.ID}); result.IsError {
+		t.Fatalf("enable failed: %s", result.ForLLM)
+	}
+}
+
+// The agent used to hear "removed"/"disabled" while the store kept the job,
+// which came back on the next restart and kept charging.
+func TestCronTool_ReportsAFailedSave(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs directory permissions to be enforced")
+	}
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron.json")
+	tool, err := NewCronTool(cron.NewCronService(storePath, nil), nil, bus.NewMessageBus(), t.TempDir(), true, 0,
+		config.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := addTestCronJob(t, tool, "a", "telegram", "chat-1", "")
+	if err := os.Chmod(storePath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+
+	for _, action := range []string{"remove", "disable"} {
+		if result := tool.Execute(ctx, map[string]any{"action": action, "job_id": job.ID}); !result.IsError {
+			t.Fatalf("%s reported success although the store was not saved: %s", action, result.ForLLM)
+		}
 	}
 }

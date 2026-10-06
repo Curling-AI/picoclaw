@@ -24,6 +24,18 @@ type JobExecutor interface {
 	PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string)
 }
 
+// JobAccessPolicy lets a remote turn reach a job created in another chat.
+//
+// The built-in rule pairs a job with the channel/chat_id that created it, which
+// assumes chat_id names the conversation. An embedder whose chat_id is not
+// stable (one id per request, for instance) but who knows the turn speaks for
+// the owner can widen access here. It never bypasses the command allowance and
+// is never asked about jobs without a remote chat (empty or internal channel):
+// those run on an internal channel, so editing one would lend the turn internal
+// privileges. It runs between reading a job and writing it back, so it must be
+// fast and must not block.
+type JobAccessPolicy func(ctx context.Context, job *cron.CronJob) bool
+
 // CronTool provides scheduling capabilities for the agent
 type CronTool struct {
 	cronService           *cron.CronService
@@ -33,6 +45,7 @@ type CronTool struct {
 	allowCommand          bool
 	execEnabled           bool
 	commandAllowedRemotes []string
+	accessPolicy          JobAccessPolicy
 }
 
 // NewCronTool creates a new CronTool
@@ -73,6 +86,12 @@ func NewCronTool(
 	}, nil
 }
 
+// SetJobAccessPolicy installs policy (nil restores the built-in rule). Call it
+// while wiring, before the tool serves turns: the field is read unguarded.
+func (t *CronTool) SetJobAccessPolicy(policy JobAccessPolicy) {
+	t.accessPolicy = policy
+}
+
 // Name returns the tool name
 func (t *CronTool) Name() string {
 	return "cron"
@@ -98,7 +117,7 @@ func (t *CronTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "list", "get", "update", "remove", "enable", "disable"},
-				"description": "Action to perform. Use 'get' before editing and 'update' to change existing jobs without losing their payload. Remote channels can only list/get/update jobs for the current channel/chat_id.",
+				"description": "Action to perform. Use 'get' before editing and 'update' to change existing jobs without losing their payload. Remote channels may be limited to the jobs of the current chat.",
 			},
 			"name": map[string]any{
 				"type":        "string",
@@ -259,7 +278,9 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 }
 
 func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
-	jobs := t.cronService.ListJobs(false)
+	// Paused jobs are listed too: hidden, a job disabled in one turn could not be
+	// found to re-enable in the next, and the agent added a new one instead.
+	jobs := t.cronService.ListJobs(true)
 
 	var accessibleJobs []cron.CronJob
 	for _, job := range jobs {
@@ -286,10 +307,20 @@ func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
 		} else {
 			scheduleInfo = "unknown"
 		}
+		if !j.Enabled {
+			scheduleInfo += ", disabled"
+		}
 		result.WriteString(fmt.Sprintf("- %s (id: %s, %s)\n", j.Name, j.ID, scheduleInfo))
 	}
 
 	return SilentResult(result.String())
+}
+
+// Agents refused here used to add a replacement job, leaving the original
+// running and charging for both.
+func inaccessibleJobResult(jobID string) *ToolResult {
+	return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel. Do not add a replacement: "+
+		"if the original is enabled, it keeps running.", jobID))
 }
 
 func (t *CronTool) getJob(ctx context.Context, args map[string]any) *ToolResult {
@@ -303,7 +334,7 @@ func (t *CronTool) getJob(ctx context.Context, args map[string]any) *ToolResult 
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}
 	if !t.canAccessJob(ctx, job) {
-		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
+		return inaccessibleJobResult(jobID)
 	}
 
 	return SilentResult(formatCronJobJSONWithScript(job))
@@ -342,7 +373,7 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}
 	if !t.canAccessJob(ctx, job) {
-		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
+		return inaccessibleJobResult(jobID)
 	}
 
 	patches := 0
@@ -410,10 +441,14 @@ func (t *CronTool) removeJob(ctx context.Context, args map[string]any) *ToolResu
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}
 	if !t.canAccessJob(ctx, job) {
-		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
+		return inaccessibleJobResult(jobID)
 	}
 
-	if t.cronService.RemoveJob(jobID) {
+	removed, err := t.cronService.RemoveJob(jobID)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("Error removing job: %v", err))
+	}
+	if removed {
 		return SilentResult(fmt.Sprintf("Cron job removed: %s", jobID))
 	}
 	return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
@@ -569,13 +604,22 @@ func (t *CronTool) canAccessJob(ctx context.Context, job *cron.CronJob) bool {
 	if channel == "" || chatID == "" {
 		return false
 	}
-	if job.Payload.Channel != channel || job.Payload.To != chatID {
+	sameChat := job.Payload.Channel == channel && job.Payload.To == chatID
+	if !sameChat && !t.policyGrants(ctx, job) {
 		return false
 	}
 	if job.Payload.Command != "" {
 		return isCommandAllowedRemote(channel, chatID, t.commandAllowedRemotes)
 	}
 	return true
+}
+
+func (t *CronTool) policyGrants(ctx context.Context, job *cron.CronJob) bool {
+	owner := job.Payload.Channel
+	if t.accessPolicy == nil || owner == "" || constants.IsInternalChannel(owner) {
+		return false
+	}
+	return t.accessPolicy(ctx, job)
 }
 
 func formatCronJobJSON(job *cron.CronJob) string {
@@ -597,10 +641,13 @@ func (t *CronTool) enableJob(ctx context.Context, args map[string]any, enable bo
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}
 	if !t.canAccessJob(ctx, job) {
-		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
+		return inaccessibleJobResult(jobID)
 	}
 
-	updatedJob := t.cronService.EnableJob(jobID, enable)
+	updatedJob, err := t.cronService.EnableJob(jobID, enable)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("Error updating job: %v", err))
+	}
 	if updatedJob == nil {
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}

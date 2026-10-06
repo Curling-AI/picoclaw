@@ -625,10 +625,14 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 				updated.State.NextRunAtMS = nil
 			}
 			cs.store.Jobs[i] = updated
+			if err := cs.saveStoreUnsafe(); err != nil {
+				cs.store.Jobs[i] = previous
+				return err
+			}
 
 			cs.notify()
 
-			return cs.saveStoreUnsafe()
+			return nil
 		}
 	}
 	return fmt.Errorf("job not found")
@@ -670,13 +674,30 @@ func sameInt64(a, b *int64) bool {
 	return *a == *b
 }
 
-func (cs *CronService) RemoveJob(jobID string) bool {
+// RemoveJob, EnableJob and UpdateJob change the store only if it is saved:
+// a change kept in memory alone was undone by the next restart, after the
+// caller had reported the job removed, paused or edited.
+
+// RemoveJob reports whether the job existed and was removed.
+func (cs *CronService) RemoveJob(jobID string) (bool, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	return cs.removeJobUnsafe(jobID)
+	previous := cs.store.Jobs
+	if !cs.removeJobUnsafe(jobID) {
+		return false, nil
+	}
+	if err := cs.saveStoreUnsafe(); err != nil {
+		cs.store.Jobs = previous
+		return false, err
+	}
+
+	cs.notify()
+
+	return true, nil
 }
 
+// removeJobUnsafe changes memory only; the caller saves the store.
 func (cs *CronService) removeJobUnsafe(jobID string) bool {
 	before := len(cs.store.Jobs)
 	var jobs []CronJob
@@ -686,26 +707,18 @@ func (cs *CronService) removeJobUnsafe(jobID string) bool {
 		}
 	}
 	cs.store.Jobs = jobs
-	removed := len(cs.store.Jobs) < before
-
-	if removed {
-		if err := cs.saveStoreUnsafe(); err != nil {
-			log.Printf("[cron] failed to save store after remove: %v", err)
-		}
-	}
-
-	cs.notify()
-
-	return removed
+	return len(cs.store.Jobs) < before
 }
 
-func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
+// EnableJob returns a copy of the changed job, or nil if there is no such job.
+func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
 		if job.ID == jobID {
+			previous := cloneCronJob(*job)
 			job.Enabled = enabled
 			job.UpdatedAtMS = time.Now().UnixMilli()
 
@@ -716,16 +729,18 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 			}
 
 			if err := cs.saveStoreUnsafe(); err != nil {
-				log.Printf("[cron] failed to save store after enable: %v", err)
+				*job = previous
+				return nil, err
 			}
 
 			cs.notify()
 
-			return job
+			jobCopy := cloneCronJob(*job)
+			return &jobCopy, nil
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 // RunNow dispara um job imediatamente, sem tocar em Enabled — "executar
@@ -758,7 +773,9 @@ func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
 	defer cs.mu.RUnlock()
 
 	if includeDisabled {
-		return cs.store.Jobs
+		// A copy, like the enabled-only branch: callers range over it after the
+		// lock is released while the scheduler keeps writing to the store.
+		return append([]CronJob(nil), cs.store.Jobs...)
 	}
 
 	var enabled []CronJob
