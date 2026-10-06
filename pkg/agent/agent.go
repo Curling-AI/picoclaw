@@ -67,7 +67,10 @@ type AgentLoop struct {
 	// que é quem conhece o vínculo. Nil = todo turno roda no escopo global.
 	// (seucaranguejo fork — ver loop.go)
 	loopResolver LoopResolver
-	mu           sync.RWMutex
+	// mirror copia para a sessão de um chat externo o que outra sessão entregou
+	// nele. (seucaranguejo fork — ver delivery_mirror.go)
+	mirror deliveryMirror
+	mu     sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -656,7 +659,24 @@ func (al *AgentLoop) runAgentLoop(
 			msg.Context.Raw["model_name"] = modelName
 		}
 		markFinalOutbound(&msg)
-		al.bus.PublishOutbound(ctx, msg)
+		// O resultado de um subagente chega ao chat de origem por aqui, rodado na
+		// sessão principal: entra também na conversa do chat. O DefaultResponse
+		// deste caminho é texto sintetizado. (seucaranguejo fork — ver
+		// delivery_mirror.go)
+		if err := al.bus.PublishOutbound(ctx, msg); err != nil {
+			logger.WarnCF("agent", "Failed to publish turn response", map[string]any{
+				"channel": opts.Dispatch.Channel(),
+				"chat_id": opts.Dispatch.ChatID(),
+				"error":   err.Error(),
+			})
+		} else if result.finalContent != opts.DefaultResponse {
+			al.mirrorDelivery(
+				opts.Dispatch.SessionKey,
+				opts.Dispatch.Channel(),
+				opts.Dispatch.ChatID(),
+				result.finalContent,
+			)
+		}
 	}
 
 	if result.finalContent != "" {

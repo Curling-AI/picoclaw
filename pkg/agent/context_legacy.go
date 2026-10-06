@@ -286,6 +286,14 @@ func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey
 
 	if finalSummary != "" {
 		agent.Sessions.SetSummary(sessionKey, finalSummary)
+		// O resumo cobre as safeCut primeiras mensagens. O que foi gravado durante
+		// as chamadas ao LLM (o turno seguinte, uma entrega espelhada) entrou no
+		// fim, e manter só as keepCount últimas descartaria, sem resumo, uma
+		// mensagem antiga para cada nova. (seucaranguejo fork — ver
+		// delivery_mirror.go)
+		if current := len(agent.Sessions.GetHistory(sessionKey)); current > len(history) {
+			keepCount = current - safeCut
+		}
 		agent.Sessions.TruncateHistory(sessionKey, keepCount)
 		agent.Sessions.Save(sessionKey)
 		m.al.emitEvent(
