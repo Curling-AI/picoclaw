@@ -697,7 +697,8 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 		"• Reproducibility: in your FIRST tool call, execute `bash scripts/%s/run.sh` directly — do "+
 		"NOT test for it, read it, or list directories first. If it runs, report only what changed "+
 		"since last time. Only if it fails with \"No such file\" is this the setup run: build a "+
-		"reproducible script there that captures this task end-to-end, then run it. Keep "+
+		"reproducible script there that captures this task end-to-end (except sending chat "+
+		"messages: the script prints them and you send them with the message tool), then run it. Keep "+
 		"state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
 		"• Notes: do NOT record routine runs in the daily notes — run silently when there is nothing "+
 		"new. Only write a note when the run produced a genuinely new fact the user would care about; "+

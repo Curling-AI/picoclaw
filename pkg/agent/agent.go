@@ -659,7 +659,18 @@ func (al *AgentLoop) runAgentLoop(
 			msg.Context.Raw["model_name"] = modelName
 		}
 		markFinalOutbound(&msg)
-		al.bus.PublishOutbound(ctx, msg)
+		// O resultado de um subagente chega ao chat de origem por aqui, rodado na
+		// sessão principal: entra também na conversa do chat. O DefaultResponse
+		// deste caminho é texto sintetizado. (seucaranguejo fork — ver
+		// delivery_mirror.go)
+		if err := al.bus.PublishOutbound(ctx, msg); err == nil && result.finalContent != opts.DefaultResponse {
+			al.mirrorDelivery(
+				opts.Dispatch.SessionKey,
+				opts.Dispatch.Channel(),
+				opts.Dispatch.ChatID(),
+				result.finalContent,
+			)
+		}
 	}
 
 	if result.finalContent != "" {

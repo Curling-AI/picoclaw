@@ -2090,17 +2090,27 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	if mlp, ok := w.ch.(MessageLengthProvider); ok {
 		maxLen = mlp.MaxMessageLength()
 	}
+	// A falha definitiva vira erro: quem chama (a ferramenta message) dizia
+	// "enviado" para uma mensagem que o canal recusou, e o espelho de entregas
+	// gravaria na conversa do chat algo que o usuário nunca recebeu.
+	// (seucaranguejo fork)
+	delivered := true
 	if chunks := splitOutboundMessageContent(msg, maxLen); len(chunks) > 1 {
 		for _, chunk := range chunks {
 			chunkMsg := msg
 			chunkMsg.Content = chunk
-			m.sendWithRetry(ctx, channelName, w, chunkMsg)
+			if _, ok := m.sendWithRetry(ctx, channelName, w, chunkMsg); !ok {
+				delivered = false
+			}
 		}
 	} else {
 		if len(chunks) == 1 {
 			msg.Content = chunks[0]
 		}
-		m.sendWithRetry(ctx, channelName, w, msg)
+		_, delivered = m.sendWithRetry(ctx, channelName, w, msg)
+	}
+	if !delivered {
+		return fmt.Errorf("%w: channel %s did not deliver the message", ErrSendFailed, channelName)
 	}
 	return nil
 }

@@ -388,6 +388,9 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 	al.releaseSessionTurnState(ts.sessionKey, ts)
 }
 
+// releaseSessionTurnState also writes the deliveries that were mirrored into
+// this session while the turn held it. (seucaranguejo fork — ver
+// delivery_mirror.go)
 func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
 	if expected == nil {
 		al.activeTurnStates.Delete(sessionKey)

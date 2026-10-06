@@ -1294,6 +1294,16 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 					continue
 				}
 			}
+			// Duas falas seguidas do assistente (a resposta de um turno e uma
+			// entrega espelhada de automação, por exemplo) seguem como uma: há
+			// provedor que recusa papéis repetidos (deepseek-reasoner), e a
+			// conversa do chat não pode travar por isso. (seucaranguejo fork — ver
+			// delivery_mirror.go)
+			if n := len(sanitized); n > 0 && isPlainAssistant(sanitized[n-1]) &&
+				isPlainAssistant(msg) && msg.ReasoningContent == "" {
+				sanitized[n-1].Content = joinAssistantText(sanitized[n-1].Content, msg.Content)
+				continue
+			}
 			sanitized = append(sanitized, msg)
 
 		default:

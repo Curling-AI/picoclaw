@@ -229,6 +229,7 @@ func registerSharedTools(
 				if err := sendMessage(ctx, channel, chatID, content, replyToMessageID, mediaParts); err != nil {
 					return err
 				}
+				// (seucaranguejo fork — ver delivery_mirror.go)
 				al.mirrorDelivery(tools.ToolSessionKey(ctx), channel, chatID, deliveredText(content, mediaParts))
 				return nil
 			})

@@ -373,6 +373,9 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 	// concurrent Continue calls for the same session both pass the active-turn
 	// check and create parallel turns. The placeholder is replaced by the real
 	// turnState inside continueWithSteeringMessages → runAgentLoop → registerActiveTurn.
+	// The early exits release it through releaseSessionTurnState so a delivery
+	// mirrored while it was held still reaches the chat session. (seucaranguejo
+	// fork — ver delivery_mirror.go)
 	placeholder := &turnState{
 		turnID: "pending-continue-" + sessionKey + "-" + fmt.Sprintf("%d", al.turnSeq.Add(1)),
 		phase:  TurnPhaseSetup,
@@ -386,23 +389,23 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 	}
 
 	if err := al.ensureHooksInitialized(ctx); err != nil {
-		al.activeTurnStates.Delete(sessionKey)
+		al.releaseSessionTurnState(sessionKey, placeholder)
 		return "", err
 	}
 	if err := al.ensureMCPInitialized(ctx); err != nil {
-		al.activeTurnStates.Delete(sessionKey)
+		al.releaseSessionTurnState(sessionKey, placeholder)
 		return "", err
 	}
 
 	steeringMsgs := al.dequeueSteeringMessagesForScopeWithFallback(sessionKey)
 	if len(steeringMsgs) == 0 {
-		al.activeTurnStates.Delete(sessionKey)
+		al.releaseSessionTurnState(sessionKey, placeholder)
 		return "", nil
 	}
 
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
-		al.activeTurnStates.Delete(sessionKey)
+		al.releaseSessionTurnState(sessionKey, placeholder)
 		return "", fmt.Errorf("no agent available for session %q", sessionKey)
 	}
 

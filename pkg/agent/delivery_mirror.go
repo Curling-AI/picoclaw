@@ -11,15 +11,20 @@ import (
 )
 
 // Espelho de entregas (fork seucaranguejo): o que o agente entrega num chat
-// externo a partir de OUTRA sessão — uma rodada de cron, uma conversa da web, um
-// subagente — entra também no histórico da sessão daquele chat. Sem isso, a
-// automação manda "posso remarcar a reunião?" no Telegram, o usuário responde
-// "pode" e o turno que recebe a resposta não sabe do que se trata: a mensagem
-// só existia na sessão do cron.
+// externo a partir de OUTRA sessão — uma rodada de cron, uma conversa da web, o
+// resultado de um subagente — entra também no histórico da sessão daquele chat.
+// Sem isso, a automação manda "posso remarcar a reunião?" no Telegram, o usuário
+// responde "pode" e o turno que recebe a resposta não sabe do que se trata: a
+// mensagem só existia na sessão do cron.
 //
 // Qual sessão processa as mensagens que chegam de um chat é fato do
 // control-plane (as chaves do webhook não saem do alocador de rotas daqui), então
 // a tradução chat → sessão vem de fora, como o LoopResolver.
+//
+// O texto entra como mensagem do assistente, sem marca de origem: é o que o
+// usuário viu no chat, e o histórico do chat passa a ser a mesma conversa que ele
+// tem na tela. Uma entrega publicada no bus conta como entregue; a ferramenta
+// message só espelha depois do envio confirmado pelo canal.
 
 // DeliverySessionResolver traduz o endereço de saída de um chat (canal + chat
 // id, como o bus o carrega) na sessão em que as mensagens desse chat são
@@ -33,6 +38,8 @@ type deliveryMirror struct {
 	// turno grava o histórico aos pedaços (tool_calls, depois cada resultado) e
 	// restaura o snapshot inicial quando é abortado: escrever no meio dele pode
 	// separar uma chamada do seu resultado, ou ser apagado pela restauração.
+	// Fica em memória: um pod que reinicia no meio do turno perde a cópia (a
+	// entrega em si já aconteceu).
 	pending map[string][]providers.Message
 }
 
@@ -51,26 +58,32 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 // de ser entregue nele por um turno da sessão origin.
 func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	text = strings.TrimSpace(text)
-	if al == nil || text == "" {
+	if al == nil || text == "" || synthesizedResponse(text) {
 		return
 	}
 	al.mirror.mu.Lock()
-	defer al.mirror.mu.Unlock()
-	if al.mirror.resolve == nil {
+	resolve := al.mirror.resolve
+	al.mirror.mu.Unlock()
+	if resolve == nil {
 		return
 	}
-	target := al.mirror.resolve(channel, chatID)
+	target := resolve(channel, chatID)
 	// Na própria sessão do chat o turno já grava o que disse: a resposta final
-	// ou a chamada da ferramenta message, que leva o texto.
+	// ou a chamada da ferramenta message, que leva o texto. A comparação é crua:
+	// resolver alias aqui custaria varrer os metadados de todas as sessões a
+	// cada entrega (a origem de um cron é uma chave nova por rodada).
 	if target == "" || target == origin {
 		return
 	}
+	// Resolvidos fora do lock: tocam o disco (EFS em produção).
 	agent := al.agentForSession(target)
 	if agent == nil || !hasConversation(agent.Sessions, target) {
 		return
 	}
 
 	msg := providers.Message{Role: "assistant", Content: text}
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
 	deferred := al.getActiveTurnState(target) != nil
 	if deferred {
 		if al.mirror.pending == nil {
@@ -109,6 +122,19 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	}
 }
 
+// synthesizedResponse reconhece os textos que o coordenador põe no lugar de uma
+// resposta que o modelo não deu. O turno não grava o de resposta vazia no
+// histórico (sessões alternando vazias, ver finalIsFallback), e os outros só
+// fazem sentido na sessão que os produziu; copiá-los para a conversa do chat
+// traria o problema de volta.
+func synthesizedResponse(text string) bool {
+	switch text {
+	case defaultResponse, toolLimitResponse, handledToolResponseSummary:
+		return true
+	}
+	return false
+}
+
 // hasConversation restringe o espelho a chats que já falaram com o agente. Um
 // chat id que nenhuma mensagem de entrada usa (um destino digitado errado, um DM
 // do Slack endereçado pelo id do usuário em vez do canal) viraria uma sessão
@@ -121,6 +147,24 @@ func hasConversation(store session.SessionStore, key string) bool {
 		return meta.GetSessionScope(key) != nil
 	}
 	return len(store.GetHistory(key)) > 0
+}
+
+// isPlainAssistant: fala do assistente só com texto, que pode ser juntada à
+// vizinha sem perder chamada de ferramenta nem anexo.
+func isPlainAssistant(msg providers.Message) bool {
+	return msg.Role == "assistant" && len(msg.ToolCalls) == 0 &&
+		len(msg.Media) == 0 && len(msg.Attachments) == 0
+}
+
+func joinAssistantText(first, second string) string {
+	first, second = strings.TrimSpace(first), strings.TrimSpace(second)
+	switch {
+	case first == "":
+		return second
+	case second == "":
+		return first
+	}
+	return first + "\n\n" + second
 }
 
 // deliveredText é o que o usuário recebeu: o texto e, quando houver, os anexos —

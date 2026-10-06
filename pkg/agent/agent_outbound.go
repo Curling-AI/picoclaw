@@ -82,6 +82,8 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 		msg.ContextUsage = computeContextUsage(al.agentForSession(sessionKey), sessionKey)
 	}
 	markFinalOutbound(&msg)
+	// Só espelha o que saiu, e só depois de sair. (seucaranguejo fork — ver
+	// delivery_mirror.go)
 	if err := al.bus.PublishOutbound(ctx, msg); err != nil {
 		logger.WarnCF("agent", "Failed to publish outbound response",
 			map[string]any{"channel": channel, "chat_id": chatID, "error": err.Error()})

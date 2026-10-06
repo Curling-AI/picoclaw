@@ -3248,6 +3248,29 @@ func TestSendMessage_WithRetry(t *testing.T) {
 	}
 }
 
+// A message the channel refused must not read as sent: the message tool would
+// tell the agent it delivered, and the delivery mirror would record it in the
+// chat's conversation.
+func TestSendMessage_PermanentFailureIsReported(t *testing.T) {
+	m := newTestManager()
+	ch := &mockChannel{
+		sendFn: func(_ context.Context, _ bus.OutboundMessage) error {
+			return fmt.Errorf("outside the 24h window: %w", ErrSendFailed)
+		},
+	}
+	m.channels["test"] = ch
+	m.workers["test"] = &channelWorker{ch: ch, limiter: rate.NewLimiter(rate.Inf, 1)}
+
+	err := m.SendMessage(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "123",
+		Content: "lembrete",
+	}))
+	if !errors.Is(err, ErrSendFailed) {
+		t.Fatalf("SendMessage error = %v, want ErrSendFailed", err)
+	}
+}
+
 func TestSendMessage_ContextOnlyUsesContextAddressing(t *testing.T) {
 	m := newTestManager()
 

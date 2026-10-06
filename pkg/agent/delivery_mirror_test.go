@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -16,26 +17,30 @@ const (
 	mirrorCronSession = "agent:cron-job1-6f1c"
 )
 
-// newMirrorTestLoop builds a loop whose Telegram chat 123 already has a
-// conversation, with the resolver the control plane would install.
-func newMirrorTestLoop(t *testing.T) (*AgentLoop, session.SessionStore) {
+// newMirrorLoop builds a loop with the resolver the control plane would
+// install: Telegram chat 123 is processed in mirrorChatSession.
+func newMirrorLoop(t *testing.T) (*AgentLoop, session.SessionStore) {
 	t.Helper()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
-	sessions := al.registry.GetDefaultAgent().Sessions
-
-	ensureSessionMetadata(sessions, mirrorChatSession,
-		&session.SessionScope{Version: session.ScopeVersionV1, AgentID: "main", Channel: "telegram"}, nil)
-	sessions.AddMessage(mirrorChatSession, "user", "oi")
-	sessions.AddMessage(mirrorChatSession, "assistant", "Oi! Em que posso ajudar?")
-
 	al.SetDeliverySessionResolver(func(channel, chatID string) string {
 		if channel == "telegram" && chatID == "123" {
 			return mirrorChatSession
 		}
 		return ""
 	})
+	return al, al.registry.GetDefaultAgent().Sessions
+}
+
+// newMirrorTestLoop is newMirrorLoop with chat 123 already in a conversation.
+func newMirrorTestLoop(t *testing.T) (*AgentLoop, session.SessionStore) {
+	t.Helper()
+	al, sessions := newMirrorLoop(t)
+	ensureSessionMetadata(sessions, mirrorChatSession,
+		&session.SessionScope{Version: session.ScopeVersionV1, AgentID: "main", Channel: "telegram"}, nil)
+	sessions.AddMessage(mirrorChatSession, "user", "oi")
+	sessions.AddMessage(mirrorChatSession, "assistant", "Oi! Em que posso ajudar?")
 	return al, sessions
 }
 
@@ -169,6 +174,111 @@ func TestMirrorDelivery_DeferredDeliveryWaitsForTheTurnThatTookOver(t *testing.T
 	}
 
 	al.clearActiveTurn(second)
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "lembrete" {
+		t.Fatalf("last chat message = %q, want the deferred delivery", got.Content)
+	}
+}
+
+// The chat session the webhook creates is the one that counts as having a
+// conversation — not a hand-made fixture.
+func TestMirrorDelivery_ReachesASessionCreatedByAnInboundTurn(t *testing.T) {
+	al, sessions := newMirrorLoop(t)
+	ctx := context.Background()
+	if _, err := al.ProcessDirectWithMedia(ctx, "oi", mirrorChatSession, "telegram", "123", nil); err != nil {
+		t.Fatalf("inbound turn: %v", err)
+	}
+
+	const briefing = "Bom dia! Sua agenda de hoje tem 3 reuniões."
+	al.PublishResponseIfNeeded(ctx, "telegram", "123", mirrorCronSession, briefing)
+
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != briefing {
+		t.Fatalf("last chat message = %q, want the delivery", got.Content)
+	}
+}
+
+// The empty-response fallback is kept out of every history on purpose; the
+// mirror must not bring it back through the chat.
+func TestMirrorDelivery_SkipsSynthesizedResponses(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	for _, text := range []string{defaultResponse, toolLimitResponse, handledToolResponseSummary} {
+		al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, text)
+	}
+
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("history grew from %d to %d with synthesized responses", before, after)
+	}
+}
+
+type refusingChannelManager struct{ *recordingChannelManager }
+
+func (refusingChannelManager) SendMessage(context.Context, bus.OutboundMessage) error {
+	return errors.New("outside the 24h window")
+}
+
+func TestMirrorDelivery_RefusedSendIsNotMirrored(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	al.channelManager = refusingChannelManager{&recordingChannelManager{}}
+	tool, _ := al.registry.GetDefaultAgent().Tools.Get("message")
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	ctx := tools.WithToolSessionContext(context.Background(), "main", mirrorCronSession, nil)
+	result := tool.Execute(ctx, map[string]any{"channel": "telegram", "chat_id": "123", "content": "lembrete"})
+
+	if result == nil || !result.IsError {
+		t.Fatalf("message tool result = %+v, want the refusal", result)
+	}
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("a refused send was mirrored (history %d → %d)", before, after)
+	}
+}
+
+// In the chat's own turn the tool call already carries the text.
+func TestMirrorDelivery_MessageToolInTheChatsOwnTurnIsNotMirrored(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	tool, _ := al.registry.GetDefaultAgent().Tools.Get("message")
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	ctx := tools.WithToolSessionContext(context.Background(), "main", mirrorChatSession, nil)
+	tool.Execute(ctx, map[string]any{"channel": "telegram", "chat_id": "123", "content": "aqui mesmo"})
+
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("history grew from %d to %d", before, after)
+	}
+}
+
+// A subagent's result reaches the origin chat through a turn of the main
+// session (processSystemMessage), not through PublishResponseIfNeeded.
+func TestMirrorDelivery_SubagentResultEntersTheChatConversation(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+
+	if _, err := al.processSystemMessage(context.Background(), bus.NormalizeInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{Channel: "system", ChatID: "telegram:123", SenderID: "subagent-1"},
+		Content: "Task 'levantamento' completed.\n\nResult:\n3 fornecedores responderam.",
+	})); err != nil {
+		t.Fatalf("system message: %v", err)
+	}
+
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "Mock response" {
+		t.Fatalf("last chat message = %q, want the subagent turn's reply", got.Content)
+	}
+}
+
+// Continue releases its placeholder on early exits; a delivery deferred while
+// the session was held must not stay stranded until some later turn ends.
+func TestMirrorDelivery_ContinueEarlyExitFlushesDeferredDelivery(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	running := &turnState{turnID: "turn-1", sessionKey: mirrorChatSession}
+	al.registerActiveTurn(running)
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
+	// A path that drops the turn without flushing (an upstream early exit).
+	al.activeTurnStates.Delete(mirrorChatSession)
+
+	if _, err := al.Continue(context.Background(), mirrorChatSession, "telegram", "123"); err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+
 	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "lembrete" {
 		t.Fatalf("last chat message = %q, want the deferred delivery", got.Content)
 	}
