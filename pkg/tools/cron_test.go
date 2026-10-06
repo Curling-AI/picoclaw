@@ -1319,8 +1319,8 @@ func TestCronTool_AccessPolicyReachesJobsFromOtherChats(t *testing.T) {
 	if update.IsError {
 		t.Fatalf("update failed: %s", update.ForLLM)
 	}
-	if got := *parseCronJobResult(t, update).Schedule.EveryMS; got != 1_800_000 {
-		t.Fatalf("EveryMS = %d, want 1800000", got)
+	if got := parseCronJobResult(t, update).Schedule.EveryMS; got == nil || *got != 1_800_000 {
+		t.Fatalf("EveryMS = %v, want 1800000", got)
 	}
 	if result := tool.Execute(ctx, map[string]any{"action": "disable", "job_id": job.ID}); result.IsError {
 		t.Fatalf("disable failed: %s", result.ForLLM)
@@ -1363,9 +1363,30 @@ func TestCronTool_RefusalDiscouragesReplacementJob(t *testing.T) {
 	other := addTestCronJob(t, tool, "other", "telegram", "chat-1", "")
 	ctx := WithToolContext(context.Background(), "telegram", "chat-2")
 
-	refusal := tool.Execute(ctx, map[string]any{"action": "update", "job_id": other.ID, "message": "x"})
-	if !refusal.IsError || !strings.Contains(refusal.ForLLM, "Do not add a replacement") {
-		t.Fatalf("refusal should discourage a replacement, got: %+v", refusal)
+	for _, action := range []string{"get", "update", "remove", "enable", "disable"} {
+		refusal := tool.Execute(ctx, map[string]any{"action": action, "job_id": other.ID, "message": "x"})
+		if !refusal.IsError || !strings.Contains(refusal.ForLLM, "Do not add a replacement") {
+			t.Fatalf("%s refusal should discourage a replacement, got: %+v", action, refusal)
+		}
+	}
+}
+
+// Jobs without a remote chat run on an internal channel; a policy that let a
+// remote turn edit them would lend it internal privileges.
+func TestCronTool_AccessPolicyNeverCoversJobsWithoutARemoteChat(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(context.Context, *cron.CronJob) bool { return true })
+	ctx := WithToolContext(context.Background(), "rpc", "run-2")
+
+	for _, owner := range []string{"", "cli", "system", "subagent"} {
+		job := addTestCronJob(t, tool, "ownerless-"+owner, owner, "", "")
+		update := tool.Execute(ctx, map[string]any{"action": "update", "job_id": job.ID, "message": "rewritten"})
+		if !update.IsError || !strings.Contains(update.ForLLM, "not accessible") {
+			t.Fatalf("channel %q: expected inaccessible update, got: %+v", owner, update)
+		}
+		if list := tool.Execute(ctx, map[string]any{"action": "list"}); strings.Contains(list.ForLLM, job.ID) {
+			t.Fatalf("channel %q: list should not include the job, got: %s", owner, list.ForLLM)
+		}
 	}
 }
 

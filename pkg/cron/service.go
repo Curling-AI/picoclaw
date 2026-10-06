@@ -721,7 +721,8 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) *CronJob {
 
 			cs.notify()
 
-			return job
+			jobCopy := cloneCronJob(*job)
+			return &jobCopy
 		}
 	}
 

@@ -29,7 +29,11 @@ type JobExecutor interface {
 // The built-in rule pairs a job with the channel/chat_id that created it, which
 // assumes chat_id names the conversation. An embedder whose chat_id is not
 // stable (one id per request, for instance) but who knows the turn speaks for
-// the owner can widen access here. It never bypasses the command allowance.
+// the owner can widen access here. It never bypasses the command allowance and
+// is never asked about jobs without a remote chat (empty or internal channel):
+// those run on an internal channel, so editing one would lend the turn internal
+// privileges. It runs between reading a job and writing it back, so it must be
+// fast and must not block.
 type JobAccessPolicy func(ctx context.Context, job *cron.CronJob) bool
 
 // CronTool provides scheduling capabilities for the agent
@@ -316,7 +320,7 @@ func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
 // running and charging for both.
 func inaccessibleJobResult(jobID string) *ToolResult {
 	return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel. Do not add a replacement: "+
-		"the original would keep running. Tell the user it cannot be changed from this conversation.", jobID))
+		"if the original is enabled, it keeps running.", jobID))
 }
 
 func (t *CronTool) getJob(ctx context.Context, args map[string]any) *ToolResult {
@@ -597,13 +601,21 @@ func (t *CronTool) canAccessJob(ctx context.Context, job *cron.CronJob) bool {
 		return false
 	}
 	sameChat := job.Payload.Channel == channel && job.Payload.To == chatID
-	if !sameChat && (t.accessPolicy == nil || !t.accessPolicy(ctx, job)) {
+	if !sameChat && !t.policyGrants(ctx, job) {
 		return false
 	}
 	if job.Payload.Command != "" {
 		return isCommandAllowedRemote(channel, chatID, t.commandAllowedRemotes)
 	}
 	return true
+}
+
+func (t *CronTool) policyGrants(ctx context.Context, job *cron.CronJob) bool {
+	owner := job.Payload.Channel
+	if t.accessPolicy == nil || owner == "" || constants.IsInternalChannel(owner) {
+		return false
+	}
+	return t.accessPolicy(ctx, job)
 }
 
 func formatCronJobJSON(job *cron.CronJob) string {

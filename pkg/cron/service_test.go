@@ -500,3 +500,19 @@ func TestListJobsIncludingDisabledReturnsACopy(t *testing.T) {
 		t.Fatalf("store job name = %q, want a: ListJobs(true) must not alias the store", got)
 	}
 }
+
+func TestEnableJobReturnsACopy(t *testing.T) {
+	cs := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
+	everyMS := int64(60_000)
+	job, err := cs.AddJob("a", CronSchedule{Kind: "every", EveryMS: &everyMS}, "a", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enabled := cs.EnableJob(job.ID, false)
+	enabled.Name = "changed by caller"
+
+	if got, _ := cs.GetJob(job.ID); got.Name != "a" {
+		t.Fatalf("store job name = %q, want a: EnableJob must not alias the store", got.Name)
+	}
+}
