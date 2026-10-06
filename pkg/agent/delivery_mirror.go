@@ -82,6 +82,8 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	}
 
 	msg := providers.Message{Role: "assistant", Content: text}
+	// registerActiveTurn usa o mesmo lock: ou a entrega vê o turno, ou é gravada
+	// antes de ele começar.
 	al.mirror.mu.Lock()
 	defer al.mirror.mu.Unlock()
 	deferred := al.getActiveTurnState(target) != nil
@@ -91,7 +93,11 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 		}
 		al.mirror.pending[target] = append(al.mirror.pending[target], msg)
 	} else {
-		agent.Sessions.AddFullMessage(target, msg)
+		// Uma entrega que ainda espera o flush (o turno acabou de liberar a
+		// sessão) vai antes desta, para a conversa manter a ordem de envio.
+		pending := al.mirror.pending[target]
+		delete(al.mirror.pending, target)
+		writeMirrored(agent, target, append(pending, msg))
 	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
@@ -106,6 +112,18 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 // flushMirroredDeliveries grava o que esperava o turno da sessão terminar.
 func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	al.mirror.mu.Lock()
+	waiting := len(al.mirror.pending[sessionKey]) > 0
+	al.mirror.mu.Unlock()
+	if !waiting {
+		return
+	}
+	// Fora do lock, como em mirrorDelivery: dentro dele só o mapa de turnos e o
+	// store, nunca o registry.
+	agent := al.agentForSession(sessionKey)
+	if agent == nil {
+		return
+	}
+	al.mirror.mu.Lock()
 	defer al.mirror.mu.Unlock()
 	pending := al.mirror.pending[sessionKey]
 	// Outro turno pode ter assumido a sessão logo em seguida: espera por ele.
@@ -113,12 +131,21 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 		return
 	}
 	delete(al.mirror.pending, sessionKey)
-	agent := al.agentForSession(sessionKey)
-	if agent == nil {
-		return
-	}
-	for _, msg := range pending {
+	writeMirrored(agent, sessionKey, pending)
+}
+
+func writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) {
+	for _, msg := range msgs {
 		agent.Sessions.AddFullMessage(sessionKey, msg)
+	}
+	// O backend JSON (fallback quando o JSONL não sobe) só persiste no Save; no
+	// JSONL cada mensagem já foi gravada e o Save só compacta, como no fim de
+	// todo turno.
+	if err := agent.Sessions.Save(sessionKey); err != nil {
+		logger.WarnCF("agent", "Failed to save mirrored delivery", map[string]any{
+			"session_key": sessionKey,
+			"error":       err.Error(),
+		})
 	}
 }
 
@@ -143,9 +170,11 @@ func hasConversation(store session.SessionStore, key string) bool {
 	if store == nil {
 		return false
 	}
-	if meta, ok := store.(session.MetadataAwareSessionStore); ok {
-		return meta.GetSessionScope(key) != nil
+	if meta, ok := store.(session.MetadataAwareSessionStore); ok && meta.GetSessionScope(key) != nil {
+		return true
 	}
+	// Sessão migrada do JSON antigo tem histórico, mas só ganha scope no
+	// próximo turno de entrada.
 	return len(store.GetHistory(key)) > 0
 }
 

@@ -381,6 +381,10 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 }
 
 func (al *AgentLoop) registerActiveTurn(ts *turnState) {
+	// Under the delivery mirror's lock, so a mirrored delivery either sees this
+	// turn or lands before it starts. (seucaranguejo fork — ver delivery_mirror.go)
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
 	al.activeTurnStates.Store(ts.sessionKey, ts)
 }
 

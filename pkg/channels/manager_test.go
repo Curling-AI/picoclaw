@@ -3271,6 +3271,40 @@ func TestSendMessage_PermanentFailureIsReported(t *testing.T) {
 	}
 }
 
+// Parts after a refused one would arrive out of context; the error says how many
+// went through so a resend does not repeat them.
+func TestSendMessage_StopsAtTheFirstRefusedPart(t *testing.T) {
+	m := newTestManager()
+	var received []string
+	ch := &mockChannelWithLength{
+		mockChannel: mockChannel{
+			sendFn: func(_ context.Context, msg bus.OutboundMessage) error {
+				if len(received) == 1 {
+					return fmt.Errorf("blocked: %w", ErrSendFailed)
+				}
+				received = append(received, msg.Content)
+				return nil
+			},
+		},
+		maxLen: 5,
+	}
+	m.channels["test"] = ch
+	m.workers["test"] = &channelWorker{ch: ch, limiter: rate.NewLimiter(rate.Inf, 1)}
+
+	err := m.SendMessage(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "123",
+		Content: "hello world again",
+	}))
+
+	if !errors.Is(err, ErrSendFailed) || !strings.Contains(err.Error(), "delivered 1 of") {
+		t.Fatalf("SendMessage error = %v, want the partial delivery reported", err)
+	}
+	if len(received) != 1 {
+		t.Fatalf("sent %d parts after the refusal, want to stop at it: %q", len(received), received)
+	}
+}
+
 func TestSendMessage_ContextOnlyUsesContextAddressing(t *testing.T) {
 	m := newTestManager()
 

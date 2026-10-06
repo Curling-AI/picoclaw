@@ -2092,25 +2092,27 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	}
 	// A falha definitiva vira erro: quem chama (a ferramenta message) dizia
 	// "enviado" para uma mensagem que o canal recusou, e o espelho de entregas
-	// gravaria na conversa do chat algo que o usuário nunca recebeu.
+	// gravaria na conversa do chat algo que o usuário nunca recebeu. Numa
+	// mensagem em partes, para na primeira recusada (as seguintes chegariam
+	// soltas) e diz quantas chegaram, para um reenvio não repetir as anteriores.
 	// (seucaranguejo fork)
-	delivered := true
-	if chunks := splitOutboundMessageContent(msg, maxLen); len(chunks) > 1 {
-		for _, chunk := range chunks {
-			chunkMsg := msg
-			chunkMsg.Content = chunk
-			if _, ok := m.sendWithRetry(ctx, channelName, w, chunkMsg); !ok {
-				delivered = false
-			}
-		}
-	} else {
+	chunks := splitOutboundMessageContent(msg, maxLen)
+	if len(chunks) <= 1 {
 		if len(chunks) == 1 {
 			msg.Content = chunks[0]
 		}
-		_, delivered = m.sendWithRetry(ctx, channelName, w, msg)
+		if _, ok := m.sendWithRetry(ctx, channelName, w, msg); !ok {
+			return fmt.Errorf("%w: channel %s did not deliver the message", ErrSendFailed, channelName)
+		}
+		return nil
 	}
-	if !delivered {
-		return fmt.Errorf("%w: channel %s did not deliver the message", ErrSendFailed, channelName)
+	for i, chunk := range chunks {
+		chunkMsg := msg
+		chunkMsg.Content = chunk
+		if _, ok := m.sendWithRetry(ctx, channelName, w, chunkMsg); !ok {
+			return fmt.Errorf("%w: channel %s delivered %d of %d parts of the message",
+				ErrSendFailed, channelName, i, len(chunks))
+		}
 	}
 	return nil
 }

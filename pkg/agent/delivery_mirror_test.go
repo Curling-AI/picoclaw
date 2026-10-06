@@ -284,6 +284,57 @@ func TestMirrorDelivery_ContinueEarlyExitFlushesDeferredDelivery(t *testing.T) {
 	}
 }
 
+// A delivery that finds the session free right after a turn ended, before the
+// flush ran, must not land ahead of the one that was waiting.
+func TestMirrorDelivery_KeepsDeliveryOrderAcrossTheFlush(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	al.registerActiveTurn(&turnState{turnID: "turn-1", sessionKey: mirrorChatSession})
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "primeira")
+	// The turn is gone but its flush has not run yet.
+	al.activeTurnStates.Delete(mirrorChatSession)
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "segunda")
+
+	history := sessions.GetHistory(mirrorChatSession)
+	if n := len(history); n < 2 || history[n-2].Content != "primeira" || history[n-1].Content != "segunda" {
+		t.Fatalf("history tail = %+v, want primeira then segunda", history[len(history)-2:])
+	}
+}
+
+// A session migrated from the legacy JSON store has history but no scope until
+// its next inbound turn.
+func TestMirrorDelivery_ReachesAMigratedSessionWithoutScope(t *testing.T) {
+	al, sessions := newMirrorLoop(t)
+	sessions.AddMessage(mirrorChatSession, "user", "oi")
+	sessions.AddMessage(mirrorChatSession, "assistant", "Oi!")
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "Aprovo a reunião?")
+
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "Aprovo a reunião?" {
+		t.Fatalf("last chat message = %q, want the delivery", got.Content)
+	}
+}
+
+// The JSON fallback store only persists on Save; a restart must not lose the
+// mirrored delivery.
+func TestMirrorDelivery_SurvivesARestartOnTheJSONStore(t *testing.T) {
+	al, _ := newMirrorLoop(t)
+	dir := t.TempDir()
+	store := session.NewSessionManager(dir)
+	store.AddMessage(mirrorChatSession, "user", "oi")
+	if err := store.Save(mirrorChatSession); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	al.registry.GetDefaultAgent().Sessions = store
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
+
+	reloaded := session.NewSessionManager(dir)
+	if got := lastMessage(t, reloaded, mirrorChatSession); got.Content != "lembrete" {
+		t.Fatalf("last message after reload = %q, want the mirrored delivery", got.Content)
+	}
+}
+
 func TestDeliveredText(t *testing.T) {
 	for _, c := range []struct {
 		name    string
