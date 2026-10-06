@@ -1296,3 +1296,92 @@ func TestCronTool_ExecuteJobReturnsErrorWithoutPublish(t *testing.T) {
 		t.Fatalf("unexpected publish on error path: %q", executor.publishedResp)
 	}
 }
+
+// A channel whose chat_id changes on every request (one id per run) used to
+// lose its jobs on the next message: add, then "not accessible" on update.
+func TestCronTool_AccessPolicyReachesJobsFromOtherChats(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(ctx context.Context, _ *cron.CronJob) bool {
+		return ToolChannel(ctx) == "rpc"
+	})
+	job := addTestCronJob(t, tool, "hourly", "rpc", "run-1", "")
+	ctx := WithToolContext(context.Background(), "rpc", "run-2")
+
+	if result := tool.Execute(ctx, map[string]any{"action": "list"}); !strings.Contains(result.ForLLM, job.ID) {
+		t.Fatalf("list should include the job, got: %s", result.ForLLM)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "get", "job_id": job.ID}); result.IsError {
+		t.Fatalf("get failed: %s", result.ForLLM)
+	}
+	update := tool.Execute(ctx, map[string]any{
+		"action": "update", "job_id": job.ID, "every_seconds": float64(1800),
+	})
+	if update.IsError {
+		t.Fatalf("update failed: %s", update.ForLLM)
+	}
+	if got := *parseCronJobResult(t, update).Schedule.EveryMS; got != 1_800_000 {
+		t.Fatalf("EveryMS = %d, want 1800000", got)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "disable", "job_id": job.ID}); result.IsError {
+		t.Fatalf("disable failed: %s", result.ForLLM)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "remove", "job_id": job.ID}); result.IsError {
+		t.Fatalf("remove failed: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_AccessPolicyKeepsCommandAllowance(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(context.Context, *cron.CronJob) bool { return true })
+	job := addTestCronJob(t, tool, "command", "rpc", "run-1", "df -h")
+	ctx := WithToolContext(context.Background(), "rpc", "run-2")
+
+	update := tool.Execute(ctx, map[string]any{"action": "update", "job_id": job.ID, "message": "changed"})
+	if !update.IsError || !strings.Contains(update.ForLLM, "not accessible") {
+		t.Fatalf("expected inaccessible update, got: %+v", update)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "list"}); strings.Contains(result.ForLLM, job.ID) {
+		t.Fatalf("list should not include the command job, got: %s", result.ForLLM)
+	}
+}
+
+func TestCronTool_AccessPolicyDoesNotNarrowOwnChat(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(context.Context, *cron.CronJob) bool { return false })
+	job := addTestCronJob(t, tool, "own", "telegram", "chat-1", "")
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+
+	if result := tool.Execute(ctx, map[string]any{"action": "get", "job_id": job.ID}); result.IsError {
+		t.Fatalf("get of own job failed: %s", result.ForLLM)
+	}
+}
+
+// Without these notes the agent read "not accessible" or an empty list as "the
+// job is gone" and added a second one next to the original.
+func TestCronTool_RefusalsDiscourageReplacementJobs(t *testing.T) {
+	tool := newTestCronTool(t)
+	other := addTestCronJob(t, tool, "other", "telegram", "chat-1", "")
+	ctx := WithToolContext(context.Background(), "telegram", "chat-2")
+
+	refusal := tool.Execute(ctx, map[string]any{"action": "update", "job_id": other.ID, "message": "x"})
+	if !refusal.IsError || !strings.Contains(refusal.ForLLM, "Do not add a replacement") {
+		t.Fatalf("refusal should discourage a replacement, got: %+v", refusal)
+	}
+
+	empty := tool.Execute(ctx, map[string]any{"action": "list"})
+	if !strings.HasPrefix(empty.ForLLM, "No scheduled jobs in this chat. ") ||
+		!strings.Contains(empty.ForLLM, hiddenJobsNote) {
+		t.Fatalf("empty list should mention hidden jobs, got: %s", empty.ForLLM)
+	}
+
+	own := addTestCronJob(t, tool, "own", "telegram", "chat-2", "")
+	partial := tool.Execute(ctx, map[string]any{"action": "list"})
+	if !strings.Contains(partial.ForLLM, own.ID) || !strings.HasSuffix(partial.ForLLM, hiddenJobsNote) {
+		t.Fatalf("list should show own job and the hidden-jobs note, got: %s", partial.ForLLM)
+	}
+
+	solo := newTestCronTool(t)
+	if got := solo.Execute(ctx, map[string]any{"action": "list"}).ForLLM; got != "No scheduled jobs" {
+		t.Fatalf("empty store list = %q, want %q", got, "No scheduled jobs")
+	}
+}
