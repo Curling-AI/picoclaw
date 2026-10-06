@@ -113,7 +113,7 @@ func (t *CronTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "list", "get", "update", "remove", "enable", "disable"},
-				"description": "Action to perform. Use 'get' before editing and 'update' to change existing jobs without losing their payload. Remote channels can only list/get/update jobs for the current channel/chat_id.",
+				"description": "Action to perform. Use 'get' before editing and 'update' to change existing jobs without losing their payload. Remote channels may be limited to the jobs of the current chat.",
 			},
 			"name": map[string]any{
 				"type":        "string",
@@ -274,20 +274,17 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 }
 
 func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
-	allJobs := t.cronService.ListJobs(false)
+	jobs := t.cronService.ListJobs(false)
 
-	var jobs []cron.CronJob
-	for _, job := range allJobs {
+	var accessibleJobs []cron.CronJob
+	for _, job := range jobs {
 		if t.canAccessJob(ctx, &job) {
-			jobs = append(jobs, job)
+			accessibleJobs = append(accessibleJobs, job)
 		}
 	}
-	hidesJobs := len(jobs) < len(allJobs)
+	jobs = accessibleJobs
 
 	if len(jobs) == 0 {
-		if hidesJobs {
-			return SilentResult("No scheduled jobs in this chat. " + hiddenJobsNote)
-		}
 		return SilentResult("No scheduled jobs")
 	}
 
@@ -306,21 +303,15 @@ func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
 		}
 		result.WriteString(fmt.Sprintf("- %s (id: %s, %s)\n", j.Name, j.ID, scheduleInfo))
 	}
-	if hidesJobs {
-		result.WriteString(hiddenJobsNote)
-	}
 
 	return SilentResult(result.String())
 }
 
-// Agents that could not see or reach a job used to add a replacement, leaving
-// the original running and charging for both. Both refusals say so.
-const hiddenJobsNote = "Jobs from other chats are not shown and cannot be changed here; " +
-	"do not add a replacement for one, the original would keep running."
-
+// Agents refused here used to add a replacement job, leaving the original
+// running and charging for both.
 func inaccessibleJobResult(jobID string) *ToolResult {
 	return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel. Do not add a replacement: "+
-		"the original would keep running. Ask the user to change it where it was created.", jobID))
+		"the original would keep running. Tell the user it cannot be changed from this conversation.", jobID))
 }
 
 func (t *CronTool) getJob(ctx context.Context, args map[string]any) *ToolResult {

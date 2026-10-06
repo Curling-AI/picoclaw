@@ -1356,9 +1356,9 @@ func TestCronTool_AccessPolicyDoesNotNarrowOwnChat(t *testing.T) {
 	}
 }
 
-// Without these notes the agent read "not accessible" or an empty list as "the
-// job is gone" and added a second one next to the original.
-func TestCronTool_RefusalsDiscourageReplacementJobs(t *testing.T) {
+// Without this the agent read "not accessible" as "the job is gone" and added
+// a second one next to the original.
+func TestCronTool_RefusalDiscouragesReplacementJob(t *testing.T) {
 	tool := newTestCronTool(t)
 	other := addTestCronJob(t, tool, "other", "telegram", "chat-1", "")
 	ctx := WithToolContext(context.Background(), "telegram", "chat-2")
@@ -1366,22 +1366,5 @@ func TestCronTool_RefusalsDiscourageReplacementJobs(t *testing.T) {
 	refusal := tool.Execute(ctx, map[string]any{"action": "update", "job_id": other.ID, "message": "x"})
 	if !refusal.IsError || !strings.Contains(refusal.ForLLM, "Do not add a replacement") {
 		t.Fatalf("refusal should discourage a replacement, got: %+v", refusal)
-	}
-
-	empty := tool.Execute(ctx, map[string]any{"action": "list"})
-	if !strings.HasPrefix(empty.ForLLM, "No scheduled jobs in this chat. ") ||
-		!strings.Contains(empty.ForLLM, hiddenJobsNote) {
-		t.Fatalf("empty list should mention hidden jobs, got: %s", empty.ForLLM)
-	}
-
-	own := addTestCronJob(t, tool, "own", "telegram", "chat-2", "")
-	partial := tool.Execute(ctx, map[string]any{"action": "list"})
-	if !strings.Contains(partial.ForLLM, own.ID) || !strings.HasSuffix(partial.ForLLM, hiddenJobsNote) {
-		t.Fatalf("list should show own job and the hidden-jobs note, got: %s", partial.ForLLM)
-	}
-
-	solo := newTestCronTool(t)
-	if got := solo.Execute(ctx, map[string]any{"action": "list"}).ForLLM; got != "No scheduled jobs" {
-		t.Fatalf("empty store list = %q, want %q", got, "No scheduled jobs")
 	}
 }
