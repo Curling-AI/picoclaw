@@ -67,7 +67,10 @@ type AgentLoop struct {
 	// que é quem conhece o vínculo. Nil = todo turno roda no escopo global.
 	// (seucaranguejo fork — ver loop.go)
 	loopResolver LoopResolver
-	mu           sync.RWMutex
+	// mirror copia para a sessão de um chat externo o que outra sessão entregou
+	// nele. (seucaranguejo fork — ver delivery_mirror.go)
+	mirror deliveryMirror
+	mu     sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}

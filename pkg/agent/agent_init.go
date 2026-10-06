@@ -176,7 +176,7 @@ func registerSharedTools(
 					allowReadPaths,
 				)
 			}
-			messageTool.SetSendCallback(func(
+			sendMessage := func(
 				ctx context.Context,
 				channel, chatID, content, replyToMessageID string,
 				mediaParts []bus.MediaPart,
@@ -220,6 +220,17 @@ func registerSharedTools(
 				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer pubCancel()
 				return msgBus.PublishOutbound(pubCtx, outboundMessage)
+			}
+			messageTool.SetSendCallback(func(
+				ctx context.Context,
+				channel, chatID, content, replyToMessageID string,
+				mediaParts []bus.MediaPart,
+			) error {
+				if err := sendMessage(ctx, channel, chatID, content, replyToMessageID, mediaParts); err != nil {
+					return err
+				}
+				al.mirrorDelivery(tools.ToolSessionKey(ctx), channel, chatID, deliveredText(content, mediaParts))
+				return nil
 			})
 			agent.Tools.Register(messageTool)
 		}

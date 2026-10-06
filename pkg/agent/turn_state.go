@@ -391,10 +391,12 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
 	if expected == nil {
 		al.activeTurnStates.Delete(sessionKey)
+		al.flushMirroredDeliveries(sessionKey)
 		return
 	}
 	if actual, ok := al.activeTurnStates.Load(sessionKey); ok && actual == expected {
 		al.activeTurnStates.Delete(sessionKey)
+		al.flushMirroredDeliveries(sessionKey)
 	}
 }
 
