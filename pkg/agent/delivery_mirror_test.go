@@ -157,6 +157,13 @@ func TestMirrorDelivery_WaitsForTheActiveTurnToEnd(t *testing.T) {
 	}
 }
 
+// endTurnBeforeFlush leaves the session as a turn's end does right before its
+// flush runs.
+func endTurnBeforeFlush(al *AgentLoop, sessionKey string) {
+	al.mirror.endTurn(sessionKey)
+	al.activeTurnStates.Delete(sessionKey)
+}
+
 // A queued message can take the session over between the end of one turn and
 // the flush; the delivery then waits for that turn as well.
 func TestMirrorDelivery_DeferredDeliveryWaitsForTheTurnThatTookOver(t *testing.T) {
@@ -166,6 +173,7 @@ func TestMirrorDelivery_DeferredDeliveryWaitsForTheTurnThatTookOver(t *testing.T
 	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
 	before := len(sessions.GetHistory(mirrorChatSession))
 
+	endTurnBeforeFlush(al, mirrorChatSession)
 	second := &turnState{turnID: "turn-2", sessionKey: mirrorChatSession}
 	al.registerActiveTurn(second)
 	al.flushMirroredDeliveries(mirrorChatSession)
@@ -241,8 +249,11 @@ func TestMirrorDelivery_MessageToolInTheChatsOwnTurnIsNotMirrored(t *testing.T) 
 	before := len(sessions.GetHistory(mirrorChatSession))
 
 	ctx := tools.WithToolSessionContext(context.Background(), "main", mirrorChatSession, nil)
-	tool.Execute(ctx, map[string]any{"channel": "telegram", "chat_id": "123", "content": "aqui mesmo"})
+	result := tool.Execute(ctx, map[string]any{"channel": "telegram", "chat_id": "123", "content": "aqui mesmo"})
 
+	if result == nil || result.IsError {
+		t.Fatalf("message tool failed: %+v", result)
+	}
 	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
 		t.Fatalf("history grew from %d to %d", before, after)
 	}
@@ -273,7 +284,7 @@ func TestMirrorDelivery_ContinueEarlyExitFlushesDeferredDelivery(t *testing.T) {
 	al.registerActiveTurn(running)
 	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
 	// A path that drops the turn without flushing (an upstream early exit).
-	al.activeTurnStates.Delete(mirrorChatSession)
+	endTurnBeforeFlush(al, mirrorChatSession)
 
 	if _, err := al.Continue(context.Background(), mirrorChatSession, "telegram", "123"); err != nil {
 		t.Fatalf("Continue: %v", err)
@@ -291,13 +302,51 @@ func TestMirrorDelivery_KeepsDeliveryOrderAcrossTheFlush(t *testing.T) {
 	al.registerActiveTurn(&turnState{turnID: "turn-1", sessionKey: mirrorChatSession})
 	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "primeira")
 	// The turn is gone but its flush has not run yet.
-	al.activeTurnStates.Delete(mirrorChatSession)
+	endTurnBeforeFlush(al, mirrorChatSession)
 
 	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "segunda")
 
 	history := sessions.GetHistory(mirrorChatSession)
 	if n := len(history); n < 2 || history[n-2].Content != "primeira" || history[n-1].Content != "segunda" {
 		t.Fatalf("history tail = %+v, want primeira then segunda", history[len(history)-2:])
+	}
+}
+
+// On the webhook path two turns of one session run at once and the second
+// overwrites the first's entry; the delivery must wait for both.
+func TestMirrorDelivery_WaitsForEveryConcurrentTurnOfTheSession(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	first := &turnState{turnID: "turn-a", sessionKey: mirrorChatSession}
+	second := &turnState{turnID: "turn-b", sessionKey: mirrorChatSession}
+	al.registerActiveTurn(first)
+	al.registerActiveTurn(second)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
+	al.clearActiveTurn(second)
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("wrote while the first turn was still running (history %d → %d)", before, after)
+	}
+
+	al.clearActiveTurn(first)
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "lembrete" {
+		t.Fatalf("last chat message after both turns = %q, want the delivery", got.Content)
+	}
+}
+
+// An error notice goes to the chat but is not conversation; and a reply whose
+// origin is unknown (a turn the pod received itself, with no session key) can't
+// be told apart from the chat's own.
+func TestMirrorDelivery_SkipsErrorNoticesAndUnknownOrigins(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	al.maybePublishError(context.Background(), "telegram", "123", "", errors.New("provider down"))
+	al.maybePublishError(context.Background(), "telegram", "123", mirrorCronSession, errors.New("provider down"))
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", "", "resposta do próprio chat")
+
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("history grew from %d to %d", before, after)
 	}
 }
 

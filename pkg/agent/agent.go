@@ -663,7 +663,13 @@ func (al *AgentLoop) runAgentLoop(
 		// sessão principal: entra também na conversa do chat. O DefaultResponse
 		// deste caminho é texto sintetizado. (seucaranguejo fork — ver
 		// delivery_mirror.go)
-		if err := al.bus.PublishOutbound(ctx, msg); err == nil && result.finalContent != opts.DefaultResponse {
+		if err := al.bus.PublishOutbound(ctx, msg); err != nil {
+			logger.WarnCF("agent", "Failed to publish turn response", map[string]any{
+				"channel": opts.Dispatch.Channel(),
+				"chat_id": opts.Dispatch.ChatID(),
+				"error":   err.Error(),
+			})
+		} else if result.finalContent != opts.DefaultResponse {
 			al.mirrorDelivery(
 				opts.Dispatch.SessionKey,
 				opts.Dispatch.Channel(),

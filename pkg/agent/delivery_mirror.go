@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"hash/fnv"
 	"strings"
 	"sync"
 
@@ -31,7 +32,19 @@ import (
 // processadas. "" = chat sem conversa para espelhar.
 type DeliverySessionResolver func(channel, chatID string) string
 
+// mirrorStripes é o número de faixas de lock do espelho. Uma faixa segura, para
+// as sessões que caem nela, a checagem "a sessão está num turno?" junto com a
+// escrita, e o registro de turno. São faixas, e não um lock por chave, porque
+// cada rodada de cron é uma chave nova e o mapa de locks cresceria sem fim; e
+// não um lock só, porque uma escrita lenta no EFS pararia o início de turno de
+// todos os chats do pod.
+const mirrorStripes = 64
+
 type deliveryMirror struct {
+	stripes [mirrorStripes]sync.Mutex
+
+	// mu protege os campos abaixo e nunca é segurado durante I/O. Ordem: a faixa
+	// antes do mu.
 	mu      sync.Mutex
 	resolve DeliverySessionResolver
 	// pending segura o que chegou com um turno ativo na sessão de destino. O
@@ -41,6 +54,45 @@ type deliveryMirror struct {
 	// Fica em memória: um pod que reinicia no meio do turno perde a cópia (a
 	// entrega em si já aconteceu).
 	pending map[string][]providers.Message
+	// turns conta os turnos vivos por sessão. O activeTurnStates guarda um só
+	// por chave, e no webhook dois turnos da mesma sessão correm juntos (uma
+	// goroutine por requisição, sem reserva): o segundo sobrescreve o primeiro
+	// e, ao terminar, apagaria a marca com o primeiro ainda gravando.
+	turns map[string]int
+}
+
+func (m *deliveryMirror) stripe(sessionKey string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sessionKey))
+	return &m.stripes[h.Sum32()%mirrorStripes]
+}
+
+// beginTurn e endTurn marcam um turno vivo na sessão. A faixa é segurada pelo
+// chamador de beginTurn, para que uma entrega veja o turno ou seja gravada
+// antes de ele começar.
+func (m *deliveryMirror) beginTurn(sessionKey string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.turns == nil {
+		m.turns = make(map[string]int)
+	}
+	m.turns[sessionKey]++
+}
+
+func (m *deliveryMirror) endTurn(sessionKey string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.turns[sessionKey] <= 1 {
+		delete(m.turns, sessionKey)
+		return
+	}
+	m.turns[sessionKey]--
+}
+
+// mirrorBusyLocked: há turno vivo na sessão, ou um placeholder que a reservou. Exige
+// mu.
+func (al *AgentLoop) mirrorBusyLocked(sessionKey string) bool {
+	return al.mirror.turns[sessionKey] > 0 || al.getActiveTurnState(sessionKey) != nil
 }
 
 // SetDeliverySessionResolver liga o espelho. Sem resolver nada é espelhado, que
@@ -58,7 +110,10 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 // de ser entregue nele por um turno da sessão origin.
 func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	text = strings.TrimSpace(text)
-	if al == nil || text == "" || synthesizedResponse(text) {
+	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
+	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
+	// chave de sessão.
+	if al == nil || origin == "" || text == "" || synthesizedResponse(text) {
 		return
 	}
 	al.mirror.mu.Lock()
@@ -82,11 +137,14 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	}
 
 	msg := providers.Message{Role: "assistant", Content: text}
-	// registerActiveTurn usa o mesmo lock: ou a entrega vê o turno, ou é gravada
-	// antes de ele começar.
+	// registerActiveTurn segura a mesma faixa: ou a entrega vê o turno, ou é
+	// gravada antes de ele começar.
+	stripe := al.mirror.stripe(target)
+	stripe.Lock()
+	defer stripe.Unlock()
 	al.mirror.mu.Lock()
-	defer al.mirror.mu.Unlock()
-	deferred := al.getActiveTurnState(target) != nil
+	deferred := al.mirrorBusyLocked(target)
+	var batch []providers.Message
 	if deferred {
 		if al.mirror.pending == nil {
 			al.mirror.pending = make(map[string][]providers.Message)
@@ -95,9 +153,12 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	} else {
 		// Uma entrega que ainda espera o flush (o turno acabou de liberar a
 		// sessão) vai antes desta, para a conversa manter a ordem de envio.
-		pending := al.mirror.pending[target]
+		batch = append(al.mirror.pending[target], msg)
 		delete(al.mirror.pending, target)
-		writeMirrored(agent, target, append(pending, msg))
+	}
+	al.mirror.mu.Unlock()
+	if !deferred {
+		writeMirrored(agent, target, batch)
 	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
@@ -117,20 +178,24 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	if !waiting {
 		return
 	}
-	// Fora do lock, como em mirrorDelivery: dentro dele só o mapa de turnos e o
-	// store, nunca o registry.
+	// Fora dos locks, como em mirrorDelivery: registry e disco.
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
 		return
 	}
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
 	al.mirror.mu.Lock()
-	defer al.mirror.mu.Unlock()
 	pending := al.mirror.pending[sessionKey]
-	// Outro turno pode ter assumido a sessão logo em seguida: espera por ele.
-	if len(pending) == 0 || al.getActiveTurnState(sessionKey) != nil {
+	// Outro turno pode estar vivo (dois pelo webhook) ou ter assumido a sessão
+	// logo em seguida: espera por ele.
+	if len(pending) == 0 || al.mirrorBusyLocked(sessionKey) {
+		al.mirror.mu.Unlock()
 		return
 	}
 	delete(al.mirror.pending, sessionKey)
+	al.mirror.mu.Unlock()
 	writeMirrored(agent, sessionKey, pending)
 }
 

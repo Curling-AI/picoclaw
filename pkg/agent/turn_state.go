@@ -381,15 +381,23 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 }
 
 func (al *AgentLoop) registerActiveTurn(ts *turnState) {
-	// Under the delivery mirror's lock, so a mirrored delivery either sees this
-	// turn or lands before it starts. (seucaranguejo fork — ver delivery_mirror.go)
-	al.mirror.mu.Lock()
-	defer al.mirror.mu.Unlock()
+	// Under the session's delivery-mirror stripe, so a mirrored delivery either
+	// sees this turn or lands before it starts; counted, because two webhook
+	// turns of one session overwrite each other's entry below.
+	// (seucaranguejo fork — ver delivery_mirror.go)
+	stripe := al.mirror.stripe(ts.sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	al.mirror.beginTurn(ts.sessionKey)
 	al.activeTurnStates.Store(ts.sessionKey, ts)
 }
 
 func (al *AgentLoop) clearActiveTurn(ts *turnState) {
+	al.mirror.endTurn(ts.sessionKey)
 	al.releaseSessionTurnState(ts.sessionKey, ts)
+	// When a concurrent turn of the same session overwrote this one's entry, the
+	// release above is a no-op; the last turn to end still flushes.
+	al.flushMirroredDeliveries(ts.sessionKey)
 }
 
 // releaseSessionTurnState also writes the deliveries that were mirrored into

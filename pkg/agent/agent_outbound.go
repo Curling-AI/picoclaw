@@ -20,7 +20,10 @@ func (al *AgentLoop) maybePublishError(ctx context.Context, channel, chatID, ses
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, formatProcessingError(err))
+	// Aviso de erro vai ao chat mas não entra na conversa dele: seria o mesmo
+	// envenenamento que o finalIsFallback evita. (seucaranguejo fork — ver
+	// delivery_mirror.go)
+	al.publishResponse(ctx, channel, chatID, sessionKey, formatProcessingError(err))
 	return true
 }
 
@@ -40,8 +43,18 @@ func (al *AgentLoop) publishResponseOrError(
 }
 
 func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string) {
+	// Só espelha o que saiu, e só depois de sair. (seucaranguejo fork — ver
+	// delivery_mirror.go)
+	if al.publishResponse(ctx, channel, chatID, sessionKey, response) {
+		al.mirrorDelivery(sessionKey, channel, chatID, response)
+	}
+}
+
+// publishResponse is PublishResponseIfNeeded without the delivery mirror; it
+// reports whether the response went out.
+func (al *AgentLoop) publishResponse(ctx context.Context, channel, chatID, sessionKey, response string) bool {
 	if response == "" {
-		return
+		return false
 	}
 
 	alreadySentToSameChat := false
@@ -70,7 +83,7 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 			"Skipped outbound (message tool already sent to same chat)",
 			map[string]any{"channel": channel, "chat_id": chatID},
 		)
-		return
+		return false
 	}
 
 	msg := bus.OutboundMessage{
@@ -82,12 +95,10 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 		msg.ContextUsage = computeContextUsage(al.agentForSession(sessionKey), sessionKey)
 	}
 	markFinalOutbound(&msg)
-	// Só espelha o que saiu, e só depois de sair. (seucaranguejo fork — ver
-	// delivery_mirror.go)
 	if err := al.bus.PublishOutbound(ctx, msg); err != nil {
 		logger.WarnCF("agent", "Failed to publish outbound response",
 			map[string]any{"channel": channel, "chat_id": chatID, "error": err.Error()})
-		return
+		return false
 	}
 	logger.InfoCF("agent", "Published outbound response",
 		map[string]any{
@@ -95,7 +106,7 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 			"chat_id":     chatID,
 			"content_len": len(response),
 		})
-	al.mirrorDelivery(sessionKey, channel, chatID, response)
+	return true
 }
 
 func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string) {
