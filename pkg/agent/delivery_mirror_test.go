@@ -384,6 +384,85 @@ func TestMirrorDelivery_SurvivesARestartOnTheJSONStore(t *testing.T) {
 	}
 }
 
+// A subagent turn that got an empty reply publishes processSystemMessage's
+// DefaultResponse; that synthesized text is not conversation.
+func TestMirrorDelivery_SubagentFallbackIsNotMirrored(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &simpleMockProvider{response: ""})
+	al.SetDeliverySessionResolver(func(_, chatID string) string {
+		if chatID == "123" {
+			return mirrorChatSession
+		}
+		return ""
+	})
+	sessions := al.registry.GetDefaultAgent().Sessions
+	sessions.AddMessage(mirrorChatSession, "user", "oi")
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	if _, err := al.processSystemMessage(context.Background(), bus.NormalizeInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{Channel: "system", ChatID: "telegram:123", SenderID: "subagent-1"},
+		Content: "Task 'x' completed.\n\nResult:\nfeito",
+	})); err != nil {
+		t.Fatalf("system message: %v", err)
+	}
+
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("the fallback reached the chat conversation (history %d → %d)", before, after)
+	}
+}
+
+// Right after /clear the conversation is empty; a delivery would make it start
+// with an assistant turn, which some providers refuse.
+func TestMirrorDelivery_SkipsAClearedConversation(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	sessions.SetHistory(mirrorChatSession, nil)
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
+
+	if history := sessions.GetHistory(mirrorChatSession); len(history) != 0 {
+		t.Fatalf("a cleared conversation now starts with %+v", history)
+	}
+}
+
+// appendingProvider writes to the session while the summarizer waits on it, as
+// the next turn or a mirrored delivery would.
+type appendingProvider struct {
+	sessions session.SessionStore
+	key      string
+}
+
+func (p *appendingProvider) Chat(
+	context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
+) (*providers.LLMResponse, error) {
+	p.sessions.AddMessage(p.key, "assistant", "entrega durante o resumo")
+	return &providers.LLMResponse{Content: "resumo"}, nil
+}
+
+func (p *appendingProvider) GetDefaultModel() string { return "mock-model" }
+
+// Summarizing keeps the messages after the summarized prefix, including what was
+// written during the summary call; trimming to the old count would drop an
+// unsummarized one instead.
+func TestSummarizeSession_KeepsWhatWasWrittenDuringTheSummary(t *testing.T) {
+	al, sessions := newMirrorLoop(t)
+	agent := al.registry.GetDefaultAgent()
+	agent.Provider = &appendingProvider{sessions: sessions, key: mirrorChatSession}
+	agent.KeepLastMessages = 4
+	sessions.SetHistory(mirrorChatSession, []providers.Message{
+		msg("user", "Q1"), msg("assistant", "A1"),
+		msg("user", "Q2"), msg("assistant", "A2"),
+		msg("user", "Q3"), msg("assistant", "A3"),
+	})
+
+	(&legacyContextManager{al: al}).summarizeSession(agent, mirrorChatSession)
+
+	history := sessions.GetHistory(mirrorChatSession)
+	if len(history) != 5 || history[0].Content != "Q2" || history[4].Content != "entrega durante o resumo" {
+		t.Fatalf("history after summary = %+v, want Q2..A3 plus the message written during it", history)
+	}
+}
+
 func TestDeliveredText(t *testing.T) {
 	for _, c := range []struct {
 		name    string

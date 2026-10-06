@@ -44,15 +44,18 @@ func TestSanitizeHistoryForProvider_JoinsConsecutiveAssistantText(t *testing.T) 
 		msg("user", "pode remarcar"),
 		assistantWithTools("A"),
 		toolResult("A"),
-		msg("assistant", "Remarquei."),
-		{Role: "assistant", Content: "pensado", ReasoningContent: "r"},
+		{Role: "assistant", Content: "Segue a planilha.", Attachments: []providers.Attachment{{}}},
+		{Role: "assistant", Content: "Lembrete das 16h.", ReasoningContent: "r"},
 	}
 
 	result := sanitizeHistoryForProvider(history)
 
-	assertRoles(t, result, "user", "assistant", "user", "assistant", "tool", "assistant", "assistant")
+	assertRoles(t, result, "user", "assistant", "user", "assistant", "tool", "assistant")
 	if result[1].Content != "Oi!\n\nLembrete: reunião às 14h." {
 		t.Fatalf("joined content = %q", result[1].Content)
+	}
+	if last := result[5]; last.Content != "Segue a planilha.\n\nLembrete das 16h." || len(last.Attachments) != 1 {
+		t.Fatalf("reply with attachment + delivery = %+v, want one message keeping the attachment", last)
 	}
 	if history[1].Content != "Oi!" {
 		t.Fatal("sanitizing mutated the stored history")

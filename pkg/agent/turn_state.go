@@ -404,15 +404,13 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 // this session while the turn held it. (seucaranguejo fork — ver
 // delivery_mirror.go)
 func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
-	if expected == nil {
-		al.activeTurnStates.Delete(sessionKey)
-		al.flushMirroredDeliveries(sessionKey)
-		return
+	if expected != nil {
+		if actual, ok := al.activeTurnStates.Load(sessionKey); !ok || actual != expected {
+			return
+		}
 	}
-	if actual, ok := al.activeTurnStates.Load(sessionKey); ok && actual == expected {
-		al.activeTurnStates.Delete(sessionKey)
-		al.flushMirroredDeliveries(sessionKey)
-	}
+	al.activeTurnStates.Delete(sessionKey)
+	al.flushMirroredDeliveries(sessionKey)
 }
 
 func (al *AgentLoop) getActiveTurnState(sessionKey string) *turnState {

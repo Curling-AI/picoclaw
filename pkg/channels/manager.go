@@ -1569,7 +1569,7 @@ func (m *Manager) sendWithRetry(
 	name string,
 	w *channelWorker,
 	msg bus.OutboundMessage,
-) ([]string, bool) {
+) ([]string, error) {
 	// Rate limit: wait for token
 	if err := w.limiter.Wait(ctx); err != nil {
 		// ctx canceled, shutting down
@@ -1584,13 +1584,13 @@ func (m *Manager) sendWithRetry(
 				Error:            err.Error(),
 			},
 		)
-		return nil, false
+		return nil, err
 	}
 
 	// Pre-send: stop typing and try to edit placeholder
 	if msgIDs, handled := m.preSend(ctx, name, msg, w.ch); handled {
 		m.publishOutboundSent(name, msg, msgIDs)
-		return msgIDs, true
+		return msgIDs, nil
 	}
 
 	var lastErr error
@@ -1599,7 +1599,7 @@ func (m *Manager) sendWithRetry(
 		msgIDs, lastErr = w.ch.Send(ctx, msg)
 		if lastErr == nil {
 			m.publishOutboundSent(name, msg, msgIDs)
-			return msgIDs, true
+			return msgIDs, nil
 		}
 
 		// Permanent failures — don't retry
@@ -1618,7 +1618,7 @@ func (m *Manager) sendWithRetry(
 			case <-time.After(rateLimitDelay):
 				continue
 			case <-ctx.Done():
-				return nil, false
+				return nil, ctx.Err()
 			}
 		}
 
@@ -1627,7 +1627,7 @@ func (m *Manager) sendWithRetry(
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
-			return nil, false
+			return nil, ctx.Err()
 		}
 	}
 
@@ -1640,7 +1640,7 @@ func (m *Manager) sendWithRetry(
 	})
 	m.publishOutboundFailed(name, msg, lastErr, false)
 
-	return nil, false
+	return nil, lastErr
 }
 
 func dispatchLoop[M any](
@@ -2101,17 +2101,17 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 		if len(chunks) == 1 {
 			msg.Content = chunks[0]
 		}
-		if _, ok := m.sendWithRetry(ctx, channelName, w, msg); !ok {
-			return fmt.Errorf("%w: channel %s did not deliver the message", ErrSendFailed, channelName)
+		if _, err := m.sendWithRetry(ctx, channelName, w, msg); err != nil {
+			return fmt.Errorf("channel %s did not deliver the message: %w", channelName, err)
 		}
 		return nil
 	}
 	for i, chunk := range chunks {
 		chunkMsg := msg
 		chunkMsg.Content = chunk
-		if _, ok := m.sendWithRetry(ctx, channelName, w, chunkMsg); !ok {
-			return fmt.Errorf("%w: channel %s delivered %d of %d parts of the message",
-				ErrSendFailed, channelName, i, len(chunks))
+		if _, err := m.sendWithRetry(ctx, channelName, w, chunkMsg); err != nil {
+			return fmt.Errorf("channel %s delivered %d of %d parts of the message: %w",
+				channelName, i, len(chunks), err)
 		}
 	}
 	return nil

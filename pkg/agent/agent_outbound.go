@@ -43,7 +43,10 @@ func (al *AgentLoop) publishResponseOrError(
 }
 
 func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string) {
-	// Só espelha o que saiu, e só depois de sair. (seucaranguejo fork — ver
+	// Espelha o que foi enfileirado para o chat. O bus não devolve o resultado do
+	// envio, então uma recusa posterior do canal (bot bloqueado, janela de 24 h do
+	// WhatsApp) não é vista aqui; a ferramenta message, que envia direto pelo
+	// canal, só espelha o que o canal aceitou. (seucaranguejo fork — ver
 	// delivery_mirror.go)
 	if al.publishResponse(ctx, channel, chatID, sessionKey, response) {
 		al.mirrorDelivery(sessionKey, channel, chatID, response)

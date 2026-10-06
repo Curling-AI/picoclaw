@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"hash/fnv"
 	"strings"
 	"sync"
@@ -122,6 +123,9 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	if resolve == nil {
 		return
 	}
+	// O mesmo endereço que a entrega usou: o canal recebe channel e chat id
+	// depois do TrimSpace do bus.NormalizeOutboundMessage.
+	channel, chatID = strings.TrimSpace(channel), strings.TrimSpace(chatID)
 	target := resolve(channel, chatID)
 	// Na própria sessão do chat o turno já grava o que disse: a resposta final
 	// ou a chamada da ferramenta message, que leva o texto. A comparação é crua:
@@ -146,10 +150,7 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	deferred := al.mirrorBusyLocked(target)
 	var batch []providers.Message
 	if deferred {
-		if al.mirror.pending == nil {
-			al.mirror.pending = make(map[string][]providers.Message)
-		}
-		al.mirror.pending[target] = append(al.mirror.pending[target], msg)
+		al.queueMirroredLocked(target, msg)
 	} else {
 		// Uma entrega que ainda espera o flush (o turno acabou de liberar a
 		// sessão) vai antes desta, para a conversa manter a ordem de envio.
@@ -158,7 +159,7 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	}
 	al.mirror.mu.Unlock()
 	if !deferred {
-		writeMirrored(agent, target, batch)
+		al.writeMirrored(agent, target, batch)
 	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
@@ -181,6 +182,8 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	// Fora dos locks, como em mirrorDelivery: registry e disco.
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
+		logger.WarnCF("agent", "No agent for mirrored deliveries; kept pending",
+			map[string]any{"session_key": sessionKey})
 		return
 	}
 	stripe := al.mirror.stripe(sessionKey)
@@ -196,12 +199,43 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	}
 	delete(al.mirror.pending, sessionKey)
 	al.mirror.mu.Unlock()
-	writeMirrored(agent, sessionKey, pending)
+	al.writeMirrored(agent, sessionKey, pending)
 }
 
-func writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) {
+// maxPendingMirrors limita a fila de uma sessão presa num turno longo: uma
+// automação de minuto contra um chat ocupado não cresce a fila sem fim. Sai a
+// mais antiga, que a conversa já não usaria.
+const maxPendingMirrors = 20
+
+// queueMirroredLocked põe a entrega na fila da sessão. Exige mu.
+func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Message) {
+	if al.mirror.pending == nil {
+		al.mirror.pending = make(map[string][]providers.Message)
+	}
+	queue := append(al.mirror.pending[sessionKey], msg)
+	if dropped := len(queue) - maxPendingMirrors; dropped > 0 {
+		queue = queue[dropped:]
+		logger.WarnCF("agent", "Dropped oldest mirrored deliveries waiting for a turn",
+			map[string]any{"session_key": sessionKey, "dropped": dropped})
+	}
+	al.mirror.pending[sessionKey] = queue
+}
+
+// writeMirrored grava como um turno grava: o store e o context manager (o
+// seahorse monta o prompt da própria base, não do store).
+func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) {
 	for _, msg := range msgs {
 		agent.Sessions.AddFullMessage(sessionKey, msg)
+		if al.contextManager == nil {
+			continue
+		}
+		if err := al.contextManager.Ingest(context.Background(), &IngestRequest{
+			SessionKey: sessionKey,
+			Message:    msg,
+		}); err != nil {
+			logger.WarnCF("agent", "Context manager ingest failed for mirrored delivery",
+				map[string]any{"session_key": sessionKey, "error": err.Error()})
+		}
 	}
 	// O backend JSON (fallback quando o JSONL não sobe) só persiste no Save; no
 	// JSONL cada mensagem já foi gravada e o Save só compacta, como no fim de
@@ -227,20 +261,15 @@ func synthesizedResponse(text string) bool {
 	return false
 }
 
-// hasConversation restringe o espelho a chats que já falaram com o agente. Um
-// chat id que nenhuma mensagem de entrada usa (um destino digitado errado, um DM
-// do Slack endereçado pelo id do usuário em vez do canal) viraria uma sessão
-// órfã, que só aparece na listagem e nunca é lida.
+// hasConversation restringe o espelho a chats com conversa em curso. Um chat id
+// que nenhuma mensagem de entrada usa (um destino digitado errado, um DM do Slack
+// endereçado pelo id do usuário em vez do canal) viraria uma sessão órfã, que só
+// aparece na listagem e nunca é lida. E uma conversa vazia (logo depois do
+// /clear) começaria pela fala do assistente, que há provedor que recusa; a
+// entrega volta a ser espelhada depois da próxima mensagem do usuário. Vale
+// também para sessão migrada do JSON antigo, que tem histórico e não tem scope.
 func hasConversation(store session.SessionStore, key string) bool {
-	if store == nil {
-		return false
-	}
-	if meta, ok := store.(session.MetadataAwareSessionStore); ok && meta.GetSessionScope(key) != nil {
-		return true
-	}
-	// Sessão migrada do JSON antigo tem histórico, mas só ganha scope no
-	// próximo turno de entrada.
-	return len(store.GetHistory(key)) > 0
+	return store != nil && len(store.GetHistory(key)) > 0
 }
 
 // isPlainAssistant: fala do assistente só com texto, que pode ser juntada à
@@ -274,13 +303,8 @@ func deliveredText(content string, parts []bus.MediaPart) string {
 			names = append(names, name)
 		}
 	}
-	content = strings.TrimSpace(content)
 	if len(names) == 0 {
-		return content
+		return strings.TrimSpace(content)
 	}
-	attachments := "[attachments: " + strings.Join(names, ", ") + "]"
-	if content == "" {
-		return attachments
-	}
-	return content + "\n\n" + attachments
+	return joinAssistantText(content, "[attachments: "+strings.Join(names, ", ")+"]")
 }

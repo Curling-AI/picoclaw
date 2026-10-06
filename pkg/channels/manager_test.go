@@ -3266,8 +3266,8 @@ func TestSendMessage_PermanentFailureIsReported(t *testing.T) {
 		ChatID:  "123",
 		Content: "lembrete",
 	}))
-	if !errors.Is(err, ErrSendFailed) {
-		t.Fatalf("SendMessage error = %v, want ErrSendFailed", err)
+	if !errors.Is(err, ErrSendFailed) || !strings.Contains(err.Error(), "outside the 24h window") {
+		t.Fatalf("SendMessage error = %v, want the channel's own refusal", err)
 	}
 }
 
@@ -3297,7 +3297,8 @@ func TestSendMessage_StopsAtTheFirstRefusedPart(t *testing.T) {
 		Content: "hello world again",
 	}))
 
-	if !errors.Is(err, ErrSendFailed) || !strings.Contains(err.Error(), "delivered 1 of") {
+	if !errors.Is(err, ErrSendFailed) || !strings.Contains(err.Error(), "delivered 1 of") ||
+		!strings.Contains(err.Error(), "blocked") {
 		t.Fatalf("SendMessage error = %v, want the partial delivery reported", err)
 	}
 	if len(received) != 1 {
