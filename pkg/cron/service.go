@@ -758,7 +758,9 @@ func (cs *CronService) ListJobs(includeDisabled bool) []CronJob {
 	defer cs.mu.RUnlock()
 
 	if includeDisabled {
-		return cs.store.Jobs
+		// A copy, like the enabled-only branch: callers range over it after the
+		// lock is released while the scheduler keeps writing to the store.
+		return append([]CronJob(nil), cs.store.Jobs...)
 	}
 
 	var enabled []CronJob

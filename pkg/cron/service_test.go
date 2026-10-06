@@ -485,3 +485,18 @@ func TestCronService_CompletionReschedulesLoop(t *testing.T) {
 	}
 	t.Fatal("recurring job did not fire at least twice — completion did not reschedule the loop")
 }
+
+func TestListJobsIncludingDisabledReturnsACopy(t *testing.T) {
+	cs := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
+	everyMS := int64(60_000)
+	if _, err := cs.AddJob("a", CronSchedule{Kind: "every", EveryMS: &everyMS}, "a", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := cs.ListJobs(true)
+	jobs[0].Name = "changed by caller"
+
+	if got := cs.ListJobs(true)[0].Name; got != "a" {
+		t.Fatalf("store job name = %q, want a: ListJobs(true) must not alias the store", got)
+	}
+}

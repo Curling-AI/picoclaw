@@ -1368,3 +1368,26 @@ func TestCronTool_RefusalDiscouragesReplacementJob(t *testing.T) {
 		t.Fatalf("refusal should discourage a replacement, got: %+v", refusal)
 	}
 }
+
+// A job paused in one turn must still be listed in the next, or the agent
+// cannot find it to re-enable and adds a new one instead.
+func TestCronTool_ListShowsDisabledJobsSoTheyCanBeReEnabled(t *testing.T) {
+	tool := newTestCronTool(t)
+	tool.SetJobAccessPolicy(func(ctx context.Context, _ *cron.CronJob) bool {
+		return ToolChannel(ctx) == "rpc"
+	})
+	job := addTestCronJob(t, tool, "hourly", "rpc", "run-1", "")
+	if result := tool.Execute(WithToolContext(context.Background(), "rpc", "run-2"),
+		map[string]any{"action": "disable", "job_id": job.ID}); result.IsError {
+		t.Fatalf("disable failed: %s", result.ForLLM)
+	}
+
+	ctx := WithToolContext(context.Background(), "rpc", "run-3")
+	list := tool.Execute(ctx, map[string]any{"action": "list"})
+	if !strings.Contains(list.ForLLM, fmt.Sprintf("(id: %s, every 60s, disabled)", job.ID)) {
+		t.Fatalf("list should show the disabled job, got: %s", list.ForLLM)
+	}
+	if result := tool.Execute(ctx, map[string]any{"action": "enable", "job_id": job.ID}); result.IsError {
+		t.Fatalf("enable failed: %s", result.ForLLM)
+	}
+}

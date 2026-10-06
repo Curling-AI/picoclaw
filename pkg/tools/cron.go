@@ -274,7 +274,9 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 }
 
 func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
-	jobs := t.cronService.ListJobs(false)
+	// Paused jobs are listed too: hidden, a job disabled in one turn could not be
+	// found to re-enable in the next, and the agent added a new one instead.
+	jobs := t.cronService.ListJobs(true)
 
 	var accessibleJobs []cron.CronJob
 	for _, job := range jobs {
@@ -300,6 +302,9 @@ func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
 			scheduleInfo = "one-time"
 		} else {
 			scheduleInfo = "unknown"
+		}
+		if !j.Enabled {
+			scheduleInfo += ", disabled"
 		}
 		result.WriteString(fmt.Sprintf("- %s (id: %s, %s)\n", j.Name, j.ID, scheduleInfo))
 	}
