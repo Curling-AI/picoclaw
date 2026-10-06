@@ -444,7 +444,11 @@ func (t *CronTool) removeJob(ctx context.Context, args map[string]any) *ToolResu
 		return inaccessibleJobResult(jobID)
 	}
 
-	if t.cronService.RemoveJob(jobID) {
+	removed, err := t.cronService.RemoveJob(jobID)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("Error removing job: %v", err))
+	}
+	if removed {
 		return SilentResult(fmt.Sprintf("Cron job removed: %s", jobID))
 	}
 	return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
@@ -640,7 +644,10 @@ func (t *CronTool) enableJob(ctx context.Context, args map[string]any, enable bo
 		return inaccessibleJobResult(jobID)
 	}
 
-	updatedJob := t.cronService.EnableJob(jobID, enable)
+	updatedJob, err := t.cronService.EnableJob(jobID, enable)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("Error updating job: %v", err))
+	}
 	if updatedJob == nil {
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}

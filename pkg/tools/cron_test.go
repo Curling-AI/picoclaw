@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -857,7 +859,7 @@ func TestCronTool_AllowlistedRemoteCanManageOwnCommandJob(t *testing.T) {
 			tool := newTestCronToolWithConfig(t, cfg)
 			job := addTestCronJob(t, tool, "command", "telegram", "chat-1", "df -h")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			ctx := WithToolContext(context.Background(), "telegram", "chat-1")
 
@@ -939,7 +941,7 @@ func TestCronTool_InternalChannelCanManageAllJobs(t *testing.T) {
 			tool := newTestCronTool(t)
 			job := addTestCronJob(t, tool, "command", "telegram", "chat-1", "df -h")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			ctx := WithToolContext(context.Background(), "cli", "direct")
 
@@ -973,7 +975,7 @@ func TestCronTool_RemoteCanManageOwnNonCommandJob(t *testing.T) {
 			tool := newTestCronTool(t)
 			job := addTestCronJob(t, tool, "reminder", "telegram", "chat-1", "")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			ctx := WithToolContext(context.Background(), "telegram", "chat-1")
 
@@ -993,7 +995,7 @@ func TestCronTool_WildcardRemoteCanManageOwnCommandJob(t *testing.T) {
 			tool := newTestCronToolWithConfig(t, cfg)
 			job := addTestCronJob(t, tool, "command", "telegram", "chat-1", "df -h")
 			if action == "enable" {
-				tool.cronService.EnableJob(job.ID, false)
+				_, _ = tool.cronService.EnableJob(job.ID, false)
 			}
 			other := addTestCronJob(t, tool, "other", "telegram", "chat-2", "uptime")
 			ctx := WithToolContext(context.Background(), "telegram", "chat-1")
@@ -1410,5 +1412,35 @@ func TestCronTool_ListShowsDisabledJobsSoTheyCanBeReEnabled(t *testing.T) {
 	}
 	if result := tool.Execute(ctx, map[string]any{"action": "enable", "job_id": job.ID}); result.IsError {
 		t.Fatalf("enable failed: %s", result.ForLLM)
+	}
+}
+
+// The agent used to hear "removed"/"disabled" while the store kept the job,
+// which came back on the next restart and kept charging.
+func TestCronTool_ReportsAFailedSave(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs directory permissions to be enforced")
+	}
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "cron.json")
+	tool, err := NewCronTool(cron.NewCronService(storePath, nil), nil, bus.NewMessageBus(), t.TempDir(), true, 0,
+		config.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := addTestCronJob(t, tool, "a", "telegram", "chat-1", "")
+	if err := os.Chmod(storePath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+
+	for _, action := range []string{"remove", "disable"} {
+		if result := tool.Execute(ctx, map[string]any{"action": action, "job_id": job.ID}); !result.IsError {
+			t.Fatalf("%s reported success although the store was not saved: %s", action, result.ForLLM)
+		}
 	}
 }

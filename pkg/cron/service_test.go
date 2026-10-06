@@ -107,14 +107,16 @@ func TestCronService_CRUD(t *testing.T) {
 	}
 
 	// Test EnableJob
-	cs.EnableJob(job.ID, false)
+	if _, err = cs.EnableJob(job.ID, false); err != nil {
+		t.Fatal(err)
+	}
 	if cs.store.Jobs[0].Enabled != false || cs.store.Jobs[0].State.NextRunAtMS != nil {
 		t.Error("EnableJob(false) failed to clear state")
 	}
 
 	// Test RemoveJob
-	removed := cs.RemoveJob(job.ID)
-	if !removed || len(cs.store.Jobs) != 0 {
+	removed, err := cs.RemoveJob(job.ID)
+	if err != nil || !removed || len(cs.store.Jobs) != 0 {
 		t.Error("RemoveJob failed")
 	}
 }
@@ -191,8 +193,8 @@ func TestCronService_UpdateJobRecomputesNextRunOnScheduleOrEnabledChange(t *test
 		t.Fatalf("next run should be recomputed, still %d", initialNextRun)
 	}
 
-	if disabled := cs.EnableJob(job.ID, false); disabled == nil {
-		t.Fatal("EnableJob(false) returned nil")
+	if disabled, err := cs.EnableJob(job.ID, false); err != nil || disabled == nil {
+		t.Fatalf("EnableJob(false) = %v, %v", disabled, err)
 	}
 	disabled, ok := cs.GetJob(job.ID)
 	if !ok {
@@ -393,7 +395,7 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 			for j := range iterations {
 				jobs := cs.ListJobs(true)
 				if len(jobs) > 0 {
-					cs.EnableJob(jobs[0].ID, j%2 == 0)
+					_, _ = cs.EnableJob(jobs[0].ID, j%2 == 0)
 				}
 				time.Sleep(100 * time.Microsecond)
 			}
@@ -509,10 +511,73 @@ func TestEnableJobReturnsACopy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	enabled := cs.EnableJob(job.ID, false)
+	enabled, err := cs.EnableJob(job.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	enabled.Name = "changed by caller"
 
 	if got, _ := cs.GetJob(job.ID); got.Name != "a" {
 		t.Fatalf("store job name = %q, want a: EnableJob must not alias the store", got.Name)
 	}
+}
+
+// serviceWithFailingSave returns a service whose next save fails: after the
+// job is added, the store directory and file turn read-only, so neither the
+// atomic write nor its direct-write fallback can succeed.
+func serviceWithFailingSave(t *testing.T) (*CronService, *CronJob) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs directory permissions to be enforced")
+	}
+	dir := t.TempDir()
+	cs := NewCronService(filepath.Join(dir, "jobs.json"), nil)
+	everyMS := int64(60_000)
+	job, err := cs.AddJob("a", CronSchedule{Kind: "every", EveryMS: &everyMS}, "a", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(dir, "jobs.json")
+	if err := os.Chmod(storePath, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	return cs, job
+}
+
+// A change kept only in memory came back undone after a restart, while the
+// caller had reported the job removed, paused or edited.
+func TestFailedSaveLeavesTheJobUnchanged(t *testing.T) {
+	t.Run("remove", func(t *testing.T) {
+		cs, job := serviceWithFailingSave(t)
+		if removed, err := cs.RemoveJob(job.ID); err == nil || removed {
+			t.Fatalf("RemoveJob = %v, %v; want false and the save error", removed, err)
+		}
+		if _, ok := cs.GetJob(job.ID); !ok {
+			t.Fatal("job was removed from memory although the store was not saved")
+		}
+	})
+	t.Run("enable", func(t *testing.T) {
+		cs, job := serviceWithFailingSave(t)
+		if got, err := cs.EnableJob(job.ID, false); err == nil || got != nil {
+			t.Fatalf("EnableJob = %v, %v; want nil and the save error", got, err)
+		}
+		if got, _ := cs.GetJob(job.ID); !got.Enabled || got.State.NextRunAtMS == nil {
+			t.Fatalf("job was paused in memory although the store was not saved: %+v", got)
+		}
+	})
+	t.Run("update", func(t *testing.T) {
+		cs, job := serviceWithFailingSave(t)
+		edited, _ := cs.GetJob(job.ID)
+		edited.Name = "edited"
+		if err := cs.UpdateJob(edited); err == nil {
+			t.Fatal("UpdateJob should return the save error")
+		}
+		if got, _ := cs.GetJob(job.ID); got.Name != "a" {
+			t.Fatalf("job name = %q in memory although the store was not saved", got.Name)
+		}
+	})
 }

@@ -48,19 +48,26 @@ func cronListCmd(storePath string) {
 
 func cronRemoveCmd(storePath, jobID string) {
 	cs := cron.NewCronService(storePath, nil)
-	if cs.RemoveJob(jobID) {
+	removed, err := cs.RemoveJob(jobID)
+	switch {
+	case err != nil:
+		fmt.Printf("✗ Failed to remove job %s: %v\n", jobID, err)
+	case removed:
 		fmt.Printf("✓ Removed job %s\n", jobID)
-	} else {
+	default:
 		fmt.Printf("✗ Job %s not found\n", jobID)
 	}
 }
 
 func cronSetJobEnabled(storePath, jobID string, enabled bool) {
 	cs := cron.NewCronService(storePath, nil)
-	job := cs.EnableJob(jobID, enabled)
-	if job != nil {
+	job, err := cs.EnableJob(jobID, enabled)
+	switch {
+	case err != nil:
+		fmt.Printf("✗ Failed to update job %s: %v\n", jobID, err)
+	case job != nil:
 		fmt.Printf("✓ Job '%s' enabled\n", job.Name)
-	} else {
+	default:
 		fmt.Printf("✗ Job %s not found\n", jobID)
 	}
 }
