@@ -201,11 +201,12 @@ func webResolver(channel, _ string) string {
 	return ""
 }
 
-// A second turn on a conversation that is already in one interleaves with it;
-// the result waits for the live turn to end and enters the history then.
-func TestRun_ResultForABusyConversationIsWrittenWhenItsTurnEnds(t *testing.T) {
+// A second turn on a conversation that is already in one interleaves with it.
+// A web result waits for the live turn to end and enters the history then.
+func TestRun_WebResultForABusyConversationIsWrittenWhenItsTurnEnds(t *testing.T) {
 	provider := &countingReplyProvider{}
 	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
 	live := &turnState{turnID: "turn-7", sessionKey: conversationSession}
 	al.registerActiveTurn(live)
 	startRunLoop(t, al)
@@ -228,6 +229,35 @@ func TestRun_ResultForABusyConversationIsWrittenWhenItsTurnEnds(t *testing.T) {
 	}
 	if provider.count() != 0 {
 		t.Fatalf("a turn ran for the result (%d model calls)", provider.count())
+	}
+}
+
+// A chat that receives replies hears about the result from the live turn: it
+// joins that turn's queue, so the turn's reply can mention it.
+func TestRun_ChatResultForABusyConversationJoinsTheLiveTurn(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	al.registerActiveTurn(&turnState{turnID: "turn-7", sessionKey: conversationSession})
+	startRunLoop(t, al)
+
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	waitFor(t, "the result in the live turn's queue", func() bool {
+		return al.pendingSteeringCountForScope(conversationSession) == 1
+	})
+	queued := al.dequeueSteeringMessagesForScope(conversationSession)
+	if len(queued) != 1 || !strings.HasPrefix(queued[0].Content, "[System: async:spawn] Spawn failed") {
+		t.Fatalf("queued %+v, want the marked result", queued)
+	}
+	if provider.count() != 0 || pendingNotes(al, conversationSession) != 0 {
+		t.Fatalf("result also became a turn (%d calls) or a note", provider.count())
+	}
+	if got := len(sessions.GetHistory(conversationSession)); got != 2 {
+		t.Fatalf("conversation history changed to %d messages", got)
 	}
 }
 

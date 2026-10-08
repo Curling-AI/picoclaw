@@ -32,22 +32,21 @@ func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *Ag
 	return sessionKey, agent, true
 }
 
-// recordBackgroundResult writes a result into its conversation without opening
-// a turn when a turn would do harm or reach no one:
-//   - the conversation is in a turn: a second turn on the same history would
-//     interleave with it, so the note waits for the turn to end, the way the
-//     delivery mirror defers its writes;
-//   - its chat cannot receive a late reply (a web run's stream ends with the
-//     run): a turn there would act unseen and race the user's next message.
+// recordBackgroundResult writes a result into its conversation, without a
+// turn, when the conversation's chat cannot receive a late reply (a web run's
+// stream ends with the run): a turn there would act unseen and race the user's
+// next message on the same history. If the conversation is in a turn, the note
+// waits for it to end, the way the delivery mirror defers its writes. The next
+// turn of the conversation reads it.
 //
-// The next turn of the conversation reads the note. false = not handled: the
-// conversation is idle and its chat reachable, so the caller runs a turn there.
+// false = not handled: the chat receives replies, so the caller runs a turn in
+// the conversation, or queues the result into the live one, whose reply can
+// mention it.
 func (al *AgentLoop) recordBackgroundResult(msg bus.InboundMessage) bool {
 	sessionKey, agent, ok := al.backgroundResultTarget(msg)
-	if !ok {
+	if !ok || al.originReachable(msg.ChatID) {
 		return false
 	}
-	reachable := al.originReachable(msg.ChatID)
 	note := providers.Message{Role: "user", Content: systemMessageContent(msg)}
 
 	stripe := al.mirror.stripe(sessionKey)
@@ -55,10 +54,6 @@ func (al *AgentLoop) recordBackgroundResult(msg bus.InboundMessage) bool {
 	defer stripe.Unlock()
 	al.mirror.mu.Lock()
 	busy := al.mirrorBusyLocked(sessionKey)
-	if !busy && reachable {
-		al.mirror.mu.Unlock()
-		return false
-	}
 	var batch []providers.Message
 	if busy {
 		al.queueMirroredLocked(sessionKey, note)

@@ -115,10 +115,10 @@ func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, stri
 	return resolveScopeKey(allocation.SessionKey, msg.SessionKey), agent.ID, true
 }
 
-// systemSteeringTarget: a result that runs as a turn of its conversation (see
-// recordBackgroundResult) claims the session like any other message, so a turn
-// that starts meanwhile gets it queued instead of a second turn on the same
-// history. Main-session results keep running inline.
+// systemSteeringTarget: a result for a conversation whose chat receives replies
+// (see recordBackgroundResult) takes the session like any other message: a live
+// turn gets it queued, an idle conversation gets a turn of its own. Main-session
+// results keep running inline.
 func (al *AgentLoop) systemSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
 	sessionKey, agent, ok := al.backgroundResultTarget(msg)
 	if !ok {
