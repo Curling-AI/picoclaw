@@ -24,6 +24,7 @@ type (
 	AsyncExecutor          = toolshared.AsyncExecutor
 	PromptMetadata         = toolshared.PromptMetadata
 	PromptMetadataProvider = toolshared.PromptMetadataProvider
+	RepeatSafety           = toolshared.RepeatSafety
 	SideEffectHinter       = toolshared.SideEffectHinter
 	ServerNamedTool        = toolshared.ServerNamedTool
 	ToolResult             = toolshared.ToolResult
@@ -38,6 +39,10 @@ const (
 	ToolPromptSlotMCP         = toolshared.ToolPromptSlotMCP
 	ToolPromptSourceRegistry  = toolshared.ToolPromptSourceRegistry
 	ToolPromptSourceDiscovery = toolshared.ToolPromptSourceDiscovery
+
+	RepeatUnsafe     = toolshared.RepeatUnsafe
+	RepeatIdempotent = toolshared.RepeatIdempotent
+	RepeatReadOnly   = toolshared.RepeatReadOnly
 )
 
 func WithToolContext(ctx context.Context, channel, chatID string) context.Context {

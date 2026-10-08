@@ -296,10 +296,8 @@ type turnState struct {
 	loopDetector     *LoopDetector
 	loopDetectorInit bool
 
-	// lastSideEffectCall is the key of the call that changed things last in
-	// this turn, compared against to block an unchanged repeat (see
-	// repeat_guard.go). Turn goroutine only, like loopDetector.
-	lastSideEffectCall string
+	// repeats is the repeat guard (repeat_guard.go). Turn goroutine only.
+	repeats repeatGuard
 
 	followUps []bus.InboundMessage
 

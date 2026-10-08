@@ -261,10 +261,10 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 
 // ExpiredToolAliases maps each name the model may write for a hidden tool that
 // is currently expired to its registry name: the registry name itself and, for
-// MCP tools, the server's own tool name. Names that are plain words (no '_' or
-// '-') are left out — they collide with prose — and so is a name shared by two
-// registered tools (visible or core ones included), since it can't say which
-// one the model meant. Keys are lowercase.
+// MCP tools, the server's own tool name. Names that are plain words (no '_',
+// '-' or '.') are left out — they collide with prose — and so is a name shared
+// by two registered tools (visible or core ones included), since it can't say
+// which one the model meant. Keys are lowercase.
 func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -272,7 +272,7 @@ func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
 	ambiguous := make(map[string]struct{})
 	add := func(alias, name string) {
 		alias = strings.ToLower(alias)
-		if !strings.ContainsAny(alias, "_-") {
+		if !strings.ContainsAny(alias, "_-.") {
 			return
 		}
 		if owner, ok := owners[alias]; ok && owner != name {

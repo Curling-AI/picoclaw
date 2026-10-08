@@ -212,6 +212,11 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			for i, pm := range pendingMessages {
 				messages = append(messages, resolvedPending[i])
 				totalContentLen += len(pm.Content)
+				// The user steered the turn: a repeat they ask for is theirs
+				// to make (repeat guard, seucaranguejo fork).
+				if pm.PromptSource != string(PromptSourceSubTurnResult) {
+					ts.repeats.reset()
+				}
 				if !ts.opts.NoHistory {
 					ts.agent.Sessions.AddFullMessage(ts.sessionKey, pm)
 					ts.recordPersistedMessage(pm)
@@ -305,9 +310,12 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				}
 				// ExecuteTools returned ControlBreak:
 				// - allResponsesHandled=true: finalize without DefaultResponse (exec.finalContent empty)
-				// - allResponsesHandled=false: coordinator applies DefaultResponse before finalize
+				// - allResponsesHandled=false: finalize with the text ExecuteTools left in
+				//   exec.finalContent (the repeat guard's stop summary; seucaranguejo fork)
 				if exec.allResponsesHandled {
 					finalContent = ""
+				} else {
+					finalContent = exec.finalContent
 				}
 				result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
 				if finalizeErr != nil {

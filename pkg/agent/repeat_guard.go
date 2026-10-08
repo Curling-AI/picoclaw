@@ -1,69 +1,129 @@
 package agent
 
-import "github.com/sipeed/picoclaw/pkg/tools"
+import (
+	"crypto/sha256"
+	"encoding/hex"
 
-// repeatedSideEffectContent replaces the result of a call that would repeat,
-// unchanged, the side effect the model caused last. A model that degenerates
-// into re-emitting its previous call (seen in prod: the same project-creating
-// MCP call 36 times in one turn, while its own text promised to stop) gets
-// this instead of another duplicate.
-const repeatedSideEffectContent = "Not executed: this is the same call (same tool, same arguments) " +
-	"as the one that just succeeded, and this tool changes things outside the conversation, so " +
-	"running it again would repeat that change (another record, message or project). Its result " +
-	"is above; continue from it. If you meant a different action, call the tool for that action. " +
-	"If a second run is really wanted, ask the user first."
+	"github.com/sipeed/picoclaw/pkg/tools"
+)
 
-// repeatHints reports whether the tool's server declared how it behaves on a
-// repeat (MCP tools do, through annotations or their absence) and, if so,
-// whether a repeat is harmless.
-func repeatHints(registry *tools.ToolRegistry, toolName string) (declared, harmless bool) {
+// Repeat guard (seucaranguejo fork). A model that degenerates into re-emitting
+// its previous call — seen in prod: the same project-creating MCP call 36
+// times in one turn, while its own text promised to stop — must not get the
+// side effect again each round. The guard covers MCP tools that may change
+// things on every call: a run of identical calls (same tool and arguments,
+// nothing in between that could change what they mean) may run
+// maxUnchangedRuns times; past that each call is refused, and after
+// maxRepeatRefusals refusals the turn ends.
+const (
+	// One repeat stays allowed: a poll of a status the server didn't declare
+	// read-only, or a publish retried after it failed downstream.
+	maxUnchangedRuns = 2
+	// A model that sends a refused call again is stuck; ending the turn beats
+	// paying LLM rounds until max_tool_iterations.
+	maxRepeatRefusals = 2
+)
+
+const repeatedSideEffectContent = "Not executed: this exact call (same tool, same arguments) already " +
+	"ran twice in a row in this turn, and this tool changes things outside the conversation, so " +
+	"running it again would repeat that change (another record, message or project). Its result is " +
+	"above. Do not send this call again in this turn: if you meant a different action, call the tool " +
+	"for that action; otherwise finish and report what was done."
+
+const repeatStopSkipContent = "Not executed: the turn ended because a refused call kept being repeated."
+
+// repeatStopSummary is the turn's reply when the guard ends it.
+func repeatStopSummary(toolName string) string {
+	return "I stopped this turn: I kept sending the same " + toolName + " call after it had already " +
+		"run and been refused, and running it again would have repeated its effect (another record, " +
+		"message or project). Nothing else ran after that. Tell me how you want to continue."
+}
+
+// callEffect is what a successful call means for the run of identical calls.
+type callEffect int
+
+const (
+	// effectNone: reads and tool discovery change nothing; the run goes on.
+	effectNone callEffect = iota
+	// effectChange: the call may have changed something (a native exec or
+	// write, an idempotent MCP call), so the same call after it is a new action.
+	effectChange
+	// effectGuarded: an MCP call that may change things again on every run.
+	effectGuarded
+)
+
+// readOnlyNativeTool reports native tools that only read, besides tool search.
+func readOnlyNativeTool(toolName string) bool {
+	return tools.IsToolDiscoveryToolName(toolName) ||
+		nonMutatingTools[toolName] ||
+		toolName == tools.FindInstalledSkillsToolName ||
+		toolName == "spawn_status"
+}
+
+func classifyCall(registry *tools.ToolRegistry, toolName string) callEffect {
+	if readOnlyNativeTool(toolName) {
+		return effectNone
+	}
 	tool, ok := registry.GetRegistered(toolName)
 	if !ok {
-		return false, false
+		return effectChange
 	}
 	hinter, ok := tool.(tools.SideEffectHinter)
 	if !ok {
-		return false, false
+		return effectChange
 	}
-	return true, hinter.RepeatIsHarmless()
+	switch hinter.RepeatSafety() {
+	case tools.RepeatReadOnly:
+		return effectNone
+	case tools.RepeatIdempotent:
+		return effectChange
+	default:
+		return effectGuarded
+	}
 }
 
-// sideEffectCallKey returns the key of a call whose repetition is not known to
-// be harmless, and false for every other call.
-//
-// Only tools whose effects are declared by their server (MCP) are guarded: they
-// act outside the agent, and without annotations the MCP defaults say a call
-// may change its environment and repeating it repeats the change. Native tools
-// stay out — re-running exec or read_file with the same arguments is routine.
-func sideEffectCallKey(registry *tools.ToolRegistry, toolName string, args map[string]any) (string, bool) {
-	if declared, harmless := repeatHints(registry, toolName); !declared || harmless {
-		return "", false
-	}
-	return toolName + ":" + normalizeArgs(args), true
+// callKey hashes the call: arguments can be large (a whole file to write).
+func callKey(toolName string, args map[string]any) string {
+	sum := sha256.Sum256([]byte(toolName + "\x00" + normalizeArgs(args)))
+	return hex.EncodeToString(sum[:])
 }
 
-// repeatsLastSideEffect reports whether key is the call that changed things
-// last in this turn, with nothing since that could make running it again mean
-// something else.
-func (ts *turnState) repeatsLastSideEffect(key string) bool {
-	return ts.lastSideEffectCall != "" && ts.lastSideEffectCall == key
+// repeatGuard tracks the current run of identical guarded calls in a turn.
+// Turn goroutine only, like the loop detector.
+type repeatGuard struct {
+	lastKey  string
+	lastRuns int
+	refusals int
 }
 
-// recordSucceededCall tracks the last call that could have changed anything.
-// A side-effecting call becomes the one a repeat is compared to. Any other call
-// that may have changed something (a native exec or write, an MCP call to a
-// different action) clears it: write A, write B, write A is a revert, not a
-// loop. Tool discovery and calls declared harmless change nothing and keep it.
-func (ts *turnState) recordSucceededCall(registry *tools.ToolRegistry, toolName, sideEffectKey string) {
-	if sideEffectKey != "" {
-		ts.lastSideEffectCall = sideEffectKey
-		return
+func (g *repeatGuard) refuses(key string) bool {
+	return key == g.lastKey && g.lastRuns >= maxUnchangedRuns
+}
+
+// recordRefusal counts a refusal and reports whether the turn must end.
+func (g *repeatGuard) recordRefusal() bool {
+	g.refusals++
+	return g.refusals >= maxRepeatRefusals
+}
+
+// recordSuccess updates the run after a call succeeded. Failures don't count:
+// the server reported the call as not done.
+func (g *repeatGuard) recordSuccess(effect callEffect, key string) {
+	switch effect {
+	case effectGuarded:
+		if key == g.lastKey {
+			g.lastRuns++
+			return
+		}
+		g.lastKey, g.lastRuns = key, 1
+	case effectChange:
+		g.lastKey, g.lastRuns = "", 0
+	case effectNone:
 	}
-	if tools.IsToolDiscoveryToolName(toolName) {
-		return
-	}
-	if declared, harmless := repeatHints(registry, toolName); declared && harmless {
-		return
-	}
-	ts.lastSideEffectCall = ""
+}
+
+// reset starts over when the user steers the turn: a repeat they ask for is
+// their decision, not the model stuck on its last call.
+func (g *repeatGuard) reset() {
+	*g = repeatGuard{}
 }

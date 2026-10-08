@@ -40,6 +40,7 @@ func TestExpiredToolAliases(t *testing.T) {
 	r.RegisterHidden(hiddenServerTool("mcp_web_search", "search"))
 	r.RegisterHidden(hiddenServerTool("mcp_fs_read_file", "read_file"))
 	r.RegisterHidden(hiddenServerTool("mcp_crm_Get-Contact", "Get-Contact"))
+	r.RegisterHidden(hiddenServerTool("mcp_drive_files_get", "files.get"))
 	r.PromoteTools([]string{"mcp_skip_skip_project_create"}, 5)
 
 	aliases := r.ExpiredToolAliases()
@@ -53,6 +54,8 @@ func TestExpiredToolAliases(t *testing.T) {
 		"mcp_fs_read_file":             "mcp_fs_read_file",
 		"mcp_crm_get-contact":          "mcp_crm_Get-Contact",
 		"get-contact":                  "mcp_crm_Get-Contact",
+		"mcp_drive_files_get":          "mcp_drive_files_get",
+		"files.get":                    "mcp_drive_files_get",
 	}
 	for alias, name := range want {
 		if got := aliases[alias]; got != name {

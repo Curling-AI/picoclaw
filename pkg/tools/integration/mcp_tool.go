@@ -174,12 +174,21 @@ func (t *MCPTool) ServerToolName() string {
 	return t.tool.Name
 }
 
-// RepeatIsHarmless reports whether the server annotated the tool read-only or
-// idempotent. Without annotations the MCP defaults apply: the tool may change
-// its environment, and running it again repeats the change.
-func (t *MCPTool) RepeatIsHarmless() bool {
+// RepeatSafety maps the server's annotations. Without them the MCP defaults
+// apply: the tool may change its environment, and running it again repeats the
+// change. The annotations are read once, when the pod connects to the server.
+func (t *MCPTool) RepeatSafety() toolshared.RepeatSafety {
 	hints := t.tool.Annotations
-	return hints != nil && (hints.ReadOnlyHint || hints.IdempotentHint)
+	switch {
+	case hints == nil:
+		return toolshared.RepeatUnsafe
+	case hints.ReadOnlyHint:
+		return toolshared.RepeatReadOnly
+	case hints.IdempotentHint:
+		return toolshared.RepeatIdempotent
+	default:
+		return toolshared.RepeatUnsafe
+	}
 }
 
 // Description returns the tool description

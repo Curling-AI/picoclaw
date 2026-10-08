@@ -181,8 +181,9 @@ func (p *Pipeline) CallLLM(
 				})
 		}
 	}
-	// Same heal for tools the model named but hasn't called yet; capped like a
-	// discovery page so a long reasoning can't unhide the whole library.
+	// Same heal (seucaranguejo fork) for tools the model named but hasn't called
+	// yet; capped like a discovery page so a long reasoning can't unhide the
+	// whole library.
 	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); len(mentioned) > 0 {
 		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
 		if len(revived) > 0 {

@@ -899,22 +899,31 @@ func TestMCPTool_Execute_WhitespaceWorkspaceDisablesArtifactPersistence(t *testi
 	}
 }
 
-func TestMCPTool_RepeatIsHarmless(t *testing.T) {
+func TestMCPTool_RepeatSafety(t *testing.T) {
 	notDestructive := false
 	tests := []struct {
 		name        string
 		annotations *mcp.ToolAnnotations
-		want        bool
+		want        toolshared.RepeatSafety
 	}{
-		{name: "no annotations: MCP defaults, may change its environment", annotations: nil, want: false},
-		{name: "empty annotations", annotations: &mcp.ToolAnnotations{}, want: false},
+		{name: "no annotations: MCP defaults", annotations: nil, want: toolshared.RepeatUnsafe},
+		{name: "title only", annotations: &mcp.ToolAnnotations{Title: "Create"}, want: toolshared.RepeatUnsafe},
 		{
 			name:        "additive but not idempotent",
 			annotations: &mcp.ToolAnnotations{DestructiveHint: &notDestructive},
-			want:        false,
+			want:        toolshared.RepeatUnsafe,
 		},
-		{name: "read-only", annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}, want: true},
-		{name: "idempotent", annotations: &mcp.ToolAnnotations{IdempotentHint: true}, want: true},
+		{
+			name:        "idempotent",
+			annotations: &mcp.ToolAnnotations{IdempotentHint: true},
+			want:        toolshared.RepeatIdempotent,
+		},
+		{name: "read-only", annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}, want: toolshared.RepeatReadOnly},
+		{
+			name:        "read-only wins over idempotent",
+			annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
+			want:        toolshared.RepeatReadOnly,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -923,8 +932,8 @@ func TestMCPTool_RepeatIsHarmless(t *testing.T) {
 				"skip",
 				&mcp.Tool{Name: "skip_project_create", Annotations: tt.annotations},
 			)
-			if got := tool.RepeatIsHarmless(); got != tt.want {
-				t.Errorf("RepeatIsHarmless() = %v, want %v", got, tt.want)
+			if got := tool.RepeatSafety(); got != tt.want {
+				t.Errorf("RepeatSafety() = %v, want %v", got, tt.want)
 			}
 		})
 	}

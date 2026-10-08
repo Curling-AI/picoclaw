@@ -32,14 +32,25 @@ type PromptMetadataProvider interface {
 	PromptMetadata() PromptMetadata
 }
 
+// RepeatSafety is what running a tool again with the same arguments does, as
+// declared by the server that runs it.
+type RepeatSafety int
+
+const (
+	// RepeatUnsafe: each call may change things again (the MCP default when
+	// the server declares nothing).
+	RepeatUnsafe RepeatSafety = iota
+	// RepeatIdempotent: the first call changes things, a repeat adds nothing.
+	RepeatIdempotent
+	// RepeatReadOnly: no call changes anything.
+	RepeatReadOnly
+)
+
 // SideEffectHinter is implemented by tools whose effects are declared by the
 // server that runs them (MCP annotations) instead of being known to the agent.
 // Native tools don't implement it.
 type SideEffectHinter interface {
-	// RepeatIsHarmless reports whether running the tool again with the same
-	// arguments changes nothing outside the conversation: the server declared
-	// it read-only or idempotent.
-	RepeatIsHarmless() bool
+	RepeatSafety() RepeatSafety
 }
 
 // ServerNamedTool is implemented by tools registered under a wrapped name

@@ -384,27 +384,8 @@ toolLoop:
 									"skipped":   remaining,
 									"reason":    skipReason,
 								})
-							for j := i + 1; j < len(normalizedToolCalls); j++ {
-								skippedTC := normalizedToolCalls[j]
-								al.emitEvent(
-									runtimeevents.KindAgentToolExecSkipped,
-									ts.eventMeta("runTurn", "turn.tool.skipped"),
-									ToolExecSkippedPayload{
-										Tool:   skippedTC.Name,
-										Reason: skipReason,
-									},
-								)
-								skippedMsg := providers.Message{
-									Role:       "tool",
-									Content:    skipMessage,
-									ToolCallID: skippedTC.ID,
-								}
-								messages = append(messages, skippedMsg)
-								if !ts.opts.NoHistory {
-									ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
-									ts.recordPersistedMessage(skippedMsg)
-								}
-							}
+							messages = append(messages,
+								al.skipToolCalls(ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
 						}
 						break toolLoop
 					}
@@ -445,6 +426,41 @@ toolLoop:
 			}
 		}
 
+		// Repeat guard (seucaranguejo fork, repeat_guard.go): runs before the
+		// approval hook, so no one is asked to approve a call that won't run.
+		effect := classifyCall(ts.agent.Tools, toolName)
+		repeatKey := ""
+		if effect == effectGuarded {
+			repeatKey = callKey(toolName, toolArgs)
+			if ts.repeats.refuses(repeatKey) {
+				logger.WarnCF("agent", "Refused unchanged repeat of a side-effecting tool call",
+					map[string]any{
+						"agent_id":    ts.agent.ID,
+						"session_key": ts.sessionKey,
+						"tool":        toolName,
+						"iteration":   iteration,
+					})
+				skipToolCall(repeatedSideEffectContent)
+				if !ts.repeats.recordRefusal() {
+					continue
+				}
+				logger.WarnCF("agent", "Turn ended: the model kept repeating a refused tool call",
+					map[string]any{
+						"agent_id":    ts.agent.ID,
+						"session_key": ts.sessionKey,
+						"tool":        toolName,
+						"iteration":   iteration,
+					})
+				messages = append(messages, al.skipToolCalls(
+					ts, normalizedToolCalls[i+1:], "repeated refused call", repeatStopSkipContent)...)
+				// The coordinator finalizes with this text like any reply, so the
+				// user gets it on every channel and the next turn sees it.
+				exec.messages = messages
+				exec.finalContent = repeatStopSummary(toolName)
+				return ToolControlBreak
+			}
+		}
+
 		if al.hooks != nil {
 			approval := al.hooks.ApproveTool(turnCtx, &ToolApprovalRequest{
 				Meta:      ts.eventMeta("runTurn", "turn.tool.approve"),
@@ -459,18 +475,6 @@ toolLoop:
 		}
 
 		if denyByTurnProfile() {
-			continue
-		}
-
-		sideEffectKey, sideEffecting := sideEffectCallKey(ts.agent.Tools, toolName, toolArgs)
-		if sideEffecting && ts.repeatsLastSideEffect(sideEffectKey) {
-			logger.WarnCF("agent", "Blocked repeat of a side-effecting tool call",
-				map[string]any{
-					"agent_id":  ts.agent.ID,
-					"tool":      toolName,
-					"iteration": iteration,
-				})
-			skipToolCall(repeatedSideEffectContent)
 			continue
 		}
 
@@ -726,10 +730,8 @@ toolLoop:
 			toolErrorSummary(toolResult),
 			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 		)
-		// Only successes count: a failed call is reported as not done, so
-		// retrying it stays allowed and it doesn't stand between two repeats.
 		if !toolResult.IsError {
-			ts.recordSucceededCall(ts.agent.Tools, toolName, sideEffectKey)
+			ts.repeats.recordSuccess(effect, repeatKey)
 		}
 		messages = append(messages, toolResultMsg)
 		if !ts.opts.NoHistory {
@@ -810,27 +812,8 @@ toolLoop:
 						"skipped":   remaining,
 						"reason":    skipReason,
 					})
-				for j := i + 1; j < len(normalizedToolCalls); j++ {
-					skippedTC := normalizedToolCalls[j]
-					al.emitEvent(
-						runtimeevents.KindAgentToolExecSkipped,
-						ts.eventMeta("runTurn", "turn.tool.skipped"),
-						ToolExecSkippedPayload{
-							Tool:   skippedTC.Name,
-							Reason: skipReason,
-						},
-					)
-					skippedMsg := providers.Message{
-						Role:       "tool",
-						Content:    skipMessage,
-						ToolCallID: skippedTC.ID,
-					}
-					messages = append(messages, skippedMsg)
-					if !ts.opts.NoHistory {
-						ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
-						ts.recordPersistedMessage(skippedMsg)
-					}
-				}
+				messages = append(messages,
+					al.skipToolCalls(ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
 			}
 			break toolLoop
 		}
@@ -937,4 +920,35 @@ toolLoop:
 		"agent_id": ts.agent.ID, "iteration": iteration,
 	})
 	return ToolControlContinue
+}
+
+// skipToolCalls answers calls with content instead of running them, so the
+// assistant message that requested them keeps a result for each.
+func (al *AgentLoop) skipToolCalls(
+	ts *turnState,
+	calls []providers.ToolCall,
+	reason, content string,
+) []providers.Message {
+	answered := make([]providers.Message, 0, len(calls))
+	for _, tc := range calls {
+		al.emitEvent(
+			runtimeevents.KindAgentToolExecSkipped,
+			ts.eventMeta("runTurn", "turn.tool.skipped"),
+			ToolExecSkippedPayload{
+				Tool:   tc.Name,
+				Reason: reason,
+			},
+		)
+		skippedMsg := providers.Message{
+			Role:       "tool",
+			Content:    content,
+			ToolCallID: tc.ID,
+		}
+		answered = append(answered, skippedMsg)
+		if !ts.opts.NoHistory {
+			ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+			ts.recordPersistedMessage(skippedMsg)
+		}
+	}
+	return answered
 }
