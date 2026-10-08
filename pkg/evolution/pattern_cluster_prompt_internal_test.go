@@ -12,17 +12,20 @@ import (
 // clusterPromptCharBudget keeps a full-window clustering call below ~10k
 // tokens. Production calls under 10k input tokens hit the 32k output cap 0.4%
 // of the time; at 80–160k they hit it 82% of the time and the run is wasted.
+// Counted in characters, not bytes: accents cost bytes, not tokens.
 const clusterPromptCharBudget = 32_000
 
 func TestBuildPatternClusterPromptStaysWithinBudgetAtFullWindow(t *testing.T) {
+	// Every free-text field oversized, as a legacy or foreign record could be;
+	// ids keep the shape buildTaskRecordID gives them.
 	tasks := make([]LearningRecord, 0, ColdPathTaskWindow)
 	for i := 0; i < ColdPathTaskWindow; i++ {
 		tasks = append(tasks, LearningRecord{
-			ID:          fmt.Sprintf("turn-%d-0123456789ab", i),
+			ID:          fmt.Sprintf("main-turn-%d-0123456789ab", i),
 			Kind:        RecordKindTask,
 			WorkspaceID: "ws",
-			Summary:     strings.Repeat("s", 160),
-			FinalOutput: strings.Repeat("o", 5000),
+			Summary:     strings.Repeat("é", 5000),
+			FinalOutput: strings.Repeat("ã", 5000),
 		})
 	}
 	base := time.Unix(1700000000, 0).UTC()
@@ -34,13 +37,13 @@ func TestBuildPatternClusterPromptStaysWithinBudgetAtFullWindow(t *testing.T) {
 			WorkspaceID: "ws",
 			CreatedAt:   base.Add(time.Duration(i) * time.Hour),
 			Label:       fmt.Sprintf("pattern-label-%03d", i),
-			Summary:     strings.Repeat("p", 1000),
+			Summary:     strings.Repeat("ç", 1000),
 		})
 	}
 
 	prompt := buildPatternClusterPrompt("ws", tasks, existing)
-	if len(prompt) > clusterPromptCharBudget {
-		t.Fatalf("prompt = %d chars, want <= %d", len(prompt), clusterPromptCharBudget)
+	if chars := utf8.RuneCountInString(prompt); chars > clusterPromptCharBudget {
+		t.Fatalf("prompt = %d chars, want <= %d", chars, clusterPromptCharBudget)
 	}
 
 	var payload struct {

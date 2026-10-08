@@ -561,10 +561,13 @@ func parseLLMClusterResponse(content string) (llmClusterResponse, bool) {
 
 // The clustering prompt is bounded on every axis, so its size no longer
 // follows the assistant's history: ColdPathTaskWindow tasks, each with a short
-// excerpt of its output, and the most recent patterns, whose labels the model
-// can reuse. An older pattern left out can come back as a near-duplicate label;
-// that is the price of a call that stays small.
+// summary and excerpt of its output, and the most recent patterns, whose labels
+// the model can reuse. The summary is cut here too, not only where records are
+// written: records from older builds or other writers come back as they are.
+// An older pattern left out can come back as a near-duplicate label; that is
+// the price of a call that stays small.
 const (
+	clusterPromptTaskSummaryRunes    = 160
 	clusterPromptExcerptRunes        = 400
 	clusterPromptPatternLimit        = 30
 	clusterPromptPatternSummaryRunes = 200
@@ -633,7 +636,7 @@ func buildPatternClusterPrompt(workspace string, tasks []LearningRecord, existin
 	for _, task := range tasks {
 		payload.Tasks = append(payload.Tasks, taskPayload{
 			ID:                 task.ID,
-			Summary:            task.Summary,
+			Summary:            summarizeText(task.Summary, clusterPromptTaskSummaryRunes),
 			FinalOutputExcerpt: summarizeText(task.FinalOutput, clusterPromptExcerptRunes),
 			Success:            task.Success,
 		})
