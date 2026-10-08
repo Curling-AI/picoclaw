@@ -17,7 +17,14 @@ import (
 
 func (al *AgentLoop) buildContinuationTarget(msg bus.InboundMessage) (*continuationTarget, error) {
 	if msg.Channel == "system" {
-		return nil, nil
+		// A result run as a turn of its conversation leaves that conversation's
+		// queue to drain like any other turn; main-session results keep none.
+		sessionKey, _, ok := al.backgroundResultTarget(msg)
+		if !ok {
+			return nil, nil
+		}
+		channel, chatID := parseSystemOrigin(msg.ChatID)
+		return &continuationTarget{SessionKey: sessionKey, Channel: channel, ChatID: chatID}, nil
 	}
 
 	route, _, err := al.resolveMessageRoute(msg)
@@ -274,7 +281,7 @@ func (al *AgentLoop) processSystemMessage(
 	}
 
 	originChannel, originChatID := parseSystemOrigin(msg.ChatID)
-	sessionKey := systemMessageSession(msg)
+	sessionKey, agent, namesSession := al.backgroundResultTarget(msg)
 
 	logger.InfoCF("agent", "Processing system message",
 		map[string]any{
@@ -301,14 +308,12 @@ func (al *AgentLoop) processSystemMessage(
 		return "", nil
 	}
 
-	// The result belongs to the conversation whose turn launched the task;
-	// main is the fallback for a message that does not name it.
-	namesSession := sessionKey != ""
-	var agent *AgentInstance
-	if namesSession {
-		agent = al.agentForSession(sessionKey)
-	} else if agent = al.GetRegistry().GetDefaultAgent(); agent != nil {
-		sessionKey = session.BuildMainSessionKey(agent.ID)
+	// The result belongs to the conversation whose turn launched the task (see
+	// background_result.go); main is the fallback.
+	if !namesSession {
+		if agent = al.GetRegistry().GetDefaultAgent(); agent != nil {
+			sessionKey = session.BuildMainSessionKey(agent.ID)
+		}
 	}
 	if agent == nil {
 		return "", fmt.Errorf("no default agent for system message")
@@ -347,17 +352,8 @@ func parseSystemOrigin(chatID string) (string, string) {
 	return "cli", chatID
 }
 
-// systemMessageSession is the session a system message names (the session of
-// the turn that launched the async work), or "" when it names none.
-func systemMessageSession(msg bus.InboundMessage) string {
-	if isExplicitSessionKey(msg.SessionKey) {
-		return strings.TrimSpace(msg.SessionKey)
-	}
-	return ""
-}
-
 // systemMessageContent marks the text as coming from async work, not from the
-// user, whether it opens a turn or joins a live one.
+// user, whether it opens a turn or is written for the next one.
 func systemMessageContent(msg bus.InboundMessage) string {
 	return fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content)
 }

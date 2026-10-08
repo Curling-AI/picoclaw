@@ -35,8 +35,11 @@ var (
 	// limit (see subTurnTimeoutError).
 	ErrSubTurnTimeout = errors.New("sub-turn time limit exceeded")
 	// ErrSubTurnParentCanceled is the error of a synchronous sub-turn stopped
-	// because the turn waiting on it was canceled.
-	ErrSubTurnParentCanceled = errors.New("subagent stopped because the turn that called it was canceled")
+	// because the turn waiting on it was stopped. It stays in the history, so it
+	// tells the model not to pick the task up again on its own.
+	ErrSubTurnParentCanceled = errors.New(
+		"subagent stopped before finishing because its turn was stopped; " +
+			"do not relaunch it unless the user asks again")
 )
 
 // subTurnTimeoutError is what the caller reads when the sub-turn's own deadline
@@ -566,7 +569,11 @@ func spawnSubTurn(
 
 	// Convert turnResult to tools.ToolResult
 	if turnErr != nil {
-		turnErr = explainSubTurnStop(turnErr, childTS, !cfg.Async && ctx.Err() != nil, timeout)
+		if !cfg.Async && ctx.Err() != nil {
+			turnErr = parentStoppedSubTurnError(turnErr, childTS)
+		} else {
+			turnErr = deadlineSubTurnError(turnErr, childTS, timeout)
+		}
 		err = turnErr
 		result = &tools.ToolResult{
 			Err:    turnErr,
@@ -582,25 +589,33 @@ func spawnSubTurn(
 	return result, err
 }
 
-// explainSubTurnStop replaces the error of a sub-turn that its own context
-// stopped, which otherwise surfaces as whatever call was in flight.
-func explainSubTurnStop(turnErr error, child *turnState, parentCanceled bool, limit time.Duration) error {
-	switch {
-	case parentCanceled:
-		return ErrSubTurnParentCanceled
-	case errors.Is(child.ctx.Err(), context.DeadlineExceeded):
-		iterations := child.currentIteration()
-		logger.WarnCF("subturn", "SubTurn stopped by its time limit", map[string]any{
-			"child_id":   child.turnID,
-			"parent_id":  child.parentTurnID,
-			"limit":      limit.String(),
-			"iterations": iterations,
-			"error":      turnErr.Error(),
-		})
-		return &subTurnTimeoutError{limit: limit, iterations: iterations}
-	default:
+// The two errors below replace the error of a sub-turn that its own context
+// stopped, which otherwise surfaces as whatever call was in flight. The
+// original goes to the log.
+
+func parentStoppedSubTurnError(turnErr error, child *turnState) error {
+	logger.InfoCF("subturn", "SubTurn stopped with its parent turn", map[string]any{
+		"child_id":   child.turnID,
+		"parent_id":  child.parentTurnID,
+		"iterations": child.currentIteration(),
+		"error":      turnErr.Error(),
+	})
+	return ErrSubTurnParentCanceled
+}
+
+func deadlineSubTurnError(turnErr error, child *turnState, limit time.Duration) error {
+	if !errors.Is(child.ctx.Err(), context.DeadlineExceeded) {
 		return turnErr
 	}
+	iterations := child.currentIteration()
+	logger.WarnCF("subturn", "SubTurn stopped by its time limit", map[string]any{
+		"child_id":   child.turnID,
+		"parent_id":  child.parentTurnID,
+		"limit":      limit.String(),
+		"iterations": iterations,
+		"error":      turnErr.Error(),
+	})
+	return &subTurnTimeoutError{limit: limit, iterations: iterations}
 }
 
 // ====================== Result Delivery ======================

@@ -122,7 +122,7 @@ func TestSpawnSubTurn_SyncChildStopsWithTheParent(t *testing.T) {
 			Model:        "test-model",
 			Tools:        []tools.Tool{},
 			SystemPrompt: "long task",
-			Timeout:      time.Minute,
+			Timeout:      10 * time.Second,
 		})
 		done <- err
 	}()
@@ -146,7 +146,8 @@ func TestSpawnSubTurn_SyncChildStopsWithTheParent(t *testing.T) {
 // Background spawns are meant to outlive the turn that launched them; the end
 // of that turn cancels its context, which must not reach the child.
 func TestSpawnSubTurn_AsyncChildOutlivesTheParentContext(t *testing.T) {
-	al, agent, cleanup := newTurnCoordTestLoop(t, &slowMockProvider{delay: 200 * time.Millisecond})
+	provider := &startedSlowProvider{delay: 200 * time.Millisecond, started: make(chan struct{})}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
 
 	parentCtx, cancelParent := context.WithCancel(context.Background())
@@ -162,7 +163,7 @@ func TestSpawnSubTurn_AsyncChildOutlivesTheParentContext(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	<-provider.started
 	cancelParent()
 
 	select {
@@ -174,6 +175,31 @@ func TestSpawnSubTurn_AsyncChildOutlivesTheParentContext(t *testing.T) {
 		t.Fatal("background child did not finish")
 	}
 }
+
+// startedSlowProvider answers after delay and signals its first call.
+type startedSlowProvider struct {
+	delay   time.Duration
+	once    sync.Once
+	started chan struct{}
+}
+
+func (p *startedSlowProvider) Chat(
+	ctx context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.once.Do(func() { close(p.started) })
+	select {
+	case <-time.After(p.delay):
+		return &providers.LLMResponse{Content: "background work done"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (p *startedSlowProvider) GetDefaultModel() string { return "slow-model" }
 
 // delegatingProvider has the parent call the synchronous subagent tool, then
 // stalls the child's model call until its context ends.
@@ -216,9 +242,8 @@ func TestSubagentTool_CancelledTurnDoesNotWaitForTheChild(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Agents.Defaults.ModelName = "test-model"
-	if !cfg.Tools.IsToolEnabled("subagent") {
-		t.Skip("subagent tool disabled in the default config")
-	}
+	cfg.Agents.Defaults.SubTurn.DefaultTimeoutMinutes = 1
+	cfg.Tools.Subagent.Enabled = true
 	provider := &delegatingProvider{stalled: make(chan struct{})}
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 	defer al.Close()

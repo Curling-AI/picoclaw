@@ -194,10 +194,14 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				return nil
 			}
 
+			if al.recordBackgroundResult(msg) {
+				continue
+			}
+
 			// Resolve the session key for this message
 			sessionKey, agentID, ok := al.resolveSteeringTarget(msg)
 			if !ok {
-				// Non-routable message (e.g., a system message that names no
+				// Non-routable message (e.g., a system message for the main
 				// session) — process immediately.
 				// Note: system messages are processed in the main goroutine,
 				// so they block the receive loop but guarantee session serialization.

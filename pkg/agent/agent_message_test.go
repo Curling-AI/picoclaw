@@ -168,37 +168,158 @@ func TestProcessSystemMessage_WithoutSessionFallsBackToMain(t *testing.T) {
 	}
 }
 
-// While the conversation has a live turn, the result joins that turn as a
-// queued message instead of opening a second turn on the same history.
-func TestRun_SystemMessageForABusySessionJoinsTheLiveTurn(t *testing.T) {
-	provider := &countingReplyProvider{}
-	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
-	al.registerActiveTurn(&turnState{turnID: "turn-7", sessionKey: conversationSession})
-
+func startRunLoop(t *testing.T, al *AgentLoop) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	go func() { _ = al.Run(ctx) }()
+}
 
-	if err := msgBus.PublishInbound(ctx, spawnResultMessage(conversationSession)); err != nil {
-		t.Fatalf("PublishInbound: %v", err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for al.pendingSteeringCountForScope(conversationSession) == 0 {
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatal("the result was not queued for the live turn")
+			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	queued := al.dequeueSteeringMessagesForScope(conversationSession)
-	if len(queued) != 1 || !strings.HasPrefix(queued[0].Content, "[System: async:spawn] Spawn failed") {
-		t.Fatalf("queued %+v, want the marked result", queued)
+}
+
+func pendingNotes(al *AgentLoop, sessionKey string) int {
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	return len(al.mirror.pending[sessionKey])
+}
+
+// webResolver maps chats the way the Ethos gateway does: a web run id is no
+// chat with a conversation of its own.
+func webResolver(channel, _ string) string {
+	if channel == "telegram" {
+		return conversationSession
+	}
+	return ""
+}
+
+// A second turn on a conversation that is already in one interleaves with it;
+// the result waits for the live turn to end and enters the history then.
+func TestRun_ResultForABusyConversationIsWrittenWhenItsTurnEnds(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	live := &turnState{turnID: "turn-7", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
+	startRunLoop(t, al)
+
+	if err := msgBus.PublishInbound(context.Background(), spawnResultMessage(conversationSession)); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	waitFor(t, "the result to wait for the live turn", func() bool {
+		return pendingNotes(al, conversationSession) == 1
+	})
+	if got := len(sessions.GetHistory(conversationSession)); got != 2 {
+		t.Fatalf("history changed to %d messages during the live turn", got)
+	}
+
+	al.clearActiveTurn(live)
+
+	history := sessions.GetHistory(conversationSession)
+	if len(history) != 3 || !strings.HasPrefix(history[2].Content, "[System: async:spawn] Spawn failed") {
+		t.Fatalf("history after the turn = %+v, want the result appended", history)
 	}
 	if provider.count() != 0 {
-		t.Fatalf("a second turn ran (%d model calls)", provider.count())
+		t.Fatalf("a turn ran for the result (%d model calls)", provider.count())
 	}
-	if got := len(sessions.GetHistory(conversationSession)); got != 2 {
-		t.Fatalf("conversation history changed to %d messages", got)
+}
+
+// The reported case: a web run's stream ends with the run, so a turn for the
+// result would act unseen and race the user's next message. The result is
+// written for the next turn instead.
+func TestRun_WebResultForAnIdleConversationIsWrittenWithoutATurn(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	startRunLoop(t, al)
+
+	if err := msgBus.PublishInbound(context.Background(), spawnResultMessage(conversationSession)); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	// A turn would hold the session while it appends the result and its reply.
+	waitFor(t, "the result in an idle conversation", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 3 && al.getActiveTurnState(conversationSession) == nil
+	})
+	if got := sessions.GetHistory(conversationSession)[2]; got.Role != "user" ||
+		!strings.HasPrefix(got.Content, "[System: async:spawn] Spawn failed") {
+		t.Fatalf("recorded %s %q", got.Role, got.Content)
+	}
+	if provider.count() != 0 {
+		t.Fatalf("a turn ran for the result (%d model calls)", provider.count())
+	}
+}
+
+// A chat that receives replies (Telegram) gets a turn of its own conversation,
+// and the session is released afterwards.
+func TestRun_ChatResultForAnIdleConversationRunsATurnThere(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	startRunLoop(t, al)
+
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	waitFor(t, "the turn to end and release the session", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 4 && al.getActiveTurnState(conversationSession) == nil
+	})
+	if provider.count() != 1 {
+		t.Fatalf("model calls = %d, want one turn", provider.count())
+	}
+}
+
+// A conversation deleted while the work ran is not recreated with only the
+// result in it.
+func TestProcessSystemMessage_DeletedConversationFallsBackToMain(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	sessions.SetHistory(conversationSession, nil)
+	mainKey := session.BuildMainSessionKey(al.registry.GetDefaultAgent().ID)
+
+	if _, err := al.processSystemMessage(context.Background(), spawnResultMessage(conversationSession)); err != nil {
+		t.Fatalf("processSystemMessage: %v", err)
+	}
+
+	if got := len(sessions.GetHistory(conversationSession)); got != 0 {
+		t.Fatalf("deleted conversation came back with %d messages", got)
+	}
+	if got := len(sessions.GetHistory(mainKey)); got == 0 {
+		t.Fatal("main session got nothing")
+	}
+}
+
+func TestBackgroundResultTarget_SkipsInternalOrigins(t *testing.T) {
+	al, _, _ := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "cli:direct", "cli:direct"
+
+	if _, _, ok := al.backgroundResultTarget(msg); ok {
+		t.Fatal("an internal origin was routed to the conversation")
+	}
+}
+
+// A result run as a turn of its conversation drains what was queued for the
+// conversation meanwhile, like any other turn.
+func TestBuildContinuationTarget_ResultTurnDrainsItsConversation(t *testing.T) {
+	al, _, _ := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+
+	target, err := al.buildContinuationTarget(msg)
+	if err != nil {
+		t.Fatalf("buildContinuationTarget: %v", err)
+	}
+	want := continuationTarget{SessionKey: conversationSession, Channel: "telegram", ChatID: "123"}
+	if target == nil || *target != want {
+		t.Fatalf("target = %+v, want the conversation and its chat", target)
 	}
 }
 

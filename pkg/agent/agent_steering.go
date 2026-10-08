@@ -6,7 +6,6 @@ import (
 	"context"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
-	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
@@ -29,6 +28,10 @@ func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.Inb
 		response = ""
 	}
 	finalResponse := response
+	if initialMsg.Channel == "system" {
+		// processSystemMessage already sent its reply; only a continuation is left.
+		finalResponse = ""
+	}
 
 	// Build continuation target
 	target, targetErr := al.buildContinuationTarget(initialMsg)
@@ -112,19 +115,13 @@ func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, stri
 	return resolveScopeKey(allocation.SessionKey, msg.SessionKey), agent.ID, true
 }
 
-// systemSteeringTarget: a system message that names its session takes turns in
-// it like any other message, joining a live turn instead of running a second
-// one on the same history. One that names none keeps running inline in main.
+// systemSteeringTarget: a result that runs as a turn of its conversation (see
+// recordBackgroundResult) claims the session like any other message, so a turn
+// that starts meanwhile gets it queued instead of a second turn on the same
+// history. Main-session results keep running inline.
 func (al *AgentLoop) systemSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
-	sessionKey := systemMessageSession(msg)
-	if sessionKey == "" {
-		return "", "", false
-	}
-	if originChannel, _ := parseSystemOrigin(msg.ChatID); constants.IsInternalChannel(originChannel) {
-		return "", "", false
-	}
-	agent := al.agentForSession(sessionKey)
-	if agent == nil {
+	sessionKey, agent, ok := al.backgroundResultTarget(msg)
+	if !ok {
 		return "", "", false
 	}
 	return sessionKey, agent.ID, true
