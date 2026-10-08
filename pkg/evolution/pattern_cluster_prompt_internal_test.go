@@ -7,13 +7,20 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tokenizer"
 )
 
-// clusterPromptCharBudget keeps a full-window clustering call below ~10k
-// tokens. Production calls under 10k input tokens hit the 32k output cap 0.4%
-// of the time; at 80–160k they hit it 82% of the time and the run is wasted.
-// Counted in characters, not bytes: accents cost bytes, not tokens.
-const clusterPromptCharBudget = 32_000
+// clusterPromptTokenBudget is measured with the estimator the agent uses for
+// its own context budget (2.5 characters per token), not the model's
+// tokenizer, which the repo does not have. It holds for Latin-script text;
+// CJK costs closer to a token per character. What the test guarantees is the
+// shape: the prompt stops following the size of the history. Whether the real
+// calls land under ~10k tokens, where production hit the 32k output cap 0.4%
+// of the time (82% at 80–160k), is checked on usage_events input_tokens after
+// deploy.
+const clusterPromptTokenBudget = 12_000
 
 func TestBuildPatternClusterPromptStaysWithinBudgetAtFullWindow(t *testing.T) {
 	// Every free-text field oversized, as a legacy or foreign record could be;
@@ -42,8 +49,10 @@ func TestBuildPatternClusterPromptStaysWithinBudgetAtFullWindow(t *testing.T) {
 	}
 
 	prompt := buildPatternClusterPrompt("ws", tasks, existing)
-	if chars := utf8.RuneCountInString(prompt); chars > clusterPromptCharBudget {
-		t.Fatalf("prompt = %d chars, want <= %d", chars, clusterPromptCharBudget)
+	estimate := tokenizer.EstimateMessageTokens(providers.Message{Role: "user", Content: prompt})
+	if estimate > clusterPromptTokenBudget {
+		t.Fatalf("prompt ≈ %d tokens (%d chars), want <= %d",
+			estimate, utf8.RuneCountInString(prompt), clusterPromptTokenBudget)
 	}
 
 	var payload struct {
