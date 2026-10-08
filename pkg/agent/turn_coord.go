@@ -64,6 +64,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				SkillContextSnapshots: skillContextSnapshots,
 				ToolKinds:             ts.toolKindsSnapshot(),
 				ToolExecutions:        ts.toolExecutionsSnapshot(),
+				CronRun:               ts.isCronRun(),
 				Loop:                  ts.opts.Loop,
 			},
 		)

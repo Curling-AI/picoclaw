@@ -119,6 +119,27 @@ func TestPruneCronRuns_EvictaCacheDeMeta(t *testing.T) {
 	}
 }
 
+func TestIsCronRunSessionKey(t *testing.T) {
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"agent:cron-job-uuid", true},
+		{"agent:cronmodel-job-uuid", true},
+		{"AGENT:CRON-job-uuid", true},
+		{"  agent:cron-job-uuid", true},
+		{"sk_v1_abc", false},
+		{"agent:main:telegram:group:x", false},
+		{"heartbeat", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := IsCronRunSessionKey(c.key); got != c.want {
+			t.Errorf("IsCronRunSessionKey(%q) = %v, want %v", c.key, got, c.want)
+		}
+	}
+}
+
 func TestIsCronRunFile(t *testing.T) {
 	cases := []struct {
 		name string

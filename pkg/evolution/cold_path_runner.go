@@ -3,34 +3,71 @@ package evolution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"time"
 )
 
 type coldPathRuntime interface {
 	RunColdPathOnce(ctx context.Context, workspace string) error
 }
 
-type ColdPathRunner struct {
-	runtime coldPathRuntime
-	async   func(func())
-	onError func(error)
-	ctx     context.Context
-	cancel  context.CancelFunc
+// ColdPathRunnerOptions tunes how often a workspace's cold path may run.
+type ColdPathRunnerOptions struct {
+	// OnError receives every failed run. Nil discards them.
+	OnError func(error)
+	// MinInterval is the least time between the starts of two runs of the same
+	// workspace. Triggers that arrive sooner are coalesced into one run when the
+	// interval ends. Zero runs back to back.
+	MinInterval time.Duration
+	// NoCreditPause refuses triggers for a workspace for this long after a run
+	// fails for lack of credit. Zero disables the pause.
+	NoCreditPause time.Duration
+	// Now and After replace the wall clock in tests.
+	Now   func() time.Time
+	After func(time.Duration) <-chan time.Time
+}
 
-	mu        sync.Mutex
-	wg        sync.WaitGroup
-	closeOnce sync.Once
-	closed    bool
-	running   map[string]workspaceRunState
+type ColdPathRunner struct {
+	runtime       coldPathRuntime
+	async         func(func())
+	onError       func(error)
+	minInterval   time.Duration
+	noCreditPause time.Duration
+	now           func() time.Time
+	after         func(time.Duration) <-chan time.Time
+	ctx           context.Context
+	cancel        context.CancelFunc
+
+	mu          sync.Mutex
+	wg          sync.WaitGroup
+	closeOnce   sync.Once
+	closed      bool
+	running     map[string]workspaceRunState
+	lastStart   map[string]time.Time
+	pausedUntil map[string]time.Time
 }
 
 func NewColdPathRunner(runtime coldPathRuntime) *ColdPathRunner {
-	return NewColdPathRunnerWithErrorHandler(runtime, nil)
+	return NewColdPathRunnerWithOptions(runtime, ColdPathRunnerOptions{})
 }
 
 func NewColdPathRunnerWithErrorHandler(runtime coldPathRuntime, onError func(error)) *ColdPathRunner {
+	return NewColdPathRunnerWithOptions(runtime, ColdPathRunnerOptions{OnError: onError})
+}
+
+func NewColdPathRunnerWithOptions(runtime coldPathRuntime, opts ColdPathRunnerOptions) *ColdPathRunner {
+	onError := opts.OnError
 	if onError == nil {
 		onError = func(error) {}
+	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	after := opts.After
+	if after == nil {
+		after = time.After
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -39,10 +76,16 @@ func NewColdPathRunnerWithErrorHandler(runtime coldPathRuntime, onError func(err
 		async: func(run func()) {
 			go run()
 		},
-		onError: onError,
-		ctx:     ctx,
-		cancel:  cancel,
-		running: make(map[string]workspaceRunState),
+		onError:       onError,
+		minInterval:   opts.MinInterval,
+		noCreditPause: opts.NoCreditPause,
+		now:           now,
+		after:         after,
+		ctx:           ctx,
+		cancel:        cancel,
+		running:       make(map[string]workspaceRunState),
+		lastStart:     make(map[string]time.Time),
+		pausedUntil:   make(map[string]time.Time),
 	}
 }
 
@@ -60,6 +103,13 @@ func (r *ColdPathRunner) Trigger(workspace string) bool {
 	if r.closed {
 		r.mu.Unlock()
 		return false
+	}
+	if until, paused := r.pausedUntil[workspace]; paused {
+		if r.now().Before(until) {
+			r.mu.Unlock()
+			return false
+		}
+		delete(r.pausedUntil, workspace)
 	}
 	state, exists := r.running[workspace]
 	if exists && state.running {
@@ -82,7 +132,38 @@ func (r *ColdPathRunner) Trigger(workspace string) bool {
 
 func (r *ColdPathRunner) runWorkspace(workspace string) {
 	for {
-		if err := r.runtime.RunColdPathOnce(r.ctx, workspace); err != nil && !errors.Is(err, context.Canceled) {
+		if !r.waitForInterval(workspace) {
+			r.mu.Lock()
+			delete(r.running, workspace)
+			r.mu.Unlock()
+			return
+		}
+		// The run about to start sees every record that arrived during the wait,
+		// so triggers from the wait are served by it. Only triggers that arrive
+		// while it runs ask for another.
+		r.mu.Lock()
+		if state, ok := r.running[workspace]; ok {
+			state.pending = false
+			r.running[workspace] = state
+		}
+		r.lastStart[workspace] = r.now()
+		r.mu.Unlock()
+
+		err := r.runtime.RunColdPathOnce(r.ctx, workspace)
+		if err != nil && isNoCreditError(err) && r.noCreditPause > 0 {
+			// Pending work is dropped too: without credit it would fail the same way.
+			until := r.now().Add(r.noCreditPause)
+			r.mu.Lock()
+			r.pausedUntil[workspace] = until
+			delete(r.running, workspace)
+			r.mu.Unlock()
+			// Triggers are refused silently while paused, so this line is the
+			// only trace; a pod runs several workspaces.
+			r.onError(fmt.Errorf("cold path of %s paused until %s: %w",
+				workspace, until.UTC().Format(time.RFC3339), err))
+			return
+		}
+		if err != nil && !errors.Is(err, context.Canceled) {
 			r.onError(err)
 		}
 
@@ -102,6 +183,30 @@ func (r *ColdPathRunner) runWorkspace(workspace string) {
 		delete(r.running, workspace)
 		r.mu.Unlock()
 		return
+	}
+}
+
+// waitForInterval blocks until MinInterval has passed since the workspace's
+// last run started. It reports false when the runner closes while waiting.
+func (r *ColdPathRunner) waitForInterval(workspace string) bool {
+	if r.minInterval <= 0 {
+		return true
+	}
+	r.mu.Lock()
+	last, ran := r.lastStart[workspace]
+	r.mu.Unlock()
+	if !ran {
+		return true
+	}
+	wait := last.Add(r.minInterval).Sub(r.now())
+	if wait <= 0 {
+		return true
+	}
+	select {
+	case <-r.after(wait):
+		return true
+	case <-r.ctx.Done():
+		return false
 	}
 }
 

@@ -14,6 +14,18 @@ import (
 // the model variant has leaked into listings that filtered just "agent:cron-".
 var cronRunKeyPrefixes = []string{"agent:cron-", "agent:cronmodel-"}
 
+// IsCronRunSessionKey reports whether a session key belongs to a cron run.
+// Both variants count, for the same reason isCronRunFile matches both.
+func IsCronRunSessionKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, prefix := range cronRunKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // isCronRunFile reports whether a session FILE belongs to a cron run. Files are
 // named after the sanitized key (':' becomes '_'), so the key prefixes are
 // matched in their on-disk form.

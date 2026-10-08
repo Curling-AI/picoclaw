@@ -2,6 +2,10 @@ package evolution
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -79,6 +83,204 @@ func TestColdPathRunner_QueuesPendingRunForWorkspace(t *testing.T) {
 	}
 
 	t.Fatalf("runCount = %d, want 2", runtime.runCount.Load())
+}
+
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+type noCreditColdPathRuntime struct {
+	runCount atomic.Int32
+}
+
+func (r *noCreditColdPathRuntime) RunColdPathOnce(context.Context, string) error {
+	r.runCount.Add(1)
+	return fmt.Errorf("cold path: %w", ErrNoCredit)
+}
+
+func waitRunnerIdle(t *testing.T, runner *ColdPathRunner, workspace string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runner.mu.Lock()
+		_, busy := runner.running[workspace]
+		runner.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("runner still busy with %q", workspace)
+}
+
+func TestColdPathRunner_WaitsMinIntervalBeforeTheNextRun(t *testing.T) {
+	runtime := &blockingColdPathRuntime{
+		started: make(chan string, 4),
+		release: make(chan struct{}, 4),
+	}
+	clock := &fakeClock{now: time.Unix(1700000000, 0)}
+	waits := make(chan time.Duration, 4)
+	elapsed := make(chan time.Time)
+	runner := NewColdPathRunnerWithOptions(runtime, ColdPathRunnerOptions{
+		MinInterval: 30 * time.Minute,
+		Now:         clock.Now,
+		After: func(d time.Duration) <-chan time.Time {
+			waits <- d
+			return elapsed
+		},
+	})
+	defer runner.Close()
+
+	runner.Trigger("workspace-a")
+	select {
+	case <-runtime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first run should start at once: the workspace never ran")
+	}
+
+	clock.Advance(5 * time.Minute)
+	runner.Trigger("workspace-a")
+	runtime.release <- struct{}{}
+
+	select {
+	case d := <-waits:
+		if d != 25*time.Minute {
+			t.Errorf("waited %v, want the 25m left of the 30m interval", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending run did not wait for the interval")
+	}
+	select {
+	case <-runtime.started:
+		t.Fatal("pending run started before the interval elapsed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	clock.Advance(25 * time.Minute)
+	elapsed <- clock.Now()
+	select {
+	case <-runtime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending run did not start after the interval")
+	}
+	runtime.release <- struct{}{}
+	waitRunnerIdle(t, runner, "workspace-a")
+	if got := runtime.runCount.Load(); got != 2 {
+		t.Fatalf("runCount = %d, want 2", got)
+	}
+}
+
+// Turns that end while the runner waits out the interval append their records
+// before triggering, so the run after the wait covers them; asking for one more
+// run would re-cluster the same window with nothing new.
+func TestColdPathRunner_TriggersDuringTheWaitShareTheNextRun(t *testing.T) {
+	runtime := &blockingColdPathRuntime{
+		started: make(chan string, 4),
+		release: make(chan struct{}, 4),
+	}
+	clock := &fakeClock{now: time.Unix(1700000000, 0)}
+	waits := make(chan time.Duration, 4)
+	elapsed := make(chan time.Time)
+	runner := NewColdPathRunnerWithOptions(runtime, ColdPathRunnerOptions{
+		MinInterval: 30 * time.Minute,
+		Now:         clock.Now,
+		After: func(d time.Duration) <-chan time.Time {
+			waits <- d
+			return elapsed
+		},
+	})
+	defer runner.Close()
+
+	runner.Trigger("workspace-a")
+	<-runtime.started
+	runner.Trigger("workspace-a")
+	runtime.release <- struct{}{}
+	select {
+	case <-waits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending run did not wait for the interval")
+	}
+
+	runner.Trigger("workspace-a")
+	runner.Trigger("workspace-a")
+	clock.Advance(30 * time.Minute)
+	elapsed <- clock.Now()
+	select {
+	case <-runtime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run after the wait did not start")
+	}
+	runtime.release <- struct{}{}
+	waitRunnerIdle(t, runner, "workspace-a")
+
+	if got := runtime.runCount.Load(); got != 2 {
+		t.Fatalf("runCount = %d, want 2", got)
+	}
+	if extra := len(waits); extra != 0 {
+		t.Fatalf("runner waited %d more times for a run nobody needs", extra)
+	}
+}
+
+func TestColdPathRunner_PausesWorkspaceAfterNoCredit(t *testing.T) {
+	runtime := &noCreditColdPathRuntime{}
+	clock := &fakeClock{now: time.Unix(1700000000, 0)}
+	reported := make(chan error, 4)
+	runner := NewColdPathRunnerWithOptions(runtime, ColdPathRunnerOptions{
+		NoCreditPause: 30 * time.Minute,
+		Now:           clock.Now,
+		OnError:       func(err error) { reported <- err },
+	})
+	defer runner.Close()
+
+	if !runner.Trigger("workspace-a") {
+		t.Fatal("first trigger should run")
+	}
+	select {
+	case err := <-reported:
+		if !errors.Is(err, ErrNoCredit) {
+			t.Fatalf("reported %v, want ErrNoCredit", err)
+		}
+		// A pod runs several workspaces: the log must say which one paused and
+		// until when.
+		until := clock.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+		if msg := err.Error(); !strings.Contains(msg, "workspace-a") || !strings.Contains(msg, until) {
+			t.Errorf("reported %q, want the workspace and the pause deadline %s", msg, until)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no-credit error was not reported")
+	}
+	waitRunnerIdle(t, runner, "workspace-a")
+
+	clock.Advance(29 * time.Minute)
+	if runner.Trigger("workspace-a") {
+		t.Error("trigger during the pause should be refused")
+	}
+	if !runner.Trigger("workspace-b") {
+		t.Error("the pause is per workspace")
+	}
+	waitRunnerIdle(t, runner, "workspace-b")
+
+	clock.Advance(2 * time.Minute)
+	if !runner.Trigger("workspace-a") {
+		t.Error("trigger after the pause should run again")
+	}
+	waitRunnerIdle(t, runner, "workspace-a")
+	if got := runtime.runCount.Load(); got != 3 {
+		t.Fatalf("runCount = %d, want 3 (a, b, a after the pause)", got)
+	}
 }
 
 func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {

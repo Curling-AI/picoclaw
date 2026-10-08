@@ -538,6 +538,49 @@ func TestEvolutionBridge_DraftModeDoesNotRunColdPathForHeartbeat(t *testing.T) {
 	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
 }
 
+// A cron run repeats the job's own prompt: there is nothing to learn from it,
+// and on a 5-minute job every run used to add a record and a cold-path pass.
+func TestEvolutionBridge_CronTurnWritesNoTaskRecordAndSkipsColdPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	seedReadyRule(t, tmpDir)
+
+	al := newEvolutionTestLoop(t, tmpDir, config.EvolutionConfig{
+		Enabled: true,
+		Mode:    "draft",
+	}, &simpleMockProvider{response: "ok"})
+	defer al.Close()
+
+	resp, err := al.ProcessDirectWithChannel(
+		context.Background(),
+		"[Scheduled run of cron job] weather report",
+		"agent:cron-job1-6f1c2d3e",
+		"cli",
+		"direct",
+	)
+	if err != nil {
+		t.Fatalf("ProcessDirectWithChannel failed: %v", err)
+	}
+	if resp != "ok" {
+		t.Fatalf("response = %q, want %q", resp, "ok")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	recordsPath := filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl")
+	assertNotExists(t, recordsPath)
+	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+
+	// Control: an ordinary turn on the same loop does write its record, so the
+	// cron turn's absence is not just async work that has not landed yet.
+	_, err = al.ProcessDirectWithChannel(context.Background(), "hello", "session-after-cron", "cli", "direct")
+	if err != nil {
+		t.Fatalf("ProcessDirectWithChannel failed: %v", err)
+	}
+	waitForEvolutionRecord(t, recordsPath)
+	if got := countEvolutionTaskRecords(t, recordsPath); got != 1 {
+		t.Fatalf("task records = %d, want 1 (the ordinary turn only)", got)
+	}
+}
+
 func TestEvolutionBridge_ScheduledModeDoesNotRunColdPathAfterTurn(t *testing.T) {
 	tmpDir := t.TempDir()
 	seedReadyRule(t, tmpDir)
