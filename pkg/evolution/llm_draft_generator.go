@@ -77,6 +77,12 @@ func (g *LLMDraftGenerator) GenerateDraftWithEvidence(
 	if isNoCreditError(err) {
 		return SkillDraft{}, noCreditError(err)
 	}
+	// A canceled run (Close on every sleep and config reload) is not this step
+	// failing: falling back would persist a heuristic answer as the model's.
+	// The run's ctx, not callCtx, so a per-call timeout keeps its fallback.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return SkillDraft{}, ctxErr
+	}
 	if err != nil || resp == nil {
 		return g.generateFallback(ctx, rule, matches, evidence)
 	}

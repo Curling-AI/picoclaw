@@ -447,12 +447,22 @@ func TestRuntime_FinalizeTurn_CronRunTracksSkillUseWithoutLearningRecord(t *test
 		t.Fatalf("NewRuntime: %v", err)
 	}
 
-	cronKeys := []string{"agent:cron-job1-6f1c", "agent:cronmodel-job2-9a2b"}
-	for _, key := range cronKeys {
+	// A child turn spawned by a cron run carries "subturn-N", not the cron
+	// prefix; it is marked as a cron run by the turn that spawned it.
+	cronTurns := []struct {
+		sessionKey string
+		cronRun    bool
+	}{
+		{"agent:cron-job1-6f1c", false},
+		{"agent:cronmodel-job2-9a2b", false},
+		{"subturn-7", true},
+	}
+	for _, turn := range cronTurns {
 		finalizeErr := rt.FinalizeTurn(context.Background(), evolution.TurnCaseInput{
 			Workspace:           root,
-			TurnID:              "turn-" + key,
-			SessionKey:          key,
+			TurnID:              "turn-" + turn.sessionKey,
+			SessionKey:          turn.sessionKey,
+			CronRun:             turn.cronRun,
 			AgentID:             "main",
 			Status:              "completed",
 			UserMessage:         "[Scheduled run of cron job] run the weather report",
@@ -460,7 +470,7 @@ func TestRuntime_FinalizeTurn_CronRunTracksSkillUseWithoutLearningRecord(t *test
 			FinalSuccessfulPath: []string{"weather"},
 		})
 		if finalizeErr != nil {
-			t.Fatalf("FinalizeTurn(%s): %v", key, finalizeErr)
+			t.Fatalf("FinalizeTurn(%s): %v", turn.sessionKey, finalizeErr)
 		}
 	}
 
@@ -479,8 +489,8 @@ func TestRuntime_FinalizeTurn_CronRunTracksSkillUseWithoutLearningRecord(t *test
 	if err != nil {
 		t.Fatalf("LoadProfile: %v", err)
 	}
-	if profile.UseCount != len(cronKeys) || profile.LastUsedAt.IsZero() {
+	if profile.UseCount != len(cronTurns) || profile.LastUsedAt.IsZero() {
 		t.Errorf("weather profile use_count=%d last_used=%v, want %d and set",
-			profile.UseCount, profile.LastUsedAt, len(cronKeys))
+			profile.UseCount, profile.LastUsedAt, len(cronTurns))
 	}
 }

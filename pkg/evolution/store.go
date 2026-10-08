@@ -192,16 +192,17 @@ func (s *Store) SaveTaskRecords(records []LearningRecord) error {
 }
 
 func (s *Store) MarkTaskRecordsClustered(ids []string) error {
-	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) bool {
+	_, err := s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) bool {
 		record.Status = RecordStatus("clustered")
 		return true
 	})
+	return err
 }
 
 // MarkTaskRecordsExpired retires records that fell out of the cold-path window,
 // so no later run loads them as candidates again. A record the clustering took
-// in the meantime keeps its status.
-func (s *Store) MarkTaskRecordsExpired(ids []string) error {
+// in the meantime keeps its status. Returns how many records it expired.
+func (s *Store) MarkTaskRecordsExpired(ids []string) (int, error) {
 	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) bool {
 		if record.Status != "" && record.Status != RecordStatus("new") {
 			return false
@@ -226,12 +227,13 @@ func (s *Store) MarkTaskRecordsJudged(decisions map[string]bool) error {
 	for id := range verdicts {
 		target[id] = struct{}{}
 	}
-	return s.updateTaskRecords(target, func(record *LearningRecord) bool {
+	_, err := s.updateTaskRecords(target, func(record *LearningRecord) bool {
 		judged := verdicts[record.ID]
 		record.Success = &judged
 		record.SuccessJudged = true
 		return true
 	})
+	return err
 }
 
 func trimmedIDSet(ids []string) map[string]struct{} {
@@ -245,12 +247,13 @@ func trimmedIDSet(ids []string) map[string]struct{} {
 }
 
 // updateTaskRecords applies mutate to the stored task records whose id is in
-// target and rewrites the file when mutate reports a change. Ids are only unique per workspace: when this
+// target and rewrites the file when mutate reports a change. Returns how many
+// records changed. Ids are only unique per workspace: when this
 // store's workspace holds a record with the id, same-id records of other
 // workspaces are left alone.
-func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record *LearningRecord) bool) error {
+func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record *LearningRecord) bool) (int, error) {
 	if len(target) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	unlock := lockStoreFile(s.paths.TaskRecords)
@@ -258,11 +261,11 @@ func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record
 
 	current, err := s.loadRecordsFromPath(s.paths.TaskRecords)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	legacy, err := s.loadLegacyTaskRecords()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	records := mergeLearningRecordsByID(legacy, current)
 
@@ -278,7 +281,7 @@ func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record
 		}
 	}
 
-	changed := false
+	changed := 0
 	for i := range records {
 		if _, ok := target[records[i].ID]; !ok {
 			continue
@@ -287,13 +290,13 @@ func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record
 			continue
 		}
 		if mutate(&records[i]) {
-			changed = true
+			changed++
 		}
 	}
-	if !changed {
-		return nil
+	if changed == 0 {
+		return 0, nil
 	}
-	return s.saveJSONLRecordsLocked(s.paths.TaskRecords, records)
+	return changed, s.saveJSONLRecordsLocked(s.paths.TaskRecords, records)
 }
 
 func (s *Store) SavePatternRecords(records []LearningRecord) error {

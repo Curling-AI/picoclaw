@@ -94,6 +94,12 @@ func (j *LLMTaskSuccessJudge) JudgeTaskRecord(
 	if isNoCreditError(err) {
 		return TaskSuccessDecision{}, noCreditError(err)
 	}
+	// A canceled run (Close on every sleep and config reload) is not this step
+	// failing: falling back would persist a heuristic answer as the model's.
+	// The run's ctx, not callCtx, so a per-call timeout keeps its fallback.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return TaskSuccessDecision{}, ctxErr
+	}
 	if err != nil || resp == nil {
 		return j.fallbackDecision(ctx, record)
 	}

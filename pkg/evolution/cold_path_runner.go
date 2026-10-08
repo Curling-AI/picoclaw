@@ -3,6 +3,7 @@ package evolution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -151,11 +152,15 @@ func (r *ColdPathRunner) runWorkspace(workspace string) {
 		err := r.runtime.RunColdPathOnce(r.ctx, workspace)
 		if err != nil && isNoCreditError(err) && r.noCreditPause > 0 {
 			// Pending work is dropped too: without credit it would fail the same way.
+			until := r.now().Add(r.noCreditPause)
 			r.mu.Lock()
-			r.pausedUntil[workspace] = r.now().Add(r.noCreditPause)
+			r.pausedUntil[workspace] = until
 			delete(r.running, workspace)
 			r.mu.Unlock()
-			r.onError(err)
+			// Triggers are refused silently while paused, so this line is the
+			// only trace; a pod runs several workspaces.
+			r.onError(fmt.Errorf("cold path of %s paused until %s: %w",
+				workspace, until.UTC().Format(time.RFC3339), err))
 			return
 		}
 		if err != nil && !errors.Is(err, context.Canceled) {

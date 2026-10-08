@@ -55,10 +55,13 @@ type Runtime struct {
 }
 
 type TurnCaseInput struct {
-	Workspace             string
-	WorkspaceID           string
-	TurnID                string
-	SessionKey            string
+	Workspace   string
+	WorkspaceID string
+	TurnID      string
+	SessionKey  string
+	// CronRun marks a turn that belongs to a cron run even when its session key
+	// does not say so: a child turn spawned by the run is keyed "subturn-N".
+	CronRun               bool
 	AgentID               string
 	Status                string
 	UserMessage           string
@@ -117,7 +120,7 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 	// add; on a 5-minute job these runs used to be most of the records. Skill
 	// usage still counts: the lifecycle cools and finally trashes skills that go
 	// unused, and a skill a cron runs every day is in use.
-	if memory.IsCronRunSessionKey(input.SessionKey) {
+	if IsCronRunTurn(input) {
 		return rt.recordSkillUsage(input, success)
 	}
 	usedSkillNames := buildUsedSkillNames(input)
@@ -161,6 +164,11 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 		"used_skills": len(record.UsedSkillNames),
 	})
 	return nil
+}
+
+// IsCronRunTurn reports whether the turn is a cron run or a turn spawned by one.
+func IsCronRunTurn(input TurnCaseInput) bool {
+	return input.CronRun || memory.IsCronRunSessionKey(input.SessionKey)
 }
 
 func buildTaskRecordID(input TurnCaseInput, createdAt time.Time) string {
@@ -285,85 +293,34 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 
 	windowRecords, expiredIDs := splitColdPathWindow(workspace, taskRecords)
 	if len(expiredIDs) > 0 {
-		if expireErr := store.MarkTaskRecordsExpired(expiredIDs); expireErr != nil {
+		expired, expireErr := store.MarkTaskRecordsExpired(expiredIDs)
+		if expireErr != nil {
 			return expireErr
 		}
-		logger.InfoCF("evolution", "Expired task records outside the cold path window", map[string]any{
-			"workspace": workspace,
-			"expired":   len(expiredIDs),
-			"window":    ColdPathTaskWindow,
-			"run_id":    runID,
-		})
+		if expired > 0 {
+			logger.InfoCF("evolution", "Expired task records outside the cold path window", map[string]any{
+				"workspace": workspace,
+				"expired":   expired,
+				"window":    ColdPathTaskWindow,
+				"run_id":    runID,
+			})
+		}
 	}
 
-	admittedCount := 0
-	newRuleCount := 0
-	if rt.patternClusterer != nil {
-		recordsForOrganizer, evidenceRecordsForOrganizer, inputErr := rt.recordsForColdPathInputs(
-			ctx,
-			workspace,
-			windowRecords,
-		)
-		if inputErr != nil {
-			return inputErr
-		}
-		recordsForOrganizer = rt.filterRecordsByMinSuccessRatio(
-			workspace,
-			evidenceRecordsForOrganizer,
-			recordsForOrganizer,
-		)
-		admittedCount = countTaskLearningRecords(recordsForOrganizer)
-		logger.DebugCF("evolution", "Admitted task records for cold path", map[string]any{
-			"workspace":       workspace,
-			"admitted_tasks":  admittedCount,
-			"organizer_input": len(recordsForOrganizer),
-			"task_ids":        joinRecordIDs(recordsForOrganizer),
-			"run_id":          runID,
-		})
-		var rules []LearningRecord
-		var clusteredTaskIDs []string
-		if clusterer, ok := rt.patternClusterer.(evidencePatternClusterer); ok {
-			rules, clusteredTaskIDs, err = clusterer.BuildPatternsWithEvidence(
-				ctx,
-				workspace,
-				recordsForOrganizer,
-				evidenceRecordsForOrganizer,
-				patternRecords,
-				rt.cfg.EffectiveMinSuccessRatio(),
-			)
-		} else {
-			rules, clusteredTaskIDs, err = rt.patternClusterer.BuildPatterns(
-				ctx,
-				workspace,
-				recordsForOrganizer,
-				patternRecords,
-			)
-		}
-		if err != nil {
-			return err
-		}
-		newRuleCount = countNewPatterns(patternRecords, rules, workspace)
-		logger.DebugCF("evolution", "Built learning patterns", map[string]any{
-			"workspace":      workspace,
-			"pattern_count":  len(rules),
-			"new_patterns":   newRuleCount,
-			"admitted_tasks": admittedCount,
-			"patterns":       summarizePatternRecords(rules),
-			"run_id":         runID,
-		})
-		if len(rules) > 0 {
-			merged := mergePatternRecords(patternRecords, rules, workspace)
-			if mergeErr := store.MergePatternRecords(rules); mergeErr != nil {
-				return mergeErr
-			}
-			patternRecords = merged
-		}
-		if len(clusteredTaskIDs) > 0 {
-			if markErr := markTaskRecordsClustered(store, clusteredTaskIDs); markErr != nil {
-				return markErr
-			}
-		}
+	clustered, clusterErr := rt.clusterColdPathWindow(ctx, workspace, store, windowRecords, patternRecords, runID)
+	// Without credit the model steps stop. Applying drafts that are already
+	// candidates and the skill lifecycle need no model, so the run still gets
+	// to them; the error goes back afterwards so the runner pauses.
+	var noCredit error
+	switch {
+	case clusterErr == nil:
+	case isNoCreditError(clusterErr):
+		noCredit = clusterErr
+	default:
+		return clusterErr
 	}
+	patternRecords = clustered.patterns
+	admittedCount, newRuleCount := clustered.admitted, clustered.newPatterns
 
 	generator := rt.draftGeneratorForWorkspace(workspace)
 	if generator == nil {
@@ -371,7 +328,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			"workspace": workspace,
 			"run_id":    runID,
 		})
-		return rt.runLifecycleMaintenance(workspace, store, runID)
+		return errors.Join(noCredit, rt.runLifecycleMaintenance(workspace, store, runID))
 	}
 
 	recaller := rt.skillsRecallerForWorkspace(workspace)
@@ -386,7 +343,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			"admitted_tasks": admittedCount,
 			"run_id":         runID,
 		})
-		return rt.runLifecycleMaintenance(workspace, store, runID)
+		return errors.Join(noCredit, rt.runLifecycleMaintenance(workspace, store, runID))
 	}
 
 	existingDrafts, err := store.LoadDrafts()
@@ -469,6 +426,9 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			return ctx.Err()
 		default:
 		}
+		if noCredit != nil {
+			break
+		}
 
 		if _, exists := existingBySource[rule.ID]; exists {
 			logger.DebugCF(
@@ -499,6 +459,10 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		})
 
 		draft, err := generateDraftWithEvidence(ctx, generator, rule, matches, evidence)
+		if isNoCreditError(err) {
+			noCredit = err
+			break
+		}
 		if err != nil {
 			return err
 		}
@@ -546,7 +510,92 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		"new_patterns":       newRuleCount,
 		"run_id":             runID,
 	})
-	return rt.runLifecycleMaintenance(workspace, store, runID)
+	return errors.Join(noCredit, rt.runLifecycleMaintenance(workspace, store, runID))
+}
+
+type coldPathClusterResult struct {
+	patterns    []LearningRecord
+	admitted    int
+	newPatterns int
+}
+
+// clusterColdPathWindow judges the window's records, clusters the admitted
+// ones into patterns and stores them. The returned patterns include the new
+// ones; on error they are the patterns it was given.
+func (rt *Runtime) clusterColdPathWindow(
+	ctx context.Context,
+	workspace string,
+	store *Store,
+	window []LearningRecord,
+	patternRecords []LearningRecord,
+	runID string,
+) (coldPathClusterResult, error) {
+	result := coldPathClusterResult{patterns: patternRecords}
+	if rt.patternClusterer == nil {
+		return result, nil
+	}
+	recordsForOrganizer, evidenceRecordsForOrganizer, inputErr := rt.recordsForColdPathInputs(ctx, workspace, window)
+	if inputErr != nil {
+		return result, inputErr
+	}
+	recordsForOrganizer = rt.filterRecordsByMinSuccessRatio(
+		workspace,
+		evidenceRecordsForOrganizer,
+		recordsForOrganizer,
+	)
+	result.admitted = countTaskLearningRecords(recordsForOrganizer)
+	logger.DebugCF("evolution", "Admitted task records for cold path", map[string]any{
+		"workspace":       workspace,
+		"admitted_tasks":  result.admitted,
+		"organizer_input": len(recordsForOrganizer),
+		"task_ids":        joinRecordIDs(recordsForOrganizer),
+		"run_id":          runID,
+	})
+	var rules []LearningRecord
+	var clusteredTaskIDs []string
+	var err error
+	if clusterer, ok := rt.patternClusterer.(evidencePatternClusterer); ok {
+		rules, clusteredTaskIDs, err = clusterer.BuildPatternsWithEvidence(
+			ctx,
+			workspace,
+			recordsForOrganizer,
+			evidenceRecordsForOrganizer,
+			patternRecords,
+			rt.cfg.EffectiveMinSuccessRatio(),
+		)
+	} else {
+		rules, clusteredTaskIDs, err = rt.patternClusterer.BuildPatterns(
+			ctx,
+			workspace,
+			recordsForOrganizer,
+			patternRecords,
+		)
+	}
+	if err != nil {
+		return result, err
+	}
+	result.newPatterns = countNewPatterns(patternRecords, rules, workspace)
+	logger.DebugCF("evolution", "Built learning patterns", map[string]any{
+		"workspace":      workspace,
+		"pattern_count":  len(rules),
+		"new_patterns":   result.newPatterns,
+		"admitted_tasks": result.admitted,
+		"patterns":       summarizePatternRecords(rules),
+		"run_id":         runID,
+	})
+	if len(rules) > 0 {
+		merged := mergePatternRecords(patternRecords, rules, workspace)
+		if mergeErr := store.MergePatternRecords(rules); mergeErr != nil {
+			return result, mergeErr
+		}
+		result.patterns = merged
+	}
+	if len(clusteredTaskIDs) > 0 {
+		if markErr := markTaskRecordsClustered(store, clusteredTaskIDs); markErr != nil {
+			return result, markErr
+		}
+	}
+	return result, nil
 }
 
 func (rt *Runtime) recordsForColdPathInputs(
@@ -565,7 +614,19 @@ func (rt *Runtime) recordsForColdPathInputs(
 	// Freshly-judged verdicts to persist so this record is not re-judged next run.
 	judgedDecisions := make(map[string]bool)
 
+	// Stops the loop keeping the verdicts already paid for in this run; only the
+	// rest waits for the next one.
+	stop := func(err error) ([]LearningRecord, []LearningRecord, error) {
+		if persistErr := rt.persistJudgedDecisions(workspace, judgedDecisions); persistErr != nil {
+			return nil, nil, errors.Join(err, persistErr)
+		}
+		return nil, nil, err
+	}
+
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return stop(err)
+		}
 		if !isTaskRecordKind(record.Kind) || record.WorkspaceID != workspace {
 			continue
 		}
@@ -587,12 +648,7 @@ func (rt *Runtime) recordsForColdPathInputs(
 		if record.Success != nil && *record.Success && judge != nil && !record.SuccessJudged {
 			decision, err := judge.JudgeTaskRecord(ctx, record)
 			if err != nil {
-				// Keep the verdicts already paid for in this run; only the rest
-				// waits for the next one.
-				if persistErr := rt.persistJudgedDecisions(workspace, judgedDecisions); persistErr != nil {
-					return nil, nil, errors.Join(err, persistErr)
-				}
-				return nil, nil, err
+				return stop(err)
 			}
 			judgedSuccess := decision.Success
 			evidenceRecord.Success = &judgedSuccess

@@ -185,6 +185,12 @@ func (c *LLMPatternClusterer) BuildPatterns(
 	if isNoCreditError(err) {
 		return nil, nil, noCreditError(err)
 	}
+	// A canceled run (Close on every sleep and config reload) is not this step
+	// failing: falling back would persist a heuristic answer as the model's.
+	// The run's ctx, not callCtx, so a per-call timeout keeps its fallback.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, ctxErr
+	}
 	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
 	if err != nil || vazio {
 		logClusterFallback("BuildPatterns", len(tasks), err, vazio)
@@ -261,6 +267,12 @@ func (c *LLMPatternClusterer) BuildPatternsWithEvidence(
 	}, nil, model, map[string]any{"temperature": 0})
 	if isNoCreditError(err) {
 		return nil, nil, noCreditError(err)
+	}
+	// A canceled run (Close on every sleep and config reload) is not this step
+	// failing: falling back would persist a heuristic answer as the model's.
+	// The run's ctx, not callCtx, so a per-call timeout keeps its fallback.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, nil, ctxErr
 	}
 	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
 	if err != nil || vazio {

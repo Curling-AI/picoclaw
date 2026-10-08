@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,6 +252,12 @@ func TestColdPathRunner_PausesWorkspaceAfterNoCredit(t *testing.T) {
 	case err := <-reported:
 		if !errors.Is(err, ErrNoCredit) {
 			t.Fatalf("reported %v, want ErrNoCredit", err)
+		}
+		// A pod runs several workspaces: the log must say which one paused and
+		// until when.
+		until := clock.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+		if msg := err.Error(); !strings.Contains(msg, "workspace-a") || !strings.Contains(msg, until) {
+			t.Errorf("reported %q, want the workspace and the pause deadline %s", msg, until)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no-credit error was not reported")

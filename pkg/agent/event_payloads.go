@@ -53,6 +53,9 @@ type TurnEndPayload struct {
 	SkillContextSnapshots []SkillContextSnapshot
 	ToolKinds             []string
 	ToolExecutions        []ToolExecutionRecord
+	// CronRun: o turno é uma execução de cron ou foi disparado por uma (spawn).
+	// O evolution não aprende com esses turnos.
+	CronRun bool
 	// Loop deste turno. Zero value = turno global. O cold path do evolution usa
 	// LoopRoot como Workspace, o que isola task-records, padrões e skills
 	// geradas dentro de loops/<slug>/. (seucaranguejo fork — ver loop.go)

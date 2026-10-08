@@ -12,7 +12,6 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/evolution"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -44,6 +43,10 @@ const afterTurnColdPathMinInterval = 30 * time.Minute
 // coldPathNoCreditPause stops cold-path runs of a workspace whose account ran
 // out of credit. Retrying after every turn only collected refusals: about 200k
 // a week in production.
+//
+// Both the spacing and the pause live in this gateway process: a pod start or
+// config reload forgets them, so the first turn after a wake runs at once. The
+// cold-path window keeps that run's cost bounded either way.
 const coldPathNoCreditPause = 30 * time.Minute
 
 func newEvolutionBridge(
@@ -259,6 +262,7 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 		WorkspaceID:           workspace,
 		TurnID:                meta.TurnID,
 		SessionKey:            meta.SessionKey,
+		CronRun:               payload.CronRun,
 		AgentID:               meta.AgentID,
 		Status:                string(payload.Status),
 		UserMessage:           payload.UserMessage,
@@ -294,7 +298,7 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 		}
 		// FinalizeTurn writes no learning record for a cron run, so there is
 		// nothing new for the cold path to look at.
-		if b.coldPathRunner != nil && b.cfg.RunsColdPathAfterTurn() && !memory.IsCronRunSessionKey(input.SessionKey) {
+		if b.coldPathRunner != nil && b.cfg.RunsColdPathAfterTurn() && !evolution.IsCronRunTurn(input) {
 			b.coldPathRunner.Trigger(input.Workspace)
 		}
 	}()
@@ -360,7 +364,10 @@ func (b *evolutionBridge) startScheduledColdPath(workspace string, times []strin
 			select {
 			case <-timer.C:
 				for _, workspace := range b.scheduledColdPathWorkspaces() {
-					b.coldPathRunner.Trigger(workspace)
+					if !b.coldPathRunner.Trigger(workspace) {
+						logger.InfoCF("agent", "Scheduled cold path slot skipped (paused without credit or closing)",
+							map[string]any{"workspace": workspace})
+					}
 				}
 			case <-b.bgCtx.Done():
 				if !timer.Stop() {

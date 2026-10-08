@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -56,6 +57,16 @@ func (ts *turnState) promptCacheScope() string {
 		return escopo
 	}
 	return promptCacheScopeForSession(ts.sessionKey)
+}
+
+// isCronRun reports whether this turn is a cron run or was spawned by one. A
+// child turn is keyed "subturn-N", but it inherits the spawning turn's cache
+// scope, which for a cron run is the job ("agent:cron-<job>").
+func (ts *turnState) isCronRun() bool {
+	if ts == nil {
+		return false
+	}
+	return memory.IsCronRunSessionKey(ts.sessionKey) || memory.IsCronRunSessionKey(ts.promptCacheScope())
 }
 
 // promptCacheScopeForSession reduz uma chave de sessão POR EXECUÇÃO à
