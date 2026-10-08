@@ -934,14 +934,14 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 	// Overlay gravável do SOUL: o SOUL.md base pode ser read-only (montado
 	// pelo deployment); ajustes de comportamento aprendidos vão em
 	// memory/SOUL.md e aparecem junto da seção. (fork — roteamento de memória)
-	cb.appendOverlay(&sb, "SOUL.md (learned)", filepath.Join("memory", "SOUL.md"))
+	cb.appendOverlay(&sb, "SOUL.md (learned)", "SOUL.md")
 	if agentDefinition.User != nil {
 		fmt.Fprintf(&sb, "## %s\n\n%s\n\n", "USER.md", agentDefinition.User.Content)
 	}
 	// Overlay gravável do USER: fatos aprendidos sobre o usuário vão em
 	// memory/USER.md — separados do MEMORY.md (contexto de trabalho) para não
 	// duplicar persona no prompt. (fork — roteamento de memória)
-	cb.appendOverlay(&sb, "USER.md (learned)", filepath.Join("memory", "USER.md"))
+	cb.appendOverlay(&sb, "USER.md (learned)", "USER.md")
 
 	if agentDefinition.Source != AgentDefinitionSourceAgent {
 		filePath := filepath.Join(cb.workspace, "IDENTITY.md")
@@ -957,12 +957,17 @@ func (cb *ContextBuilder) LoadBootstrapFiles() string {
 // memory/SOUL.md) como seção própria do bootstrap. Overlays existem porque os
 // arquivos base podem ser montados read-only pelo deployment: o agente grava o
 // que APRENDE nesses overlays em vez de duplicar tudo no MEMORY.md.
-func (cb *ContextBuilder) appendOverlay(sb *strings.Builder, label, relPath string) {
-	data, err := os.ReadFile(filepath.Join(cb.workspace, relPath))
+//
+// Como o MEMORY.md, entram até o próprio teto (memory_budget.go).
+func (cb *ContextBuilder) appendOverlay(sb *strings.Builder, label, name string) {
+	file := learnedOverlayFile(name)
+	absPath := filepath.Join(cb.workspace, filepath.FromSlash(file.path))
+	data, err := os.ReadFile(absPath)
 	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
 		return
 	}
-	fmt.Fprintf(sb, "## %s\n\n%s\n\n", label, strings.TrimSpace(string(data)))
+	content := capMemoryForPrompt(strings.TrimSpace(string(data)), file, absPath)
+	fmt.Fprintf(sb, "## %s\n\n%s\n\n", label, content)
 }
 
 // buildDynamicContext returns a short dynamic context string with per-request info.

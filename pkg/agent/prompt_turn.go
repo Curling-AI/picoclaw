@@ -174,6 +174,7 @@ func loopPromptPart(scope LoopScope) *PromptPart {
 	// é contenção fraca — o modelo o trata como sugestão de seção, não como
 	// fronteira de conteúdo.
 	if mem := readTrimmedFile(loopMemoryFile(scope.Root)); mem != "" {
+		mem = capMemoryForPrompt(mem, loopLongTermFile(scope.Slug), loopMemoryFile(scope.Root))
 		fmt.Fprintf(&sb, "\n<memory scope=\"loop:%s\">\n%s\n</memory>\n", scope.Slug, mem)
 	}
 
