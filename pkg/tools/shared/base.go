@@ -32,6 +32,22 @@ type PromptMetadataProvider interface {
 	PromptMetadata() PromptMetadata
 }
 
+// SideEffectHinter is implemented by tools whose effects are declared by the
+// server that runs them (MCP annotations) instead of being known to the agent.
+// Native tools don't implement it.
+type SideEffectHinter interface {
+	// RepeatIsHarmless reports whether running the tool again with the same
+	// arguments changes nothing outside the conversation: the server declared
+	// it read-only or idempotent.
+	RepeatIsHarmless() bool
+}
+
+// ServerNamedTool is implemented by tools registered under a wrapped name
+// (mcp_<server>_<tool>) that the model also refers to by the server's own name.
+type ServerNamedTool interface {
+	ServerToolName() string
+}
+
 // --- Request-scoped tool context (channel / chatID) ---
 //
 // Carried via context.Value so that concurrent tool calls each receive

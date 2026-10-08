@@ -181,6 +181,19 @@ func (p *Pipeline) CallLLM(
 				})
 		}
 	}
+	// Same heal for tools the model named but hasn't called yet; capped like a
+	// discovery page so a long reasoning can't unhide the whole library.
+	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); len(mentioned) > 0 {
+		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
+		if len(revived) > 0 {
+			logger.InfoCF("agent", "Re-promoted deferred tools named by the model",
+				map[string]any{
+					"agent_id":  ts.agent.ID,
+					"iteration": iteration,
+					"tools":     revived,
+				})
+		}
+	}
 
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefs()
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)

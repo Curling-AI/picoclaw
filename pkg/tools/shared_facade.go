@@ -24,6 +24,8 @@ type (
 	AsyncExecutor          = toolshared.AsyncExecutor
 	PromptMetadata         = toolshared.PromptMetadata
 	PromptMetadataProvider = toolshared.PromptMetadataProvider
+	SideEffectHinter       = toolshared.SideEffectHinter
+	ServerNamedTool        = toolshared.ServerNamedTool
 	ToolResult             = toolshared.ToolResult
 )
 

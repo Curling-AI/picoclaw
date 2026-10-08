@@ -247,6 +247,58 @@ func (r *ToolRegistry) HasRegistered(name string) bool {
 	return ok
 }
 
+// GetRegistered returns a registered tool whether or not it is callable right
+// now (hidden tools whose TTL expired included).
+func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.tools[name]
+	if !ok {
+		return nil, false
+	}
+	return entry.Tool, true
+}
+
+// ExpiredToolAliases maps each name the model may write for a hidden tool that
+// is currently expired to its registry name: the registry name itself and, for
+// MCP tools, the server's own tool name. Names that are plain words (no '_' or
+// '-') are left out — they collide with prose — and so is a name shared by two
+// registered tools (visible or core ones included), since it can't say which
+// one the model meant. Keys are lowercase.
+func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	owners := make(map[string]string, len(r.tools))
+	ambiguous := make(map[string]struct{})
+	add := func(alias, name string) {
+		alias = strings.ToLower(alias)
+		if !strings.ContainsAny(alias, "_-") {
+			return
+		}
+		if owner, ok := owners[alias]; ok && owner != name {
+			ambiguous[alias] = struct{}{}
+			return
+		}
+		owners[alias] = name
+	}
+	for name, entry := range r.tools {
+		add(name, name)
+		if named, ok := entry.Tool.(ServerNamedTool); ok {
+			add(named.ServerToolName(), name)
+		}
+	}
+	aliases := make(map[string]string)
+	for alias, name := range owners {
+		if _, skip := ambiguous[alias]; skip {
+			continue
+		}
+		if entry := r.tools[name]; !entry.IsCore && entry.TTL <= 0 {
+			aliases[alias] = name
+		}
+	}
+	return aliases
+}
+
 // HiddenToolSnapshot holds a consistent snapshot of hidden tools and the
 // registry version at which it was taken. Used by BM25SearchTool cache.
 type HiddenToolSnapshot struct {

@@ -168,6 +168,20 @@ func (t *MCPTool) Name() string {
 	return base + "_" + suffix
 }
 
+// ServerToolName returns the tool's own name on its MCP server, without the
+// mcp_<server>_ prefix of Name.
+func (t *MCPTool) ServerToolName() string {
+	return t.tool.Name
+}
+
+// RepeatIsHarmless reports whether the server annotated the tool read-only or
+// idempotent. Without annotations the MCP defaults apply: the tool may change
+// its environment, and running it again repeats the change.
+func (t *MCPTool) RepeatIsHarmless() bool {
+	hints := t.tool.Annotations
+	return hints != nil && (hints.ReadOnlyHint || hints.IdempotentHint)
+}
+
 // Description returns the tool description
 func (t *MCPTool) Description() string {
 	desc := t.tool.Description

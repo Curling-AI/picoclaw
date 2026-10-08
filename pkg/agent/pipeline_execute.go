@@ -138,30 +138,33 @@ toolLoop:
 
 		toolName := tc.Name
 		toolArgs := cloneStringAnyMap(tc.Arguments)
-		denyByTurnProfile := func() bool {
-			if turnProfileToolAllowed(ts.profile, toolName) {
-				return false
-			}
+		// skipToolCall answers the call with content instead of running it.
+		skipToolCall := func(content string) {
 			exec.allResponsesHandled = false
-			denyContent := fmt.Sprintf("Tool %q is not allowed by the active turn profile.", toolName)
 			al.emitEvent(
 				runtimeevents.KindAgentToolExecSkipped,
 				ts.eventMeta("runTurn", "turn.tool.skipped"),
 				ToolExecSkippedPayload{
 					Tool:   toolName,
-					Reason: denyContent,
+					Reason: content,
 				},
 			)
-			deniedMsg := providers.Message{
+			skippedMsg := providers.Message{
 				Role:       "tool",
-				Content:    denyContent,
+				Content:    content,
 				ToolCallID: tc.ID,
 			}
-			messages = append(messages, deniedMsg)
+			messages = append(messages, skippedMsg)
 			if !ts.opts.NoHistory {
-				ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
-				ts.recordPersistedMessage(deniedMsg)
+				ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+				ts.recordPersistedMessage(skippedMsg)
 			}
+		}
+		denyByTurnProfile := func() bool {
+			if turnProfileToolAllowed(ts.profile, toolName) {
+				return false
+			}
+			skipToolCall(fmt.Sprintf("Tool %q is not allowed by the active turn profile.", toolName))
 			return true
 		}
 
@@ -430,26 +433,7 @@ toolLoop:
 						"action":   "respond",
 					})
 			case HookActionDenyTool:
-				exec.allResponsesHandled = false
-				denyContent := hookDeniedToolContent("Tool execution denied by hook", decision.Reason)
-				al.emitEvent(
-					runtimeevents.KindAgentToolExecSkipped,
-					ts.eventMeta("runTurn", "turn.tool.skipped"),
-					ToolExecSkippedPayload{
-						Tool:   toolName,
-						Reason: denyContent,
-					},
-				)
-				deniedMsg := providers.Message{
-					Role:       "tool",
-					Content:    denyContent,
-					ToolCallID: tc.ID,
-				}
-				messages = append(messages, deniedMsg)
-				if !ts.opts.NoHistory {
-					ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
-					ts.recordPersistedMessage(deniedMsg)
-				}
+				skipToolCall(hookDeniedToolContent("Tool execution denied by hook", decision.Reason))
 				continue
 			case HookActionAbortTurn:
 				exec.abortedByHook = true
@@ -469,31 +453,24 @@ toolLoop:
 				Arguments: toolArgs,
 			})
 			if !approval.Approved {
-				exec.allResponsesHandled = false
-				denyContent := hookDeniedToolContent("Tool execution denied by approval hook", approval.Reason)
-				al.emitEvent(
-					runtimeevents.KindAgentToolExecSkipped,
-					ts.eventMeta("runTurn", "turn.tool.skipped"),
-					ToolExecSkippedPayload{
-						Tool:   toolName,
-						Reason: denyContent,
-					},
-				)
-				deniedMsg := providers.Message{
-					Role:       "tool",
-					Content:    denyContent,
-					ToolCallID: tc.ID,
-				}
-				messages = append(messages, deniedMsg)
-				if !ts.opts.NoHistory {
-					ts.agent.Sessions.AddFullMessage(ts.sessionKey, deniedMsg)
-					ts.recordPersistedMessage(deniedMsg)
-				}
+				skipToolCall(hookDeniedToolContent("Tool execution denied by approval hook", approval.Reason))
 				continue
 			}
 		}
 
 		if denyByTurnProfile() {
+			continue
+		}
+
+		sideEffectKey, sideEffecting := sideEffectCallKey(ts.agent.Tools, toolName, toolArgs)
+		if sideEffecting && ts.repeatsLastSideEffect(sideEffectKey) {
+			logger.WarnCF("agent", "Blocked repeat of a side-effecting tool call",
+				map[string]any{
+					"agent_id":  ts.agent.ID,
+					"tool":      toolName,
+					"iteration": iteration,
+				})
+			skipToolCall(repeatedSideEffectContent)
 			continue
 		}
 
@@ -749,6 +726,11 @@ toolLoop:
 			toolErrorSummary(toolResult),
 			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 		)
+		// Only successes count: a failed call is reported as not done, so
+		// retrying it stays allowed and it doesn't stand between two repeats.
+		if !toolResult.IsError {
+			ts.recordSucceededCall(ts.agent.Tools, toolName, sideEffectKey)
+		}
 		messages = append(messages, toolResultMsg)
 		if !ts.opts.NoHistory {
 			ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)

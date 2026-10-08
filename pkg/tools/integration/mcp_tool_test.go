@@ -898,3 +898,44 @@ func TestMCPTool_Execute_WhitespaceWorkspaceDisablesArtifactPersistence(t *testi
 		t.Fatalf("expected large text to remain inline when workspace is blank, got %q", result.ForLLM)
 	}
 }
+
+func TestMCPTool_RepeatIsHarmless(t *testing.T) {
+	notDestructive := false
+	tests := []struct {
+		name        string
+		annotations *mcp.ToolAnnotations
+		want        bool
+	}{
+		{name: "no annotations: MCP defaults, may change its environment", annotations: nil, want: false},
+		{name: "empty annotations", annotations: &mcp.ToolAnnotations{}, want: false},
+		{
+			name:        "additive but not idempotent",
+			annotations: &mcp.ToolAnnotations{DestructiveHint: &notDestructive},
+			want:        false,
+		},
+		{name: "read-only", annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}, want: true},
+		{name: "idempotent", annotations: &mcp.ToolAnnotations{IdempotentHint: true}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := NewMCPTool(
+				&MockMCPManager{},
+				"skip",
+				&mcp.Tool{Name: "skip_project_create", Annotations: tt.annotations},
+			)
+			if got := tool.RepeatIsHarmless(); got != tt.want {
+				t.Errorf("RepeatIsHarmless() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMCPTool_ServerToolName(t *testing.T) {
+	tool := NewMCPTool(&MockMCPManager{}, "skip", &mcp.Tool{Name: "skip_project_status"})
+	if got := tool.ServerToolName(); got != "skip_project_status" {
+		t.Errorf("ServerToolName() = %q, want the server's own name", got)
+	}
+	if got := tool.Name(); got != "mcp_skip_skip_project_status" {
+		t.Errorf("Name() = %q, want the prefixed registry name", got)
+	}
+}
