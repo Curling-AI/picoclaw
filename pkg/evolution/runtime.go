@@ -16,6 +16,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
@@ -112,6 +113,13 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 	}
 
 	success := input.Status == "completed"
+	// A cron run repeats its job's prompt, so it teaches nothing a skill would
+	// add; on a 5-minute job these runs used to be most of the records. Skill
+	// usage still counts: the lifecycle cools and finally trashes skills that go
+	// unused, and a skill a cron runs every day is in use.
+	if memory.IsCronRunSessionKey(input.SessionKey) {
+		return rt.recordSkillUsage(input, success)
+	}
 	usedSkillNames := buildUsedSkillNames(input)
 	workspaceID := input.Workspace
 	createdAt := rt.now()
@@ -275,13 +283,26 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		"run_id":        runID,
 	})
 
+	windowRecords, expiredIDs := splitColdPathWindow(workspace, taskRecords)
+	if len(expiredIDs) > 0 {
+		if expireErr := store.MarkTaskRecordsExpired(expiredIDs); expireErr != nil {
+			return expireErr
+		}
+		logger.InfoCF("evolution", "Expired task records outside the cold path window", map[string]any{
+			"workspace": workspace,
+			"expired":   len(expiredIDs),
+			"window":    ColdPathTaskWindow,
+			"run_id":    runID,
+		})
+	}
+
 	admittedCount := 0
 	newRuleCount := 0
 	if rt.patternClusterer != nil {
 		recordsForOrganizer, evidenceRecordsForOrganizer, inputErr := rt.recordsForColdPathInputs(
 			ctx,
 			workspace,
-			taskRecords,
+			windowRecords,
 		)
 		if inputErr != nil {
 			return inputErr
@@ -558,14 +579,19 @@ func (rt *Runtime) recordsForColdPathInputs(
 		}
 
 		evidenceRecord := record
-		// LLM-judge each successful record AT MOST ONCE. The cold path runs
-		// after_turn and an unclustered record stays "new" (as clustering
-		// evidence) indefinitely, so without the SuccessJudged gate it would be
-		// re-judged every turn. Already-judged records reuse their persisted
-		// Success verdict below. (seucaranguejo fork)
+		// LLM-judge each successful record AT MOST ONCE. An unclustered record
+		// stays "new" (as clustering evidence) for as long as it is in the
+		// window, so without the SuccessJudged gate it would be re-judged every
+		// run. Already-judged records reuse their persisted Success verdict
+		// below. (seucaranguejo fork)
 		if record.Success != nil && *record.Success && judge != nil && !record.SuccessJudged {
 			decision, err := judge.JudgeTaskRecord(ctx, record)
 			if err != nil {
+				// Keep the verdicts already paid for in this run; only the rest
+				// waits for the next one.
+				if persistErr := rt.persistJudgedDecisions(workspace, judgedDecisions); persistErr != nil {
+					return nil, nil, errors.Join(err, persistErr)
+				}
 				return nil, nil, err
 			}
 			judgedSuccess := decision.Success
@@ -586,16 +612,22 @@ func (rt *Runtime) recordsForColdPathInputs(
 		admitted = append(admitted, evidenceRecord)
 	}
 
-	// Persist the judge verdicts (Success + SuccessJudged) so subsequent runs skip
-	// the LLM call. Runs before clustering's MarkTaskRecordsClustered; both load
-	// fresh from disk and only touch their own fields, so they compose. Only
-	// writes when something new was judged, so a steady state costs no writes.
-	if len(judgedDecisions) > 0 {
-		if err := rt.storeForWorkspace(workspace).MarkTaskRecordsJudged(judgedDecisions); err != nil {
-			return nil, nil, err
-		}
+	if err := rt.persistJudgedDecisions(workspace, judgedDecisions); err != nil {
+		return nil, nil, err
 	}
 	return admitted, evidence, nil
+}
+
+// persistJudgedDecisions stores the judge verdicts (Success + SuccessJudged) so
+// later runs skip the LLM call. Runs before clustering's
+// MarkTaskRecordsClustered; both load fresh from disk and only touch their own
+// fields, so they compose. Writes only when something new was judged, so a
+// steady state costs no writes.
+func (rt *Runtime) persistJudgedDecisions(workspace string, decisions map[string]bool) error {
+	if len(decisions) == 0 {
+		return nil
+	}
+	return rt.storeForWorkspace(workspace).MarkTaskRecordsJudged(decisions)
 }
 
 func (rt *Runtime) filterRecordsByMinSuccessRatio(

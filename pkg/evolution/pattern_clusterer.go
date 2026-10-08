@@ -182,6 +182,9 @@ func (c *LLMPatternClusterer) BuildPatterns(
 			Content: buildPatternClusterPrompt(workspace, tasks, existing),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
+	if isNoCreditError(err) {
+		return nil, nil, noCreditError(err)
+	}
 	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
 	if err != nil || vazio {
 		logClusterFallback("BuildPatterns", len(tasks), err, vazio)
@@ -256,6 +259,9 @@ func (c *LLMPatternClusterer) BuildPatternsWithEvidence(
 			Content: buildPatternClusterPrompt(workspace, evidenceTasks, existing),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
+	if isNoCreditError(err) {
+		return nil, nil, noCreditError(err)
+	}
 	vazio := resp == nil || strings.TrimSpace(resp.Content) == ""
 	if err != nil || vazio {
 		logClusterFallback("BuildPatternsWithEvidence", len(evidenceTasks), err, vazio)
@@ -553,6 +559,53 @@ func parseLLMClusterResponse(content string) (llmClusterResponse, bool) {
 	return payload, true
 }
 
+// The clustering prompt is bounded on every axis, so its size no longer
+// follows the assistant's history: ColdPathTaskWindow tasks, each with a short
+// excerpt of its output, and the most recent patterns, whose labels the model
+// can reuse. An older pattern left out can come back as a near-duplicate label;
+// that is the price of a call that stays small.
+const (
+	clusterPromptExcerptRunes        = 400
+	clusterPromptPatternLimit        = 30
+	clusterPromptPatternSummaryRunes = 200
+)
+
+// recentPatternsForPrompt returns the workspace's labeled patterns, at most
+// clusterPromptPatternLimit of them, most recently touched kept, in their
+// original order.
+func recentPatternsForPrompt(workspace string, existing []LearningRecord) []LearningRecord {
+	patterns := make([]LearningRecord, 0, len(existing))
+	for _, pattern := range existing {
+		if pattern.WorkspaceID != workspace || strings.TrimSpace(pattern.Label) == "" {
+			continue
+		}
+		patterns = append(patterns, pattern)
+	}
+	if len(patterns) <= clusterPromptPatternLimit {
+		return patterns
+	}
+	touched := func(record LearningRecord) time.Time {
+		if record.UpdatedAt != nil {
+			return *record.UpdatedAt
+		}
+		return record.CreatedAt
+	}
+	order := make([]int, len(patterns))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return touched(patterns[order[a]]).After(touched(patterns[order[b]]))
+	})
+	keep := append([]int(nil), order[:clusterPromptPatternLimit]...)
+	sort.Ints(keep)
+	out := make([]LearningRecord, 0, clusterPromptPatternLimit)
+	for _, i := range keep {
+		out = append(out, patterns[i])
+	}
+	return out
+}
+
 func buildPatternClusterPrompt(workspace string, tasks []LearningRecord, existing []LearningRecord) string {
 	type taskPayload struct {
 		ID                 string `json:"id"`
@@ -571,23 +624,17 @@ func buildPatternClusterPrompt(workspace string, tasks []LearningRecord, existin
 	}{
 		Instruction: "Group tasks that have the same reusable task meaning. Use existing pattern labels when they fit. Labels must be lowercase hyphenated and must not include concrete values.",
 	}
-	for _, pattern := range existing {
-		if pattern.WorkspaceID != workspace {
-			continue
-		}
-		if strings.TrimSpace(pattern.Label) == "" {
-			continue
-		}
+	for _, pattern := range recentPatternsForPrompt(workspace, existing) {
 		payload.ExistingPatterns = append(payload.ExistingPatterns, patternPayload{
 			Label:   strings.TrimSpace(pattern.Label),
-			Summary: strings.TrimSpace(pattern.Summary),
+			Summary: summarizeText(pattern.Summary, clusterPromptPatternSummaryRunes),
 		})
 	}
 	for _, task := range tasks {
 		payload.Tasks = append(payload.Tasks, taskPayload{
 			ID:                 task.ID,
 			Summary:            task.Summary,
-			FinalOutputExcerpt: summarizeText(task.FinalOutput, 800),
+			FinalOutputExcerpt: summarizeText(task.FinalOutput, clusterPromptExcerptRunes),
 			Success:            task.Success,
 		})
 	}

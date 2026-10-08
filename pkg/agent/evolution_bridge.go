@@ -12,6 +12,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/evolution"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -33,6 +34,17 @@ type evolutionBridge struct {
 }
 
 const evolutionDirectDeliveryAttr = "evolution_direct_delivery"
+
+// afterTurnColdPathMinInterval spaces after_turn cold-path runs of a workspace.
+// A run costs one judge call per new record plus one clustering call over the
+// window; running it after every turn of a busy chat paid that clustering call
+// per message for records a single run can take together.
+const afterTurnColdPathMinInterval = 30 * time.Minute
+
+// coldPathNoCreditPause stops cold-path runs of a workspace whose account ran
+// out of credit. Retrying after every turn only collected refusals: about 200k
+// a week in production.
+const coldPathNoCreditPause = 30 * time.Minute
 
 func newEvolutionBridge(
 	registry *AgentRegistry,
@@ -87,11 +99,18 @@ func newEvolutionBridge(
 		cancel:   cancel,
 	}
 	if cfg.Evolution.RunsColdPathAutomatically() {
-		bridge.coldPathRunner = evolution.NewColdPathRunnerWithErrorHandler(runtime, func(err error) {
-			logger.WarnCF("agent", "Cold path run failed", map[string]any{
-				"error": err.Error(),
-			})
-		})
+		opts := evolution.ColdPathRunnerOptions{
+			OnError: func(err error) {
+				logger.WarnCF("agent", "Cold path run failed", map[string]any{
+					"error": err.Error(),
+				})
+			},
+			NoCreditPause: coldPathNoCreditPause,
+		}
+		if cfg.Evolution.RunsColdPathAfterTurn() {
+			opts.MinInterval = afterTurnColdPathMinInterval
+		}
+		bridge.coldPathRunner = evolution.NewColdPathRunnerWithOptions(runtime, opts)
 	}
 	if cfg.Evolution.RunsColdPathScheduled() {
 		bridge.startScheduledColdPath(cfg.Agents.Defaults.Workspace, cfg.Evolution.EffectiveColdPathTimes())
@@ -273,7 +292,9 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 			})
 			return
 		}
-		if b.coldPathRunner != nil && b.cfg.RunsColdPathAfterTurn() {
+		// FinalizeTurn writes no learning record for a cron run, so there is
+		// nothing new for the cold path to look at.
+		if b.coldPathRunner != nil && b.cfg.RunsColdPathAfterTurn() && !memory.IsCronRunSessionKey(input.SessionKey) {
 			b.coldPathRunner.Trigger(input.Workspace)
 		}
 	}()

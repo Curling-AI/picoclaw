@@ -192,17 +192,56 @@ func (s *Store) SaveTaskRecords(records []LearningRecord) error {
 }
 
 func (s *Store) MarkTaskRecordsClustered(ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	target := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
+	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) {
+		record.Status = RecordStatus("clustered")
+	})
+}
+
+// MarkTaskRecordsExpired retires records that fell out of the cold-path window,
+// so no later run loads them as candidates again.
+func (s *Store) MarkTaskRecordsExpired(ids []string) error {
+	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) {
+		record.Status = recordStatusExpired
+	})
+}
+
+// MarkTaskRecordsJudged persists the cold-path success judge's verdict so the
+// record is not re-judged on later runs. It sets SuccessJudged=true and Success
+// to the decided value for each id (keeping Status unchanged, so the record stays
+// available as clustering evidence). (seucaranguejo fork)
+func (s *Store) MarkTaskRecordsJudged(decisions map[string]bool) error {
+	verdicts := make(map[string]bool, len(decisions))
+	for id, success := range decisions {
+		if id = strings.TrimSpace(id); id != "" {
+			verdicts[id] = success
 		}
+	}
+	target := make(map[string]struct{}, len(verdicts))
+	for id := range verdicts {
 		target[id] = struct{}{}
 	}
+	return s.updateTaskRecords(target, func(record *LearningRecord) {
+		judged := verdicts[record.ID]
+		record.Success = &judged
+		record.SuccessJudged = true
+	})
+}
+
+func trimmedIDSet(ids []string) map[string]struct{} {
+	target := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			target[id] = struct{}{}
+		}
+	}
+	return target
+}
+
+// updateTaskRecords applies mutate to the stored task records whose id is in
+// target and rewrites the file. Ids are only unique per workspace: when this
+// store's workspace holds a record with the id, same-id records of other
+// workspaces are left alone.
+func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record *LearningRecord)) error {
 	if len(target) == 0 {
 		return nil
 	}
@@ -240,73 +279,7 @@ func (s *Store) MarkTaskRecordsClustered(ids []string) error {
 		if hasTargetRecordInWorkspace[records[i].ID] && records[i].WorkspaceID != s.paths.Workspace {
 			continue
 		}
-		records[i].Status = RecordStatus("clustered")
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	return s.saveJSONLRecordsLocked(s.paths.TaskRecords, records)
-}
-
-// MarkTaskRecordsJudged persists the cold-path success judge's verdict so the
-// record is not re-judged on later runs. It sets SuccessJudged=true and Success
-// to the decided value for each id (keeping Status unchanged, so the record stays
-// available as clustering evidence). Mirrors MarkTaskRecordsClustered's
-// load/merge/rewrite. (seucaranguejo fork)
-func (s *Store) MarkTaskRecordsJudged(decisions map[string]bool) error {
-	if len(decisions) == 0 {
-		return nil
-	}
-	target := make(map[string]bool, len(decisions))
-	for id, success := range decisions {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		target[id] = success
-	}
-	if len(target) == 0 {
-		return nil
-	}
-
-	unlock := lockStoreFile(s.paths.TaskRecords)
-	defer unlock()
-
-	current, err := s.loadRecordsFromPath(s.paths.TaskRecords)
-	if err != nil {
-		return err
-	}
-	legacy, err := s.loadLegacyTaskRecords()
-	if err != nil {
-		return err
-	}
-	records := mergeLearningRecordsByID(legacy, current)
-
-	hasTargetRecordInWorkspace := make(map[string]bool, len(target))
-	if strings.TrimSpace(s.paths.Workspace) != "" {
-		for _, record := range records {
-			if _, ok := target[record.ID]; !ok {
-				continue
-			}
-			if record.WorkspaceID == s.paths.Workspace {
-				hasTargetRecordInWorkspace[record.ID] = true
-			}
-		}
-	}
-
-	changed := false
-	for i := range records {
-		success, ok := target[records[i].ID]
-		if !ok {
-			continue
-		}
-		if hasTargetRecordInWorkspace[records[i].ID] && records[i].WorkspaceID != s.paths.Workspace {
-			continue
-		}
-		judged := success
-		records[i].Success = &judged
-		records[i].SuccessJudged = true
+		mutate(&records[i])
 		changed = true
 	}
 	if !changed {

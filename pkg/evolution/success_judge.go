@@ -91,6 +91,9 @@ func (j *LLMTaskSuccessJudge) JudgeTaskRecord(
 			Content: buildTaskSuccessJudgePrompt(record),
 		},
 	}, nil, model, map[string]any{"temperature": 0})
+	if isNoCreditError(err) {
+		return TaskSuccessDecision{}, noCreditError(err)
+	}
 	if err != nil || resp == nil {
 		return j.fallbackDecision(ctx, record)
 	}
