@@ -103,10 +103,10 @@ type memoryFit struct {
 	// hidden são TODAS as partes que ficaram de fora, em ordem; o marcador lista
 	// só as primeiras e as últimas.
 	hidden []omittedEntry
-	// hiddenHeadings são os títulos das seções que o agente não vê inteiras: a
-	// cortada no meio e as escondidas. É o que uma reescrita do arquivo inteiro
-	// feita a partir do prompt apagaria.
-	hiddenHeadings []string
+	// hiddenSections são as seções que o agente não vê inteiras: a cortada no
+	// meio e as escondidas, com o texto exato. É o que uma reescrita do arquivo
+	// inteiro feita a partir do prompt apagaria ou trocaria.
+	hiddenSections []HiddenMemorySection
 	markerTokens   int
 }
 
@@ -172,9 +172,13 @@ func fitMemory(raw string, file memoryPromptFile) memoryFit {
 	return fit
 }
 
-// fenceCloseTokens cobre o "\n```" que fecha um bloco de código aberto no corte
-// e o "\n\n" antes do marcador.
-const fenceCloseTokens = 3
+// maxFenceRunes limita a cerca reconhecida (e, portanto, a que fecha o bloco no
+// corte), para a reserva abaixo valer sempre.
+const maxFenceRunes = 10
+
+// fenceCloseTokens cobre o "\n" + cerca que fecha um bloco de código aberto no
+// corte e o "\n\n" antes do marcador.
+const fenceCloseTokens = (1 + maxFenceRunes + 2 + 4) * 2 / 5
 
 // cutWithin acha o maior trecho que cabe em budget: linhas inteiras, por busca
 // binária sobre prefixos (o estimador é monotônico no tamanho do prefixo).
@@ -190,19 +194,18 @@ func cutWithin(tl trimmedLines, budget int) memoryCut {
 	// A linha seguinte não caberia nem sozinha (um JSON colado na memória):
 	// mostra o começo dela, cortado numa fronteira de runa, em vez de esconder
 	// tudo dali em diante.
+	// A busca é direto sobre o byte, sem montar a lista de runas: uma linha de
+	// MB viraria centenas de MB alocados a cada montagem do prompt.
 	line := tl.lines[shown]
-	var bounds []int
-	for b := 0; b < len(line); {
-		_, size := utf8.DecodeRuneInString(line[b:])
-		b += size
-		bounds = append(bounds, b)
+	n := sort.Search(len(line)+1, func(b int) bool {
+		return estimateTextTokens(tl.content[:tl.starts[shown]+b]) > budget
+	}) - 1
+	for n > 0 && n < len(line) && !utf8.RuneStart(line[n]) {
+		n--
 	}
-	n := sort.Search(len(bounds), func(i int) bool {
-		return estimateTextTokens(tl.content[:tl.starts[shown]+bounds[i]]) > budget
-	})
 	if n > 0 {
-		cut.partial = bounds[n-1]
-		cut.end = tl.starts[shown] + cut.partial
+		cut.partial = n
+		cut.end = tl.starts[shown] + n
 	}
 	return cut
 }
@@ -212,7 +215,7 @@ func renderCut(tl trimmedLines, file memoryPromptFile, total int, cut memoryCut)
 	if cut.partial > 0 {
 		shownLines = tl.lines[:cut.shown+1]
 	}
-	current, fence := scanShown(shownLines)
+	current, currentIdx, fence := scanShown(shownLines)
 	body := tl.content[:cut.end]
 	if fence != "" {
 		body += "\n" + fence
@@ -228,33 +231,75 @@ func renderCut(tl trimmedLines, file memoryPromptFile, total int, cut memoryCut)
 		partialLine: cut.partial > 0,
 		hidden:      hidden,
 	}
-	if continues && current != "" {
-		fit.hiddenHeadings = append(fit.hiddenHeadings, current)
-	}
-	for _, e := range hidden {
-		if !e.continues {
-			fit.hiddenHeadings = append(fit.hiddenHeadings, e.heading)
-		}
-	}
+	fit.hiddenSections = hiddenSections(tl, hidden, continues, current, currentIdx)
 	marker := omissionMarker(file, fit)
 	fit.markerTokens = estimateTextTokens(marker)
 	fit.text = body + "\n\n" + marker
 	return fit
 }
 
-// fenceOf devolve o marcador de cerca de código da linha (``` ou ~~~), ou "".
-// É heurística: uma linha de prosa que comece com três crases também conta.
-func fenceOf(line string) string {
-	t := strings.TrimSpace(line)
-	for _, f := range []string{"```", "~~~"} {
-		if strings.HasPrefix(t, f) {
-			return f
+// HiddenMemorySection é uma seção que o prompt não mostra inteira. Text é o
+// trecho exato do arquivo, do título até antes do próximo; Heading é "" para o
+// texto antes da primeira seção.
+type HiddenMemorySection struct {
+	Heading string
+	Text    string
+}
+
+// hiddenSections recorta, do conteúdo, cada seção que o agente não vê inteira:
+// a cortada no meio (desde o título dela, que aparece) e as escondidas. São
+// substrings de content, sem cópia.
+func hiddenSections(
+	tl trimmedLines,
+	hidden []omittedEntry,
+	continues bool,
+	current string,
+	currentIdx int,
+) []HiddenMemorySection {
+	type span struct {
+		heading string
+		from    int
+	}
+	var spans []span
+	if continues {
+		spans = append(spans, span{heading: current, from: max(currentIdx, 0)})
+	}
+	for _, e := range hidden {
+		if !e.continues {
+			spans = append(spans, span{heading: e.heading, from: e.idx})
 		}
 	}
-	return ""
+	out := make([]HiddenMemorySection, len(spans))
+	for k, sp := range spans {
+		to := len(tl.lines)
+		if k+1 < len(spans) {
+			to = spans[k+1].from
+		}
+		out[k] = HiddenMemorySection{
+			Heading: sp.heading,
+			Text:    strings.TrimRight(tl.content[tl.starts[sp.from]:tl.starts[to]-1], "\r\n\t "),
+		}
+	}
+	return out
+}
+
+// fenceOf devolve a cerca de código da linha (a sequência de três ou mais ` ou
+// ~ do começo), ou "". É heurística: uma linha de prosa que comece com três
+// crases também conta.
+func fenceOf(line string) string {
+	t := strings.TrimSpace(line)
+	if len(t) < 3 || (t[0] != '`' && t[0] != '~') {
+		return ""
+	}
+	n := len(t) - len(strings.TrimLeft(t, t[:1]))
+	if n < 3 {
+		return ""
+	}
+	return t[:min(n, maxFenceRunes)]
 }
 
 // toggleFence atualiza a cerca aberta com a linha; devolve se a linha é cerca.
+// Fecha com o mesmo caractere e pelo menos o mesmo comprimento da abertura.
 func toggleFence(open *string, line string) bool {
 	f := fenceOf(line)
 	switch {
@@ -262,7 +307,7 @@ func toggleFence(open *string, line string) bool {
 		return false
 	case *open == "":
 		*open = f
-	case *open == f:
+	case f[0] == (*open)[0] && len(f) >= len(*open):
 		*open = ""
 	}
 	return true
@@ -280,21 +325,24 @@ func headingText(line string) (string, bool) {
 }
 
 // scanShown devolve o último título fora de bloco de código no trecho mostrado
-// e a cerca que ficou aberta no fim dele ("" se nenhuma).
-func scanShown(lines []string) (heading, fence string) {
-	for _, ln := range lines {
+// (e o índice da linha dele, -1 sem título) e a cerca que ficou aberta no fim
+// ("" se nenhuma).
+func scanShown(lines []string) (heading string, idx int, fence string) {
+	idx = -1
+	for i, ln := range lines {
 		if toggleFence(&fence, ln) {
 			continue
 		}
 		if h, ok := headingText(ln); ok && fence == "" {
-			heading = h
+			heading, idx = h, i
 		}
 	}
-	return heading, fence
+	return heading, idx, fence
 }
 
 type omittedEntry struct {
 	filePos
+	idx       int // linha em trimmedLines.lines
 	heading   string
 	continues bool // resto da seção cortada no meio, não um título
 }
@@ -321,7 +369,7 @@ func hiddenParts(tl trimmedLines, cut memoryCut, current, fence string) ([]omitt
 			continue
 		}
 		if h, ok := headingText(tl.lines[i]); ok {
-			parts = append(parts, omittedEntry{filePos: tl.at(i, 0), heading: h})
+			parts = append(parts, omittedEntry{filePos: tl.at(i, 0), idx: i, heading: h})
 		}
 	}
 	return parts, continues
@@ -422,10 +470,11 @@ type MemoryPromptUsage struct {
 	ShownLines  int // última linha mostrada inteira
 	TotalLines  int
 	PartialLine bool // a linha ShownLines+1 aparece só no começo
-	// HiddenHeadings são os títulos das seções que o prompt não mostra
-	// inteiras. Uma reescrita do arquivo inteiro feita a partir do prompt não
-	// tem como repeti-las; a ferramenta de memória recusa a que as apague.
-	HiddenHeadings []string
+	// HiddenSections são as seções que o prompt não mostra inteiras, com o
+	// texto exato. Uma reescrita do arquivo inteiro feita a partir do prompt não
+	// tem como repeti-las; a ferramenta de memória recusa a que não as traga
+	// iguais.
+	HiddenSections []HiddenMemorySection
 }
 
 // MemoryPromptUsageFor roda, sobre o conteúdo de um arquivo de memória, o mesmo
@@ -446,7 +495,7 @@ func MemoryPromptUsageFor(relPath, content string) (MemoryPromptUsage, bool) {
 		ShownLines:     fit.shownLines,
 		TotalLines:     fit.totalLines,
 		PartialLine:    fit.partialLine,
-		HiddenHeadings: fit.hiddenHeadings,
+		HiddenSections: fit.hiddenSections,
 	}, true
 }
 

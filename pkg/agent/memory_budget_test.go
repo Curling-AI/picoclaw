@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -439,7 +440,10 @@ func TestFitMemory_Invariants(t *testing.T) {
 			continue
 		}
 		body := fit.text[:strings.LastIndex(fit.text, "\n\n[")]
-		body = strings.TrimSuffix(strings.TrimSuffix(body, "\n```"), "\n~~~")
+		if i := strings.LastIndexByte(body, '\n'); i >= 0 && fenceOf(body[i+1:]) != "" &&
+			!strings.HasPrefix(strings.TrimSpace(raw)[i+1:], body[i+1:]) {
+			body = body[:i] // a cerca que o recorte acrescentou para fechar o bloco
+		}
 		if !strings.HasPrefix(strings.TrimSpace(raw), body) {
 			t.Fatalf("caso %d: o corpo mostrado não é prefixo do conteúdo", n)
 		}
@@ -468,7 +472,7 @@ func randomMemory(rng *rand.Rand) string {
 		case 1:
 			sb.WriteString("## Antiga " + fmt.Sprint(rng.Intn(1000)) + nl)
 		case 2:
-			fence := []string{"```", "~~~"}[rng.Intn(2)]
+			fence := []string{"```", "~~~", "````"}[rng.Intn(3)]
 			sb.WriteString(fence + "sql" + nl + "### dentro do código" + nl)
 			sb.WriteString(strings.Repeat("select 1 from tabela;"+nl, rng.Intn(300)))
 			sb.WriteString(fence + nl)
@@ -523,25 +527,57 @@ func TestFitMemory_GiantLineAfterTheFirstShowsItsStart(t *testing.T) {
 	}
 }
 
-// HiddenHeadings: a seção cortada no meio e todas as escondidas — o que uma
-// reescrita feita a partir do prompt não tem como repetir.
-func TestMemoryPromptUsageFor_HiddenHeadings(t *testing.T) {
+// HiddenSections: a seção cortada no meio (desde o título, que aparece) e todas
+// as escondidas, com o texto exato do arquivo — o que uma reescrita feita a
+// partir do prompt não tem como repetir.
+func TestMemoryPromptUsageFor_HiddenSections(t *testing.T) {
 	raw := bigMemory(400)
 	usage, _ := MemoryPromptUsageFor("memory/MEMORY.md", raw)
 	fit := fitMemory(raw, assistantLongTermFile)
 	body := fit.text[:strings.Index(fit.text, "\n\n[")]
 	fully := strings.Count(body, "### Tópico") - 1 // a última aparece cortada
-	if len(usage.HiddenHeadings) != 400-fully {
-		t.Fatalf("%d títulos escondidos, esperava %d", len(usage.HiddenHeadings), 400-fully)
+	if len(usage.HiddenSections) != 400-fully {
+		t.Fatalf("%d seções escondidas, esperava %d", len(usage.HiddenSections), 400-fully)
 	}
-	if usage.HiddenHeadings[len(usage.HiddenHeadings)-1] != "### Tópico 399" {
+	for _, sec := range usage.HiddenSections {
+		if !strings.HasPrefix(sec.Text, sec.Heading+"\n") || !strings.Contains(raw, sec.Text+"\n") {
+			t.Fatalf("texto da seção %q não é o trecho exato do arquivo: %.120q", sec.Heading, sec.Text)
+		}
+		if strings.Count(sec.Text, "### ") != 1 {
+			t.Fatalf("seção %q engoliu a vizinha", sec.Heading)
+		}
+	}
+	first := usage.HiddenSections[0]
+	if !strings.Contains(body, first.Heading) || strings.Contains(body, first.Text) {
+		t.Fatal("a primeira é a seção cortada no meio: título visível, texto inteiro não")
+	}
+	if last := usage.HiddenSections[len(usage.HiddenSections)-1]; last.Heading != "### Tópico 399" {
+		t.Fatalf("a última seção escondida deveria ser a 399: %q", last.Heading)
+	}
+
+	// Texto antes da primeira seção, cortado: entra sem título.
+	pre := strings.Repeat("nota solta sem seção ainda\n", 4000) + "### Depois\n- fato"
+	usage, _ = MemoryPromptUsageFor("memory/MEMORY.md", pre)
+	if len(usage.HiddenSections) != 2 || usage.HiddenSections[0].Heading != "" ||
+		!strings.HasPrefix(usage.HiddenSections[0].Text, "nota solta") {
 		t.Fatalf(
-			"o último título deveria estar entre os escondidos: %v",
-			usage.HiddenHeadings[len(usage.HiddenHeadings)-3:],
+			"preâmbulo cortado deveria ser a 1ª seção escondida, sem título: %+v",
+			usage.HiddenSections[:min(2, len(usage.HiddenSections))],
 		)
 	}
-	if !strings.Contains(body, usage.HiddenHeadings[0]) {
-		t.Fatal("o primeiro escondido é a seção cortada no meio, cujo título aparece no prompt")
+}
+
+// Cerca de quatro crases: o fechamento usa o mesmo comprimento, senão o bloco
+// continuaria aberto.
+func TestFitMemory_ClosesLongerFence(t *testing.T) {
+	raw := "### Runbook\n````md\n" + strings.Repeat("```sql\nselect 1;\n```\n", 3000) + "````\n### Depois\n- fato"
+	out := fitMemoryToPromptBudget(raw, assistantLongTermFile)
+	body := out[:strings.Index(out, "\n\n[")]
+	if !strings.HasSuffix(body, "\n````") {
+		t.Fatalf("o bloco de quatro crases deveria ser fechado com quatro: %q", body[len(body)-40:])
+	}
+	if !strings.Contains(out, ": ### Depois") {
+		t.Fatal("título depois do bloco deveria estar listado")
 	}
 }
 
@@ -557,5 +593,23 @@ func TestLoopPromptPart_CappedMemoryIsStableAcrossTurns(t *testing.T) {
 	scope := LoopScope{ID: "id", Slug: "vendas", Root: root}
 	if loopPromptPart(scope).Content != loopPromptPart(scope).Content {
 		t.Fatal("bloco do loop mudou sem a memória mudar")
+	}
+}
+
+// O bloco do loop é remontado a cada turno e a ferramenta de memória roda o
+// recorte a cada escrita: uma linha de MB não pode virar centenas de MB
+// alocados (era o caso quando a busca montava a lista de runas da linha).
+func TestFitMemory_GiantLineAllocatesLittle(t *testing.T) {
+	raw := "### Notas\n" + strings.Repeat("dado ", 1_000_000) + "\n" + bigMemory(20)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	fit := fitMemory(raw, loopLongTermFile("vendas"))
+	runtime.ReadMemStats(&after)
+	if !fit.partialLine {
+		t.Fatal("esperava o começo da linha gigante")
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 4<<20 {
+		t.Fatalf("recorte de uma linha de %d MB alocou %d MB", len(raw)>>20, alloc>>20)
 	}
 }
