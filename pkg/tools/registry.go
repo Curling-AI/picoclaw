@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -257,6 +258,17 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 		return nil, false
 	}
 	return entry.Tool, true
+}
+
+// CoercedArgs returns a copy of args with the typing fixes ExecuteWithContext
+// applies before running the tool (numeric strings, stringified booleans), so
+// a caller can compare calls the way the tool will see them.
+func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
+	coerced := maps.Clone(args)
+	if tool, ok := r.GetRegistered(name); ok {
+		coerceToolArgs(tool.Parameters(), coerced)
+	}
+	return coerced
 }
 
 // ExpiredToolAliases maps each name the model may write for a hidden tool that

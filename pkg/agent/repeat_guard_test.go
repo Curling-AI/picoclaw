@@ -31,11 +31,14 @@ func newMCPTestTool(name string, safety tools.RepeatSafety) *mcpTestTool {
 
 func (m *mcpTestTool) RepeatSafety() tools.RepeatSafety { return m.safety }
 
-// Parameters mirrors skip_project_create: nothing required, so {} is valid.
+// Parameters: nothing required, so {} is valid, like skip_project_create.
 func (m *mcpTestTool) Parameters() map[string]any {
 	return map[string]any{
-		"type":       "object",
-		"properties": map[string]any{"name": map[string]any{"type": "string"}},
+		"type": "object",
+		"properties": map[string]any{
+			"name":      map[string]any{"type": "string"},
+			"projectId": map[string]any{"type": "integer"},
+		},
 	}
 }
 
@@ -299,6 +302,22 @@ func TestRepeatsThatMeanSomethingStillRun(t *testing.T) {
 				t.Errorf("tool ran %d times, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// The registry runs the tool with "40235" coerced to 40235: the same action.
+func TestArgumentsAreComparedAsTheToolGetsThem(t *testing.T) {
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	asString := stepCall{tool: createToolName, args: map[string]any{"projectId": "40235"}}
+	asNumber := stepCall{tool: createToolName, args: map[string]any{"projectId": 40235}}
+
+	run := runSteps(t, &stepProvider{steps: oneCallPerStep(asString, asNumber, asString)}, create)
+
+	if got := create.calls.Load(); got != maxUnchangedRuns {
+		t.Fatalf("tool ran %d times, want %d", got, maxUnchangedRuns)
+	}
+	if got := run.toolResults(repeatedSideEffectContent); got != 1 {
+		t.Errorf("%d refusals, want 1", got)
 	}
 }
 

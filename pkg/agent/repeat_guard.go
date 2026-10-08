@@ -82,9 +82,12 @@ func classifyCall(registry *tools.ToolRegistry, toolName string) callEffect {
 	}
 }
 
-// callKey hashes the call: arguments can be large (a whole file to write).
-func callKey(toolName string, args map[string]any) string {
-	sum := sha256.Sum256([]byte(toolName + "\x00" + normalizeArgs(args)))
+// callKey hashes the call as the tool will receive it: after the registry's
+// typing fixes, so "40235" and 40235 are one action, and hashed because
+// arguments can be large (a whole file to write).
+func callKey(registry *tools.ToolRegistry, toolName string, args map[string]any) string {
+	normalized := normalizeArgs(registry.CoercedArgs(toolName, args))
+	sum := sha256.Sum256([]byte(toolName + "\x00" + normalized))
 	return hex.EncodeToString(sum[:])
 }
 

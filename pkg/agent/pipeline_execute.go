@@ -431,7 +431,7 @@ toolLoop:
 		effect := classifyCall(ts.agent.Tools, toolName)
 		repeatKey := ""
 		if effect == effectGuarded {
-			repeatKey = callKey(toolName, toolArgs)
+			repeatKey = callKey(ts.agent.Tools, toolName, toolArgs)
 			if ts.repeats.refuses(repeatKey) {
 				logger.WarnCF("agent", "Refused unchanged repeat of a side-effecting tool call",
 					map[string]any{

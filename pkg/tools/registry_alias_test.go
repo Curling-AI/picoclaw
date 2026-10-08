@@ -77,3 +77,27 @@ func TestExpiredToolAliases(t *testing.T) {
 		t.Errorf("aliases = %v, want exactly %v", aliases, want)
 	}
 }
+
+func TestCoercedArgs_FixesTypesOnACopy(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockRegistryTool{name: "create", desc: "core", params: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"projectId": map[string]any{"type": "integer"},
+			"name":      map[string]any{"type": "string"},
+		},
+	}})
+	args := map[string]any{"projectId": "40235", "name": "app"}
+
+	coerced := r.CoercedArgs("create", args)
+
+	if coerced["projectId"] != int64(40235) || coerced["name"] != "app" {
+		t.Errorf("coerced = %v, want projectId as the integer 40235", coerced)
+	}
+	if args["projectId"] != "40235" {
+		t.Errorf("the caller's args changed: %v", args)
+	}
+	if unknown := r.CoercedArgs("missing", args); unknown["projectId"] != "40235" {
+		t.Errorf("unknown tool: got %v, want the args unchanged", unknown)
+	}
+}
