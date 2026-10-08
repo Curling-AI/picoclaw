@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
@@ -99,7 +100,7 @@ func (al *AgentLoop) drainQueuedSteeringContinuations(
 
 func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
 	if msg.Channel == "system" {
-		return "", "", false
+		return al.systemSteeringTarget(msg)
 	}
 
 	route, agent, err := al.resolveMessageRoute(msg)
@@ -109,4 +110,22 @@ func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, stri
 	allocation := al.allocateRouteSession(route, msg)
 
 	return resolveScopeKey(allocation.SessionKey, msg.SessionKey), agent.ID, true
+}
+
+// systemSteeringTarget: a system message that names its session takes turns in
+// it like any other message, joining a live turn instead of running a second
+// one on the same history. One that names none keeps running inline in main.
+func (al *AgentLoop) systemSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
+	sessionKey := systemMessageSession(msg)
+	if sessionKey == "" {
+		return "", "", false
+	}
+	if originChannel, _ := parseSystemOrigin(msg.ChatID); constants.IsInternalChannel(originChannel) {
+		return "", "", false
+	}
+	agent := al.agentForSession(sessionKey)
+	if agent == nil {
+		return "", "", false
+	}
+	return sessionKey, agent.ID, true
 }

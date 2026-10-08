@@ -31,7 +31,46 @@ var (
 	ErrDepthLimitExceeded   = errors.New("sub-turn depth limit exceeded")
 	ErrInvalidSubTurnConfig = errors.New("invalid sub-turn config")
 	ErrConcurrencyTimeout   = errors.New("timeout waiting for concurrency slot")
+	// ErrSubTurnTimeout matches the error of a sub-turn stopped by its own time
+	// limit (see subTurnTimeoutError).
+	ErrSubTurnTimeout = errors.New("sub-turn time limit exceeded")
+	// ErrSubTurnParentCanceled is the error of a synchronous sub-turn stopped
+	// because the turn waiting on it was canceled.
+	ErrSubTurnParentCanceled = errors.New("subagent stopped because the turn that called it was canceled")
 )
+
+// subTurnTimeoutError is what the caller reads when the sub-turn's own deadline
+// stopped it. The deadline usually cuts a model call in flight, and that error
+// ("LLM call failed after retries: context deadline exceeded") reads as a
+// provider failure: models retried the same task unchanged and hit the same
+// limit again.
+type subTurnTimeoutError struct {
+	limit      time.Duration
+	iterations int
+}
+
+func (e *subTurnTimeoutError) Error() string {
+	iterations := fmt.Sprintf("%d iterations", e.iterations)
+	if e.iterations == 1 {
+		iterations = "1 iteration"
+	}
+	return fmt.Sprintf("subagent exceeded its %s limit after %s and was stopped before finishing "+
+		"(a time limit, not a model or provider failure). Changes it already made stay in place. "+
+		"Do not relaunch the same task unchanged, it will hit the same limit: split it into smaller "+
+		"tasks and delegate them one at a time, or do the remaining part yourself",
+		formatSubTurnLimit(e.limit), iterations)
+}
+
+func (e *subTurnTimeoutError) Is(target error) bool {
+	return target == ErrSubTurnTimeout
+}
+
+func formatSubTurnLimit(limit time.Duration) string {
+	if limit >= time.Minute && limit%time.Minute == 0 {
+		return fmt.Sprintf("%d min", int(limit/time.Minute))
+	}
+	return limit.String()
+}
 
 // getSubTurnConfig returns the effective SubTurn configuration with defaults applied.
 func (al *AgentLoop) getSubTurnConfig() subTurnRuntimeConfig {
@@ -341,6 +380,16 @@ func spawnSubTurn(
 	// The child has its own timeout for self-protection.
 	childCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	// A synchronous child has its caller blocked on it, so it ends with the
+	// caller's turn: a stop (or a new message after one) must not leave the turn
+	// stuck until the child's deadline, then writing its result into the next
+	// turn. Only the cancellation is linked; the child keeps its own values.
+	// Background spawns stay independent, since the end of the turn that
+	// launched them cancels that turn's context.
+	if !cfg.Async {
+		stopLink := context.AfterFunc(ctx, cancel)
+		defer stopLink()
+	}
 
 	childID := al.generateSubTurnID()
 
@@ -517,6 +566,7 @@ func spawnSubTurn(
 
 	// Convert turnResult to tools.ToolResult
 	if turnErr != nil {
+		turnErr = explainSubTurnStop(turnErr, childTS, !cfg.Async && ctx.Err() != nil, timeout)
 		err = turnErr
 		result = &tools.ToolResult{
 			Err:    turnErr,
@@ -530,6 +580,27 @@ func spawnSubTurn(
 	}
 
 	return result, err
+}
+
+// explainSubTurnStop replaces the error of a sub-turn that its own context
+// stopped, which otherwise surfaces as whatever call was in flight.
+func explainSubTurnStop(turnErr error, child *turnState, parentCanceled bool, limit time.Duration) error {
+	switch {
+	case parentCanceled:
+		return ErrSubTurnParentCanceled
+	case errors.Is(child.ctx.Err(), context.DeadlineExceeded):
+		iterations := child.currentIteration()
+		logger.WarnCF("subturn", "SubTurn stopped by its time limit", map[string]any{
+			"child_id":   child.turnID,
+			"parent_id":  child.parentTurnID,
+			"limit":      limit.String(),
+			"iterations": iterations,
+			"error":      turnErr.Error(),
+		})
+		return &subTurnTimeoutError{limit: limit, iterations: iterations}
+	default:
+		return turnErr
+	}
 }
 
 // ====================== Result Delivery ======================

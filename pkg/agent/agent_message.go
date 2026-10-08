@@ -273,21 +273,15 @@ func (al *AgentLoop) processSystemMessage(
 		)
 	}
 
+	originChannel, originChatID := parseSystemOrigin(msg.ChatID)
+	sessionKey := systemMessageSession(msg)
+
 	logger.InfoCF("agent", "Processing system message",
 		map[string]any{
-			"sender_id": msg.SenderID,
-			"chat_id":   msg.ChatID,
+			"sender_id":   msg.SenderID,
+			"chat_id":     msg.ChatID,
+			"session_key": sessionKey,
 		})
-
-	// Parse origin channel from chat_id (format: "channel:chat_id")
-	var originChannel, originChatID string
-	if idx := strings.Index(msg.ChatID, ":"); idx > 0 {
-		originChannel = msg.ChatID[:idx]
-		originChatID = msg.ChatID[idx+1:]
-	} else {
-		originChannel = "cli"
-		originChatID = msg.ChatID
-	}
 
 	// Extract subagent result from message content
 	// Format: "Task 'label' completed.\n\nResult:\n<actual content>"
@@ -307,17 +301,25 @@ func (al *AgentLoop) processSystemMessage(
 		return "", nil
 	}
 
-	// Use default agent for system messages
-	agent := al.GetRegistry().GetDefaultAgent()
+	// The result belongs to the conversation whose turn launched the task;
+	// main is the fallback for a message that does not name it.
+	namesSession := sessionKey != ""
+	var agent *AgentInstance
+	if namesSession {
+		agent = al.agentForSession(sessionKey)
+	} else if agent = al.GetRegistry().GetDefaultAgent(); agent != nil {
+		sessionKey = session.BuildMainSessionKey(agent.ID)
+	}
 	if agent == nil {
 		return "", fmt.Errorf("no default agent for system message")
 	}
 
-	// Use the origin session for context
-	sessionKey := session.BuildMainSessionKey(agent.ID)
 	dispatch := DispatchRequest{
 		SessionKey:  sessionKey,
-		UserMessage: fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
+		UserMessage: systemMessageContent(msg),
+	}
+	if metaStore, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok && namesSession {
+		dispatch.SessionScope = metaStore.GetSessionScope(sessionKey)
 	}
 	if originChannel != "" || originChatID != "" {
 		dispatch.InboundContext = &bus.InboundContext{
@@ -334,4 +336,28 @@ func (al *AgentLoop) processSystemMessage(
 		EnableSummary:   false,
 		SendResponse:    true,
 	})
+}
+
+// parseSystemOrigin splits a system message's chat id ("channel:chat_id") into
+// the chat the async work was launched from.
+func parseSystemOrigin(chatID string) (string, string) {
+	if idx := strings.Index(chatID, ":"); idx > 0 {
+		return chatID[:idx], chatID[idx+1:]
+	}
+	return "cli", chatID
+}
+
+// systemMessageSession is the session a system message names (the session of
+// the turn that launched the async work), or "" when it names none.
+func systemMessageSession(msg bus.InboundMessage) string {
+	if isExplicitSessionKey(msg.SessionKey) {
+		return strings.TrimSpace(msg.SessionKey)
+	}
+	return ""
+}
+
+// systemMessageContent marks the text as coming from async work, not from the
+// user, whether it opens a turn or joins a live one.
+func systemMessageContent(msg bus.InboundMessage) string {
+	return fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content)
 }
