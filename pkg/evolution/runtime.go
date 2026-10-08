@@ -321,6 +321,11 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 	}
 	patternRecords = clustered.patterns
 	admittedCount, newRuleCount := clustered.admitted, clustered.newPatterns
+	// Every later failure keeps the no-credit error alongside it: the runner
+	// pauses only when the error it gets still says so.
+	fail := func(err error) error {
+		return errors.Join(noCredit, err)
+	}
 
 	generator := rt.draftGeneratorForWorkspace(workspace)
 	if generator == nil {
@@ -348,7 +353,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 
 	existingDrafts, err := store.LoadDrafts()
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	readyRuleByID := make(map[string]LearningRecord, len(readyRules))
 	for _, rule := range readyRules {
@@ -376,7 +381,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		}
 		matches, recallErr := recaller.RecallSimilarSkills(rule)
 		if recallErr != nil {
-			return recallErr
+			return fail(recallErr)
 		}
 		draft.MatchedSkillRefs = collectSkillRefs(matches)
 		var normalizationNotes []string
@@ -389,13 +394,13 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		changedExistingDrafts = true
 		if draft.Status != DraftStatusCandidate || mode != "apply" || applier == nil {
 			if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
-				return saveErr
+				return fail(saveErr)
 			}
 			continue
 		}
 		updatedDraft, applyErr := rt.applyCandidateDraft(ctx, workspace, store, applier, draft, runID)
 		if applyErr != nil {
-			return applyErr
+			return fail(applyErr)
 		}
 		if updatedDraft.Status == DraftStatusAccepted {
 			appliedExistingDrafts++
@@ -405,7 +410,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 	if changedExistingDrafts {
 		existingDrafts, err = store.LoadDrafts()
 		if err != nil {
-			return err
+			return fail(err)
 		}
 	}
 	existingBySource := existingDraftSourceSet(existingDrafts, workspace)
@@ -423,7 +428,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 	for _, rule := range readyRules {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fail(ctx.Err())
 		default:
 		}
 		if noCredit != nil {
@@ -448,7 +453,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		rule = enrichRuleWithDraftEvidence(rule, evidence)
 		matches, err := recaller.RecallSimilarSkills(rule)
 		if err != nil {
-			return err
+			return fail(err)
 		}
 		logger.DebugCF("evolution", "Generating skill draft", map[string]any{
 			"workspace":           workspace,
@@ -464,7 +469,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			break
 		}
 		if err != nil {
-			return err
+			return fail(err)
 		}
 
 		draft = rt.finalizeDraft(workspace, rule, matches, evidence, draft)
@@ -482,14 +487,14 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			var err error
 			draft, err = rt.applyCandidateDraft(ctx, workspace, store, applier, draft, runID)
 			if err != nil {
-				return err
+				return fail(err)
 			}
 			draftSaved = true
 		}
 
 		if !draftSaved {
 			if err := store.SaveDrafts([]SkillDraft{draft}); err != nil {
-				return err
+				return fail(err)
 			}
 		}
 		logger.DebugCF("evolution", "Saved skill draft", map[string]any{

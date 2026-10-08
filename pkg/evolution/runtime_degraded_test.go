@@ -268,3 +268,39 @@ func TestStore_MarkTaskRecordsExpiredLeavesProcessedRecords(t *testing.T) {
 		}
 	}
 }
+
+// The runner pauses only when the error it gets still says "no credit". A
+// local failure later in the same run (here a corrupt drafts file) must not
+// hide it, or the next trigger repeats the refused model calls at once.
+func TestRuntime_RunColdPathOnce_NoCreditSurvivesALaterLocalFailure(t *testing.T) {
+	root := t.TempDir()
+	paths := evolution.NewPaths(root, "")
+	store := evolution.NewStore(paths)
+	seedTaskBacklog(t, store, root, 0, 2)
+	if err := store.AppendLearningRecords([]evolution.LearningRecord{readyRule("rule-1", root)}); err != nil {
+		t.Fatalf("AppendLearningRecords: %v", err)
+	}
+	if err := os.WriteFile(paths.SkillDrafts, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
+		Config:           config.EvolutionConfig{Enabled: true, Mode: "apply"},
+		Store:            store,
+		SuccessJudge:     &stubSuccessJudge{},
+		PatternClusterer: failingClusterer{err: fmt.Errorf("cluster: %w", evolution.ErrNoCredit)},
+		DraftGenerator:   &countingDraftGenerator{},
+		SkillsRecaller:   evolution.NewSkillsRecaller(root),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+
+	runErr := rt.RunColdPathOnce(context.Background(), root)
+	if !errors.Is(runErr, evolution.ErrNoCredit) {
+		t.Fatalf("RunColdPathOnce err = %v, want it to still carry ErrNoCredit", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "invalid character") {
+		t.Errorf("err = %v, want the drafts failure reported too", runErr)
+	}
+}
