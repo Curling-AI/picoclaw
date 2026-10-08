@@ -164,7 +164,15 @@ func fitMemory(raw string, file memoryPromptFile) memoryFit {
 	// metade do pior, e só vale se o resultado ainda couber. As duas dependem
 	// só do conteúdo, então o recorte continua estável entre turnos.
 	tl := splitTrimmed(raw)
-	fit := renderCut(tl, file, total, cutWithin(tl, file.budget-markerReserveTokens(file)))
+	reserve := markerReserveTokens(file)
+	fit := renderCut(tl, file, total, cutWithin(tl, file.budget-reserve))
+	// Uma cerca de código mais longa do que a reserva cobre fecha com o
+	// comprimento real; devolve o excesso ao corpo e corta de novo. Cada volta
+	// tira pelo menos um token, então termina.
+	for extra := 0; estimateTextTokens(fit.text) > file.budget; {
+		extra += estimateTextTokens(fit.text) - file.budget
+		fit = renderCut(tl, file, total, cutWithin(tl, file.budget-reserve-extra))
+	}
 	tighter := renderCut(tl, file, total, cutWithin(tl, file.budget-fit.markerTokens-fenceCloseTokens))
 	if estimateTextTokens(tighter.text) <= file.budget {
 		fit = tighter
@@ -172,13 +180,10 @@ func fitMemory(raw string, file memoryPromptFile) memoryFit {
 	return fit
 }
 
-// maxFenceRunes limita a cerca reconhecida (e, portanto, a que fecha o bloco no
-// corte), para a reserva abaixo valer sempre.
-const maxFenceRunes = 10
-
-// fenceCloseTokens cobre o "\n" + cerca que fecha um bloco de código aberto no
-// corte e o "\n\n" antes do marcador.
-const fenceCloseTokens = (1 + maxFenceRunes + 2 + 4) * 2 / 5
+// fenceCloseTokens cobre o "\n" + cerca (até 10 caracteres) que fecha um bloco de
+// código aberto no corte e o "\n\n" antes do marcador. Cerca mais longa é
+// tratada em fitMemory.
+const fenceCloseTokens = (1 + 10 + 2 + 4) * 2 / 5
 
 // cutWithin acha o maior trecho que cabe em budget: linhas inteiras, por busca
 // binária sobre prefixos (o estimador é monotônico no tamanho do prefixo).
@@ -275,10 +280,9 @@ func hiddenSections(
 		if k+1 < len(spans) {
 			to = spans[k+1].from
 		}
-		out[k] = HiddenMemorySection{
-			Heading: sp.heading,
-			Text:    strings.TrimRight(tl.content[tl.starts[sp.from]:tl.starts[to]-1], "\r\n\t "),
-		}
+		// Só o \n que separa da próxima seção fica de fora; espaço no fim de
+		// linha é do arquivo (quebra forçada em markdown) e fica.
+		out[k] = HiddenMemorySection{Heading: sp.heading, Text: tl.content[tl.starts[sp.from] : tl.starts[to]-1]}
 	}
 	return out
 }
@@ -295,7 +299,7 @@ func fenceOf(line string) string {
 	if n < 3 {
 		return ""
 	}
-	return t[:min(n, maxFenceRunes)]
+	return t[:n]
 }
 
 // toggleFence atualiza a cerca aberta com a linha; devolve se a linha é cerca.

@@ -613,3 +613,39 @@ func TestFitMemory_GiantLineAllocatesLittle(t *testing.T) {
 		t.Fatalf("recorte de uma linha de %d MB alocou %d MB", len(raw)>>20, alloc>>20)
 	}
 }
+
+// Cerca mais longa do que a reserva fixa cobre: o fechamento tem o comprimento
+// real (senão o marcador ficaria dentro do bloco) e o orçamento continua valendo.
+func TestFitMemory_ClosesVeryLongFenceWithinBudget(t *testing.T) {
+	fence := strings.Repeat("`", 40)
+	raw := "### Runbook\n" + fence + "sql\n" + strings.Repeat(
+		"select 1 from tabela;\n",
+		5000,
+	) + fence + "\n### Depois\n- fato"
+	for _, file := range []memoryPromptFile{assistantLongTermFile, learnedOverlayFile("USER.md")} {
+		out := fitMemoryToPromptBudget(raw, file)
+		if got := estimatedTokens(out); got > file.budget {
+			t.Fatalf("%s: %d tokens, teto %d", file.path, got, file.budget)
+		}
+		body := out[:strings.Index(out, "\n\n[")]
+		if !strings.HasSuffix(body, "\n"+fence) {
+			t.Fatalf("%s: o bloco deveria fechar com a cerca inteira: %q", file.path, body[max(0, len(body)-60):])
+		}
+	}
+}
+
+// HiddenMemorySection.Text é o trecho exato do arquivo: espaço no fim de linha
+// (quebra de linha forçada em markdown) faz parte dele.
+func TestMemoryPromptUsageFor_HiddenSectionKeepsTrailingSpaces(t *testing.T) {
+	raw := bigMemory(400) + "### Assinatura\n- fato com quebra  \n### Fim\n- ok"
+	usage, _ := MemoryPromptUsageFor("memory/MEMORY.md", raw)
+	for _, sec := range usage.HiddenSections {
+		if sec.Heading == "### Assinatura" {
+			if sec.Text != "### Assinatura\n- fato com quebra  " {
+				t.Fatalf("texto da seção perdeu bytes do arquivo: %q", sec.Text)
+			}
+			return
+		}
+	}
+	t.Fatal("seção ### Assinatura deveria estar entre as escondidas")
+}
