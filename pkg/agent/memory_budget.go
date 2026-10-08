@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -303,6 +304,51 @@ func markerReserveTokens(file memoryPromptFile) int {
 	fit := memoryFit{shownTokens: 9_999_999, totalTokens: 9_999_999, totalLines: 9_999_999, shownLines: 9_999_999}
 	// "\n```" do fechamento de cerca e o "\n\n" antes do marcador.
 	return estimateTextTokens(omissionMarker(file, fit, worst, 9_999_999)+"\n```\n\n") + 1
+}
+
+// MemoryPromptUsage diz quanto de um arquivo de memória entra no prompt.
+type MemoryPromptUsage struct {
+	Capped      bool
+	Budget      int // tokens estimados, marcador incluído
+	TotalTokens int // tokens estimados do arquivo inteiro
+	ShownLines  int
+	TotalLines  int
+}
+
+// MemoryPromptUsageFor roda, sobre o conteúdo de um arquivo de memória, o mesmo
+// recorte da montagem do prompt. É o que a ferramenta de memória usa para
+// avisar o agente, depois de uma escrita, de que o arquivo passou do teto.
+// relPath é relativo ao workspace: memory/MEMORY.md, memory/USER.md,
+// memory/SOUL.md ou loops/<slug>/memory/MEMORY.md; ok é false para outro.
+func MemoryPromptUsageFor(relPath, content string) (MemoryPromptUsage, bool) {
+	file, ok := memoryPromptFileFor(relPath)
+	if !ok {
+		return MemoryPromptUsage{}, false
+	}
+	fit := fitMemory(strings.TrimSpace(content), file)
+	return MemoryPromptUsage{
+		Capped:      fit.capped,
+		Budget:      file.budget,
+		TotalTokens: fit.totalTokens,
+		ShownLines:  fit.shownLines,
+		TotalLines:  fit.totalLines,
+	}, true
+}
+
+func memoryPromptFileFor(relPath string) (memoryPromptFile, bool) {
+	clean := path.Clean(filepath.ToSlash(relPath))
+	switch clean {
+	case assistantLongTermFile.path:
+		return assistantLongTermFile, true
+	case "memory/USER.md", "memory/SOUL.md":
+		return learnedOverlayFile(path.Base(clean)), true
+	}
+	parts := strings.Split(clean, "/")
+	if len(parts) == 4 && parts[0] == loopsDirName && parts[1] != "" &&
+		parts[2] == "memory" && parts[3] == "MEMORY.md" {
+		return loopLongTermFile(parts[1]), true
+	}
+	return memoryPromptFile{}, false
 }
 
 // capMemoryForPrompt é o lado imperativo: recorta e registra o recorte uma vez

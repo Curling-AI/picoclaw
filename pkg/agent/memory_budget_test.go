@@ -318,3 +318,40 @@ func TestFitMemoryToPromptBudget_LegacyLevelTwoHeadings(t *testing.T) {
 		t.Fatalf("seções `## ` omitidas deveriam ser listadas:\n%s", out[max(0, len(out)-1500):])
 	}
 }
+
+// A consulta exportada (usada pela ferramenta de memória do control plane para
+// avisar o agente depois de uma escrita) devolve o mesmo recorte do prompt.
+func TestMemoryPromptUsageFor_MatchesThePromptCut(t *testing.T) {
+	big := bigMemory(400)
+	cases := []struct {
+		relPath string
+		file    memoryPromptFile
+	}{
+		{"memory/MEMORY.md", assistantLongTermFile},
+		{"memory/USER.md", learnedOverlayFile("USER.md")},
+		{"memory/SOUL.md", learnedOverlayFile("SOUL.md")},
+		{"loops/vendas/memory/MEMORY.md", loopLongTermFile("vendas")},
+	}
+	for _, tc := range cases {
+		usage, ok := MemoryPromptUsageFor(tc.relPath, big)
+		if !ok {
+			t.Fatalf("%s: caminho de memória não reconhecido", tc.relPath)
+		}
+		fit := fitMemory(strings.TrimSpace(big), tc.file)
+		if !usage.Capped || usage.Budget != tc.file.budget || usage.ShownLines != fit.shownLines ||
+			usage.TotalLines != fit.totalLines || usage.TotalTokens != fit.totalTokens {
+			t.Fatalf("%s: usage %+v difere do recorte do prompt %+v", tc.relPath, usage, fit)
+		}
+
+		small, _ := MemoryPromptUsageFor(tc.relPath, "### Curta\n- um fato")
+		if small.Capped {
+			t.Fatalf("%s: memória pequena não pode aparecer como recortada", tc.relPath)
+		}
+	}
+
+	for _, other := range []string{"MEMORY.md", "memory/notes.md", "loops//memory/MEMORY.md", "loops/a/b/memory/MEMORY.md"} {
+		if _, ok := MemoryPromptUsageFor(other, big); ok {
+			t.Fatalf("%q não é um arquivo de memória do prompt", other)
+		}
+	}
+}
