@@ -171,6 +171,47 @@ func TestRepeatedSideEffectCallStopsAndEndsTheTurn(t *testing.T) {
 	}
 }
 
+// A narration streamed before the calls leaves the channel marked as holding
+// the final answer, and the channel drops a plain final outbound as its
+// duplicate: the summary must reach the user through the stream.
+func TestStopSummaryIsStreamedAfterANarration(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+	cfg.Agents.Defaults.MaxToolIterations = 10
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	narratedCreate := func(id string) configuredStreamingCall {
+		return configuredStreamingCall{
+			chunks: []string{"Creating the project"},
+			response: &providers.LLMResponse{
+				Content: "Creating the project",
+				ToolCalls: []providers.ToolCall{{
+					ID: id, Type: "function", Name: createToolName, Arguments: map[string]any{},
+				}},
+			},
+		}
+	}
+	provider := &configuredStreamingProvider{streamPlan: []configuredStreamingCall{
+		narratedCreate("call-1"), narratedCreate("call-2"), narratedCreate("call-3"), narratedCreate("call-4"),
+	}}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	al.GetRegistry().GetDefaultAgent().Tools.Register(create)
+
+	got := runConfiguredStreamingTurn(t, al, "pico")
+
+	summary := repeatStopSummary(createToolName)
+	if got != summary {
+		t.Fatalf("response = %q, want the stop summary", got)
+	}
+	if calls := create.calls.Load(); calls != maxUnchangedRuns {
+		t.Errorf("project created %d times, want %d", calls, maxUnchangedRuns)
+	}
+	if n := len(streamer.finalized); n == 0 || streamer.finalized[n-1] != summary {
+		t.Errorf("stream finalized = %q, want the stop summary last", streamer.finalized)
+	}
+}
+
 // Ending the turn mid-reply still answers every call of that reply, or the
 // history drops the whole assistant message.
 func TestEndingTheTurnAnswersTheRestOfTheReply(t *testing.T) {

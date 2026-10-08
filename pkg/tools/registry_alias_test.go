@@ -101,3 +101,33 @@ func TestCoercedArgs_FixesTypesOnACopy(t *testing.T) {
 		t.Errorf("unknown tool: got %v, want the args unchanged", unknown)
 	}
 }
+
+func TestCoercedArgs_LeavesNestedInputIntact(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockRegistryTool{name: "create", desc: "core", params: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"nested": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"count": map[string]any{"type": "integer"}},
+			},
+			"items": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+		},
+	}})
+	args := map[string]any{"nested": map[string]any{"count": "7"}, "items": []any{"9"}}
+
+	coerced := r.CoercedArgs("create", args)
+
+	if got := coerced["nested"].(map[string]any)["count"]; got != int64(7) {
+		t.Errorf("coerced nested.count = %#v, want int64(7)", got)
+	}
+	if got := coerced["items"].([]any)[0]; got != int64(9) {
+		t.Errorf("coerced items[0] = %#v, want int64(9)", got)
+	}
+	if got := args["nested"].(map[string]any)["count"]; got != "7" {
+		t.Errorf("the caller's nested.count changed to %#v", got)
+	}
+	if got := args["items"].([]any)[0]; got != "9" {
+		t.Errorf("the caller's items[0] changed to %#v", got)
+	}
+}

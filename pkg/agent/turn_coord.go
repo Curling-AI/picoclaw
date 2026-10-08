@@ -340,6 +340,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			finalContent = ts.opts.DefaultResponse
 			exec.finalIsFallback = true
 		}
+		pipeline.beginSynthesizedFinalStream(turnCtx, ts, exec)
 	}
 
 	// Check hard abort before finalizing (may have been set during tool execution)

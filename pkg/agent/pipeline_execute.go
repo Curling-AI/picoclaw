@@ -457,6 +457,7 @@ toolLoop:
 				// user gets it on every channel and the next turn sees it.
 				exec.messages = messages
 				exec.finalContent = repeatStopSummary(toolName)
+				p.beginSynthesizedFinalStream(turnCtx, ts, exec)
 				return ToolControlBreak
 			}
 		}

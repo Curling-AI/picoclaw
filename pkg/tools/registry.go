@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -262,13 +261,42 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 
 // CoercedArgs returns a copy of args with the typing fixes ExecuteWithContext
 // applies before running the tool (numeric strings, stringified booleans), so
-// a caller can compare calls the way the tool will see them.
+// a caller can compare calls the way the tool will see them. The copy is deep:
+// coercion rewrites nested objects and arrays in place, and args must stay as
+// the model sent them.
 func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
-	coerced := maps.Clone(args)
+	coerced, _ := cloneJSONValue(args).(map[string]any)
 	if tool, ok := r.GetRegistered(name); ok {
 		coerceToolArgs(tool.Parameters(), coerced)
 	}
 	return coerced
+}
+
+// cloneJSONValue copies the objects and arrays of a decoded JSON value; the
+// scalars it holds are immutable and shared.
+func cloneJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		if v == nil {
+			return v
+		}
+		cloned := make(map[string]any, len(v))
+		for key, item := range v {
+			cloned[key] = cloneJSONValue(item)
+		}
+		return cloned
+	case []any:
+		if v == nil {
+			return v
+		}
+		cloned := make([]any, len(v))
+		for i, item := range v {
+			cloned[i] = cloneJSONValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 // ExpiredToolAliases maps each name the model may write for a hidden tool that
