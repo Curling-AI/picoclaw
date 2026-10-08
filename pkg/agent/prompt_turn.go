@@ -173,8 +173,9 @@ func loopPromptPart(scope LoopScope) *PromptPart {
 	// Delimitador em vez de heading, pela mesma razão da memória global: heading
 	// é contenção fraca — o modelo o trata como sugestão de seção, não como
 	// fronteira de conteúdo.
-	if raw, err := os.ReadFile(loopMemoryFile(scope.Root)); err == nil && strings.TrimSpace(string(raw)) != "" {
-		mem := capMemoryForPrompt(string(raw), loopLongTermFile(scope.Slug), loopMemoryFile(scope.Root))
+	memPath := loopMemoryFile(scope.Root)
+	if raw, err := os.ReadFile(memPath); err == nil && strings.TrimSpace(string(raw)) != "" {
+		mem := capMemoryForPrompt(string(raw), loopLongTermFile(scope.Slug), memPath)
 		fmt.Fprintf(&sb, "\n<memory scope=\"loop:%s\">\n%s\n</memory>\n", scope.Slug, mem)
 	}
 

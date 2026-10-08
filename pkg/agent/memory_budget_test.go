@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,10 @@ import (
 
 func estimatedTokens(s string) int {
 	return tokenizer.EstimateMessageTokens(providers.Message{Content: s})
+}
+
+func fitMemoryToPromptBudget(raw string, file memoryPromptFile) string {
+	return fitMemory(raw, file).text
 }
 
 // bigMemory monta um MEMORY.md legado com `n` seções `### `, cada uma com ~1 KB
@@ -118,12 +123,19 @@ func TestGetMemoryContext_LegacyMemoryAboveBudget(t *testing.T) {
 	}
 }
 
-// omittedParts lê as entradas "- offset B, line N: texto" do marcador.
-func omittedParts(t *testing.T, out string) []omittedEntry {
+// listedPart é uma entrada "- offset B, line N: texto" do marcador, como o
+// agente a lê.
+type listedPart struct {
+	offset, line int
+	text         string
+}
+
+// omittedParts lê as entradas listadas no marcador.
+func omittedParts(t *testing.T, out string) []listedPart {
 	t.Helper()
-	var parts []omittedEntry
+	var parts []listedPart
 	for _, ln := range strings.Split(out, "\n") {
-		var e omittedEntry
+		var e listedPart
 		if _, err := fmt.Sscanf(ln, "- offset %d, line %d:", &e.offset, &e.line); err != nil {
 			continue
 		}
@@ -136,7 +148,7 @@ func omittedParts(t *testing.T, out string) []omittedEntry {
 // assertPartsPointIntoFile confere cada entrada contra o arquivo em disco: o
 // título está na linha N e começa no byte B. É o que o agente passa ao
 // read_file (offset no modo de bytes, o do Maestro; start_line no de linhas).
-func assertPartsPointIntoFile(t *testing.T, raw string, parts []omittedEntry) {
+func assertPartsPointIntoFile(t *testing.T, raw string, parts []listedPart) {
 	t.Helper()
 	lines := strings.Split(raw, "\n")
 	for _, e := range parts {
@@ -301,6 +313,10 @@ func TestLoadBootstrapFiles_LearnedOverlayAboveBudget(t *testing.T) {
 		t.Fatalf("sem seção do overlay:\n%.300s", out)
 	}
 	section := out[start+len(header):]
+	if next := strings.Index(section, "\n## "); next >= 0 {
+		section = section[:next]
+	}
+	section = strings.TrimSpace(section)
 	if got := estimatedTokens(section); got > learnedOverlayFile("USER.md").budget {
 		t.Fatalf("overlay com %d tokens, teto %d", got, learnedOverlayFile("USER.md").budget)
 	}
@@ -395,5 +411,151 @@ func TestMemoryPromptUsageFor_MatchesThePromptCut(t *testing.T) {
 		if _, ok := MemoryPromptUsageFor(other, big); ok {
 			t.Fatalf("%q não é um arquivo de memória do prompt", other)
 		}
+	}
+}
+
+// Propriedades de que o agente depende, sobre arquivos gerados com tudo o que
+// já apareceu em memória real: títulos de três níveis, cercas ``` e ~~~,
+// linhas gigantes, acento, \r\n, espaço no começo e byte UTF-8 inválido
+// (write_file e exec gravam qualquer coisa). Semente fixa: falha reproduz.
+func TestFitMemory_Invariants(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261008))
+	files := []memoryPromptFile{assistantLongTermFile, learnedOverlayFile("USER.md"), loopLongTermFile("vendas")}
+	for n := range 600 {
+		raw := randomMemory(rng)
+		file := files[n%len(files)]
+		fit := fitMemory(raw, file)
+
+		if got := estimatedTokens(fit.text); got > file.budget {
+			t.Fatalf("caso %d: %d tokens, teto %d", n, got, file.budget)
+		}
+		if utf8.ValidString(raw) && !utf8.ValidString(fit.text) {
+			t.Fatalf("caso %d: corte quebrou UTF-8", n)
+		}
+		if !fit.capped {
+			if fit.text != strings.TrimSpace(raw) {
+				t.Fatalf("caso %d: abaixo do teto o conteúdo mudou", n)
+			}
+			continue
+		}
+		body := fit.text[:strings.LastIndex(fit.text, "\n\n[")]
+		body = strings.TrimSuffix(strings.TrimSuffix(body, "\n```"), "\n~~~")
+		if !strings.HasPrefix(strings.TrimSpace(raw), body) {
+			t.Fatalf("caso %d: o corpo mostrado não é prefixo do conteúdo", n)
+		}
+		for _, e := range fit.hidden {
+			if e.offset < 0 || e.offset > len(raw) || strings.Count(raw[:e.offset], "\n")+1 != e.line {
+				t.Fatalf("caso %d: offset %d não corresponde à linha %d", n, e.offset, e.line)
+			}
+			if !e.continues && !strings.HasPrefix(raw[e.offset:], e.heading) {
+				t.Fatalf("caso %d: offset %d deveria começar em %q", n, e.offset, e.heading)
+			}
+		}
+	}
+}
+
+func randomMemory(rng *rand.Rand) string {
+	var sb strings.Builder
+	nl := "\n"
+	if rng.Intn(4) == 0 {
+		nl = "\r\n"
+	}
+	sb.WriteString(strings.Repeat(" \n", rng.Intn(3)))
+	for range rng.Intn(400) + 1 {
+		switch rng.Intn(12) {
+		case 0:
+			sb.WriteString("### Seção " + fmt.Sprint(rng.Intn(1000)) + nl)
+		case 1:
+			sb.WriteString("## Antiga " + fmt.Sprint(rng.Intn(1000)) + nl)
+		case 2:
+			fence := []string{"```", "~~~"}[rng.Intn(2)]
+			sb.WriteString(fence + "sql" + nl + "### dentro do código" + nl)
+			sb.WriteString(strings.Repeat("select 1 from tabela;"+nl, rng.Intn(300)))
+			sb.WriteString(fence + nl)
+		case 3:
+			n := rng.Intn(200)
+			if rng.Intn(15) == 0 {
+				n = rng.Intn(20000)
+			}
+			sb.WriteString(strings.Repeat("ação ", n) + nl)
+		case 4:
+			sb.WriteString("caf\xe9 inválido" + nl)
+		case 5:
+			sb.WriteString(nl)
+		default:
+			sb.WriteString("- **Fato**: " + strings.Repeat("texto ", rng.Intn(40)+1) + nl)
+		}
+	}
+	return sb.String()
+}
+
+// Uma seção nova entra no FIM do arquivo. A lista do marcador traz as últimas
+// partes, então o título dela aparece mesmo com centenas de seções escondidas.
+func TestFitMemory_NewestSectionsAreListed(t *testing.T) {
+	raw := bigMemory(400) + "### Cliente X quer relatório semanal\n- **Pedido**: toda sexta\n"
+	out := fitMemoryToPromptBudget(raw, assistantLongTermFile)
+	if !strings.Contains(out, ": ### Cliente X quer relatório semanal") {
+		t.Fatalf("a seção mais nova deveria estar listada:\n%s", out[strings.LastIndex(out, "\n\n["):])
+	}
+	if !strings.Contains(out, "more sections between offset") {
+		t.Fatal("o meio da lista deveria dizer quantas seções e entre quais offsets")
+	}
+}
+
+// Linha gigante no meio (não só na primeira): mostra o começo dela em vez de
+// esconder tudo dali em diante.
+func TestFitMemory_GiantLineAfterTheFirstShowsItsStart(t *testing.T) {
+	raw := "### Notas\n" + strings.Repeat("dado ", 40000) + "\n" + bigMemory(20)
+	fit := fitMemory(raw, assistantLongTermFile)
+	if !fit.partialLine || fit.shownLines != 1 {
+		t.Fatalf("esperava a linha 1 inteira e o começo da 2: shown=%d partial=%v", fit.shownLines, fit.partialLine)
+	}
+	if fit.shownTokens < assistantLongTermFile.budget/2 {
+		t.Fatalf("o corte desperdiçou o orçamento: %d de %d", fit.shownTokens, assistantLongTermFile.budget)
+	}
+	first := fit.hidden[0]
+	body := fit.text[:strings.Index(fit.text, "\n\n[")]
+	if !first.continues || first.line != 2 || first.offset != len(body) {
+		t.Fatalf("continuação deveria apontar o byte %d da linha 2: %+v", len(body), first)
+	}
+	if !strings.Contains(fit.text, ": ### Tópico 019") {
+		t.Fatal("as seções depois da linha gigante deveriam estar listadas")
+	}
+}
+
+// HiddenHeadings: a seção cortada no meio e todas as escondidas — o que uma
+// reescrita feita a partir do prompt não tem como repetir.
+func TestMemoryPromptUsageFor_HiddenHeadings(t *testing.T) {
+	raw := bigMemory(400)
+	usage, _ := MemoryPromptUsageFor("memory/MEMORY.md", raw)
+	fit := fitMemory(raw, assistantLongTermFile)
+	body := fit.text[:strings.Index(fit.text, "\n\n[")]
+	fully := strings.Count(body, "### Tópico") - 1 // a última aparece cortada
+	if len(usage.HiddenHeadings) != 400-fully {
+		t.Fatalf("%d títulos escondidos, esperava %d", len(usage.HiddenHeadings), 400-fully)
+	}
+	if usage.HiddenHeadings[len(usage.HiddenHeadings)-1] != "### Tópico 399" {
+		t.Fatalf(
+			"o último título deveria estar entre os escondidos: %v",
+			usage.HiddenHeadings[len(usage.HiddenHeadings)-3:],
+		)
+	}
+	if !strings.Contains(body, usage.HiddenHeadings[0]) {
+		t.Fatal("o primeiro escondido é a seção cortada no meio, cujo título aparece no prompt")
+	}
+}
+
+// O bloco do loop é remontado a cada turno: com a memória igual, sai igual.
+func TestLoopPromptPart_CappedMemoryIsStableAcrossTurns(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "loops", "vendas")
+	if err := os.MkdirAll(filepath.Join(root, "memory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(loopMemoryFile(root), []byte(bigMemory(200)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scope := LoopScope{ID: "id", Slug: "vendas", Root: root}
+	if loopPromptPart(scope).Content != loopPromptPart(scope).Content {
+		t.Fatal("bloco do loop mudou sem a memória mudar")
 	}
 }

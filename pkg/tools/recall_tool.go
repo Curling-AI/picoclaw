@@ -66,9 +66,9 @@ func (t *RecallTool) Description() string {
 		"- durable: your long-term memory (MEMORY.md), organized in topic sections. Facts that stay true.\n" +
 		"- episodic: the daily notes — one line per event, the record of what actually happened on a " +
 		"given day (decisions, what you did, what the user said).\n" +
-		"The prompt shows your durable memory only up to a size budget (sections beyond it are listed by " +
-		"heading) and only the last few days of notes, so use this for anything left out, older or beyond " +
-		"that window. Query by topic (\"the postgres incident\") OR by date " +
+		"The prompt shows your durable memory only up to a size budget (past it, only the first and the " +
+		"latest sections are listed by heading) and only the last few days of notes, so use this for " +
+		"anything left out, older or beyond that window. Query by topic (\"the postgres incident\") OR by date " +
 		"(\"2026-07-12\", \"20260712\") to see what happened then. Narrow with 'scope' only when you are " +
 		"sure which kind you want."
 }
