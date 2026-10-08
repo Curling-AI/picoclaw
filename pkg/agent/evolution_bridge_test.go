@@ -565,8 +565,20 @@ func TestEvolutionBridge_CronTurnWritesNoTaskRecordAndSkipsColdPath(t *testing.T
 	}
 
 	time.Sleep(150 * time.Millisecond)
-	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
+	recordsPath := filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl")
+	assertNotExists(t, recordsPath)
 	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
+
+	// Control: an ordinary turn on the same loop does write its record, so the
+	// cron turn's absence is not just async work that has not landed yet.
+	_, err = al.ProcessDirectWithChannel(context.Background(), "hello", "session-after-cron", "cli", "direct")
+	if err != nil {
+		t.Fatalf("ProcessDirectWithChannel failed: %v", err)
+	}
+	waitForEvolutionRecord(t, recordsPath)
+	if got := countEvolutionTaskRecords(t, recordsPath); got != 1 {
+		t.Fatalf("task records = %d, want 1 (the ordinary turn only)", got)
+	}
 }
 
 func TestEvolutionBridge_ScheduledModeDoesNotRunColdPathAfterTurn(t *testing.T) {

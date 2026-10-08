@@ -137,7 +137,14 @@ func (r *ColdPathRunner) runWorkspace(workspace string) {
 			r.mu.Unlock()
 			return
 		}
+		// The run about to start sees every record that arrived during the wait,
+		// so triggers from the wait are served by it. Only triggers that arrive
+		// while it runs ask for another.
 		r.mu.Lock()
+		if state, ok := r.running[workspace]; ok {
+			state.pending = false
+			r.running[workspace] = state
+		}
 		r.lastStart[workspace] = r.now()
 		r.mu.Unlock()
 

@@ -74,6 +74,9 @@ func (g *LLMDraftGenerator) GenerateDraftWithEvidence(
 			Content: g.buildPrompt(rule, matches, evidence),
 		},
 	}, nil, model, map[string]any{"temperature": 0.2})
+	if isNoCreditError(err) {
+		return SkillDraft{}, noCreditError(err)
+	}
 	if err != nil || resp == nil {
 		return g.generateFallback(ctx, rule, matches, evidence)
 	}

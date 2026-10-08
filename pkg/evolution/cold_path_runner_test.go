@@ -182,6 +182,57 @@ func TestColdPathRunner_WaitsMinIntervalBeforeTheNextRun(t *testing.T) {
 	}
 }
 
+// Turns that end while the runner waits out the interval append their records
+// before triggering, so the run after the wait covers them; asking for one more
+// run would re-cluster the same window with nothing new.
+func TestColdPathRunner_TriggersDuringTheWaitShareTheNextRun(t *testing.T) {
+	runtime := &blockingColdPathRuntime{
+		started: make(chan string, 4),
+		release: make(chan struct{}, 4),
+	}
+	clock := &fakeClock{now: time.Unix(1700000000, 0)}
+	waits := make(chan time.Duration, 4)
+	elapsed := make(chan time.Time)
+	runner := NewColdPathRunnerWithOptions(runtime, ColdPathRunnerOptions{
+		MinInterval: 30 * time.Minute,
+		Now:         clock.Now,
+		After: func(d time.Duration) <-chan time.Time {
+			waits <- d
+			return elapsed
+		},
+	})
+	defer runner.Close()
+
+	runner.Trigger("workspace-a")
+	<-runtime.started
+	runner.Trigger("workspace-a")
+	runtime.release <- struct{}{}
+	select {
+	case <-waits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending run did not wait for the interval")
+	}
+
+	runner.Trigger("workspace-a")
+	runner.Trigger("workspace-a")
+	clock.Advance(30 * time.Minute)
+	elapsed <- clock.Now()
+	select {
+	case <-runtime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run after the wait did not start")
+	}
+	runtime.release <- struct{}{}
+	waitRunnerIdle(t, runner, "workspace-a")
+
+	if got := runtime.runCount.Load(); got != 2 {
+		t.Fatalf("runCount = %d, want 2", got)
+	}
+	if extra := len(waits); extra != 0 {
+		t.Fatalf("runner waited %d more times for a run nobody needs", extra)
+	}
+}
+
 func TestColdPathRunner_PausesWorkspaceAfterNoCredit(t *testing.T) {
 	runtime := &noCreditColdPathRuntime{}
 	clock := &fakeClock{now: time.Unix(1700000000, 0)}

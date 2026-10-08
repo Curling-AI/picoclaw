@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,13 +47,20 @@ func (c *capturingClusterer) BuildPatternsWithEvidence(
 	return nil, nil, nil
 }
 
-type noCreditJudge struct{ calls int }
+// noCreditJudge accepts the first `credit` records, then runs out of credit.
+type noCreditJudge struct {
+	credit int
+	calls  int
+}
 
 func (j *noCreditJudge) JudgeTaskRecord(
 	_ context.Context,
 	_ evolution.LearningRecord,
 ) (evolution.TaskSuccessDecision, error) {
 	j.calls++
+	if j.calls <= j.credit {
+		return evolution.TaskSuccessDecision{Success: true}, nil
+	}
 	return evolution.TaskSuccessDecision{}, fmt.Errorf("judge: %w", evolution.ErrNoCredit)
 }
 
@@ -231,12 +239,12 @@ func TestRuntime_RunColdPathOnce_BacklogDrainsWhileClusteringFormsNothing(t *tes
 	}
 }
 
-func TestRuntime_RunColdPathOnce_NoCreditStopsBeforeClusteringAndLeavesRecordsUnjudged(t *testing.T) {
+func TestRuntime_RunColdPathOnce_NoCreditKeepsPaidVerdictsAndSkipsClustering(t *testing.T) {
 	root := t.TempDir()
 	store := evolution.NewStore(evolution.NewPaths(root, ""))
-	seedTaskBacklog(t, store, root, 0, 3)
+	seedTaskBacklog(t, store, root, 0, 4)
 
-	judge := &noCreditJudge{}
+	judge := &noCreditJudge{credit: 2}
 	clusterer := &capturingClusterer{}
 	rt := newBacklogRuntime(t, root, store, judge, clusterer)
 
@@ -244,8 +252,8 @@ func TestRuntime_RunColdPathOnce_NoCreditStopsBeforeClusteringAndLeavesRecordsUn
 	if !errors.Is(err, evolution.ErrNoCredit) {
 		t.Fatalf("RunColdPathOnce err = %v, want ErrNoCredit", err)
 	}
-	if judge.calls != 1 {
-		t.Errorf("judge calls = %d, want 1: the run stops at the first no-credit answer", judge.calls)
+	if judge.calls != 3 {
+		t.Errorf("judge calls = %d, want 3: the run stops at the first no-credit answer", judge.calls)
 	}
 	if len(clusterer.runs) != 0 {
 		t.Errorf("clusterer ran %d times without credit", len(clusterer.runs))
@@ -254,10 +262,86 @@ func TestRuntime_RunColdPathOnce_NoCreditStopsBeforeClusteringAndLeavesRecordsUn
 	if loadErr != nil {
 		t.Fatalf("LoadTaskRecords: %v", loadErr)
 	}
+	// The two verdicts already paid for are kept; the rest waits for credit.
+	judged := map[string]bool{}
 	for _, record := range records {
-		if record.SuccessJudged {
-			t.Errorf("%s marked judged although no verdict came back", record.ID)
+		judged[record.ID] = record.SuccessJudged
+	}
+	want := map[string]bool{
+		backlogTaskID(0): true, backlogTaskID(1): true,
+		backlogTaskID(2): false, backlogTaskID(3): false,
+	}
+	for id, wantJudged := range want {
+		if judged[id] != wantJudged {
+			t.Errorf("%s SuccessJudged = %v, want %v", id, judged[id], wantJudged)
 		}
+	}
+}
+
+// Production stores mix legacy records without a status, records of loops
+// (another workspace in the same state dir, often reusing ids) and records the
+// clustering already took. Only this workspace's unprocessed records expire.
+func TestRuntime_RunColdPathOnce_ExpiresOnlyThisWorkspacesUnprocessedRecords(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state", "evolution")
+	loop := filepath.Join(root, "loops", "x")
+	store := evolution.NewStore(evolution.NewPaths(root, stateDir))
+	loopStore := evolution.NewStore(evolution.NewPaths(loop, stateDir))
+
+	const own = 50
+	seedTaskBacklog(t, store, root, 0, own)
+	records, err := store.LoadTaskRecords()
+	if err != nil {
+		t.Fatalf("LoadTaskRecords: %v", err)
+	}
+	for i := range records {
+		if i%2 == 0 {
+			records[i].Status = "" // written before statuses existed
+		}
+	}
+	if saveErr := store.SaveTaskRecords(records); saveErr != nil {
+		t.Fatalf("SaveTaskRecords: %v", saveErr)
+	}
+	seedTaskBacklog(t, loopStore, loop, 0, 10)
+	ok := true
+	clustered := evolution.LearningRecord{
+		ID:          "task-clustered",
+		Kind:        evolution.RecordKindTask,
+		WorkspaceID: root,
+		CreatedAt:   time.Unix(1600000000, 0).UTC(),
+		Summary:     "already in a pattern",
+		FinalOutput: "done",
+		Status:      evolution.RecordStatus("clustered"),
+		Success:     &ok,
+	}
+	if appendErr := store.AppendLearningRecords([]evolution.LearningRecord{clustered}); appendErr != nil {
+		t.Fatalf("AppendLearningRecords: %v", appendErr)
+	}
+
+	rt := newBacklogRuntime(t, root, store, &stubSuccessJudge{}, &capturingClusterer{})
+	if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+		t.Fatalf("RunColdPathOnce: %v", runErr)
+	}
+
+	stored, err := store.LoadTaskRecords()
+	if err != nil {
+		t.Fatalf("LoadTaskRecords: %v", err)
+	}
+	counts := map[string]map[evolution.RecordStatus]int{root: {}, loop: {}}
+	for _, record := range stored {
+		if record.ID == clustered.ID {
+			if record.Status != "clustered" {
+				t.Errorf("clustered record became %q", record.Status)
+			}
+			continue
+		}
+		counts[record.WorkspaceID][record.Status]++
+	}
+	if got := counts[root]["expired"]; got != own-evolution.ColdPathTaskWindow {
+		t.Errorf("own expired = %d, want %d (statuses %v)", got, own-evolution.ColdPathTaskWindow, counts[root])
+	}
+	if got := counts[loop]["new"]; got != 10 {
+		t.Errorf("loop records = %v, want all 10 untouched", counts[loop])
 	}
 }
 
@@ -322,6 +406,35 @@ func TestLLMPatternClusterer_NoCreditIsReportedInsteadOfFallingBack(t *testing.T
 	}
 	if len(patterns) != 1 {
 		t.Errorf("heuristic fallback patterns = %d, want 1", len(patterns))
+	}
+}
+
+// In apply mode a heuristic draft written only because the account ran dry
+// would land in the workspace as a skill.
+func TestLLMDraftGenerator_NoCreditIsReportedInsteadOfAHeuristicDraft(t *testing.T) {
+	rule := evolution.LearningRecord{
+		ID:          "rule-1",
+		Kind:        evolution.RecordKindPattern,
+		WorkspaceID: "ws",
+		Label:       "weather-report",
+		Summary:     "weather report",
+		Status:      evolution.RecordStatus("ready"),
+	}
+	fallback := stubDraftGenerator{draft: evolution.SkillDraft{TargetSkillName: "weather-report"}}
+
+	generator := evolution.NewLLMDraftGenerator(&erroringProvider{err: errGatewayNoCredit}, "m", fallback)
+	draft, err := generator.GenerateDraft(context.Background(), rule, nil)
+	if !errors.Is(err, evolution.ErrNoCredit) {
+		t.Fatalf("err = %v, want ErrNoCredit", err)
+	}
+	if draft.TargetSkillName != "" {
+		t.Errorf("no-credit run produced a draft for %q", draft.TargetSkillName)
+	}
+
+	generator = evolution.NewLLMDraftGenerator(&erroringProvider{err: errGatewayDown}, "m", fallback)
+	draft, err = generator.GenerateDraft(context.Background(), rule, nil)
+	if err != nil || draft.TargetSkillName != "weather-report" {
+		t.Errorf("draft = %+v err = %v, want the fallback draft", draft, err)
 	}
 }
 

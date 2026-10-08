@@ -192,16 +192,22 @@ func (s *Store) SaveTaskRecords(records []LearningRecord) error {
 }
 
 func (s *Store) MarkTaskRecordsClustered(ids []string) error {
-	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) {
+	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) bool {
 		record.Status = RecordStatus("clustered")
+		return true
 	})
 }
 
 // MarkTaskRecordsExpired retires records that fell out of the cold-path window,
-// so no later run loads them as candidates again.
+// so no later run loads them as candidates again. A record the clustering took
+// in the meantime keeps its status.
 func (s *Store) MarkTaskRecordsExpired(ids []string) error {
-	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) {
+	return s.updateTaskRecords(trimmedIDSet(ids), func(record *LearningRecord) bool {
+		if record.Status != "" && record.Status != RecordStatus("new") {
+			return false
+		}
 		record.Status = recordStatusExpired
+		return true
 	})
 }
 
@@ -220,10 +226,11 @@ func (s *Store) MarkTaskRecordsJudged(decisions map[string]bool) error {
 	for id := range verdicts {
 		target[id] = struct{}{}
 	}
-	return s.updateTaskRecords(target, func(record *LearningRecord) {
+	return s.updateTaskRecords(target, func(record *LearningRecord) bool {
 		judged := verdicts[record.ID]
 		record.Success = &judged
 		record.SuccessJudged = true
+		return true
 	})
 }
 
@@ -238,10 +245,10 @@ func trimmedIDSet(ids []string) map[string]struct{} {
 }
 
 // updateTaskRecords applies mutate to the stored task records whose id is in
-// target and rewrites the file. Ids are only unique per workspace: when this
+// target and rewrites the file when mutate reports a change. Ids are only unique per workspace: when this
 // store's workspace holds a record with the id, same-id records of other
 // workspaces are left alone.
-func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record *LearningRecord)) error {
+func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record *LearningRecord) bool) error {
 	if len(target) == 0 {
 		return nil
 	}
@@ -279,8 +286,9 @@ func (s *Store) updateTaskRecords(target map[string]struct{}, mutate func(record
 		if hasTargetRecordInWorkspace[records[i].ID] && records[i].WorkspaceID != s.paths.Workspace {
 			continue
 		}
-		mutate(&records[i])
-		changed = true
+		if mutate(&records[i]) {
+			changed = true
+		}
 	}
 	if !changed {
 		return nil
