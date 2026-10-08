@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -88,51 +89,91 @@ func estimateTextTokens(s string) int {
 	return tokenizer.EstimateMessageTokens(providers.Message{Content: s})
 }
 
-// memoryFit é o resultado do recorte, com os números para o log.
+// memoryFit é o resultado do recorte, com os números para o log. Linhas são
+// as do arquivo em disco.
 type memoryFit struct {
 	text        string
 	capped      bool
 	totalTokens int
 	shownTokens int
 	totalLines  int
-	shownLines  int
+	shownLines  int // última linha mostrada inteira
+	partialLine bool
 	omitted     int
 }
 
 // fitMemoryToPromptBudget devolve o conteúdo como deve entrar no prompt:
-// inteiro quando cabe no orçamento, recortado com marcador quando não.
-func fitMemoryToPromptBudget(content string, file memoryPromptFile) string {
-	return fitMemory(content, file).text
+// aparado e inteiro quando cabe no orçamento, recortado com marcador quando não.
+func fitMemoryToPromptBudget(raw string, file memoryPromptFile) string {
+	return fitMemory(raw, file).text
 }
 
-func fitMemory(content string, file memoryPromptFile) memoryFit {
+// filePos é um ponto do arquivo em disco: linha (1-based, o start_line do
+// read_file por linhas) e byte (o offset do read_file por bytes, o do Maestro).
+type filePos struct{ line, offset int }
+
+// trimmedLines é o conteúdo aparado partido em linhas, com a posição de cada
+// linha no arquivo em disco: o prompt mostra o aparado, mas o agente lê o
+// arquivo, então o marcador precisa das coordenadas dele.
+type trimmedLines struct {
+	content string
+	lines   []string
+	starts  []int // byte de cada linha dentro de content; starts[len(lines)] = len(content)+1
+	origin  filePos
+}
+
+func splitTrimmed(raw string) trimmedLines {
+	lead := len(raw) - len(strings.TrimLeftFunc(raw, unicode.IsSpace))
+	content := strings.TrimSpace(raw)
+	lines := strings.Split(content, "\n")
+	starts := make([]int, len(lines)+1)
+	for i, ln := range lines {
+		starts[i+1] = starts[i] + len(ln) + 1
+	}
+	return trimmedLines{
+		content: content,
+		lines:   lines,
+		starts:  starts,
+		origin:  filePos{line: strings.Count(raw[:lead], "\n"), offset: lead},
+	}
+}
+
+// at é a posição no arquivo do byte `b` da linha `i` do conteúdo aparado.
+func (t trimmedLines) at(i, b int) filePos {
+	return filePos{line: t.origin.line + i + 1, offset: t.origin.offset + t.starts[i] + b}
+}
+
+func fitMemory(raw string, file memoryPromptFile) memoryFit {
+	content := strings.TrimSpace(raw)
 	total := estimateTextTokens(content)
 	if total <= file.budget {
 		return memoryFit{text: content, totalTokens: total}
 	}
 
-	lines := strings.Split(content, "\n")
+	tl := splitTrimmed(raw)
 	bodyBudget := max(0, file.budget-markerReserveTokens(file))
-	shown := shownLineCount(content, lines, bodyBudget)
+	shown := shownLineCount(tl, bodyBudget)
 
-	partialFirstLine := shown == 0
-	body := strings.Join(lines[:shown], "\n")
-	shownLines := lines[:shown]
-	if partialFirstLine {
-		body = runePrefixWithin(lines[0], bodyBudget)
-		shownLines = lines[:1]
+	body := tl.content[:max(0, tl.starts[shown]-1)]
+	shownLines := tl.lines[:shown]
+	partial := ""
+	if shown == 0 {
+		partial = runePrefixWithin(tl.lines[0], bodyBudget)
+		body = partial
+		shownLines = tl.lines[:1]
 	}
 	if _, fenced := scanShown(shownLines); fenced {
 		body += "\n```"
 	}
 
-	entries, more := omittedEntries(lines, shown, partialFirstLine)
+	entries, more := omittedEntries(tl, shown, len(partial))
 	fit := memoryFit{
 		capped:      true,
 		totalTokens: total,
 		shownTokens: estimateTextTokens(body),
-		totalLines:  len(lines),
-		shownLines:  shown,
+		totalLines:  tl.origin.line + len(tl.lines),
+		shownLines:  tl.origin.line + shown,
+		partialLine: shown == 0,
 		omitted:     len(entries) + more,
 	}
 	fit.text = body + "\n\n" + omissionMarker(file, fit, entries, more)
@@ -140,21 +181,11 @@ func fitMemory(content string, file memoryPromptFile) memoryFit {
 }
 
 // shownLineCount é o maior k tal que as k primeiras linhas cabem em budget.
-// O prefixo de k linhas é um prefixo do próprio content, então a busca não
+// O prefixo de k linhas é um prefixo do próprio conteúdo, então a busca não
 // aloca, e o estimador é monotônico no tamanho do prefixo.
-func shownLineCount(content string, lines []string, budget int) int {
-	ends := make([]int, len(lines)+1)
-	for i, ln := range lines {
-		ends[i+1] = ends[i] + len(ln) + 1
-	}
-	prefix := func(k int) string {
-		if k == 0 {
-			return ""
-		}
-		return content[:ends[k]-1]
-	}
-	return sort.Search(len(lines)+1, func(k int) bool {
-		return k > 0 && estimateTextTokens(prefix(k)) > budget
+func shownLineCount(tl trimmedLines, budget int) int {
+	return sort.Search(len(tl.lines)+1, func(k int) bool {
+		return k > 0 && estimateTextTokens(tl.content[:tl.starts[k]-1]) > budget
 	}) - 1
 }
 
@@ -183,15 +214,16 @@ func headingText(line string) (string, bool) {
 }
 
 type omittedEntry struct {
-	line int // 1-based, como o start_line do read_file
+	filePos
 	text string
 }
 
-// omittedEntries lista o que ficou de fora a partir da linha shown+1: primeiro
-// a continuação da seção cortada no meio, se houver, depois cada título fora de
-// bloco de código. Devolve no máximo maxOmittedHeadingsListed entradas e
-// quantas títulos sobraram além delas.
-func omittedEntries(lines []string, shown int, partialFirstLine bool) ([]omittedEntry, int) {
+// omittedEntries lista o que ficou de fora depois das `shown` primeiras linhas
+// (ou dos `partialBytes` primeiros bytes da linha 1, quando nem ela coube):
+// primeiro a continuação da seção cortada no meio, se houver, depois cada
+// título fora de bloco de código. Devolve no máximo maxOmittedHeadingsListed
+// entradas e quantos títulos sobraram além delas.
+func omittedEntries(tl trimmedLines, shown, partialBytes int) ([]omittedEntry, int) {
 	var entries []omittedEntry
 	more := 0
 	add := func(e omittedEntry) {
@@ -202,30 +234,30 @@ func omittedEntries(lines []string, shown int, partialFirstLine bool) ([]omitted
 		more++
 	}
 
-	current, fenced := scanShown(lines[:shown])
+	current, fenced := scanShown(tl.lines[:shown])
 	start := shown
-	if partialFirstLine {
-		add(omittedEntry{line: 1, text: continuation("")})
-		if isFenceLine(lines[0]) {
+	if shown == 0 {
+		add(omittedEntry{filePos: tl.at(0, partialBytes), text: continuation("")})
+		if isFenceLine(tl.lines[0]) {
 			fenced = !fenced
 		}
 		start = 1
-	} else if next := firstNonBlank(lines, shown); next < len(lines) {
-		if _, ok := headingText(lines[next]); !ok || fenced {
-			add(omittedEntry{line: next + 1, text: continuation(current)})
+	} else if next := firstNonBlank(tl.lines, shown); next < len(tl.lines) {
+		if _, ok := headingText(tl.lines[next]); !ok || fenced {
+			add(omittedEntry{filePos: tl.at(next, 0), text: continuation(current)})
 		}
 	}
 
-	for i := start; i < len(lines); i++ {
-		if isFenceLine(lines[i]) {
+	for i := start; i < len(tl.lines); i++ {
+		if isFenceLine(tl.lines[i]) {
 			fenced = !fenced
 			continue
 		}
 		if fenced {
 			continue
 		}
-		if h, ok := headingText(lines[i]); ok {
-			add(omittedEntry{line: i + 1, text: truncateHeading(h)})
+		if h, ok := headingText(tl.lines[i]); ok {
+			add(omittedEntry{filePos: tl.at(i, 0), text: truncateHeading(h)})
 		}
 	}
 	return entries, more
@@ -271,19 +303,20 @@ func truncateHeading(h string) string {
 
 func omissionMarker(file memoryPromptFile, fit memoryFit, entries []omittedEntry, more int) string {
 	var sb strings.Builder
-	shownWhat := fmt.Sprintf("lines 1–%d of %d", fit.shownLines, fit.totalLines)
-	if fit.shownLines == 0 {
-		shownWhat = fmt.Sprintf("the start of line 1 of %d", fit.totalLines)
+	shownWhat := fmt.Sprintf("it up to line %d of %d", fit.shownLines, fit.totalLines)
+	if fit.partialLine {
+		shownWhat = fmt.Sprintf("only the start of line %d of %d", fit.shownLines+1, fit.totalLines)
 	}
 	fmt.Fprintf(&sb, "[%s is over its prompt budget: this shows %s (~%d of ~%d estimated tokens). "+
 		"The file is intact on disk.", file.path, shownWhat, fit.shownTokens, fit.totalTokens)
-	how := fmt.Sprintf("read it with read_file (path %q, start_line)", file.path)
+	how := fmt.Sprintf("read it with read_file on %q from that offset (or start_line, if your "+
+		"read_file reads by line)", file.path)
 	if file.recall {
-		how += " or search it with recall"
+		how += ", or search it with recall"
 	}
-	fmt.Fprintf(&sb, " Not shown, by the line where it starts — %s:\n", how)
+	fmt.Fprintf(&sb, " Not shown, by where each part starts — %s:\n", how)
 	for _, e := range entries {
-		fmt.Fprintf(&sb, "- line %d: %s\n", e.line, e.text)
+		fmt.Fprintf(&sb, "- offset %d, line %d: %s\n", e.offset, e.line, e.text)
 	}
 	if more > 0 {
 		fmt.Fprintf(&sb, "- … and %d more sections\n", more)
@@ -296,14 +329,15 @@ func omissionMarker(file memoryPromptFile, fit memoryFit, entries []omittedEntry
 // todas as entradas com título no teto de runas e números grandes. Reservar o
 // pior caso garante o orçamento sem depender de onde o corte cai.
 func markerReserveTokens(file memoryPromptFile) int {
+	const big = 9_999_999_999
 	worst := make([]omittedEntry, maxOmittedHeadingsListed)
 	heading := "### " + strings.Repeat("w", maxOmittedHeadingRunes) + "…"
 	for i := range worst {
-		worst[i] = omittedEntry{line: 9_999_999, text: "(continues " + heading + ")"}
+		worst[i] = omittedEntry{filePos: filePos{line: big, offset: big}, text: "(continues " + heading + ")"}
 	}
-	fit := memoryFit{shownTokens: 9_999_999, totalTokens: 9_999_999, totalLines: 9_999_999, shownLines: 9_999_999}
+	fit := memoryFit{shownTokens: big, totalTokens: big, totalLines: big, shownLines: big}
 	// "\n```" do fechamento de cerca e o "\n\n" antes do marcador.
-	return estimateTextTokens(omissionMarker(file, fit, worst, 9_999_999)+"\n```\n\n") + 1
+	return estimateTextTokens(omissionMarker(file, fit, worst, big)+"\n```\n\n") + 1
 }
 
 // MemoryPromptUsage diz quanto de um arquivo de memória entra no prompt.
@@ -325,7 +359,7 @@ func MemoryPromptUsageFor(relPath, content string) (MemoryPromptUsage, bool) {
 	if !ok {
 		return MemoryPromptUsage{}, false
 	}
-	fit := fitMemory(strings.TrimSpace(content), file)
+	fit := fitMemory(content, file)
 	return MemoryPromptUsage{
 		Capped:      fit.capped,
 		Budget:      file.budget,

@@ -211,7 +211,7 @@ func (ms *MemoryStore) GetMemoryContext(recentDays int) string {
 
 	if longTerm != "" {
 		sb.WriteString("<memory scope=\"long-term\">\n")
-		sb.WriteString(capMemoryForPrompt(strings.TrimSpace(longTerm), assistantLongTermFile, ms.memoryFile))
+		sb.WriteString(capMemoryForPrompt(longTerm, assistantLongTermFile, ms.memoryFile))
 		sb.WriteString("\n</memory>")
 	}
 

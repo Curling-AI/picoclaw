@@ -94,7 +94,7 @@ func TestGetMemoryContext_LegacyMemoryAboveBudget(t *testing.T) {
 	if !strings.HasPrefix(block, "### Tópico 000\n") {
 		t.Fatalf("o começo do arquivo deveria continuar no prompt:\n%.300s", block)
 	}
-	for _, want := range []string{"intact on disk", "memory/MEMORY.md", "start_line", "recall"} {
+	for _, want := range []string{"intact on disk", "memory/MEMORY.md", "offset", "start_line", "recall"} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("marcador sem %q:\n%s", want, block[max(0, len(block)-2000):])
 		}
@@ -118,35 +118,72 @@ func TestGetMemoryContext_LegacyMemoryAboveBudget(t *testing.T) {
 	}
 }
 
-// O marcador aponta a linha onde cada seção omitida começa, e essa linha é de
-// fato o título — é o que o agente passa ao read_file como start_line.
-func TestFitMemoryToPromptBudget_OmittedSectionsPointToTheirLines(t *testing.T) {
-	content := strings.TrimSpace(bigMemory(400))
-	lines := strings.Split(content, "\n")
+// omittedParts lê as entradas "- offset B, line N: texto" do marcador.
+func omittedParts(t *testing.T, out string) []omittedEntry {
+	t.Helper()
+	var parts []omittedEntry
+	for _, ln := range strings.Split(out, "\n") {
+		var e omittedEntry
+		if _, err := fmt.Sscanf(ln, "- offset %d, line %d:", &e.offset, &e.line); err != nil {
+			continue
+		}
+		e.text = strings.TrimSpace(ln[strings.Index(ln, ":")+1:])
+		parts = append(parts, e)
+	}
+	return parts
+}
+
+// assertPartsPointIntoFile confere cada entrada contra o arquivo em disco: o
+// título está na linha N e começa no byte B. É o que o agente passa ao
+// read_file (offset no modo de bytes, o do Maestro; start_line no de linhas).
+func assertPartsPointIntoFile(t *testing.T, raw string, parts []omittedEntry) {
+	t.Helper()
+	lines := strings.Split(raw, "\n")
+	for _, e := range parts {
+		if strings.HasPrefix(e.text, "(continues") {
+			continue
+		}
+		if e.line < 1 || e.line > len(lines) || lines[e.line-1] != e.text {
+			t.Fatalf("linha %d deveria ser %q", e.line, e.text)
+		}
+		if e.offset < 0 || !strings.HasPrefix(raw[e.offset:], e.text+"\n") {
+			t.Fatalf("offset %d deveria começar em %q", e.offset, e.text)
+		}
+	}
+}
+
+func TestFitMemoryToPromptBudget_OmittedPartsPointToOffsetAndLine(t *testing.T) {
+	content := bigMemory(400)
 	out := fitMemoryToPromptBudget(content, assistantLongTermFile)
 
-	listed := 0
-	for _, ln := range strings.Split(out, "\n") {
-		var n int
-		var heading string
-		if _, err := fmt.Sscanf(ln, "- line %d:", &n); err != nil {
-			continue
-		}
-		heading = strings.TrimSpace(ln[strings.Index(ln, ":")+1:])
-		if strings.HasPrefix(heading, "(continues") {
-			continue
-		}
-		if n < 1 || n > len(lines) || lines[n-1] != heading {
-			t.Fatalf("linha %d deveria ser %q, é %q", n, heading, lines[max(0, min(n-1, len(lines)-1))])
-		}
-		listed++
+	parts := omittedParts(t, out)
+	if len(parts) < 2 {
+		t.Fatalf("seções omitidas não listadas:\n%s", out[max(0, len(out)-2000):])
 	}
-	if listed == 0 {
-		t.Fatalf("nenhuma seção omitida listada:\n%s", out[max(0, len(out)-2000):])
+	if len(parts) > maxOmittedHeadingsListed {
+		t.Fatalf("listou %d partes, teto %d", len(parts), maxOmittedHeadingsListed)
 	}
-	if listed > maxOmittedHeadingsListed {
-		t.Fatalf("listou %d seções, teto %d", listed, maxOmittedHeadingsListed)
+	assertPartsPointIntoFile(t, content, parts)
+}
+
+// Arquivo que começa com linhas em branco: o prompt mostra o conteúdo aparado,
+// mas linhas e offsets do marcador são os do arquivo em disco.
+func TestGetMemoryContext_OffsetsAreRelativeToTheFileOnDisk(t *testing.T) {
+	ms := NewMemoryStore(t.TempDir())
+	raw := "\n\n  \n" + bigMemory(400)
+	if err := ms.WriteLongTerm(raw); err != nil {
+		t.Fatal(err)
 	}
+	block := longTermBlock(t, ms.GetMemoryContext(0))
+
+	if !strings.HasPrefix(block, "### Tópico 000\n") {
+		t.Fatalf("o prompt deveria mostrar o conteúdo aparado:\n%.200s", block)
+	}
+	parts := omittedParts(t, block)
+	if len(parts) == 0 {
+		t.Fatal("sem partes omitidas")
+	}
+	assertPartsPointIntoFile(t, raw, parts)
 }
 
 // O recorte é função pura do conteúdo: turnos seguidos e um pod novo montam o
@@ -206,6 +243,11 @@ func TestFitMemoryToPromptBudget_SingleHugeLine(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "ação ação") || !strings.Contains(out, "intact on disk") {
 		t.Fatalf("esperava o começo da linha e o marcador:\n%.200s", out)
+	}
+	parts := omittedParts(t, out)
+	body := out[:strings.Index(out, "\n\n[")]
+	if len(parts) != 1 || parts[0].offset != len(body) || parts[0].line != 1 {
+		t.Fatalf("a continuação deveria apontar o byte %d da linha 1: %+v", len(body), parts)
 	}
 }
 

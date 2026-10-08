@@ -966,7 +966,7 @@ func (cb *ContextBuilder) appendOverlay(sb *strings.Builder, label, name string)
 	if err != nil || len(strings.TrimSpace(string(data))) == 0 {
 		return
 	}
-	content := capMemoryForPrompt(strings.TrimSpace(string(data)), file, absPath)
+	content := capMemoryForPrompt(string(data), file, absPath)
 	fmt.Fprintf(sb, "## %s\n\n%s\n\n", label, content)
 }
 
