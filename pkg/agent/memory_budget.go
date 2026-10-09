@@ -123,8 +123,8 @@ type trimmedLines struct {
 	lines   []string
 	starts  []int // byte de cada linha dentro de content; starts[len(lines)] = len(content)+1
 	origin  filePos
-	code    []bool   // a linha é de bloco de código cercado (as cercas incluídas)
-	open    []string // a cerca aberta depois da linha, "" fora de bloco
+	code    []bool   // a linha é de bloco de código cercado, para achar títulos
+	open    []string // a cerca aberta depois da linha, para fechar o corpo mostrado
 }
 
 func splitTrimmed(raw string) trimmedLines {
@@ -364,9 +364,14 @@ func fenceKind(c byte) int {
 
 // markCode marca as linhas de bloco de código cercado e a cerca aberta depois
 // de cada uma. Fecha com o mesmo caractere e pelo menos o mesmo comprimento da
-// abertura. Uma cerca que nunca fecha não abre bloco: no CommonMark ela iria até
-// o fim do arquivo, mas numa memória é uma escrita cortada no meio, e engoliria
-// da lista todas as seções gravadas depois dela.
+// abertura.
+//
+// São duas leituras. Para achar títulos, uma cerca que nunca fecha não abre
+// bloco: no CommonMark ela iria até o fim do arquivo, mas numa memória é uma
+// escrita cortada no meio e engoliria da lista todas as seções gravadas depois
+// dela. Já open é a leitura do CommonMark, sem olhar adiante: é como o modelo
+// lê o corpo mostrado, então uma cerca aberta ali é fechada antes do marcador
+// mesmo que nunca feche no arquivo.
 func markCode(lines []string) (code []bool, open []string) {
 	// longest[i] é a maior cerca de fechamento de cada caractere da linha i em
 	// diante: diz, sem varrer de novo, se uma abertura vai fechar.
@@ -379,17 +384,23 @@ func markCode(lines []string) (code []bool, open []string) {
 	}
 	code = make([]bool, len(lines))
 	open = make([]string, len(lines))
-	fence := ""
+	fence, read := "", ""
 	for i, ln := range lines {
+		c, n := closingFence(ln)
 		if fence != "" {
 			code[i] = true
-			if c, n := closingFence(ln); c == fence[0] && n >= len(fence) {
+			if c == fence[0] && n >= len(fence) {
 				fence = ""
 			}
 		} else if f := fenceOf(ln); f != "" && longest[i+1][fenceKind(f[0])] >= len(f) {
 			fence, code[i] = f, true
 		}
-		open[i] = fence
+		if read == "" {
+			read = fenceOf(ln)
+		} else if c == read[0] && n >= len(read) {
+			read = ""
+		}
+		open[i] = read
 	}
 	return code, open
 }

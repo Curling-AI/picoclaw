@@ -687,13 +687,14 @@ func TestMarkCode(t *testing.T) {
 	cases := []struct {
 		lines []string
 		code  string // um caractere por linha: c = bloco, . = fora
+		open  string // cerca aberta no fim, na leitura do CommonMark
 	}{
-		{[]string{"```sql", "a", "```go", "### dentro", "```", "### fora"}, "ccccc."},
-		{[]string{"~~~", "```", "### dentro", "~~~", "### fora"}, "cccc."},
-		{[]string{"````", "```", "### dentro", "````", "x"}, "cccc."},
-		{[]string{"### A", "```sql", "x", "### B"}, "...."},
-		{[]string{"```select 1``` inline", "### B", "```"}, "..."},
-		{[]string{"~~~ `x`", "### dentro", "~~~"}, "ccc"},
+		{[]string{"```sql", "a", "```go", "### dentro", "```", "### fora"}, "ccccc.", ""},
+		{[]string{"~~~", "```", "### dentro", "~~~", "### fora"}, "cccc.", ""},
+		{[]string{"````", "```", "### dentro", "````", "x"}, "cccc.", ""},
+		{[]string{"### A", "```sql", "x", "### B"}, "....", "```"},
+		{[]string{"```select 1``` inline", "### B", "```"}, "...", "```"},
+		{[]string{"~~~ `x`", "### dentro", "~~~"}, "ccc", ""},
 	}
 	for _, tc := range cases {
 		code, open := markCode(tc.lines)
@@ -704,8 +705,8 @@ func TestMarkCode(t *testing.T) {
 		if string(got) != tc.code {
 			t.Errorf("%q: %s, esperava %s", tc.lines, got, tc.code)
 		}
-		if open[len(open)-1] != "" && tc.code[len(tc.code)-1] != 'c' {
-			t.Errorf("%q: cerca aberta no fim", tc.lines)
+		if open[len(open)-1] != tc.open {
+			t.Errorf("%q: cerca aberta no fim %q, esperava %q", tc.lines, open[len(open)-1], tc.open)
 		}
 	}
 }
@@ -739,5 +740,16 @@ func TestFitMemory_MarkerAloneOverBudgetTerminates(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("recorte não terminou com o marcador acima do teto")
+	}
+}
+
+// A cerca que nunca fecha não esconde títulos, mas no corpo mostrado ela abre
+// um bloco: é fechada antes do marcador, senão o marcador vira código.
+func TestFitMemory_ClosesFenceThatNeverClosesBeforeMarker(t *testing.T) {
+	raw := "### Notas\n```sql\n" + strings.Repeat("select 1 from tabela_grande;\n", 5000)
+	out := fitMemoryToPromptBudget(raw, learnedOverlayFile("USER.md"))
+	marker := strings.Index(out, "\n\n[")
+	if marker < 0 || !strings.HasSuffix(out[:marker], "\n```") {
+		t.Fatalf("o bloco aberto deveria ser fechado antes do marcador: %q", out[max(0, marker-40):max(0, marker)])
 	}
 }
