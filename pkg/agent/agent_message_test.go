@@ -812,7 +812,8 @@ func TestDeliverToConversation_ReportsAFailedWrite(t *testing.T) {
 	agent := al.registry.GetDefaultAgent()
 	agent.Sessions = failingAppendStore{sessions}
 
-	deferred, err := al.deliverToConversation(agent, conversationSession, backgroundNote(spawnResultMessage(conversationSession)))
+	note := backgroundNote(spawnResultMessage(conversationSession))
+	deferred, err := al.deliverToConversation(agent, conversationSession, note)
 
 	if deferred || err == nil {
 		t.Fatalf("deferred=%v err=%v, want the failed write reported", deferred, err)

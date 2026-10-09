@@ -570,7 +570,8 @@ func TestJSONLBackend_AppendMessageReportsAFailedWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	if err := session.NewJSONLBackend(store).AppendMessage("s1", providers.Message{Role: "user", Content: "ok"}); err != nil {
+	ok := providers.Message{Role: "user", Content: "ok"}
+	if err := session.NewJSONLBackend(store).AppendMessage("s1", ok); err != nil {
 		t.Fatalf("append on a working store: %v", err)
 	}
 
