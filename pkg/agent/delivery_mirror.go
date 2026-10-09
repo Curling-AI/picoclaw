@@ -148,7 +148,10 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 		return
 	}
 
-	deferred := al.deliverToConversation(agent, target, providers.Message{Role: "assistant", Content: text})
+	deferred, err := al.deliverToConversation(agent, target, providers.Message{Role: "assistant", Content: text})
+	if err != nil {
+		return // writeMirrored logged it
+	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
 		"chat_id":        chatID,
@@ -187,15 +190,19 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	}
 	delete(al.mirror.pending, sessionKey)
 	al.mirror.mu.Unlock()
-	al.writeMirrored(agent, sessionKey, pending)
+	_ = al.writeMirrored(agent, sessionKey, pending) // logged there
 }
 
 // deliverToConversation writes msg into the session's history now, after
 // whatever was still waiting for a flush, or queues it when a turn holds the
-// session (true = deferred). It is the one place that takes the stripe and then
-// mu: registerActiveTurn holds the same stripe, so a write either sees the turn
-// or lands before it starts.
-func (al *AgentLoop) deliverToConversation(agent *AgentInstance, sessionKey string, msg providers.Message) bool {
+// session (deferred). err is a write that failed now (already logged). It is
+// the one place that takes the stripe and then mu: registerActiveTurn holds the
+// same stripe, so a write either sees the turn or lands before it starts.
+func (al *AgentLoop) deliverToConversation(
+	agent *AgentInstance,
+	sessionKey string,
+	msg providers.Message,
+) (deferred bool, err error) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
 	defer stripe.Unlock()
@@ -203,15 +210,14 @@ func (al *AgentLoop) deliverToConversation(agent *AgentInstance, sessionKey stri
 	if al.mirrorBusyLocked(sessionKey) {
 		al.queueMirroredLocked(sessionKey, msg)
 		al.mirror.mu.Unlock()
-		return true
+		return true, nil
 	}
 	// Uma entrega que ainda espera o flush (o turno acabou de liberar a sessão)
 	// vai antes desta, para a conversa manter a ordem de envio.
 	batch := append(al.mirror.pending[sessionKey], msg)
 	delete(al.mirror.pending, sessionKey)
 	al.mirror.mu.Unlock()
-	al.writeMirrored(agent, sessionKey, batch)
-	return false
+	return false, al.writeMirrored(agent, sessionKey, batch)
 }
 
 // dropMirroredDeliveries discards what waits for the session's turn to end:
@@ -252,10 +258,19 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 }
 
 // writeMirrored grava como um turno grava: o store e o context manager (o
-// seahorse monta o prompt da própria base, não do store).
-func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) {
-	for _, msg := range msgs {
-		agent.Sessions.AddFullMessage(sessionKey, msg)
+// seahorse monta o prompt da própria base, não do store). Devolve, já logado,
+// o erro de uma escrita que não chegou ao store: o que está aqui pode ser a
+// única cópia (resultado de subagente numa conversa web, nota de um /stop).
+func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
+	for i, msg := range msgs {
+		if err := appendToSession(agent.Sessions, sessionKey, msg); err != nil {
+			logger.ErrorCF("agent", "Could not write into the conversation", map[string]any{
+				"session_key": sessionKey,
+				"lost":        len(msgs) - i,
+				"error":       err.Error(),
+			})
+			return err
+		}
 		if al.contextManager == nil {
 			continue
 		}
@@ -275,7 +290,19 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 			"session_key": sessionKey,
 			"error":       err.Error(),
 		})
+		return err
 	}
+	return nil
+}
+
+// appendToSession appends msg and reports a failed write when the store can
+// tell (session.CheckedAppender); other stores only report it on Save.
+func appendToSession(store session.SessionStore, sessionKey string, msg providers.Message) error {
+	if checked, ok := store.(session.CheckedAppender); ok {
+		return checked.AppendMessage(sessionKey, msg)
+	}
+	store.AddFullMessage(sessionKey, msg)
+	return nil
 }
 
 // synthesizedResponse reconhece os textos que o coordenador põe no lugar de uma

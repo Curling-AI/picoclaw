@@ -347,12 +347,16 @@ func (al *AgentLoop) processSystemMessage(
 		}
 	}
 
-	return al.runAgentLoop(ctx, agent, processOptions{
+	opts := processOptions{
 		Dispatch:        dispatch,
 		DefaultResponse: "Background task completed.",
 		EnableSummary:   false,
 		SendResponse:    true,
-	})
+	}
+	if namesSession {
+		opts.BackgroundResult = &msg
+	}
+	return al.runAgentLoop(ctx, agent, opts)
 }
 
 // parseSystemOrigin splits a system message's chat id ("channel:chat_id") into

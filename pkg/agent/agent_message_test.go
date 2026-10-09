@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -405,6 +407,20 @@ func TestRun_ChatResultForAnIdleConversationRunsATurnThere(t *testing.T) {
 	if provider.count() != 1 {
 		t.Fatalf("model calls = %d, want one turn", provider.count())
 	}
+	// nickgs1337 on #112: the result's turn answers once, in its chat.
+	var replies []bus.OutboundMessage
+	deadline := time.After(300 * time.Millisecond)
+	for collecting := true; collecting; {
+		select {
+		case out := <-msgBus.OutboundChan():
+			replies = append(replies, out)
+		case <-deadline:
+			collecting = false
+		}
+	}
+	if len(replies) != 1 || replies[0].ChatID != "123" {
+		t.Fatalf("replies = %+v, want exactly one, in the chat", replies)
+	}
 }
 
 // A conversation cleared or deleted while the work ran is not recreated with
@@ -507,24 +523,39 @@ func TestTurnState_OriginSessionKeyIsTheRootTurns(t *testing.T) {
 // wrote it into the cleared conversation, so the next turn read the old task.
 func TestClear_DropsResultsWaitingForTheTurn(t *testing.T) {
 	provider := &countingReplyProvider{}
-	al, _, sessions := newSystemMessageTestLoop(t, provider)
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
 	al.mirror.mu.Lock()
 	al.queueMirroredLocked(conversationSession, providers.Message{
 		Role:    "user",
 		Content: "[System: async:spawn] Task 'importação' completed.",
 	})
 	al.mirror.mu.Unlock()
+	// nickgs1337 on #112: and a result really parked behind the live turn.
+	parked := spawnResultMessage(conversationSession)
+	parked.Context.ChatID, parked.ChatID = "telegram:123", "telegram:123"
+	parked.Content = "Task 'exportação' completed."
+	if !al.routeBackgroundResult(parked) {
+		t.Fatal("the result was not parked")
+	}
 
 	if _, err := al.ProcessDirect(context.Background(), "/clear", conversationSession); err != nil {
 		t.Fatalf("/clear: %v", err)
 	}
-	if n := pendingNotes(al, conversationSession); n != 0 {
-		t.Fatalf("%d deliveries still waiting after /clear", n)
+	if n := pendingNotes(al, conversationSession) + parkedResults(al, conversationSession); n != 0 {
+		t.Fatalf("%d results still waiting after /clear", n)
 	}
-	al.flushMirroredDeliveries(conversationSession)
+	al.clearActiveTurn(live)
+
+	time.Sleep(100 * time.Millisecond)
+	if n := len(msgBus.InboundChan()); n != 0 {
+		t.Fatalf("%d old results went back to the loop", n)
+	}
 	for _, m := range sessions.GetHistory(conversationSession) {
-		if strings.Contains(m.Content, "Task 'importação' completed") {
-			t.Fatalf("the old result reached the cleared conversation: %q", m.Content)
+		if strings.Contains(m.Content, "completed") {
+			t.Fatalf("an old result reached the cleared conversation: %q", m.Content)
 		}
 	}
 }
@@ -558,19 +589,7 @@ func TestParkBackgroundResult_AfterTheClaimantEndedIsReleased(t *testing.T) {
 func TestReleaseParkedResults_FullBusWritesTheResultIntoTheConversation(t *testing.T) {
 	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
 	al.SetDeliverySessionResolver(webResolver)
-	previous := releaseTimeout
-	releaseTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { releaseTimeout = previous })
-	for i := 0; ; i++ {
-		filler := spawnResultMessage("sk_v1_other")
-		filler.Content = fmt.Sprintf("filler %d", i)
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		err := msgBus.PublishInbound(ctx, filler)
-		cancel()
-		if err != nil {
-			break // the queue is full
-		}
-	}
+	fillInboundQueue(t, msgBus)
 	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
 	al.registerActiveTurn(live)
 	if !al.routeBackgroundResult(spawnResultMessage(conversationSession)) {
@@ -593,7 +612,8 @@ func TestReleaseParkedResults_FullBusWritesTheResultIntoTheConversation(t *testi
 // Local review: after a /stop the user wants the agent quiet. Results that
 // arrived during the stopped turn, or arrive before it ends, are written for the
 // next turn, never opened as turns of their own. Devin on #112: all of them,
-// more than the mirror queue holds.
+// more than the mirror queue holds. nickgs1337 on #112: through the /stop path,
+// so dropping its call fails this test.
 func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 	provider := &countingReplyProvider{}
 	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
@@ -615,8 +635,10 @@ func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 	}
 	waitFor(t, "the results to wait", func() bool { return parkedResults(al, conversationSession) == results })
 
-	al.parkedResultsToNotes(conversationSession) // what a /stop does to them
-	publish(results)                             // arrives while the stopped turn winds down
+	if result, err := al.stopActiveTurnForSession(conversationSession); err != nil || !result.Stopped {
+		t.Fatalf("stop = %+v, %v", result, err)
+	}
+	publish(results) // arrives while the stopped turn winds down
 	waitFor(t, "the loop to take the late result", func() bool { return len(msgBus.InboundChan()) == 0 })
 	time.Sleep(100 * time.Millisecond) // parked right after it is taken
 	al.clearActiveTurn(live)
@@ -631,5 +653,168 @@ func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 	history := sessions.GetHistory(conversationSession)
 	if first := history[2].Content; !strings.Contains(first, "Task 0 completed") {
 		t.Fatalf("first note = %q, want the oldest result", first)
+	}
+}
+
+// stallingProvider answers the first call only when the turn is stopped, and
+// tells the test the turn is running.
+type stallingProvider struct {
+	started chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *stallingProvider) Chat(
+	ctx context.Context, _ []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.calls.Add(1)
+	select {
+	case p.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *stallingProvider) GetDefaultModel() string { return "mock-model" }
+
+// nickgs1337 on #112: a /stop on the turn a result opened rolled the history
+// back with the result in it, so the subagent's work was in no conversation,
+// and the stop reply quoted the internal envelope as the task name.
+func TestStop_TurnOpenedByAResultKeepsTheResultAsANote(t *testing.T) {
+	provider := &stallingProvider{started: make(chan struct{}, 1)}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	startRunLoop(t, al)
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the result never opened a turn")
+	}
+
+	result, err := al.stopActiveTurnForSession(conversationSession)
+	if err != nil || !result.Stopped {
+		t.Fatalf("stop = %+v, %v", result, err)
+	}
+	if result.TaskName != "" {
+		t.Fatalf("stop reply names the task %q", result.TaskName)
+	}
+
+	waitFor(t, "the result back in the history", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 3 && al.getActiveTurnState(conversationSession) == nil
+	})
+	if got := sessions.GetHistory(conversationSession)[2]; got.Role != "user" ||
+		!strings.HasPrefix(got.Content, "[System: async:spawn] Spawn failed") {
+		t.Fatalf("history ends with %s %q", got.Role, got.Content)
+	}
+	if n := provider.calls.Load(); n != 1 {
+		t.Fatalf("model calls = %d, want the one that was stopped", n)
+	}
+}
+
+// A turn that ends between the stop's cancel and its rollback already restored
+// its own snapshot. The rollback must not then cut what was written into the
+// conversation after the turn (here, a note).
+func TestHardAbort_SparesWhatWasWrittenAfterTheTurnEnded(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	agent := al.registry.GetDefaultAgent()
+	live := &turnState{
+		turnID:               "turn-9",
+		sessionKey:           conversationSession,
+		session:              sessions,
+		initialHistoryLength: 2,
+	}
+	live.turnCancel = func() {
+		al.clearActiveTurn(live)
+		_, _ = al.deliverToConversation(agent, conversationSession, providers.Message{
+			Role:    "user",
+			Content: "[System: async:spawn] Task 'importação' completed.",
+		})
+	}
+	al.registerActiveTurn(live)
+
+	if err := al.HardAbort(conversationSession); err != nil {
+		t.Fatalf("HardAbort: %v", err)
+	}
+
+	if got := len(sessions.GetHistory(conversationSession)); got != 3 {
+		t.Fatalf("history has %d messages, want the note kept", got)
+	}
+}
+
+// fillInboundQueue fills the loop's inbound queue (no loop is running) and
+// shortens the wait for room, so the next publish of a background result fails.
+func fillInboundQueue(t *testing.T, msgBus *bus.MessageBus) {
+	t.Helper()
+	previous := backgroundPublishTimeout
+	backgroundPublishTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { backgroundPublishTimeout = previous })
+	for i := 0; ; i++ {
+		filler := spawnResultMessage("sk_v1_other")
+		filler.Content = fmt.Sprintf("filler %d", i)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		err := msgBus.PublishInbound(ctx, filler)
+		cancel()
+		if err != nil {
+			return // the queue is full
+		}
+	}
+}
+
+// nickgs1337 on #112: the result of a spawn the user stopped must not open a
+// turn, whenever it lands (the stopped turn may be gone by then). It is written
+// for the next turn instead, and nothing goes to the loop.
+func TestDeliverAsyncResult_StoppedWorkIsANoteNotATurn(t *testing.T) {
+	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	msg.Content = "Spawn failed: " + ErrSubTurnParentCanceled.Error()
+
+	al.deliverAsyncResult(msg, fmt.Errorf("spawn: %w", ErrSubTurnParentCanceled))
+
+	if n := len(msgBus.InboundChan()); n != 0 {
+		t.Fatalf("%d messages went to the loop", n)
+	}
+	history := sessions.GetHistory(conversationSession)
+	if len(history) != 3 || !strings.Contains(history[2].Content, "its turn was stopped") {
+		t.Fatalf("history = %+v, want the stopped result as a note", history)
+	}
+}
+
+// nickgs1337 on #112: the first publish of an async result only logged when
+// the queue was full; the result is written into the conversation instead.
+func TestDeliverAsyncResult_FullBusWritesTheResultIntoTheConversation(t *testing.T) {
+	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	fillInboundQueue(t, msgBus)
+
+	al.deliverAsyncResult(spawnResultMessage(conversationSession), nil)
+
+	if got := len(sessions.GetHistory(conversationSession)); got != 3 {
+		t.Fatalf("history has %d messages, want the result written", got)
+	}
+}
+
+// failingAppendStore loses every append and says so, like a full disk.
+type failingAppendStore struct{ session.SessionStore }
+
+func (failingAppendStore) AppendMessage(string, providers.Message) error {
+	return errors.New("no space left on device")
+}
+
+// nickgs1337 on #112: a failed write was logged as "Recorded background result
+// in its conversation". The caller now gets the error.
+func TestDeliverToConversation_ReportsAFailedWrite(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	agent := al.registry.GetDefaultAgent()
+	agent.Sessions = failingAppendStore{sessions}
+
+	deferred, err := al.deliverToConversation(agent, conversationSession, backgroundNote(spawnResultMessage(conversationSession)))
+
+	if deferred || err == nil {
+		t.Fatalf("deferred=%v err=%v, want the failed write reported", deferred, err)
 	}
 }

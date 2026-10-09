@@ -564,6 +564,20 @@ func (r *ToolRegistry) VisibleHiddenNames() []string {
 	return names
 }
 
+// HiddenNames returns, in the given order, the names that are registered
+// hidden (non-core) tools, whatever their TTL.
+func (r *ToolRegistry) HiddenNames(names []string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var hidden []string
+	for _, name := range names {
+		if entry, exists := r.tools[name]; exists && !entry.IsCore {
+			hidden = append(hidden, name)
+		}
+	}
+	return hidden
+}
+
 // ToProviderDefsFor is ToProviderDefs for one turn: the core tools plus exactly
 // the hidden tools in offered, whatever their TTL is at this moment.
 //

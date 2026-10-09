@@ -134,6 +134,9 @@ type processOptions struct {
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
 	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
 	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
+	// BackgroundResult is the async result this turn was opened for. A /stop
+	// rolls the turn back, result included, and writes it back as a note.
+	BackgroundResult *bus.InboundMessage
 }
 
 type continuationTarget struct {

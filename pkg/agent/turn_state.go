@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"strings"
 	"sync"
@@ -1124,9 +1125,5 @@ func (ts *turnState) offerTools(names []string) {
 func (ts *turnState) offeredToolSet() map[string]struct{} {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
-	set := make(map[string]struct{}, len(ts.offeredTools))
-	for name := range ts.offeredTools {
-		set[name] = struct{}{}
-	}
-	return set
+	return maps.Clone(ts.offeredTools)
 }

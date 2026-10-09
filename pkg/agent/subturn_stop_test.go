@@ -90,18 +90,21 @@ func TestSpawnSubTurn_DeadlineNamesTheLimitAndIterations(t *testing.T) {
 	}
 }
 
-func TestSubTurnTimeoutError_StatesTheLimitInMinutes(t *testing.T) {
+func TestTimeLimitSubTurnError_StatesTheLimitInMinutes(t *testing.T) {
 	for _, tc := range []struct {
 		limit time.Duration
 		want  string
 	}{
-		{limit: 5 * time.Minute, want: "5 min limit"},
-		{limit: 20 * time.Minute, want: "20 min limit"},
-		{limit: 90 * time.Second, want: "1m30s limit"},
+		{limit: 5 * time.Minute, want: "time limit (5 min,"},
+		{limit: 20 * time.Minute, want: "time limit (20 min,"},
+		{limit: 90 * time.Second, want: "time limit (1m30s,"},
 	} {
-		err := &subTurnTimeoutError{limit: tc.limit, iterations: 78}
+		err := timeLimitSubTurnError(tc.limit, 78)
 		if got := err.Error(); !strings.Contains(got, tc.want) || !strings.Contains(got, "after 78 iterations") {
 			t.Errorf("limit %v: error %q, want %q and the iteration count", tc.limit, got, tc.want)
+		}
+		if !errors.Is(err, ErrSubTurnTimeout) {
+			t.Errorf("limit %v: %v does not match ErrSubTurnTimeout", tc.limit, err)
 		}
 	}
 }
@@ -273,5 +276,45 @@ func TestSubagentTool_CancelledTurnDoesNotWaitForTheChild(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the canceled turn is still waiting for its subagent")
+	}
+}
+
+// nickgs1337 on #112: a /stop also cancels the async spawns of the stopped
+// turn, and their result read "Spawn failed ... context canceled", like a
+// provider failure.
+func TestSpawnSubTurn_AsyncChildStoppedByAStopSaysSo(t *testing.T) {
+	provider := &stallingToolCallProvider{stallAt: 1, stalled: make(chan struct{})}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+	parent := newStopTestParent(agent)
+	parent.al = al
+	parent.sessionKey = "sk_v1_stopped"
+	al.activeTurnStates.Store(parent.sessionKey, parent)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+			Model:        "test-model",
+			Tools:        []tools.Tool{},
+			SystemPrompt: "background task",
+			Async:        true,
+			Critical:     true,
+			Timeout:      10 * time.Second,
+		})
+		done <- err
+	}()
+	<-provider.stalled
+
+	if err := al.HardAbort(parent.sessionKey); err != nil {
+		t.Fatalf("HardAbort: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSubTurnParentCanceled) {
+			t.Fatalf("err = %v, want ErrSubTurnParentCanceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop did not reach the background child")
 	}
 }

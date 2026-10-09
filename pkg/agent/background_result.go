@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // The result of async work (a spawn) arrives as a system message naming the
@@ -58,12 +60,8 @@ func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *Ag
 // instead would silence every chat it cannot map (Discord, WhatsApp groups).
 func originTakesLateReplies(chatID string) bool {
 	channel, _ := parseSystemOrigin(chatID)
-	return channel != webRunChannel
+	return channel != tools.WebRunChannel
 }
-
-// webRunChannel is the channel the Ethos gateway runs web chats on: one run per
-// message, whose stream ends with the run.
-const webRunChannel = "grpc"
 
 // routeBackgroundResult handles a result whose conversation is busy (parked)
 // or whose chat takes no late reply (written now). false = the caller runs a
@@ -79,7 +77,10 @@ func (al *AgentLoop) routeBackgroundResult(msg bus.InboundMessage) bool {
 	if originTakesLateReplies(msg.ChatID) {
 		return false
 	}
-	deferred := al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
+	deferred, err := al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
+	if err != nil {
+		return true // writeMirrored logged it
+	}
 	logger.InfoCF("agent", "Recorded background result in its conversation", map[string]any{
 		"sender_id":   msg.SenderID,
 		"chat_id":     msg.ChatID,
@@ -173,7 +174,7 @@ func (al *AgentLoop) releaseParkedResults(sessionKey string) {
 	// being lost.
 	go func() {
 		for _, msg := range parked {
-			ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), backgroundPublishTimeout)
 			err := al.bus.PublishInbound(ctx, msg)
 			cancel()
 			if err == nil {
@@ -189,9 +190,28 @@ func (al *AgentLoop) releaseParkedResults(sessionKey string) {
 	}()
 }
 
-// releaseTimeout bounds how long a released result waits for room on the
-// inbound queue before it is written into the conversation instead.
-var releaseTimeout = 30 * time.Second
+// backgroundPublishTimeout bounds how long a background result waits for room
+// on the inbound queue before it is written into the conversation instead.
+var backgroundPublishTimeout = 30 * time.Second
+
+// deliverAsyncResult hands the result of async work (a spawn) to the loop, to
+// be routed like any inbound message. Work the user stopped is written as a
+// note instead: a stop means quiet, and its result may land after the stopped
+// turn is gone, when nothing else keeps it from opening a turn. A result the
+// loop does not take in time is written as a note too, rather than lost.
+func (al *AgentLoop) deliverAsyncResult(msg bus.InboundMessage, workErr error) {
+	if errors.Is(workErr, ErrSubTurnParentCanceled) {
+		al.recordBackgroundNote(msg)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), backgroundPublishTimeout)
+	defer cancel()
+	if err := al.bus.PublishInbound(ctx, msg); err != nil {
+		logger.ErrorCF("agent", "Async result could not reach the loop; writing it into the conversation",
+			map[string]any{"session_key": msg.SessionKey, "sender_id": msg.SenderID, "error": err.Error()})
+		al.recordBackgroundNote(msg)
+	}
+}
 
 // parkedResultsToNotes writes the results parked for a session into the
 // conversation, for its next turn to read, instead of handing them back to the
@@ -238,18 +258,24 @@ func (al *AgentLoop) writeNotesLocked(sessionKey string, results []bus.InboundMe
 	batch := append(al.mirror.pending[sessionKey], notes...)
 	delete(al.mirror.pending, sessionKey)
 	al.mirror.mu.Unlock()
-	al.writeMirrored(agent, sessionKey, batch)
+	_ = al.writeMirrored(agent, sessionKey, batch) // logged there
 }
 
 // recordBackgroundNote writes a result into its conversation for the next turn
-// to read, without a turn of its own.
-func (al *AgentLoop) recordBackgroundNote(msg bus.InboundMessage) bool {
+// to read, without a turn of its own. A result whose conversation is gone (or
+// that names none) is dropped, as processSystemMessage drops it.
+func (al *AgentLoop) recordBackgroundNote(msg bus.InboundMessage) {
 	sessionKey, agent, ok := al.backgroundResultTarget(msg)
 	if !ok {
-		return false
+		logger.WarnCF("agent", "Dropped background result with no conversation to write it into",
+			map[string]any{
+				"sender_id":   msg.SenderID,
+				"session_key": msg.SessionKey,
+				"content_len": len(msg.Content),
+			})
+		return
 	}
-	al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
-	return true
+	_, _ = al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
 }
 
 func backgroundNote(msg bus.InboundMessage) providers.Message {

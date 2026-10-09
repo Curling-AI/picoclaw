@@ -67,7 +67,11 @@ func (al *AgentLoop) stopActiveTurnForSession(sessionKey string) (commands.StopR
 	}
 
 	snap := ts.snapshot()
-	result.TaskName = snap.UserMessage
+	if ts.opts.BackgroundResult == nil {
+		// A result's turn would quote the internal envelope; the generic reply
+		// says enough.
+		result.TaskName = snap.UserMessage
+	}
 
 	if strings.HasPrefix(snap.TurnID, pendingTurnPrefix) {
 		// A pending placeholder means this session is either idle (our own
@@ -86,6 +90,11 @@ func (al *AgentLoop) stopActiveTurnForSession(sessionKey string) (commands.StopR
 		return commands.StopResult{}, err
 	}
 
+	if note := ts.opts.BackgroundResult; note != nil {
+		// The rollback took the result with it. Written back after the cut
+		// (queued while the turn winds down), so the work is not lost.
+		al.recordBackgroundNote(*note)
+	}
 	result.Stopped = true
 	return result, nil
 }

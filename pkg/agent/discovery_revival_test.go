@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -210,5 +211,68 @@ func TestDiscoveredToolNamesFromMessages(t *testing.T) {
 	got := strings.Join(discoveredToolNamesFromMessages(messages), ",")
 	if want := "new_a,shared,old_a"; got != want {
 		t.Errorf("discovered = %s, want %s (newest first, deduped, discovery results only)", got, want)
+	}
+}
+
+// promotedElsewhereProvider is stuckWithoutToolProvider in a session where,
+// right after this turn seeded its tools, another conversation's tool_search
+// promotes the same tool: its TTL is above zero, but the turn does not offer it.
+type promotedElsewhereProvider struct {
+	stuckWithoutToolProvider
+	registry *tools.ToolRegistry
+	once     sync.Once
+}
+
+func (p *promotedElsewhereProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	defs []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.once.Do(func() { p.registry.PromoteTools([]string{p.want}, 5) })
+	return p.stuckWithoutToolProvider.Chat(ctx, messages, defs, model, opts)
+}
+
+// nickgs1337 on #112: the heal only offered what ReviveExpired returned (TTL
+// <= 0), so a tool promoted by another session after this turn seeded was
+// never offered and the retry resent the same tools array.
+func TestAnnounceRetryOffersADiscoveredToolPromotedElsewhere(t *testing.T) {
+	tool := &countingTool{name: sqlToolName}
+	provider := &promotedElsewhereProvider{
+		stuckWithoutToolProvider: stuckWithoutToolProvider{want: sqlToolName, stuckReply: announcedSQLRun},
+	}
+	al := newSessionWithExpiredDiscovery(t, provider, tool)
+	provider.registry = al.registry.GetDefaultAgent().Tools
+
+	if _, err := al.ProcessDirect(context.Background(), "roda", "revival-promoted-elsewhere"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if got := tool.calls.Load(); got != 1 {
+		t.Fatalf("tool ran %d times, want 1 — the retry went out without the tool", got)
+	}
+}
+
+// The cap and the nudge count only what the turn does not offer yet: telling
+// the model an offered tool was missing is false, and it spends the cap.
+func TestReviveDiscoveredTools_NamesOnlyWhatTheTurnLacks(t *testing.T) {
+	al := newSessionWithExpiredDiscovery(t, &countingReplyProvider{}, &countingTool{name: sqlToolName})
+	agent := al.registry.GetDefaultAgent()
+	agent.Tools.RegisterHidden(&countingTool{name: "mcp_nekt_generate_sql"})
+	ts := newTurnState(agent, processOptions{}, turnEventScope{})
+	ts.offerTools([]string{"mcp_nekt_generate_sql"})
+	exec := &turnExecution{messages: agent.Sessions.GetHistory(directSessionKey(al))}
+
+	NewPipeline(al).reviveDiscoveredTools(ts, exec, 1)
+
+	if len(exec.transientTurnMessages) != 1 {
+		t.Fatalf("nudges = %d, want 1", len(exec.transientTurnMessages))
+	}
+	nudge := exec.transientTurnMessages[0].Content
+	if !strings.Contains(nudge, sqlToolName) || strings.Contains(nudge, "mcp_nekt_generate_sql") {
+		t.Fatalf("nudge %q, want only the tool the turn lacked", nudge)
+	}
+	if _, ok := ts.offeredToolSet()[sqlToolName]; !ok {
+		t.Fatal("the lacking tool was not offered")
 	}
 }

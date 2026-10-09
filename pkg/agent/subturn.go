@@ -31,42 +31,17 @@ var (
 	ErrDepthLimitExceeded   = errors.New("sub-turn depth limit exceeded")
 	ErrInvalidSubTurnConfig = errors.New("invalid sub-turn config")
 	ErrConcurrencyTimeout   = errors.New("timeout waiting for concurrency slot")
-	// ErrSubTurnTimeout matches the error of a sub-turn stopped by its own time
-	// limit (see subTurnTimeoutError).
-	ErrSubTurnTimeout = errors.New("sub-turn time limit exceeded")
-	// ErrSubTurnParentCanceled is the error of a synchronous sub-turn stopped
-	// because the turn waiting on it was stopped. It stays in the history, so it
-	// tells the model not to pick the task up again on its own.
+	// ErrSubTurnTimeout starts the error of a sub-turn stopped by its own time
+	// limit (see deadlineSubTurnError).
+	ErrSubTurnTimeout = errors.New("subagent stopped by its time limit")
+	// ErrSubTurnParentCanceled is the error of a sub-turn stopped because the
+	// turn that launched it was: a synchronous one with its caller, an async
+	// one by a /stop. It stays in the history, so it tells the model not to
+	// pick the task up again on its own.
 	ErrSubTurnParentCanceled = errors.New(
 		"subagent stopped before finishing because its turn was stopped; " +
 			"do not relaunch it unless the user asks again")
 )
-
-// subTurnTimeoutError is what the caller reads when the sub-turn's own deadline
-// stopped it. The deadline usually cuts a model call in flight, and that error
-// ("LLM call failed after retries: context deadline exceeded") reads as a
-// provider failure: models retried the same task unchanged and hit the same
-// limit again.
-type subTurnTimeoutError struct {
-	limit      time.Duration
-	iterations int
-}
-
-func (e *subTurnTimeoutError) Error() string {
-	iterations := fmt.Sprintf("%d iterations", e.iterations)
-	if e.iterations == 1 {
-		iterations = "1 iteration"
-	}
-	return fmt.Sprintf("subagent exceeded its %s limit after %s and was stopped before finishing "+
-		"(a time limit, not a model or provider failure). Changes it already made stay in place. "+
-		"Do not relaunch the same task unchanged, it will hit the same limit: split it into smaller "+
-		"tasks and delegate them one at a time, or do the remaining part yourself",
-		formatSubTurnLimit(e.limit), iterations)
-}
-
-func (e *subTurnTimeoutError) Is(target error) bool {
-	return target == ErrSubTurnTimeout
-}
 
 func formatSubTurnLimit(limit time.Duration) string {
 	if limit >= time.Minute && limit%time.Minute == 0 {
@@ -552,9 +527,31 @@ func spawnSubTurn(
 		)
 	}()
 
+	// What the child left running in the background. A child that dies
+	// (deadline, stop, error, panic) or is hard-aborted, which ends with no
+	// error, leaves nobody to poll or stop it: in prod a script kept writing to
+	// the user's app long after the agent that launched it was gone. A child
+	// that finished may have handed its processes over in its answer: they
+	// pass to the turn that launched it, so that turn's own failure stops them.
+	childFinished := false
+	defer func() {
+		if childFinished {
+			tools.HandOverBackgroundSessions(childID, parentTS.sessionKey)
+			return
+		}
+		if killed := tools.KillBackgroundSessions(childID); len(killed) > 0 {
+			logger.WarnCF("subturn", "Stopped background processes of a failed sub-turn", map[string]any{
+				"child_id":  childID,
+				"parent_id": parentTS.turnID,
+				"sessions":  killed,
+			})
+		}
+	}()
+
 	// 8. Execute sub-turn via the real agent loop.
 	pipeline := NewPipeline(al)
 	turnRes, turnErr := al.runTurn(childCtx, childTS, pipeline)
+	childFinished = turnErr == nil && turnRes.status != TurnEndStatusAborted
 
 	// Release the concurrency semaphore immediately after runTurn completes,
 	// before the cleanup defer runs. This prevents a deadlock where:
@@ -567,24 +564,9 @@ func spawnSubTurn(
 		semAcquired = false // prevent the defer from double-releasing
 	}
 
-	// A child that dies (deadline, stop, error) or is hard-aborted, which ends
-	// with no error, leaves nobody to poll or stop what it started in the
-	// background: in prod a script kept writing to the user's app long after the
-	// agent that launched it was gone. A child that finished keeps its
-	// processes; it may have handed them over in its answer.
-	if turnErr != nil || turnRes.status == TurnEndStatusAborted {
-		if killed := tools.KillBackgroundSessions(childID); len(killed) > 0 {
-			logger.WarnCF("subturn", "Stopped background processes of a failed sub-turn", map[string]any{
-				"child_id":  childID,
-				"parent_id": parentTS.turnID,
-				"sessions":  killed,
-			})
-		}
-	}
-
 	// Convert turnResult to tools.ToolResult
 	if turnErr != nil {
-		if !cfg.Async && ctx.Err() != nil {
+		if stoppedWithItsTurn(ctx, cfg, childTS) {
 			turnErr = parentStoppedSubTurnError(turnErr, childTS)
 		} else {
 			turnErr = deadlineSubTurnError(turnErr, childTS, timeout)
@@ -608,6 +590,25 @@ func spawnSubTurn(
 // stopped, which otherwise surfaces as whatever call was in flight. The
 // original goes to the log.
 
+// stoppedWithItsTurn reports whether the sub-turn ended because the turn that
+// launched it was stopped: a synchronous one when its caller's context ends, an
+// async one (which outlives its caller by design) only when a hard abort up the
+// chain canceled it.
+func stoppedWithItsTurn(callerCtx context.Context, cfg SubTurnConfig, child *turnState) bool {
+	if !cfg.Async {
+		return callerCtx.Err() != nil
+	}
+	if !errors.Is(child.ctx.Err(), context.Canceled) {
+		return false
+	}
+	for ts := child.parentTurnState; ts != nil; ts = ts.parentTurnState {
+		if ts.hardAbortRequested() {
+			return true
+		}
+	}
+	return false
+}
+
 func parentStoppedSubTurnError(turnErr error, child *turnState) error {
 	logger.InfoCF("subturn", "SubTurn stopped with its parent turn", map[string]any{
 		"child_id":   child.turnID,
@@ -630,7 +631,23 @@ func deadlineSubTurnError(turnErr error, child *turnState, limit time.Duration) 
 		"iterations": iterations,
 		"error":      turnErr.Error(),
 	})
-	return &subTurnTimeoutError{limit: limit, iterations: iterations}
+	return timeLimitSubTurnError(limit, iterations)
+}
+
+// timeLimitSubTurnError is what the caller reads when the sub-turn's own
+// deadline stopped it. The deadline usually cuts a model call in flight, and
+// that error ("LLM call failed after retries: context deadline exceeded") reads
+// as a provider failure: models retried the same task unchanged and hit the
+// same limit again.
+func timeLimitSubTurnError(limit time.Duration, iterations int) error {
+	ran := fmt.Sprintf("%d iterations", iterations)
+	if iterations == 1 {
+		ran = "1 iteration"
+	}
+	return fmt.Errorf("%w (%s, after %s), not a model or provider failure. Changes it already made "+
+		"stay in place. Do not relaunch the same task unchanged, it will hit the same limit: split it "+
+		"into smaller tasks and delegate them one at a time, or do the remaining part yourself",
+		ErrSubTurnTimeout, formatSubTurnLimit(limit), ran)
 }
 
 // ====================== Result Delivery ======================

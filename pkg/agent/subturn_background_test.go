@@ -209,3 +209,78 @@ func TestSpawnSubTurn_AbortedChildStopsItsBackgroundProcesses(t *testing.T) {
 
 	waitBackgroundJobStopped(t, execTool, abortedMarker)
 }
+
+const panickedMarker = "sleep 30 # mst277-panicked"
+
+// backgroundThenPanicProvider starts a background job and then panics, like a
+// bug in the turn loop.
+type backgroundThenPanicProvider struct {
+	calls atomic.Int32
+}
+
+func (p *backgroundThenPanicProvider) Chat(
+	context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
+) (*providers.LLMResponse, error) {
+	if p.calls.Add(1) == 1 {
+		return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
+			ID:        "bg",
+			Type:      "function",
+			Name:      "exec",
+			Arguments: map[string]any{"action": "run", "command": panickedMarker, "background": "true"},
+		}}}, nil
+	}
+	panic("turn loop bug")
+}
+
+func (p *backgroundThenPanicProvider) GetDefaultModel() string { return "mock-model" }
+
+// nickgs1337 on #112: a panic in the child's turn skipped the cleanup.
+func TestSpawnSubTurn_PanickedChildStopsItsBackgroundProcesses(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenPanicProvider{})
+	defer cleanup()
+	execTool, err := tools.NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("NewExecTool: %v", err)
+	}
+	agent.Tools.Register(execTool)
+
+	_, _ = spawnSubTurn(context.Background(), al, newStopTestParent(agent), SubTurnConfig{
+		Model:        "test-model",
+		Tools:        []tools.Tool{},
+		SystemPrompt: "suba o servidor",
+		Timeout:      5 * time.Second,
+	})
+
+	waitBackgroundJobStopped(t, execTool, panickedMarker)
+}
+
+const grandchildMarker = "sleep 30 # mst277-handed-to-parent"
+
+// nickgs1337 on #112: what a finished child handed over was matched to nobody
+// when the turn above it died. It now belongs to the turn that launched the
+// child.
+func TestSpawnSubTurn_FinishedChildHandsItsProcessesToTheParent(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenAnswerProvider{command: grandchildMarker})
+	defer cleanup()
+	execTool, err := tools.NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("NewExecTool: %v", err)
+	}
+	agent.Tools.Register(execTool)
+	parent := newStopTestParent(agent)
+	parent.sessionKey = "subturn-parent"
+
+	if _, err = spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+		Model:        "test-model",
+		Tools:        []tools.Tool{},
+		SystemPrompt: "suba o servidor",
+		Timeout:      5 * time.Second,
+	}); err != nil {
+		t.Fatalf("spawnSubTurn: %v", err)
+	}
+
+	if killed := tools.KillBackgroundSessions(parent.sessionKey); len(killed) != 1 {
+		t.Fatalf("the parent's failure stopped %v, want the job its child handed over", killed)
+	}
+	waitBackgroundJobStopped(t, execTool, grandchildMarker)
+}

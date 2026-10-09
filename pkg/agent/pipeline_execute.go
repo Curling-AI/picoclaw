@@ -560,9 +560,7 @@ toolLoop:
 					ContentLen: len(content),
 				},
 			)
-			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer pubCancel()
-			if err := al.bus.PublishInbound(pubCtx, bus.InboundMessage{
+			al.deliverAsyncResult(bus.InboundMessage{
 				Context: bus.InboundContext{
 					Channel:  "system",
 					ChatID:   fmt.Sprintf("%s:%s", ts.channel, ts.chatID),
@@ -571,15 +569,7 @@ toolLoop:
 				},
 				Content:    content,
 				SessionKey: ts.originSessionKey(),
-			}); err != nil {
-				logger.ErrorCF("agent", "Async tool result was lost: publishing it failed",
-					map[string]any{
-						"tool":        asyncToolName,
-						"channel":     ts.channel,
-						"session_key": ts.originSessionKey(),
-						"error":       err.Error(),
-					})
-			}
+			}, result.Err)
 		}
 
 		toolStart := time.Now()
