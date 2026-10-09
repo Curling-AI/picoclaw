@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2272,5 +2273,74 @@ func TestSerializeMessages_StripsSystemParts(t *testing.T) {
 	raw := string(data)
 	if strings.Contains(raw, "system_parts") {
 		t.Fatal("system_parts should not appear in serialized output")
+	}
+}
+
+// Subagents call without streaming; a GLM call written as text there used to
+// reach the agent loop as the answer.
+func TestProviderChat_NonStreamingLiftsGLMCallFromText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"content": "<tool_call>mcp_skip_skip_file_list\n<arg_key>projectId</arg_key>\n" +
+						"<arg_value>65025</arg_value>\n</tool_call>",
+				},
+				"finish_reason": "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "zai/glm-5.3-flash", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Name != "mcp_skip_skip_file_list" {
+		t.Fatalf("ToolCalls = %#v, want the GLM call", out.ToolCalls)
+	}
+	if out.ToolCalls[0].Arguments["projectId"] != float64(65025) {
+		t.Errorf("projectId = %#v", out.ToolCalls[0].Arguments["projectId"])
+	}
+	if out.Content != "" {
+		t.Errorf("Content = %q, want the markup stripped", out.Content)
+	}
+}
+
+func TestProviderChat_RepairsGLMMarkupInsideArguments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		args, _ := json.Marshal(map[string]any{
+			"action": "add_section<arg_key>section</arg_key><arg_value>Notas</arg_value>" +
+				"<arg_key>content</arg_key><arg_value>texto",
+		})
+		resp := map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{
+					"content": "",
+					"tool_calls": []map[string]any{{
+						"id":       "call_1",
+						"type":     "function",
+						"function": map[string]any{"name": "memory", "arguments": string(args)},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "zai/glm-5.3-flash", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	want := map[string]any{"action": "add_section", "section": "Notas", "content": "texto"}
+	if len(out.ToolCalls) != 1 || !reflect.DeepEqual(out.ToolCalls[0].Arguments, want) {
+		t.Fatalf("ToolCalls = %#v, want args %#v", out.ToolCalls, want)
 	}
 }

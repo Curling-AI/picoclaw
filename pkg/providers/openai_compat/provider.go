@@ -517,7 +517,35 @@ func (p *Provider) Chat(
 		return nil, err
 	}
 	out.ProviderRequestID = resp.Header.Get(requestIDHeader)
+	// Same rescue the streaming path does inline: subagents call without
+	// streaming, and their GLM calls written as text used to reach the loop as
+	// a plain answer.
+	if len(out.ToolCalls) == 0 && out.Content != "" {
+		if extracted := protocoltypes.ExtractToolCallsFromText(out.Content); len(extracted) > 0 {
+			out.ToolCalls = extracted
+			out.Content = protocoltypes.StripToolCallsFromText(out.Content)
+		}
+	}
+	repairToolCallMarkup(out.ToolCalls, out.UpstreamID, out.ResolvedProvider)
 	return out, nil
+}
+
+// repairToolCallMarkup fixes, in place, structured tool calls that came back
+// with GLM argument markup inside them, and logs which tools needed it. The
+// log never carries argument values: they are user content.
+func repairToolCallMarkup(calls []ToolCall, upstreamID, resolvedProvider string) {
+	if protocoltypes.RepairToolCallMarkup(calls) == 0 {
+		return
+	}
+	names := make([]string, 0, len(calls))
+	for _, tc := range calls {
+		names = append(names, tc.Name)
+	}
+	logger.WarnCF("openai_compat", "Repaired GLM argument markup inside tool calls", map[string]any{
+		"tools":             names,
+		"upstream_id":       upstreamID,
+		"resolved_provider": resolvedProvider,
+	})
 }
 
 // ChatStream implements streaming via OpenAI-compatible SSE (stream: true).
@@ -924,6 +952,8 @@ func parseStreamResponse(
 			}
 		}
 	}
+
+	repairToolCallMarkup(toolCalls, upstreamID, resolvedProvider)
 
 	// Raw frames are the only way to tell reasoning-only from a dropped final
 	// chunk or broken framing after the fact.

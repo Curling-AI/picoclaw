@@ -11,20 +11,25 @@ import (
 var xmlToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
 
 // ExtractToolCallsFromText parses tool calls embedded in response text.
-// It supports four formats:
+// It supports five formats:
 //  1. JSON wrapper: {"tool_calls": [{"id":"…","type":"function","function":{…}}]}
 //  2. XML tag:      <tool_call>{"name":"…","arguments":{…}}</tool_call>
-//  3. Pseudo-XML:   <function=NAME><parameter=KEY>VALUE</parameter></function>
-//  4. Bare JSON:    {"name":"…","arguments":{…}}
+//  3. GLM:          <tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value></tool_call>
+//  4. Pseudo-XML:   <function=NAME><parameter=KEY>VALUE</parameter></function>
+//  5. Bare JSON:    {"name":"…","arguments":{…}}
 //
-// Pseudo-XML is tried BEFORE bare JSON: its argument values are arbitrary text
-// (patches, code) that can contain a {"name":…,"arguments":…} object, and the
-// bare scanner would happily lift that inner object out as the call.
+// The markup formats are tried BEFORE bare JSON: their argument values are
+// arbitrary text (patches, code) that can contain a {"name":…,"arguments":…}
+// object, and the bare scanner would happily lift that inner object out as the
+// call.
 func ExtractToolCallsFromText(text string) []ToolCall {
 	if calls := extractJSONWrapper(text); len(calls) > 0 {
 		return calls
 	}
 	if calls := extractXMLToolCalls(text); len(calls) > 0 {
+		return calls
+	}
+	if calls := extractGLMToolCalls(text); len(calls) > 0 {
 		return calls
 	}
 	if calls := extractPseudoXMLToolCalls(text); len(calls) > 0 {
@@ -37,6 +42,7 @@ func ExtractToolCallsFromText(text string) []ToolCall {
 func StripToolCallsFromText(text string) string {
 	text = stripJSONWrapper(text)
 	text = xmlToolCallRe.ReplaceAllString(text, "")
+	text = glmToolCallRe.ReplaceAllString(text, "")
 	text = pseudoXMLFunctionRe.ReplaceAllString(text, "")
 	// The wrapper survives its own body: the function element is what carries
 	// the call, and a lone <tool_call>/</tool_call> left behind reads as markup
@@ -326,25 +332,32 @@ func decodePseudoXMLValue(raw string) any {
 	return v
 }
 
-// truncatedToolCallSuffixes are the closing tags a pseudo-XML tool call ends
-// with. Nothing else in prose ends this way.
-var truncatedToolCallSuffixes = []string{"</tool_call>", "</function>", "</parameter>"}
+// truncatedToolCallSuffixes are the closing tags a tool call written as markup
+// ends with (pseudo-XML and GLM). Nothing else in prose ends this way.
+var truncatedToolCallSuffixes = []string{"</tool_call>", "</function>", "</parameter>", glmArgValueClose, glmArgKeyClose}
 
-// LooksLikeTruncatedToolCall reports whether text is the TAIL of a pseudo-XML
-// tool call whose opening tags never reached us — the shape a gateway leaves
-// behind when its own tool parser starts matching `<tool_call><function=…>` and
-// then bails, forwarding the remainder as ordinary text.
+// truncatedToolCallPrefixes are the tags a reply can only START with when it is
+// the rest of a tool call whose head the gateway consumed. Prose that discusses
+// this markup does not open with a bare tag.
+var truncatedToolCallPrefixes = []string{"<tool_call>", "<function=", "<parameter=", glmArgKeyOpen, glmArgValueOpen}
+
+// LooksLikeTruncatedToolCall reports whether text is a piece of a tool call
+// written as markup that could not be turned into a call: the TAIL of one whose
+// opening tags never reached us (a gateway parser matched `<tool_call>…`, bailed
+// and forwarded the remainder), a reply that IS the rest of such a call (it
+// opens with a bare `<arg_value>`), or a GLM call cut off inside a value.
 //
 // Callers must treat such text as a FAILED tool call, never as an answer: with
-// the `<function=NAME>` tag gone the call cannot be reconstructed (there is no
-// name), and there is no way to tell where the model's prose ended and the call
-// began — so any prefix kept would be a guess.
+// the tool name gone the call cannot be reconstructed, and there is no way to
+// tell where the model's prose ended and the call began — so any prefix kept
+// would be a guess.
 //
-// The test is deliberately anchored at the END of the message. Requiring only
-// that a closing tag appear somewhere would fire on an assistant legitimately
-// explaining this markup, which happens the moment anyone debugs it.
+// The test is deliberately anchored at the START or END of the message.
+// Requiring only that a tag appear somewhere would fire on an assistant
+// legitimately explaining this markup, which happens the moment anyone debugs
+// it.
 func LooksLikeTruncatedToolCall(text string) bool {
-	trimmed := strings.TrimRight(text, " \t\r\n")
+	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return false
 	}
@@ -353,13 +366,30 @@ func LooksLikeTruncatedToolCall(text string) bool {
 			return true
 		}
 	}
-	return false
+	for _, prefix := range truncatedToolCallPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return endsInsideGLMArgValue(trimmed)
+}
+
+// endsInsideGLMArgValue reports whether text stops in the middle of a GLM
+// argument value: its last <arg_value> follows an </arg_key> and is never
+// closed. That is a call cut off mid-emission ("…</arg_key>\n<arg_value>src/App"),
+// not an explanation of the format, which would show both tags.
+func endsInsideGLMArgValue(text string) bool {
+	open := strings.LastIndex(text, glmArgValueOpen)
+	if open < 0 || strings.LastIndex(text, glmArgValueClose) > open {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSpace(text[:open]), glmArgKeyClose)
 }
 
 // toolCallMarkupMarkers are the opening tokens of a tool call written as text.
 // Only OPENING ones: they are what a stream can recognize before the block is
 // complete, which is the whole point of catching this mid-stream.
-var toolCallMarkupMarkers = []string{"<tool_call>", "<function=", "<parameter="}
+var toolCallMarkupMarkers = []string{"<tool_call>", "<function=", "<parameter=", glmArgKeyOpen, glmArgValueOpen}
 
 // LooksLikeToolCallMarkup reports whether accumulated streamed text has turned
 // into a tool call written as markup — the signal to stop publishing it live.
