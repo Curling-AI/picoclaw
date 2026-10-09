@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -63,6 +64,9 @@ type deliveryMirror struct {
 	// estacionado, e o que estacionar até o turno acabar, vira nota quando ele
 	// acaba, em vez de voltar ao bus.
 	quiet map[string]bool
+	// cleared guarda quando cada sessão passou por /clear: o resultado de um
+	// trabalho lançado antes disso é da conversa apagada, não da nova.
+	cleared map[string]time.Time
 	// turns conta os turnos vivos por sessão. O activeTurnStates guarda um só
 	// por chave, e no webhook dois turnos da mesma sessão correm juntos (uma
 	// goroutine por requisição, sem reserva): o segundo sobrescreve o primeiro
@@ -222,7 +226,8 @@ func (al *AgentLoop) deliverToConversation(
 
 // dropMirroredDeliveries discards what waits for the session's turn to end:
 // mirrored deliveries and parked background results. A task launched before
-// /clear ends with no trace in the cleared conversation, on purpose.
+// /clear ends with no trace in the cleared conversation, on purpose; the clear
+// is stamped so its results that arrive later are dropped too (clearedSince).
 func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
@@ -231,11 +236,23 @@ func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
 	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
 	delete(al.mirror.pending, sessionKey)
 	delete(al.mirror.parked, sessionKey)
+	if al.mirror.cleared == nil {
+		al.mirror.cleared = make(map[string]time.Time)
+	}
+	al.mirror.cleared[sessionKey] = time.Now()
 	al.mirror.mu.Unlock()
 	if dropped > 0 {
 		logger.InfoCF("agent", "Dropped deliveries waiting for a turn of a cleared session",
 			map[string]any{"session_key": sessionKey, "dropped": dropped})
 	}
+}
+
+// clearedSince reports whether the session was cleared after t.
+func (al *AgentLoop) clearedSince(sessionKey string, t time.Time) bool {
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	cleared, ok := al.mirror.cleared[sessionKey]
+	return ok && cleared.After(t)
 }
 
 // maxPendingMirrors limita a fila de uma sessão presa num turno longo: uma

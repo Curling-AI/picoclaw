@@ -37,8 +37,8 @@ const maxParkedResults = 100
 // backgroundResultTarget is the conversation a system message's result goes
 // to, with the agent that owns it. ok is false for a message that names no
 // session or comes from an internal chat, which keep the main session, and for
-// one that names a conversation that no longer exists (cleared or deleted while
-// the work ran), which processSystemMessage drops.
+// one whose conversation no longer exists (deleted, or cleared while the work
+// ran, even if the user has typed since), which processSystemMessage drops.
 func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *AgentInstance, bool) {
 	if msg.Channel != "system" || !isExplicitSessionKey(msg.SessionKey) {
 		return "", nil, false
@@ -47,6 +47,9 @@ func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *Ag
 		return "", nil, false
 	}
 	sessionKey := msg.SessionKey
+	if !msg.LaunchedAt.IsZero() && al.clearedSince(sessionKey, msg.LaunchedAt) {
+		return "", nil, false
+	}
 	agent := al.agentForSession(sessionKey)
 	if agent == nil || !hasConversation(agent.Sessions, sessionKey) {
 		return "", nil, false

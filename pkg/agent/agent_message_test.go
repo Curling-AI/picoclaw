@@ -818,3 +818,37 @@ func TestDeliverToConversation_ReportsAFailedWrite(t *testing.T) {
 		t.Fatalf("deferred=%v err=%v, want the failed write reported", deferred, err)
 	}
 }
+
+// nickgs1337 on #112: a task launched before /clear delivered into the new
+// conversation once the user had typed anything, and spent a model call.
+func TestRun_ResultOfWorkLaunchedBeforeAClearIsDropped(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	before := spawnResultMessage(conversationSession)
+	before.Context.ChatID, before.ChatID = "telegram:123", "telegram:123"
+	before.LaunchedAt = time.Now()
+
+	if _, err := al.ProcessDirect(context.Background(), "/clear", conversationSession); err != nil {
+		t.Fatalf("/clear: %v", err)
+	}
+	sessions.AddMessage(conversationSession, "user", "vamos começar outra coisa")
+	after := before
+	after.LaunchedAt = time.Now()
+	after.Content = "Task 'nova' completed."
+	startRunLoop(t, al)
+
+	if err := msgBus.PublishInbound(context.Background(), before); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if provider.count() != 0 || len(sessions.GetHistory(conversationSession)) != 1 {
+		t.Fatalf("the old result reached the new conversation (%d model calls, %d messages)",
+			provider.count(), len(sessions.GetHistory(conversationSession)))
+	}
+
+	if err := msgBus.PublishInbound(context.Background(), after); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	waitFor(t, "work launched after the clear to arrive", func() bool { return provider.count() == 1 })
+}
