@@ -373,7 +373,10 @@ func TestDirectTurn_LateResultIsContinuedForAChatThatTakesReplies(t *testing.T) 
 	al, msgBus, _ := newSystemMessageTestLoop(t, provider)
 	al.SetDeliverySessionResolver(webResolver)
 	agentID := al.registry.GetDefaultAgent().ID
-	result := providers.Message{Role: "user", Content: "[System: async:spawn] Spawn failed: subagent exceeded its 20 min limit"}
+	result := providers.Message{
+		Role:    "user",
+		Content: "[System: async:spawn] Spawn failed: subagent exceeded its 20 min limit",
+	}
 
 	if err := al.enqueueSteeringMessage(conversationSession, agentID, result); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -402,7 +405,11 @@ func TestDirectTurn_WebRunLeavesTheQueueAlone(t *testing.T) {
 	al, _, _ := newSystemMessageTestLoop(t, provider)
 	al.SetDeliverySessionResolver(webResolver)
 	agentID := al.registry.GetDefaultAgent().ID
-	if err := al.enqueueSteeringMessage(conversationSession, agentID, providers.Message{Role: "user", Content: "e mais isso"}); err != nil {
+	if err := al.enqueueSteeringMessage(
+		conversationSession,
+		agentID,
+		providers.Message{Role: "user", Content: "e mais isso"},
+	); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 

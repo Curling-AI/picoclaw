@@ -34,10 +34,21 @@ const (
 )
 
 var (
-	glmToolCallRe  = regexp.MustCompile(`(?s)<tool_call>\s*([A-Za-z0-9_.\-]+)\s*((?:<arg_key>.*?</arg_key>\s*<arg_value>.*?</arg_value>\s*)*)</tool_call>`)
+	glmToolCallRe = regexp.MustCompile(
+		`(?s)<tool_call>\s*([A-Za-z0-9_.\-]+)\s*((?:<arg_key>.*?</arg_key>\s*<arg_value>.*?</arg_value>\s*)*)</tool_call>`,
+	)
 	toolNameRe     = regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`)
 	glmMarkupTags  = []string{glmArgKeyOpen, glmArgKeyClose, glmArgValueOpen, glmArgValueClose}
-	glmTagReplacer = strings.NewReplacer(glmArgKeyOpen, "", glmArgKeyClose, "", glmArgValueOpen, "", glmArgValueClose, "")
+	glmTagReplacer = strings.NewReplacer(
+		glmArgKeyOpen,
+		"",
+		glmArgKeyClose,
+		"",
+		glmArgValueOpen,
+		"",
+		glmArgValueClose,
+		"",
+	)
 )
 
 type glmArg struct {

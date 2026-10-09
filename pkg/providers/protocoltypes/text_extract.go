@@ -334,7 +334,13 @@ func decodePseudoXMLValue(raw string) any {
 
 // truncatedToolCallSuffixes are the closing tags a tool call written as markup
 // ends with (pseudo-XML and GLM). Nothing else in prose ends this way.
-var truncatedToolCallSuffixes = []string{"</tool_call>", "</function>", "</parameter>", glmArgValueClose, glmArgKeyClose}
+var truncatedToolCallSuffixes = []string{
+	"</tool_call>",
+	"</function>",
+	"</parameter>",
+	glmArgValueClose,
+	glmArgKeyClose,
+}
 
 // truncatedToolCallPrefixes are the tags a reply can only START with when it is
 // the rest of a tool call whose head the gateway consumed. Prose that discusses

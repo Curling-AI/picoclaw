@@ -102,8 +102,9 @@ func TestTurnToolsGrowWithWhatTheTurnUses(t *testing.T) {
 	ts.seedOfferedTools(registry) // only the first seed counts
 
 	names := func() []string {
-		var out []string
-		for _, d := range registry.ToProviderDefsFor(ts.offeredToolSet()) {
+		defs := registry.ToProviderDefsFor(ts.offeredToolSet())
+		out := make([]string, 0, len(defs))
+		for _, d := range defs {
 			out = append(out, d.Function.Name)
 		}
 		return out

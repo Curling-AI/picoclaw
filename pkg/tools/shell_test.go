@@ -2310,7 +2310,7 @@ func TestKillOwnedBy_StopsOnlyTheOwnersProcesses(t *testing.T) {
 		result := tool.Execute(ctx, map[string]any{"action": "run", "command": "sleep 30", "background": "true"})
 		require.False(t, result.IsError, result.ForLLM)
 		for _, s := range sm.List() {
-			if session, err := sm.Get(s.ID); err == nil && session.Owner == owner {
+			if session, getErr := sm.Get(s.ID); getErr == nil && session.Owner == owner {
 				return s.ID
 			}
 		}
@@ -2325,8 +2325,8 @@ func TestKillOwnedBy_StopsOnlyTheOwnersProcesses(t *testing.T) {
 	require.Equal(t, []string{dead}, killed)
 
 	require.Eventually(t, func() bool {
-		s, err := sm.Get(dead)
-		return err == nil && s.IsDone()
+		s, getErr := sm.Get(dead)
+		return getErr == nil && s.IsDone()
 	}, 5*time.Second, 50*time.Millisecond, "the owner's process kept running")
 	s, err := sm.Get(alive)
 	require.NoError(t, err)

@@ -61,8 +61,16 @@ func TestLooksLikeTruncatedToolCall_GLM(t *testing.T) {
 		{"tail of a call", "<arg_value>65025</arg_value>\n</tool_call>", true},
 		{"ends with a closed value", "src/App.tsx</arg_value>", true},
 		{"ends with a key", "<arg_key>path</arg_key>", true},
-		{"prose then a call cut inside a value", "Vou ler.\n<tool_call>read_file\n<arg_key>path</arg_key>\n<arg_value>src/Ap", true},
-		{"explaining the format", "O GLM escreve <arg_key>k</arg_key><arg_value>v</arg_value> no lugar do JSON.", false},
+		{
+			"prose then a call cut inside a value",
+			"Vou ler.\n<tool_call>read_file\n<arg_key>path</arg_key>\n<arg_value>src/Ap",
+			true,
+		},
+		{
+			"explaining the format",
+			"O GLM escreve <arg_key>k</arg_key><arg_value>v</arg_value> no lugar do JSON.",
+			false,
+		},
 		{"mentioning one tag", "Use a tag `<arg_value>` para o valor", false},
 		{"plain answer", "Pronto, o arquivo foi criado.", false},
 	}
