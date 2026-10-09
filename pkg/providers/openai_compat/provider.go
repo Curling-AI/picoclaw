@@ -521,38 +521,60 @@ func (p *Provider) Chat(
 	// streaming, and their GLM calls written as text used to reach the loop as
 	// a plain answer.
 	if len(out.ToolCalls) == 0 && out.Content != "" {
-		if extracted := liftTextToolCalls(out.Content, tools); len(extracted) > 0 {
+		if extracted, rest := liftTextToolCalls(out.Content, tools); len(extracted) > 0 {
 			out.ToolCalls = extracted
-			out.Content = protocoltypes.StripToolCallsFromText(out.Content)
+			out.Content = rest
 		}
 	}
 	repairToolCallMarkup(out.ToolCalls, tools, out.UpstreamID, out.ResolvedProvider)
 	return out, nil
 }
 
-// liftTextToolCalls returns the tool calls the model wrote into text, only when
-// every one of them names a tool this request offered. A caller that offers no
-// tools (a summary, a side question, an image description) keeps its text, and
-// prose that quotes a call to a tool outside the request stays prose: run, it
-// would execute something the model only showed.
-func liftTextToolCalls(text string, tools []ToolDefinition) []ToolCall {
+// liftTextToolCalls returns the tool calls the model wrote into text, and the
+// text without them, only when every one of them names a tool this request
+// offered. A caller that offers no tools (a summary, a side question, an image
+// description) keeps its text, and prose that quotes a call to a tool outside
+// the request stays prose: run, it would execute something the model only
+// showed.
+func liftTextToolCalls(text string, tools []ToolDefinition) ([]ToolCall, string) {
+	if len(tools) == 0 {
+		return nil, text
+	}
+	extracted, rest := protocoltypes.LiftToolCallsFromText(text)
+	if !allOffered(extracted, tools) {
+		return nil, text
+	}
+	return extracted, rest
+}
+
+// liftReasoningToolCalls is liftTextToolCalls for a model's thinking, where a
+// call only counts as the last thing written (see
+// protocoltypes.LiftTrailingToolCallsFromText).
+func liftReasoningToolCalls(thinking string, tools []ToolDefinition) []ToolCall {
 	if len(tools) == 0 {
 		return nil
 	}
-	extracted := protocoltypes.ExtractToolCallsFromText(text)
-	if len(extracted) == 0 {
+	extracted := protocoltypes.LiftTrailingToolCallsFromText(thinking)
+	if !allOffered(extracted, tools) {
 		return nil
+	}
+	return extracted
+}
+
+func allOffered(calls []ToolCall, tools []ToolDefinition) bool {
+	if len(calls) == 0 {
+		return false
 	}
 	offered := make(map[string]struct{}, len(tools))
 	for _, t := range tools {
 		offered[t.Function.Name] = struct{}{}
 	}
-	for _, tc := range extracted {
+	for _, tc := range calls {
 		if _, ok := offered[tc.Name]; !ok {
-			return nil
+			return false
 		}
 	}
-	return extracted
+	return true
 }
 
 // repairToolCallMarkup fixes, in place, structured tool calls that came back
@@ -951,9 +973,9 @@ func parseStreamResponse(
 	// text content instead of the structured tool_calls field. Extract them.
 	content := textContent.String()
 	if len(toolCalls) == 0 && content != "" {
-		if extracted := liftTextToolCalls(content, tools); len(extracted) > 0 {
+		if extracted, rest := liftTextToolCalls(content, tools); len(extracted) > 0 {
 			toolCalls = extracted
-			content = protocoltypes.StripToolCallsFromText(content)
+			content = rest
 		}
 	}
 
@@ -964,13 +986,14 @@ func parseStreamResponse(
 	//
 	// Gated on empty content on purpose. A model that answered AND merely
 	// mused "I could call read_file" in its scratchpad must not have that
-	// musing promoted to a real call.
+	// musing promoted to a real call. For the same reason only a call that
+	// ends the thinking counts: one mid-scratchpad is the model weighing it.
 	if len(toolCalls) == 0 && content == "" {
 		for _, thinking := range []string{reasoningContent.String(), reasoning.String()} {
 			if thinking == "" {
 				continue
 			}
-			if extracted := liftTextToolCalls(thinking, tools); len(extracted) > 0 {
+			if extracted := liftReasoningToolCalls(thinking, tools); len(extracted) > 0 {
 				toolCalls = extracted
 				break
 			}

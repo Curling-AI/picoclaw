@@ -2,6 +2,7 @@ package protocoltypes
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,8 +25,8 @@ func toolDef(name string, props ...string) ToolDefinition {
 
 var offeredTools = []ToolDefinition{
 	toolDef("memory", "action", "section", "content", "new_text", "old_text"),
-	toolDef("write_file", "path", "content"),
-	toolDef("exec", "command", "cwd"),
+	toolDef("write_file", "path", "content", "append"),
+	toolDef("exec", "command", "cwd", "background"),
 	toolDef("mcp_skip_skip_file_read", "projectId", "path"),
 }
 
@@ -74,10 +75,28 @@ func TestExtractGLMToolCall_WinsOverBareJSONInsideValue(t *testing.T) {
 
 // One value missing its closing tag must not run into the next call and eat
 // the prose between them.
-func TestExtractGLMToolCall_UnclosedValueStaysInItsBlock(t *testing.T) {
-	text := "<tool_call>exec<arg_key>command</arg_key><arg_value>ls</tool_call>\n" +
-		"Some prose.\n<tool_call>read_file<arg_key>path</arg_key><arg_value>a.txt</arg_value></tool_call>"
-	calls := ExtractToolCallsFromText(text)
+func TestGLMBlocks_UnclosedValueStaysInItsBlock(t *testing.T) {
+	first := "<tool_call>exec<arg_key>command</arg_key><arg_value>ls</tool_call>"
+	second := "<tool_call>read_file<arg_key>path</arg_key><arg_value>a.txt</arg_value></tool_call>"
+	text := first + "\nSome prose.\n" + second
+	blocks := glmBlocks(text)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %#v, want two", blocks)
+	}
+	if got := text[blocks[0].start:blocks[0].end]; got != first {
+		t.Errorf("first block = %q", got)
+	}
+	if got := text[blocks[1].start:blocks[1].end]; got != second {
+		t.Errorf("second block = %q", got)
+	}
+}
+
+// Several calls ending the message are all lifted, each with its own id.
+func TestExtractGLMToolCall_SeveralCallsAtTheEnd(t *testing.T) {
+	text := "Vou olhar os dois.\n" +
+		"<tool_call>exec<arg_key>command</arg_key><arg_value>ls</tool_call>\n" +
+		"<tool_call>mcp_skip_skip_file_read<arg_key>path</arg_key><arg_value>a.txt</arg_value></tool_call>\n"
+	calls, rest := LiftToolCallsFromText(text)
 	if len(calls) != 2 {
 		t.Fatalf("calls = %#v, want two", calls)
 	}
@@ -87,8 +106,8 @@ func TestExtractGLMToolCall_UnclosedValueStaysInItsBlock(t *testing.T) {
 	if calls[0].ID == calls[1].ID {
 		t.Errorf("both calls got id %q", calls[0].ID)
 	}
-	if got := StripToolCallsFromText(text); got != "Some prose." {
-		t.Errorf("stripped = %q, want the prose kept", got)
+	if rest != "Vou olhar os dois." {
+		t.Errorf("rest = %q, want the prose kept", rest)
 	}
 }
 
@@ -100,11 +119,30 @@ func TestLooksLikeTruncatedToolCall_GLM(t *testing.T) {
 	}{
 		{"reply that is a value cut short", "<arg_value>pocketbase/migrations/0001", true},
 		{"tail of a call", "<arg_value>65025</arg_value>\n</tool_call>", true},
-		{"ends with a closed value", "src/App.tsx</arg_value>", true},
+		{
+			"ends with a closed value of a call",
+			"Vou ler.\n<tool_call>read_file<arg_key>path</arg_key><arg_value>a.txt</arg_value>",
+			true,
+		},
 		{"ends with a key", "<arg_key>path</arg_key>", true},
 		{
 			"prose then a call cut inside a value",
 			"Vou ler.\n<tool_call>read_file\n<arg_key>path</arg_key>\n<arg_value>src/Ap",
+			true,
+		},
+		{"cut inside the first key", "Vou ler.\n<tool_call>read_file\n<arg_key>pa", true},
+		{
+			"cut inside a later key",
+			"<tool_call>exec<arg_key>command</arg_key><arg_value>ls</arg_value>\n<arg_key>cw",
+			true,
+		},
+		{"reply that is a key cut short", "<arg_key>cont", true},
+		{"cut right after the tool name", "Vou criar o arquivo.\n<tool_call>write_file", true},
+		{"cut inside the closing tag", "<arg_value>a.txt</arg_value>\n</tool_c", true},
+		{"cut inside a value tag", "Vou ler.\n<tool_call>read_file\n<arg_key>path</arg_key>\n<arg_va", true},
+		{
+			"a whole call that was not lifted",
+			"<tool_call>write_file<arg_key>path</arg_key><arg_value>a</arg_value><arg_key>path</arg_key><arg_value>b</arg_value></tool_call>",
 			true,
 		},
 		{
@@ -113,6 +151,11 @@ func TestLooksLikeTruncatedToolCall_GLM(t *testing.T) {
 			false,
 		},
 		{"mentioning one tag", "Use a tag `<arg_value>` para o valor", false},
+		{"mentioning the key tag", "Use a tag `<arg_key>` para a chave", false},
+		{"explaining the closing tag", "The closing tag is </arg_value>", false},
+		{"explaining the key closing tag", "Cada chave termina em </arg_key>", false},
+		{"mentioning the call tag before a word", "I will use the <tool_call> format", false},
+		{"ending with a lone angle bracket", "Use a < b", false},
 		{"opening with the call tag in prose", "<tool_call> is the tag GLM uses; the answer is no.", false},
 		{"opening with the pseudo-XML tag in prose", "<function=foo> is how Qwen writes it.", false},
 		{"plain answer", "Pronto, o arquivo foi criado.", false},
@@ -173,6 +216,22 @@ func TestRepairToolCallMarkup(t *testing.T) {
 			wantName: "exec",
 			want:     map[string]any{"command": "ls -la"},
 		},
+		{
+			name: "the call closed after an unclosed value",
+			call: ToolCall{Name: "memory", Arguments: map[string]any{
+				"action": "replace_text<arg_key>new_text</arg_key><arg_value>texto novo\n</tool_call>\n",
+			}},
+			wantName: "memory",
+			want:     map[string]any{"action": "replace_text", "new_text": "texto novo"},
+		},
+		{
+			name: "the call closed after a closed value",
+			call: ToolCall{Name: "memory", Arguments: map[string]any{
+				"action": "replace_text<arg_key>new_text</arg_key><arg_value>texto</arg_value></tool_call>",
+			}},
+			wantName: "memory",
+			want:     map[string]any{"action": "replace_text", "new_text": "texto"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -203,15 +262,34 @@ func TestRepairToolCallMarkup(t *testing.T) {
 
 // Calls that merely carry this markup as content are normal calls: writing a
 // test fixture, grepping for the tag, a key the model already sent, a key the
-// tool does not take, a broken-key shape that would lose part of the call.
+// tool does not take, a broken-key shape that would lose part of the call. The
+// quoted keys are ones the tool takes and the call left out, so only the shape
+// of the markup keeps these calls whole.
 func TestRepairToolCallMarkup_LeavesNormalCallsAlone(t *testing.T) {
 	cases := map[string]ToolCall{
 		"file content quoting the format": {Name: "write_file", Arguments: map[string]any{
-			"path":    "glm_test.go",
-			"content": "const sample = `<tool_call>exec<arg_key>command</arg_key><arg_value>ls</arg_value></tool_call>`",
+			"path": "docs/glm.md",
+			"content": "Exemplo: `<tool_call>write_file<arg_key>append</arg_key><arg_value>true</arg_value>" +
+				"</tool_call>` grava no fim do arquivo.",
+		}},
+		"fixture written by a command": {Name: "exec", Arguments: map[string]any{
+			"command": "printf '<arg_key>cwd</arg_key><arg_value>/etc</arg_value>' > fixture.txt && rm -rf build",
+		}},
+		"grep for a pair": {Name: "exec", Arguments: map[string]any{
+			"command": "grep -r '<arg_key>background</arg_key><arg_value>true</arg_value>' docs/ && rm tmp",
 		}},
 		"grep for the tag": {Name: "exec", Arguments: map[string]any{
 			"command": "grep -rn '<arg_key>' pkg/ | head",
+		}},
+		"recovered key repeated": {Name: "exec", Arguments: map[string]any{
+			"command": "ls<arg_key>cwd</arg_key><arg_value>/tmp</arg_value><arg_key>cwd</arg_key><arg_value>/etc",
+		}},
+		"recovered key repeated across arguments": {Name: "memory", Arguments: map[string]any{
+			"action":  "add_section<arg_key>section</arg_key><arg_value>Notas",
+			"content": "texto<arg_key>section</arg_key><arg_value>Outra",
+		}},
+		"text between pairs": {Name: "exec", Arguments: map[string]any{
+			"command": "ls<arg_key>cwd</arg_key><arg_value>/tmp</arg_value> e depois <arg_key>background</arg_key><arg_value>true",
 		}},
 		"recovered key already given": {Name: "write_file", Arguments: map[string]any{
 			"path":    "a.txt",
@@ -255,18 +333,49 @@ func TestRepairToolCallMarkup_NeedsTheOfferedTools(t *testing.T) {
 	}
 }
 
-// Many unclosed pairs must not make the parser quadratic.
-func TestParseGLMArgs_StaysLinear(t *testing.T) {
-	var b strings.Builder
-	for range 40_000 {
-		b.WriteString("<arg_key>k</arg_key><arg_value>value without its closing tag ")
+// No input shape may make the parser quadratic: the text is model output,
+// up to the output cap and beyond when a gateway concatenates.
+func TestGLMParsing_StaysLinear(t *testing.T) {
+	var unclosed strings.Builder
+	for i := range 40_000 {
+		fmt.Fprintf(&unclosed, "<arg_key>k%d</arg_key><arg_value>value without its closing tag ", i)
 	}
-	start := time.Now()
-	if got := len(parseGLMArgs(b.String())); got != 40_000 {
-		t.Fatalf("pairs = %d", got)
+	var keysOnly strings.Builder
+	for i := range 40_000 {
+		fmt.Fprintf(&keysOnly, "<arg_key>k%d</arg_key>", i)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("parsing took %s", elapsed)
+	var quotedClosers strings.Builder
+	quotedClosers.WriteString("<tool_call>x")
+	for i := range 40_000 {
+		fmt.Fprintf(&quotedClosers, "<arg_key>k%d</arg_key><arg_value>a</tool_call></arg_value>", i)
+	}
+	quotedClosers.WriteString("</tool_call>")
+
+	cases := map[string]func(){
+		"many unclosed pairs": func() {
+			if pairs, _, ok := parseGLMArgs(unclosed.String()); !ok || len(pairs) != 40_000 {
+				t.Errorf("pairs = %d, ok = %v", len(pairs), ok)
+			}
+		},
+		"keys with no value": func() {
+			if _, _, ok := parseGLMArgs(keysOnly.String()); ok {
+				t.Error("keys with no value were accepted")
+			}
+		},
+		"values quoting the closing tag": func() {
+			if blocks := glmBlocks(quotedClosers.String()); len(blocks) != 1 {
+				t.Errorf("blocks = %d, want the whole call", len(blocks))
+			}
+		},
+	}
+	for name, run := range cases {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			run()
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("took %s", elapsed)
+			}
+		})
 	}
 }
 

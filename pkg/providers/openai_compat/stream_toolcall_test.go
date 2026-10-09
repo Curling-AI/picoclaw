@@ -114,6 +114,23 @@ func TestParseStreamResponse_ToolCallInReasoningChannel(t *testing.T) {
 	}
 }
 
+// Nor when the thinking weighs a call and moves on: only a call that ends the
+// thinking is one the model meant to make.
+func TestParseStreamResponse_ReasoningCallMidThoughtIsNotLifted(t *testing.T) {
+	body := sse(
+		`{"choices":[{"delta":{"reasoning_content":"Poderia chamar <function=read_file>\n<parameter=path>a.txt</parameter>\n</function> mas já li esse arquivo."}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), readFileTool, nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %+v, want none", resp.ToolCalls)
+	}
+}
+
 // The same salvage must NOT fire when the model actually answered: musing
 // "I could call read_file" in the scratchpad is not a call, and promoting it
 // would run tools the model never asked for.

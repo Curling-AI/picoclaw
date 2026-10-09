@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // GLM-family models (glm-5.x, glm-5.x-flash) write tool calls in their own
@@ -22,12 +23,19 @@ import (
 // GLM, so it is the model's output and not one parser):
 //
 //  1. The whole block, or its tail, arrives as plain content. Handled by
-//     extractGLMToolCalls and by the truncated-call guards in text_extract.go.
+//     liftGLMToolCalls and by the truncated-call guards in text_extract.go.
 //  2. The gateway does return a structured call, but the model left a closing
 //     tag out and the rest of the markup rode along inside one argument:
 //     {"action": "replace_text<arg_key>new_text</arg_key><arg_value>…"}.
 //     The tool then rejects the call ("is not in enum") and the model repeats
 //     the same broken call over and over. Handled by RepairToolCallMarkup.
+//
+// Both only act on markup that cannot be anything else. An argument is
+// arbitrary text (a file, a command, a patch) and may quote this very markup;
+// read as a call, a quote rebinds arguments or runs a command the model only
+// showed. Whatever is ambiguous stays as it came: a text call is not lifted
+// (the guard then asks the model to retry) and a structured call is not
+// rewritten.
 //
 // Values stay strings. The executor converts a string to the type the tool's
 // schema declares (numbers, booleans, and JSON text for arrays and objects);
@@ -66,84 +74,141 @@ type glmBlock struct {
 	name, body string
 }
 
+// span is a byte range of a text, end exclusive.
+type span struct{ start, end int }
+
+// tagFinder finds the next occurrence of one tag at or after a position. It
+// answers from its last search while the position stays between where that
+// search started and what it found, so a walk that only moves forward scans
+// the text once per tag instead of once per step.
+type tagFinder struct {
+	text, tag string
+	from, at  int // the last search started at from and found the tag at at (-1: none)
+}
+
+func newTagFinder(text, tag string) *tagFinder {
+	return &tagFinder{text: text, tag: tag, from: len(text) + 1, at: -1}
+}
+
+func (f *tagFinder) next(pos int) int {
+	if pos >= f.from && (f.at < 0 || pos <= f.at) {
+		return f.at
+	}
+	if pos > len(f.text) {
+		return -1
+	}
+	f.from, f.at = pos, -1
+	if i := strings.Index(f.text[pos:], f.tag); i >= 0 {
+		f.at = pos + i
+	}
+	return f.at
+}
+
+// glmScanner walks the GLM blocks of one text.
+type glmScanner struct {
+	opens, closes, values, valueCloses *tagFinder
+}
+
 // glmBlocks finds the GLM calls in text, one block at a time. A block ends at
-// the first </tool_call>, unless that tag falls inside a value still open and
-// the value's own </arg_value> comes before any next <tool_call>: then the
-// value just quotes the tag and the block runs on to the next </tool_call>.
-// A value that never closes stays in its block instead of swallowing the
-// prose and the call that follow.
+// the first </tool_call> outside a value: a value that is closed before any
+// next <tool_call> may quote that tag. A value that never closes stays in its
+// block instead of swallowing the prose and the call that follow. An opener
+// not followed by an argument list (prose mentioning the tag) is skipped
+// alone, so the call after it is still found.
 func glmBlocks(text string) []glmBlock {
+	s := glmScanner{
+		opens:       newTagFinder(text, glmCallOpen),
+		closes:      newTagFinder(text, glmCallClose),
+		values:      newTagFinder(text, glmArgValueOpen),
+		valueCloses: newTagFinder(text, glmArgValueClose),
+	}
 	var blocks []glmBlock
 	pos := 0
 	for {
-		open := strings.Index(text[pos:], glmCallOpen)
-		if open < 0 {
+		start := s.opens.next(pos)
+		if start < 0 {
 			return blocks
 		}
-		start := pos + open
 		afterOpen := start + len(glmCallOpen)
 		name := glmCallNameRe.FindStringSubmatchIndex(text[afterOpen:])
-		if name == nil {
+		if name == nil || !glmArgsFollow(text[afterOpen+name[1]:]) {
 			pos = afterOpen
 			continue
 		}
 		bodyStart := afterOpen + name[1]
-		closing := strings.Index(text[bodyStart:], glmCallClose)
-		if closing < 0 {
+		end := s.blockEnd(bodyStart)
+		if end < 0 {
 			return blocks
 		}
-		end := bodyStart + closing
-		for valueStillOpen(text[bodyStart:end]) {
-			rest := text[end+len(glmCallClose):]
-			valueClose := strings.Index(rest, glmArgValueClose)
-			nextCall := strings.Index(rest, glmCallOpen)
-			if valueClose < 0 || (nextCall >= 0 && nextCall < valueClose) {
-				break
-			}
-			nextClose := strings.Index(rest[valueClose:], glmCallClose)
-			if nextClose < 0 {
-				break
-			}
-			end += len(glmCallClose) + valueClose + nextClose
-		}
-		body := text[bodyStart:end]
-		if glmBody(body) {
-			blocks = append(blocks, glmBlock{
-				start: start,
-				end:   end + len(glmCallClose),
-				name:  text[afterOpen+name[2] : afterOpen+name[3]],
-				body:  body,
-			})
-		}
+		blocks = append(blocks, glmBlock{
+			start: start,
+			end:   end + len(glmCallClose),
+			name:  text[afterOpen+name[2] : afterOpen+name[3]],
+			body:  text[bodyStart:end],
+		})
 		pos = end + len(glmCallClose)
 	}
 }
 
-func valueStillOpen(body string) bool {
-	return strings.LastIndex(body, glmArgValueOpen) > strings.LastIndex(body, glmArgValueClose)
-}
-
-// glmBody reports whether the text after a tool name is a GLM argument list:
-// nothing, or pairs starting right away.
-func glmBody(body string) bool {
-	trimmed := strings.TrimSpace(body)
-	return trimmed == "" || strings.HasPrefix(trimmed, glmArgKeyOpen)
-}
-
-func extractGLMToolCalls(text string) []ToolCall {
-	blocks := glmBlocks(text)
-	if len(blocks) == 0 {
-		return nil
+// blockEnd returns where the </tool_call> closing the block whose body starts
+// at pos sits, or -1 when the block never closes.
+func (s *glmScanner) blockEnd(pos int) int {
+	for {
+		closing := s.closes.next(pos)
+		if closing < 0 {
+			return -1
+		}
+		value := s.values.next(pos)
+		if value < 0 || value > closing {
+			return closing
+		}
+		valueStart := value + len(glmArgValueOpen)
+		valueEnd := s.valueCloses.next(valueStart)
+		nextCall := s.opens.next(valueStart)
+		if valueEnd < 0 || (nextCall >= 0 && nextCall < valueEnd) {
+			return closing
+		}
+		pos = valueEnd + len(glmArgValueClose)
 	}
-	result := make([]ToolCall, 0, len(blocks))
-	for _, b := range blocks {
-		args := map[string]any{}
-		for _, a := range parseGLMArgs(b.body) {
+}
+
+// glmArgsFollow reports whether the text after a tool name is a GLM argument
+// list: nothing before the closing tag, or a pair starting right away.
+func glmArgsFollow(rest string) bool {
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	return strings.HasPrefix(rest, glmArgKeyOpen) || strings.HasPrefix(rest, glmCallClose)
+}
+
+// liftGLMToolCalls turns into calls the GLM blocks that end the text, with
+// their spans. Only the tail counts: a model emitting a call stops there, and
+// a block followed by more prose, or inside a ``` fence, is a call the model
+// is quoting (a page it summarizes, an example it gives). One ambiguous block
+// in the tail lifts nothing.
+func liftGLMToolCalls(text string, blocks []glmBlock) ([]ToolCall, []span) {
+	first, end := len(blocks), len(text)
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if strings.TrimSpace(text[blocks[i].end:end]) != "" {
+			break
+		}
+		first, end = i, blocks[i].start
+	}
+	if first == len(blocks) || insideCodeFence(text[:blocks[first].start]) {
+		return nil, nil
+	}
+	tail := blocks[first:]
+	calls := make([]ToolCall, 0, len(tail))
+	spans := make([]span, 0, len(tail))
+	for _, b := range tail {
+		pairs, rest, ok := parseGLMArgs(b.body)
+		if !ok || strings.TrimSpace(rest) != "" {
+			return nil, nil
+		}
+		args := make(map[string]any, len(pairs))
+		for _, a := range pairs {
 			args[a.key] = a.value
 		}
-
 		argsJSON, _ := json.Marshal(args)
-		result = append(result, ToolCall{
+		calls = append(calls, ToolCall{
 			ID:        glmCallIDPrefix + strconv.FormatUint(glmCallSeq.Add(1), 10),
 			Name:      b.name,
 			Arguments: args,
@@ -152,86 +217,103 @@ func extractGLMToolCalls(text string) []ToolCall {
 				Arguments: string(argsJSON),
 			},
 		})
+		spans = append(spans, span{b.start, b.end})
 	}
-	return result
+	return calls, spans
 }
 
-// stripGLMToolCalls removes the blocks extractGLMToolCalls turns into calls.
-func stripGLMToolCalls(text string) string {
-	blocks := glmBlocks(text)
-	if len(blocks) == 0 {
-		return text
-	}
-	var b strings.Builder
-	prev := 0
-	for _, block := range blocks {
-		b.WriteString(text[prev:block.start])
-		prev = block.end
-	}
-	b.WriteString(text[prev:])
-	return b.String()
+// insideCodeFence reports whether text leaves a ``` fence open.
+func insideCodeFence(text string) bool {
+	return strings.Count(text, "```")%2 == 1
 }
 
 // parseGLMArgs reads a run of <arg_key>K</arg_key><arg_value>V</arg_value>
-// pairs, tolerating the closing tags the model forgets: a value ends at its
-// </arg_value>, at the next <arg_key>, or at the end of the text. Pairs whose
-// key is not a plain identifier are skipped; a guess there would hand the
-// tool an argument nobody wrote. Linear in the input: each search is bounded
-// by the next <arg_key>.
-func parseGLMArgs(s string) []glmArg {
-	var out []glmArg
+// pairs. A value ends at its </arg_value> or, when the model forgot that tag,
+// at the next <arg_key> or the end of the text. rest is what follows the last
+// closed value when it is not another pair; the caller decides what may sit
+// there.
+//
+// ok is false when the markup is ambiguous: a key repeats, is not a plain
+// identifier or never closes, a key has no value, a value opens another call,
+// or text sits between a closed value and the next key. That is what a value
+// quoting this markup looks like, and reading it as pairs would hand the tool
+// arguments nobody passed.
+//
+// Linear in the input: every search is bounded by the next <arg_key>.
+func parseGLMArgs(s string) (args []glmArg, rest string, ok bool) {
+	seen := map[string]bool{}
 	for {
-		start := strings.Index(s, glmArgKeyOpen)
-		if start < 0 {
-			return out
+		s = strings.TrimLeftFunc(s, unicode.IsSpace)
+		if !strings.HasPrefix(s, glmArgKeyOpen) {
+			return args, s, true
 		}
-		s = s[start+len(glmArgKeyOpen):]
+		s = s[len(glmArgKeyOpen):]
+		pair, next := s, ""
+		if i := strings.Index(s, glmArgKeyOpen); i >= 0 {
+			pair, next = s[:i], s[i:]
+		}
 
-		keyEnd := strings.Index(s, glmArgKeyClose)
+		keyEnd := strings.Index(pair, glmArgKeyClose)
 		if keyEnd < 0 {
-			return out
+			return nil, "", false
 		}
-		key := strings.TrimSpace(s[:keyEnd])
-		s = s[keyEnd+len(glmArgKeyClose):]
-
-		valueStart := strings.Index(s, glmArgValueOpen)
-		if valueStart < 0 || strings.TrimSpace(s[:valueStart]) != "" {
-			continue
+		key := strings.TrimSpace(pair[:keyEnd])
+		if !toolNameRe.MatchString(key) || seen[key] {
+			return nil, "", false
 		}
-		s = s[valueStart+len(glmArgValueOpen):]
-
-		window := len(s)
-		if next := strings.Index(s, glmArgKeyOpen); next >= 0 {
-			window = next
+		seen[key] = true
+		value := strings.TrimLeftFunc(pair[keyEnd+len(glmArgKeyClose):], unicode.IsSpace)
+		if !strings.HasPrefix(value, glmArgValueOpen) {
+			return nil, "", false
 		}
-		valueEnd := window
-		if closing := strings.Index(s[:window], glmArgValueClose); closing >= 0 {
-			valueEnd = closing
+		value = value[len(glmArgValueOpen):]
+		after := ""
+		if closing := strings.Index(value, glmArgValueClose); closing >= 0 {
+			value, after = value[:closing], value[closing+len(glmArgValueClose):]
+			if next != "" && strings.TrimSpace(after) != "" {
+				return nil, "", false
+			}
 		}
-		value := glmValue(s[:valueEnd])
-		s = strings.TrimPrefix(s[valueEnd:], glmArgValueClose)
-
-		if toolNameRe.MatchString(key) {
-			out = append(out, glmArg{key: key, value: value})
+		if strings.Contains(value, glmCallOpen) {
+			return nil, "", false
 		}
+		args = append(args, glmArg{key: key, value: glmValue(value)})
+		if next == "" {
+			return args, after, true
+		}
+		s = next
 	}
 }
 
-// glmValue drops the one newline the format puts on each side of a value and
-// nothing else: the value may be a patch whose first line is indented.
+// glmValue drops the one line break the format puts on each side of a value
+// and nothing else: the value may be a patch whose first line is indented.
 func glmValue(raw string) string {
-	return strings.TrimSuffix(strings.TrimPrefix(raw, "\n"), "\n")
+	for _, nl := range []string{"\r\n", "\n"} {
+		if strings.HasPrefix(raw, nl) {
+			raw = raw[len(nl):]
+			break
+		}
+	}
+	for _, nl := range []string{"\r\n", "\n"} {
+		if strings.HasSuffix(raw, nl) {
+			raw = raw[:len(raw)-len(nl)]
+			break
+		}
+	}
+	return raw
 }
 
 // RepairToolCallMarkup rewrites, in place, structured tool calls that carry the
 // rest of a GLM call inside their name or one string argument, and returns the
 // names of the calls it changed.
 //
-// It only acts when the markup is unambiguous: every argument recovered from
-// it must be a parameter the tool declares (tools is what the request offered)
-// and must be missing from the call. Anything else stays as the model sent it —
-// a write_file whose content quotes this markup, or an exec that greps for it,
-// is a normal call.
+// It only acts on the shape the model produces when it drops a closing tag:
+// the markup starts inside the argument and runs to its end (at most a stray
+// </tool_call> after the last pair), every recovered argument is a parameter
+// the tool declares (tools is what the request offered), none repeats, and
+// none was already in the call. Anything else stays as the model sent it: a
+// write_file whose content quotes this markup, or an exec that greps for it,
+// is a normal call, even when the key it quotes is one the tool takes.
 func RepairToolCallMarkup(calls []ToolCall, tools []ToolDefinition) []string {
 	if len(calls) == 0 || len(tools) == 0 {
 		return nil
@@ -261,9 +343,13 @@ func repairToolCall(tc *ToolCall, params map[string]map[string]any) bool {
 	}
 
 	var recovered []glmArg
-	if head, rest, ok := strings.Cut(name, glmArgKeyOpen); ok {
+	if head, rest, found := strings.Cut(name, glmArgKeyOpen); found {
+		pairs, ok := trailingGLMArgs(rest)
+		if !ok {
+			return false
+		}
 		name = strings.TrimSpace(head)
-		recovered = append(recovered, parseGLMArgs(glmArgKeyOpen+rest)...)
+		recovered = append(recovered, pairs...)
 	}
 	props, known := params[name]
 	if !known {
@@ -271,16 +357,16 @@ func repairToolCall(tc *ToolCall, params map[string]map[string]any) bool {
 	}
 
 	for key, value := range args {
-		str, ok := value.(string)
+		str, isString := value.(string)
 		// "raw" holds arguments the provider could not decode; the executor
 		// explains that case to the model.
-		if !ok || key == "raw" || !strings.Contains(str, glmArgKeyOpen) {
+		if !isString || key == "raw" || !strings.Contains(str, glmArgKeyOpen) {
 			continue
 		}
 		head, rest, _ := strings.Cut(str, glmArgKeyOpen)
-		pairs := parseGLMArgs(glmArgKeyOpen + rest)
-		if len(pairs) == 0 {
-			continue
+		pairs, ok := trailingGLMArgs(rest)
+		if !ok {
+			return false
 		}
 		args[key] = strings.TrimSuffix(strings.TrimRight(head, " \t\r\n"), glmArgValueClose)
 		recovered = append(recovered, pairs...)
@@ -289,18 +375,18 @@ func repairToolCall(tc *ToolCall, params map[string]map[string]any) bool {
 	if len(recovered) == 0 {
 		return false
 	}
+	seen := make(map[string]bool, len(recovered))
 	for _, a := range recovered {
-		if _, declared := props[a.key]; !declared {
+		if _, declared := props[a.key]; !declared || seen[a.key] {
 			return false
 		}
 		if _, given := tc.Arguments[a.key]; given {
 			return false
 		}
+		seen[a.key] = true
 	}
 	for _, a := range recovered {
-		if _, taken := args[a.key]; !taken {
-			args[a.key] = a.value
-		}
+		args[a.key] = a.value
 	}
 
 	tc.Name = name
@@ -312,4 +398,17 @@ func repairToolCall(tc *ToolCall, params map[string]map[string]any) bool {
 	tc.Function.Name = name
 	tc.Function.Arguments = string(argsJSON)
 	return true
+}
+
+// trailingGLMArgs reads the pairs of markup that starts right after an
+// <arg_key> and must run to the end of its text; a stray </tool_call> at the
+// very end, where the model closed the call it thought it was writing, goes
+// away with the last value.
+func trailingGLMArgs(rest string) ([]glmArg, bool) {
+	text := strings.TrimSuffix(strings.TrimRightFunc(rest, unicode.IsSpace), glmCallClose)
+	pairs, tail, ok := parseGLMArgs(glmArgKeyOpen + text)
+	if !ok || len(pairs) == 0 || strings.TrimSpace(tail) != "" {
+		return nil, false
+	}
+	return pairs, true
 }

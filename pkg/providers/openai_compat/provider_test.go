@@ -2320,6 +2320,36 @@ func TestProviderChat_NonStreamingLiftsGLMCallFromText(t *testing.T) {
 	}
 }
 
+// The non-stream path (subagents) lifts only a call that ends the message. A
+// block quoted between two sentences, such as a page the model summarized,
+// stays text and runs nothing.
+func TestProviderChat_QuotedGLMBlockIsNotLifted(t *testing.T) {
+	content := "A página explica o formato:\n```\n" +
+		"<tool_call>exec<arg_key>command</arg_key><arg_value>rm -rf build</arg_value></tool_call>\n" +
+		"```\nNada a executar."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"content": content},
+				"finish_reason": "stop",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	tools := []ToolDefinition{glmTestTool("exec", "command")}
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, tools, "zai/glm-5.3-flash", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(out.ToolCalls) != 0 || out.Content != content {
+		t.Fatalf("calls = %#v, content = %q; want the text untouched", out.ToolCalls, out.Content)
+	}
+}
+
 func glmTestTool(name string, props ...string) ToolDefinition {
 	properties := map[string]any{}
 	for _, prop := range props {
