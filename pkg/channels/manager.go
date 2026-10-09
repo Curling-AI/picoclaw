@@ -615,6 +615,13 @@ func (m *Manager) SetMediaStore(store media.MediaStore) {
 
 // GetStreamer implements bus.StreamDelegate.
 // It checks if the named channel supports streaming and returns a Streamer.
+// ClearFinalizedStream forgets that a stream finalized the session's answer
+// (bus.FinalizedStreamClearer), so its next final outbound isn't dropped as a
+// duplicate. (seucaranguejo fork)
+func (m *Manager) ClearFinalizedStream(channelName, chatID, sessionKey string) {
+	m.streamActive.Delete(streamSuppressionKey(channelName, chatID, sessionKey))
+}
+
 func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionKey string) (bus.Streamer, bool) {
 	m.mu.RLock()
 	ch, exists := m.channels[channelName]

@@ -317,6 +317,16 @@ func (p *Pipeline) beginSynthesizedFinalStream(ctx context.Context, ts *turnStat
 	}
 	streamer, ok := p.Bus.GetStreamer(ctx, ts.channel, ts.chatID, ts.sessionKey)
 	if !ok || streamer == nil {
+		// The reply goes out as a plain final outbound, which the channel would
+		// drop as the duplicate of a narration finalized earlier in the turn.
+		logger.WarnCF("agent", "No stream for a final reply the turn wrote; clearing the finalized-stream marker",
+			map[string]any{
+				"agent_id": ts.agent.ID,
+				"channel":  ts.channel,
+			})
+		if clearer, ok := p.Bus.(bus.FinalizedStreamClearer); ok {
+			clearer.ClearFinalizedStream(ts.channel, ts.chatID, ts.sessionKey)
+		}
 		return
 	}
 	exec.streamingPublisher = &streamingChunkPublisher{
