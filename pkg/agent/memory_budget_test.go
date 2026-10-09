@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -402,9 +403,9 @@ func TestMemoryPromptUsageFor_MatchesThePromptCut(t *testing.T) {
 			t.Fatalf("%s: usage %+v difere do recorte do prompt %+v", tc.relPath, usage, fit)
 		}
 
-		small, _ := MemoryPromptUsageFor(tc.relPath, "### Curta\n- um fato")
-		if small.Capped {
-			t.Fatalf("%s: memória pequena não pode aparecer como recortada", tc.relPath)
+		small, _ := MemoryPromptUsageFor(tc.relPath, "\n### Curta\n- um fato\n")
+		if small.Capped || small.ShownLines != 3 || small.TotalLines != 3 {
+			t.Fatalf("%s: memória pequena aparece inteira, linhas 3 de 3: %+v", tc.relPath, small)
 		}
 	}
 
@@ -466,7 +467,7 @@ func randomMemory(rng *rand.Rand) string {
 	}
 	sb.WriteString(strings.Repeat(" \n", rng.Intn(3)))
 	for range rng.Intn(400) + 1 {
-		switch rng.Intn(12) {
+		switch rng.Intn(14) {
 		case 0:
 			sb.WriteString("### Seção " + fmt.Sprint(rng.Intn(1000)) + nl)
 		case 1:
@@ -484,6 +485,10 @@ func randomMemory(rng *rand.Rand) string {
 			sb.WriteString(strings.Repeat("ação ", n) + nl)
 		case 4:
 			sb.WriteString("caf\xe9 inválido" + nl)
+		case 6:
+			sb.WriteString("```select 1``` inline" + nl)
+		case 7: // escrita cortada no meio: abre e nunca fecha
+			sb.WriteString([]string{"```", "~~~"}[rng.Intn(2)] + "sql" + nl + "select 1;" + nl)
 		case 5:
 			sb.WriteString(nl)
 		default:
@@ -648,4 +653,91 @@ func TestMemoryPromptUsageFor_HiddenSectionKeepsTrailingSpaces(t *testing.T) {
 		}
 	}
 	t.Fatal("seção ### Assinatura deveria estar entre as escondidas")
+}
+
+// Uma linha só não pode esconder da lista todas as seções seguintes: nem crases
+// inline no começo da linha, nem uma cerca que nunca fecha (escrita cortada no
+// meio). Os títulos depois delas continuam listados um a um.
+func TestFitMemory_StrayFenceDoesNotHideHeadings(t *testing.T) {
+	for name, stray := range map[string]string{
+		"inline":   "```select 1``` inline\n",
+		"unclosed": "```sql\nselect 1 from tabela\n",
+	} {
+		raw := "### Consultas\n" + stray + bigMemory(2000)
+		usage, _ := MemoryPromptUsageFor("memory/USER.md", raw)
+		if len(usage.HiddenSections) < 1900 ||
+			usage.HiddenSections[len(usage.HiddenSections)-1].Heading != "### Tópico 1999" {
+			t.Fatalf("%s: %d seções escondidas, esperava ~2000 com título", name, len(usage.HiddenSections))
+		}
+		out := fitMemoryToPromptBudget(raw, learnedOverlayFile("USER.md"))
+		if !strings.Contains(out, ": ### Tópico 1999\n") {
+			t.Fatalf(
+				"%s: a última seção deveria estar listada pelo título:\n%s",
+				name,
+				out[strings.Index(out, "\n\n["):],
+			)
+		}
+	}
+}
+
+// Regras do CommonMark para as cercas: fechamento não tem texto depois (um
+// "```go" dentro do bloco é conteúdo), crase não fecha til, e cerca sem
+// fechamento não abre bloco.
+func TestMarkCode(t *testing.T) {
+	cases := []struct {
+		lines []string
+		code  string // um caractere por linha: c = bloco, . = fora
+	}{
+		{[]string{"```sql", "a", "```go", "### dentro", "```", "### fora"}, "ccccc."},
+		{[]string{"~~~", "```", "### dentro", "~~~", "### fora"}, "cccc."},
+		{[]string{"````", "```", "### dentro", "````", "x"}, "cccc."},
+		{[]string{"### A", "```sql", "x", "### B"}, "...."},
+		{[]string{"```select 1``` inline", "### B", "```"}, "..."},
+		{[]string{"~~~ `x`", "### dentro", "~~~"}, "ccc"},
+	}
+	for _, tc := range cases {
+		code, open := markCode(tc.lines)
+		got := make([]byte, len(code))
+		for i, c := range code {
+			got[i] = ".c"[map[bool]int{false: 0, true: 1}[c]]
+		}
+		if string(got) != tc.code {
+			t.Errorf("%q: %s, esperava %s", tc.lines, got, tc.code)
+		}
+		if open[len(open)-1] != "" && tc.code[len(tc.code)-1] != 'c' {
+			t.Errorf("%q: cerca aberta no fim", tc.lines)
+		}
+	}
+}
+
+// Nas pontas do arquivo, o texto da seção escondida também é o trecho exato:
+// o espaço no fim da última linha (onde as seções novas entram) e a
+// indentação da primeira.
+func TestMemoryPromptUsageFor_HiddenSectionKeepsBothEnds(t *testing.T) {
+	usage, _ := MemoryPromptUsageFor("memory/MEMORY.md", bigMemory(400)+"### Fim\n- fato  \n\n")
+	if last := usage.HiddenSections[len(usage.HiddenSections)-1]; last.Text != "### Fim\n- fato  " {
+		t.Fatalf("última seção perdeu bytes do arquivo: %q", last.Text)
+	}
+
+	pre := "\n  nota indentada\n" + strings.Repeat("nota solta sem seção\n", 4000) + "### Depois\n- fato"
+	usage, _ = MemoryPromptUsageFor("memory/MEMORY.md", pre)
+	if first := usage.HiddenSections[0]; !strings.HasPrefix(first.Text, "  nota indentada\n") {
+		t.Fatalf("preâmbulo perdeu a indentação da primeira linha: %.40q", first.Text)
+	}
+}
+
+// Um marcador maior que o teto sozinho (só com um slug de milhares de
+// caracteres) não tem como caber: o recorte termina mesmo assim.
+func TestFitMemory_MarkerAloneOverBudgetTerminates(t *testing.T) {
+	file := loopLongTermFile(strings.Repeat("s", 20_000))
+	done := make(chan memoryFit, 1)
+	go func() { done <- fitMemory(bigMemory(50), file) }()
+	select {
+	case fit := <-done:
+		if !fit.capped {
+			t.Fatal("deveria aparecer como recortada")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("recorte não terminou com o marcador acima do teto")
+	}
 }

@@ -118,10 +118,13 @@ type filePos struct{ line, offset int }
 // linha no arquivo em disco: o prompt mostra o aparado, mas o agente lê o
 // arquivo, então o marcador precisa das coordenadas dele.
 type trimmedLines struct {
+	raw     string
 	content string
 	lines   []string
 	starts  []int // byte de cada linha dentro de content; starts[len(lines)] = len(content)+1
 	origin  filePos
+	code    []bool   // a linha é de bloco de código cercado (as cercas incluídas)
+	open    []string // a cerca aberta depois da linha, "" fora de bloco
 }
 
 func splitTrimmed(raw string) trimmedLines {
@@ -132,12 +135,45 @@ func splitTrimmed(raw string) trimmedLines {
 	for i, ln := range lines {
 		starts[i+1] = starts[i] + len(ln) + 1
 	}
+	code, open := markCode(lines)
 	return trimmedLines{
+		raw:     raw,
 		content: content,
 		lines:   lines,
 		starts:  starts,
 		origin:  filePos{line: strings.Count(raw[:lead], "\n"), offset: lead},
+		code:    code,
+		open:    open,
 	}
+}
+
+// lastLine é a linha do arquivo em disco onde o conteúdo aparado termina.
+func lastLine(raw, content string) int {
+	if content == "" {
+		return 0
+	}
+	lead := len(raw) - len(strings.TrimLeftFunc(raw, unicode.IsSpace))
+	return strings.Count(raw[:lead], "\n") + strings.Count(content, "\n") + 1
+}
+
+// span é o trecho do arquivo em disco das linhas [from, to) do conteúdo
+// aparado, sem o \n final. Nas pontas do arquivo volta o que o TrimSpace tirou
+// da própria linha: a indentação da primeira e o espaço no fim da última
+// (quebra de linha forçada em markdown).
+func (t trimmedLines) span(from, to int) string {
+	lead := t.origin.offset
+	start, end := lead+t.starts[from], lead+t.starts[to]-1
+	if from == 0 {
+		start = strings.LastIndexByte(t.raw[:lead], '\n') + 1
+	}
+	if to == len(t.lines) {
+		if nl := strings.IndexByte(t.raw[end:], '\n'); nl >= 0 {
+			end += nl
+		} else {
+			end = len(t.raw)
+		}
+	}
+	return t.raw[start:end]
 }
 
 // at é a posição no arquivo do byte `b` da linha `i` do conteúdo aparado.
@@ -156,23 +192,16 @@ func fitMemory(raw string, file memoryPromptFile) memoryFit {
 	content := strings.TrimSpace(raw)
 	total := estimateTextTokens(content)
 	if total <= file.budget {
-		return memoryFit{text: content, totalTokens: total}
+		n := lastLine(raw, content)
+		return memoryFit{text: content, totalTokens: total, totalLines: n, shownLines: n}
 	}
 
-	// Duas passadas. A primeira reserva o PIOR marcador possível, então sempre
-	// cabe. A segunda reserva o marcador real daquele corte, que costuma ser
-	// metade do pior, e só vale se o resultado ainda couber. As duas dependem
-	// só do conteúdo, então o recorte continua estável entre turnos.
+	// Duas passadas, ambas função só do conteúdo. A primeira reserva o PIOR
+	// marcador possível, então sempre cabe. A segunda reserva o marcador real
+	// do primeiro corte, que costuma ter metade do tamanho, e só vale se couber:
+	// num overlay de 4k, a reserva do pior caso sozinha leva um terço do teto.
 	tl := splitTrimmed(raw)
-	reserve := markerReserveTokens(file)
-	fit := renderCut(tl, file, total, cutWithin(tl, file.budget-reserve))
-	// Uma cerca de código mais longa do que a reserva cobre fecha com o
-	// comprimento real; devolve o excesso ao corpo e corta de novo. Cada volta
-	// tira pelo menos um token, então termina.
-	for extra := 0; estimateTextTokens(fit.text) > file.budget; {
-		extra += estimateTextTokens(fit.text) - file.budget
-		fit = renderCut(tl, file, total, cutWithin(tl, file.budget-reserve-extra))
-	}
+	fit := fitBody(tl, file, total, file.budget-markerReserveTokens(file))
 	tighter := renderCut(tl, file, total, cutWithin(tl, file.budget-fit.markerTokens-fenceCloseTokens))
 	if estimateTextTokens(tighter.text) <= file.budget {
 		fit = tighter
@@ -180,9 +209,24 @@ func fitMemory(raw string, file memoryPromptFile) memoryFit {
 	return fit
 }
 
+// fitBody corta o corpo para caber em bodyBudget. Uma cerca de código mais
+// longa do que a reserva cobre fecha com o comprimento real: o excesso sai do
+// corpo e corta de novo. Com o corpo já vazio não há mais o que tirar, e o
+// resultado fica acima do teto; só acontece se o marcador sozinho passar do
+// teto (um slug de loop com milhares de caracteres).
+func fitBody(tl trimmedLines, file memoryPromptFile, total, bodyBudget int) memoryFit {
+	fit := renderCut(tl, file, total, cutWithin(tl, bodyBudget))
+	for over := estimateTextTokens(fit.text) - file.budget; over > 0 && bodyBudget > 0; {
+		bodyBudget -= over
+		fit = renderCut(tl, file, total, cutWithin(tl, bodyBudget))
+		over = estimateTextTokens(fit.text) - file.budget
+	}
+	return fit
+}
+
 // fenceCloseTokens cobre o "\n" + cerca (até 10 caracteres) que fecha um bloco de
 // código aberto no corte e o "\n\n" antes do marcador. Cerca mais longa é
-// tratada em fitMemory.
+// tratada em fitBody.
 const fenceCloseTokens = (1 + 10 + 2 + 4) * 2 / 5
 
 // cutWithin acha o maior trecho que cabe em budget: linhas inteiras, por busca
@@ -216,17 +260,17 @@ func cutWithin(tl trimmedLines, budget int) memoryCut {
 }
 
 func renderCut(tl trimmedLines, file memoryPromptFile, total int, cut memoryCut) memoryFit {
-	shownLines := tl.lines[:cut.shown]
+	shown := cut.shown
 	if cut.partial > 0 {
-		shownLines = tl.lines[:cut.shown+1]
+		shown++
 	}
-	current, currentIdx, fence := scanShown(shownLines)
+	current, currentIdx, fence := tl.scanShown(shown)
 	body := tl.content[:cut.end]
 	if fence != "" {
 		body += "\n" + fence
 	}
 
-	hidden, continues := hiddenParts(tl, cut, current, fence)
+	hidden, continues := hiddenParts(tl, cut, current)
 	fit := memoryFit{
 		capped:      true,
 		totalTokens: total,
@@ -244,16 +288,16 @@ func renderCut(tl trimmedLines, file memoryPromptFile, total int, cut memoryCut)
 }
 
 // HiddenMemorySection é uma seção que o prompt não mostra inteira. Text é o
-// trecho exato do arquivo, do título até antes do próximo; Heading é "" para o
-// texto antes da primeira seção.
+// trecho exato do arquivo, do título até antes do próximo (ou até o fim da
+// última linha com texto); Heading é "" para o texto antes da primeira seção.
 type HiddenMemorySection struct {
 	Heading string
 	Text    string
 }
 
-// hiddenSections recorta, do conteúdo, cada seção que o agente não vê inteira:
+// hiddenSections recorta, do arquivo, cada seção que o agente não vê inteira:
 // a cortada no meio (desde o título dela, que aparece) e as escondidas. São
-// substrings de content, sem cópia.
+// substrings do arquivo, sem cópia.
 func hiddenSections(
 	tl trimmedLines,
 	hidden []omittedEntry,
@@ -280,41 +324,74 @@ func hiddenSections(
 		if k+1 < len(spans) {
 			to = spans[k+1].from
 		}
-		// Só o \n que separa da próxima seção fica de fora; espaço no fim de
-		// linha é do arquivo (quebra forçada em markdown) e fica.
-		out[k] = HiddenMemorySection{Heading: sp.heading, Text: tl.content[tl.starts[sp.from] : tl.starts[to]-1]}
+		out[k] = HiddenMemorySection{Heading: sp.heading, Text: tl.span(sp.from, to)}
 	}
 	return out
 }
 
-// fenceOf devolve a cerca de código da linha (a sequência de três ou mais ` ou
-// ~ do começo), ou "". É heurística: uma linha de prosa que comece com três
-// crases também conta.
+// fenceOf devolve a cerca que a linha abriria (a sequência de três ou mais ` ou
+// ~ do começo), ou "". Como no CommonMark, numa cerca de crases o resto da
+// linha não tem crase: "```select 1``` inline" é código inline, não cerca.
 func fenceOf(line string) string {
 	t := strings.TrimSpace(line)
 	if len(t) < 3 || (t[0] != '`' && t[0] != '~') {
 		return ""
 	}
 	n := len(t) - len(strings.TrimLeft(t, t[:1]))
-	if n < 3 {
+	if n < 3 || (t[0] == '`' && strings.IndexByte(t[n:], '`') >= 0) {
 		return ""
 	}
 	return t[:n]
 }
 
-// toggleFence atualiza a cerca aberta com a linha; devolve se a linha é cerca.
-// Fecha com o mesmo caractere e pelo menos o mesmo comprimento da abertura.
-func toggleFence(open *string, line string) bool {
+// closingFence devolve o caractere e o comprimento de uma linha que só tem
+// cerca, ou n = 0. Como no CommonMark, a cerca de fechamento não tem texto
+// depois.
+func closingFence(line string) (c byte, n int) {
 	f := fenceOf(line)
-	switch {
-	case f == "":
-		return false
-	case *open == "":
-		*open = f
-	case f[0] == (*open)[0] && len(f) >= len(*open):
-		*open = ""
+	if f == "" || strings.TrimSpace(line) != f {
+		return 0, 0
 	}
-	return true
+	return f[0], len(f)
+}
+
+func fenceKind(c byte) int {
+	if c == '~' {
+		return 1
+	}
+	return 0
+}
+
+// markCode marca as linhas de bloco de código cercado e a cerca aberta depois
+// de cada uma. Fecha com o mesmo caractere e pelo menos o mesmo comprimento da
+// abertura. Uma cerca que nunca fecha não abre bloco: no CommonMark ela iria até
+// o fim do arquivo, mas numa memória é uma escrita cortada no meio, e engoliria
+// da lista todas as seções gravadas depois dela.
+func markCode(lines []string) (code []bool, open []string) {
+	// longest[i] é a maior cerca de fechamento de cada caractere da linha i em
+	// diante: diz, sem varrer de novo, se uma abertura vai fechar.
+	longest := make([][2]int, len(lines)+1)
+	for i := len(lines) - 1; i >= 0; i-- {
+		longest[i] = longest[i+1]
+		if c, n := closingFence(lines[i]); n > 0 {
+			longest[i][fenceKind(c)] = max(longest[i][fenceKind(c)], n)
+		}
+	}
+	code = make([]bool, len(lines))
+	open = make([]string, len(lines))
+	fence := ""
+	for i, ln := range lines {
+		if fence != "" {
+			code[i] = true
+			if c, n := closingFence(ln); c == fence[0] && n >= len(fence) {
+				fence = ""
+			}
+		} else if f := fenceOf(ln); f != "" && longest[i+1][fenceKind(f[0])] >= len(f) {
+			fence, code[i] = f, true
+		}
+		open[i] = fence
+	}
+	return code, open
 }
 
 // headingText reconhece os níveis que a memória usa como seção: `### ` (o
@@ -328,20 +405,19 @@ func headingText(line string) (string, bool) {
 	return "", false
 }
 
-// scanShown devolve o último título fora de bloco de código no trecho mostrado
-// (e o índice da linha dele, -1 sem título) e a cerca que ficou aberta no fim
-// ("" se nenhuma).
-func scanShown(lines []string) (heading string, idx int, fence string) {
-	idx = -1
-	for i, ln := range lines {
-		if toggleFence(&fence, ln) {
-			continue
-		}
-		if h, ok := headingText(ln); ok && fence == "" {
-			heading, idx = h, i
+// scanShown devolve o último título fora de bloco de código nas n primeiras
+// linhas (e o índice da linha dele, -1 sem título) e a cerca que ficou aberta
+// no fim delas ("" se nenhuma).
+func (t trimmedLines) scanShown(n int) (heading string, idx int, fence string) {
+	if n > 0 {
+		fence = t.open[n-1]
+	}
+	for i := n - 1; i >= 0; i-- {
+		if h, ok := headingText(t.lines[i]); ok && !t.code[i] {
+			return h, i, fence
 		}
 	}
-	return heading, idx, fence
+	return "", -1, fence
 }
 
 type omittedEntry struct {
@@ -354,7 +430,7 @@ type omittedEntry struct {
 // hiddenParts lista tudo o que ficou de fora depois do corte: primeiro a
 // continuação da seção cortada no meio, se houver, depois cada título fora de
 // bloco de código. Devolve também se houve continuação.
-func hiddenParts(tl trimmedLines, cut memoryCut, current, fence string) ([]omittedEntry, bool) {
+func hiddenParts(tl trimmedLines, cut memoryCut, current string) ([]omittedEntry, bool) {
 	var parts []omittedEntry
 	start := cut.shown
 	continues := false
@@ -363,13 +439,13 @@ func hiddenParts(tl trimmedLines, cut memoryCut, current, fence string) ([]omitt
 		continues = true
 		start = cut.shown + 1
 	} else if next := firstNonBlank(tl.lines, cut.shown); next < len(tl.lines) {
-		if _, ok := headingText(tl.lines[next]); !ok || fence != "" {
+		if _, ok := headingText(tl.lines[next]); !ok || tl.code[next] {
 			parts = append(parts, omittedEntry{filePos: tl.at(next, 0), heading: current, continues: true})
 			continues = true
 		}
 	}
 	for i := start; i < len(tl.lines); i++ {
-		if toggleFence(&fence, tl.lines[i]) || fence != "" {
+		if tl.code[i] {
 			continue
 		}
 		if h, ok := headingText(tl.lines[i]); ok {
@@ -471,7 +547,7 @@ type MemoryPromptUsage struct {
 	Capped      bool
 	Budget      int // tokens estimados, marcador incluído
 	TotalTokens int // tokens estimados do arquivo inteiro
-	ShownLines  int // última linha mostrada inteira
+	ShownLines  int // última linha mostrada inteira; igual a TotalLines abaixo do teto
 	TotalLines  int
 	PartialLine bool // a linha ShownLines+1 aparece só no começo
 	// HiddenSections são as seções que o prompt não mostra inteiras, com o
