@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"time"
+
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -12,6 +15,22 @@ import (
 // conversation, not to the main session: a turn of main does not know what the
 // conversation was doing and, running beside the conversation's own turns, can
 // act on the same resources unseen.
+//
+// What happens to it depends on two things, decided in routeBackgroundResult:
+//
+//   - the conversation is in a turn: the result is parked and handled again when
+//     that turn ends, as if it had arrived then. It never enters the steering
+//     queue, where a /stop, a full queue or a direct turn that does not drain it
+//     would lose it, and where it would read as the user interrupting a tool
+//     batch;
+//   - the conversation is idle: a chat that takes late replies (Telegram,
+//     WhatsApp, Discord...) gets a turn in the conversation, which answers there;
+//     a web run, whose stream ended with the run, gets the result written into
+//     the conversation for its next turn, with no turn of its own.
+
+// maxParkedResults bounds the results waiting for one conversation's turn. Far
+// above what a turn launches; past it the oldest goes, loudly.
+const maxParkedResults = 100
 
 // backgroundResultTarget is the conversation a system message's result goes
 // to, with the agent that owns it. ok is false for a message that names no
@@ -32,59 +51,128 @@ func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *Ag
 	return sessionKey, agent, true
 }
 
-// recordBackgroundResult writes a result into its conversation, without a
-// turn, when the conversation's chat cannot receive a late reply (a web run's
-// stream ends with the run): a turn there would act unseen and race the user's
-// next message on the same history. If the conversation is in a turn, the note
-// waits for it to end, the way the delivery mirror defers its writes. The next
-// turn of the conversation reads it.
-//
-// false = not handled: the chat receives replies, so the caller runs a turn in
-// the conversation, or queues the result into the live one, whose reply can
-// mention it.
-func (al *AgentLoop) recordBackgroundResult(msg bus.InboundMessage) bool {
+// originTakesLateReplies reports whether the chat the work was launched from
+// can receive a reply after the turn that launched it ended. Only a web run
+// cannot: its stream closes with the run. Deciding on the resolver's answer
+// instead would silence every chat it cannot map (Discord, WhatsApp groups).
+func originTakesLateReplies(chatID string) bool {
+	channel, _ := parseSystemOrigin(chatID)
+	return channel != "grpc"
+}
+
+// routeBackgroundResult handles a result whose conversation is busy (parked)
+// or whose chat takes no late reply (written now). false = the caller runs a
+// turn in the conversation, or the main session handles it.
+func (al *AgentLoop) routeBackgroundResult(msg bus.InboundMessage) bool {
 	sessionKey, agent, ok := al.backgroundResultTarget(msg)
-	if !ok || al.originReachable(msg.ChatID) {
+	if !ok {
 		return false
 	}
-	note := providers.Message{Role: "user", Content: systemMessageContent(msg)}
-
-	stripe := al.mirror.stripe(sessionKey)
-	stripe.Lock()
-	defer stripe.Unlock()
-	al.mirror.mu.Lock()
-	busy := al.mirrorBusyLocked(sessionKey)
-	var batch []providers.Message
-	if busy {
-		al.queueMirroredLocked(sessionKey, note)
-	} else {
-		batch = append(al.mirror.pending[sessionKey], note)
-		delete(al.mirror.pending, sessionKey)
+	if al.parkIfBusy(sessionKey, msg) {
+		return true
 	}
-	al.mirror.mu.Unlock()
-	if !busy {
-		al.writeMirrored(agent, sessionKey, batch)
+	if originTakesLateReplies(msg.ChatID) {
+		return false
 	}
+	deferred := al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
 	logger.InfoCF("agent", "Recorded background result in its conversation", map[string]any{
 		"sender_id":   msg.SenderID,
 		"chat_id":     msg.ChatID,
 		"session_key": sessionKey,
-		"deferred":    busy,
-		"content_len": len(note.Content),
+		"content_len": len(msg.Content),
+		"deferred":    deferred,
 	})
 	return true
 }
 
-// originReachable reports whether a late reply can reach the chat the work was
-// launched from. With a delivery resolver, a chat it maps to no conversation is
-// not one (a web run id). Without a resolver every chat counts as reachable.
-func (al *AgentLoop) originReachable(chatID string) bool {
+// parkIfBusy parks msg when a turn holds the session.
+func (al *AgentLoop) parkIfBusy(sessionKey string, msg bus.InboundMessage) bool {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
 	al.mirror.mu.Lock()
-	resolve := al.mirror.resolve
-	al.mirror.mu.Unlock()
-	if resolve == nil {
-		return true
+	defer al.mirror.mu.Unlock()
+	if !al.mirrorBusyLocked(sessionKey) {
+		return false
 	}
-	channel, originChatID := parseSystemOrigin(chatID)
-	return resolve(channel, originChatID) != ""
+	al.parkResultLocked(sessionKey, msg)
+	return true
+}
+
+// parkBackgroundResult holds a result whose conversation turned out to be busy
+// after routing (the session was claimed in between).
+func (al *AgentLoop) parkBackgroundResult(sessionKey string, msg bus.InboundMessage) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	al.parkResultLocked(sessionKey, msg)
+}
+
+// parkResultLocked queues msg for when the session's turn ends. Requires mu.
+func (al *AgentLoop) parkResultLocked(sessionKey string, msg bus.InboundMessage) {
+	if al.mirror.parked == nil {
+		al.mirror.parked = make(map[string][]bus.InboundMessage)
+	}
+	queue := append(al.mirror.parked[sessionKey], msg)
+	if dropped := len(queue) - maxParkedResults; dropped > 0 {
+		queue = queue[dropped:]
+		logger.ErrorCF("agent", "Dropped oldest background results waiting for a turn",
+			map[string]any{"session_key": sessionKey, "dropped": dropped})
+	}
+	al.mirror.parked[sessionKey] = queue
+	logger.InfoCF("agent", "Background result waits for the conversation's turn to end", map[string]any{
+		"sender_id":   msg.SenderID,
+		"chat_id":     msg.ChatID,
+		"session_key": sessionKey,
+		"waiting":     len(queue),
+	})
+}
+
+// releaseParkedResults hands the results parked for a session back to the
+// inbound bus once no turn holds it, in arrival order, so each is routed as if
+// it had just arrived. Called where a turn ends, next to the mirror flush.
+func (al *AgentLoop) releaseParkedResults(sessionKey string) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	al.mirror.mu.Lock()
+	parked := al.mirror.parked[sessionKey]
+	if len(parked) == 0 || al.mirrorBusyLocked(sessionKey) {
+		al.mirror.mu.Unlock()
+		stripe.Unlock()
+		return
+	}
+	delete(al.mirror.parked, sessionKey)
+	al.mirror.mu.Unlock()
+	stripe.Unlock()
+
+	// Off the turn-end path: the inbound queue may be full, and its consumer
+	// is the loop this turn may be running on.
+	go func() {
+		for _, msg := range parked {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := al.bus.PublishInbound(ctx, msg)
+			cancel()
+			if err != nil {
+				logger.ErrorCF("agent", "Failed to hand a parked background result back to the loop",
+					map[string]any{"session_key": sessionKey, "sender_id": msg.SenderID, "error": err.Error()})
+			}
+		}
+	}()
+}
+
+// recordBackgroundNote writes a result into its conversation for the next turn
+// to read, without a turn of its own.
+func (al *AgentLoop) recordBackgroundNote(msg bus.InboundMessage) bool {
+	sessionKey, agent, ok := al.backgroundResultTarget(msg)
+	if !ok {
+		return false
+	}
+	al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
+	return true
+}
+
+func backgroundNote(msg bus.InboundMessage) providers.Message {
+	return providers.Message{Role: "user", Content: systemMessageContent(msg)}
 }

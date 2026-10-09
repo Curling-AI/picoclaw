@@ -194,7 +194,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				return nil
 			}
 
-			if al.recordBackgroundResult(msg) {
+			if al.routeBackgroundResult(msg) {
 				continue
 			}
 
@@ -221,7 +221,13 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			}
 			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
 				isSystem := msg.Channel == "system"
-				if !isSystem && al.tryHandleStopCommand(ctx, msg, sessionKey) {
+				if isSystem {
+					// Claimed between routing and here: the result waits for
+					// that turn to end instead of riding its steering queue.
+					al.parkBackgroundResult(sessionKey, msg)
+					continue
+				}
+				if al.tryHandleStopCommand(ctx, msg, sessionKey) {
 					continue
 				}
 
@@ -309,6 +315,12 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 
 				if al.takePendingStop(sessionKey) {
 					al.releaseSessionTurnState(sessionKey, nil)
+					if m.Channel == "system" {
+						// The user stopped this conversation: the result is
+						// written for its next turn instead of opening one.
+						al.recordBackgroundNote(m)
+						return
+					}
 					target := &continuationTarget{
 						SessionKey: sessionKey,
 						Channel:    m.Channel,

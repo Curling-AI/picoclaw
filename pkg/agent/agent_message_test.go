@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -186,6 +187,12 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+func parkedResults(al *AgentLoop, sessionKey string) int {
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	return len(al.mirror.parked[sessionKey])
+}
+
 func pendingNotes(al *AgentLoop, sessionKey string) int {
 	al.mirror.mu.Lock()
 	defer al.mirror.mu.Unlock()
@@ -215,30 +222,41 @@ func TestRun_WebResultForABusyConversationIsWrittenWhenItsTurnEnds(t *testing.T)
 		t.Fatalf("PublishInbound: %v", err)
 	}
 	waitFor(t, "the result to wait for the live turn", func() bool {
-		return pendingNotes(al, conversationSession) == 1
+		return parkedResults(al, conversationSession) == 1
 	})
 	if got := len(sessions.GetHistory(conversationSession)); got != 2 {
 		t.Fatalf("history changed to %d messages during the live turn", got)
 	}
+	if n := al.pendingSteeringCountForScope(conversationSession); n != 0 {
+		t.Fatalf("the result entered the live turn's steering queue (%d)", n)
+	}
 
 	al.clearActiveTurn(live)
 
-	history := sessions.GetHistory(conversationSession)
-	if len(history) != 3 || !strings.HasPrefix(history[2].Content, "[System: async:spawn] Spawn failed") {
-		t.Fatalf("history after the turn = %+v, want the result appended", history)
+	waitFor(t, "the result in the history after the turn", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 3
+	})
+	if got := sessions.GetHistory(conversationSession)[2]; !strings.HasPrefix(
+		got.Content,
+		"[System: async:spawn] Spawn failed",
+	) {
+		t.Fatalf("appended %q, want the result", got.Content)
 	}
 	if provider.count() != 0 {
 		t.Fatalf("a turn ran for the result (%d model calls)", provider.count())
 	}
 }
 
-// A chat that receives replies hears about the result from the live turn: it
-// joins that turn's queue, so the turn's reply can mention it.
-func TestRun_ChatResultForABusyConversationJoinsTheLiveTurn(t *testing.T) {
+// nickgs1337 on #2106: in the live turn's steering queue the result could be
+// lost (a direct turn never drains it, /stop clears it, the queue caps at 10)
+// and it skipped the rest of the tool batch as if the user had written. It
+// waits outside that queue and gets a turn of its own when the live one ends.
+func TestRun_ChatResultForABusyConversationRunsAfterTheTurn(t *testing.T) {
 	provider := &countingReplyProvider{}
-	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al, msgBus, _ := newSystemMessageTestLoop(t, provider)
 	al.SetDeliverySessionResolver(webResolver)
-	al.registerActiveTurn(&turnState{turnID: "turn-7", sessionKey: conversationSession})
+	live := &turnState{turnID: "turn-7", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
 	startRunLoop(t, al)
 
 	msg := spawnResultMessage(conversationSession)
@@ -246,18 +264,100 @@ func TestRun_ChatResultForABusyConversationJoinsTheLiveTurn(t *testing.T) {
 	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
 		t.Fatalf("PublishInbound: %v", err)
 	}
-	waitFor(t, "the result in the live turn's queue", func() bool {
-		return al.pendingSteeringCountForScope(conversationSession) == 1
+	waitFor(t, "the result to wait for the live turn", func() bool {
+		return parkedResults(al, conversationSession) == 1
 	})
-	queued := al.dequeueSteeringMessagesForScope(conversationSession)
-	if len(queued) != 1 || !strings.HasPrefix(queued[0].Content, "[System: async:spawn] Spawn failed") {
-		t.Fatalf("queued %+v, want the marked result", queued)
+	// What /stop does to the live turn's queue must not reach the result.
+	al.clearSteeringMessagesForScope(conversationSession)
+	if provider.count() != 0 || al.pendingSteeringCountForScope(conversationSession) != 0 {
+		t.Fatalf("result ran (%d calls) or entered the steering queue during the live turn", provider.count())
 	}
-	if provider.count() != 0 || pendingNotes(al, conversationSession) != 0 {
-		t.Fatalf("result also became a turn (%d calls) or a note", provider.count())
+
+	al.clearActiveTurn(live)
+
+	waitFor(t, "a turn for the result after the live one", func() bool { return provider.count() == 1 })
+	select {
+	case out := <-msgBus.OutboundChan():
+		if out.Channel != "telegram" || out.ChatID != "123" {
+			t.Fatalf("reply went to %s:%s, want telegram:123", out.Channel, out.ChatID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the chat never got a reply about the result")
 	}
-	if got := len(sessions.GetHistory(conversationSession)); got != 2 {
-		t.Fatalf("conversation history changed to %d messages", got)
+}
+
+// More results than the old steering queue held (10) while the turn runs: none
+// is lost, and they reach the conversation in order.
+func TestRun_ManyResultsForABusyConversationAllArrive(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	live := &turnState{turnID: "turn-7", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
+	startRunLoop(t, al)
+
+	const results = 15
+	for i := range results {
+		msg := spawnResultMessage(conversationSession)
+		msg.Content = fmt.Sprintf("Task %02d completed", i)
+		if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+			t.Fatalf("PublishInbound: %v", err)
+		}
+	}
+	waitFor(t, "every result to wait", func() bool { return parkedResults(al, conversationSession) == results })
+	al.clearActiveTurn(live)
+
+	waitFor(t, "every result in the history", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 2+results
+	})
+	for i, m := range sessions.GetHistory(conversationSession)[2:] {
+		if want := fmt.Sprintf("Task %02d completed", i); !strings.Contains(m.Content, want) {
+			t.Fatalf("history[%d] = %q, want %q (order kept)", i+2, m.Content, want)
+		}
+	}
+}
+
+// nickgs1337 on #2106: the resolver answers "" for chats it cannot map
+// (Discord, WhatsApp groups), which read as a web run and silenced them.
+func TestRun_ResultForAChatTheResolverCannotMapStillGetsAReply(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, _ := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	startRunLoop(t, al)
+
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "discord:999", "discord:999"
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	waitFor(t, "a turn for the result", func() bool { return provider.count() == 1 })
+}
+
+// nickgs1337 on #2106: with a stop pending for the conversation the worker
+// returned early and dropped the result, and built the continuation from the
+// system message's channel. The result is written for the next turn instead.
+func TestRun_ResultForAStoppedConversationIsWrittenNotRun(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	al.markPendingStop(conversationSession)
+	startRunLoop(t, al)
+
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound: %v", err)
+	}
+	waitFor(t, "the result in the history", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 3
+	})
+	if provider.count() != 0 {
+		t.Fatalf("a turn ran after the stop (%d model calls)", provider.count())
+	}
+	select {
+	case out := <-msgBus.OutboundChan():
+		t.Fatalf("something was sent after the stop: %+v", out)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -362,62 +462,6 @@ func TestTurnState_OriginSessionKeyIsTheRootTurns(t *testing.T) {
 
 	if got := grandchild.originSessionKey(); got != conversationSession {
 		t.Fatalf("originSessionKey = %q, want %q", got, conversationSession)
-	}
-}
-
-// Devin on #109: a result queued into a direct turn (webhook-forwarded chats
-// such as WhatsApp run through ProcessDirectWithMedia) after its last steering
-// poll sat in the queue until the user wrote again.
-func TestDirectTurn_LateResultIsContinuedForAChatThatTakesReplies(t *testing.T) {
-	provider := &countingReplyProvider{}
-	al, msgBus, _ := newSystemMessageTestLoop(t, provider)
-	al.SetDeliverySessionResolver(webResolver)
-	agentID := al.registry.GetDefaultAgent().ID
-	result := providers.Message{
-		Role:    "user",
-		Content: "[System: async:spawn] Spawn failed: subagent exceeded its 20 min limit",
-	}
-
-	if err := al.enqueueSteeringMessage(conversationSession, agentID, result); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
-	al.continueQueuedAfterDirectTurn(context.Background(), conversationSession, "telegram", "123")
-
-	if provider.count() != 1 {
-		t.Fatalf("model calls = %d, want 1 continuation turn", provider.count())
-	}
-	if n := al.pendingSteeringCountForScope(conversationSession); n != 0 {
-		t.Fatalf("%d messages still queued", n)
-	}
-	select {
-	case out := <-msgBus.OutboundChan():
-		if out.Channel != "telegram" || out.ChatID != "123" || out.Content != "background result noted" {
-			t.Fatalf("outbound = %+v, want the continuation's reply to telegram:123", out)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the continuation's reply never reached the chat")
-	}
-}
-
-// A web run cannot take a late reply; its queue is left for the next turn.
-func TestDirectTurn_WebRunLeavesTheQueueAlone(t *testing.T) {
-	provider := &countingReplyProvider{}
-	al, _, _ := newSystemMessageTestLoop(t, provider)
-	al.SetDeliverySessionResolver(webResolver)
-	agentID := al.registry.GetDefaultAgent().ID
-	if err := al.enqueueSteeringMessage(
-		conversationSession,
-		agentID,
-		providers.Message{Role: "user", Content: "e mais isso"},
-	); err != nil {
-		t.Fatalf("enqueue: %v", err)
-	}
-
-	al.continueQueuedAfterDirectTurn(context.Background(), conversationSession, "grpc", "run-1")
-
-	if provider.count() != 0 || al.pendingSteeringCountForScope(conversationSession) != 1 {
-		t.Fatalf("calls = %d, queued = %d; want the queue untouched",
-			provider.count(), al.pendingSteeringCountForScope(conversationSession))
 	}
 }
 

@@ -409,6 +409,7 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 	// When a concurrent turn of the same session overwrote this one's entry, the
 	// release above is a no-op; the last turn to end still flushes.
 	al.flushMirroredDeliveries(ts.sessionKey)
+	al.releaseParkedResults(ts.sessionKey)
 }
 
 // releaseSessionTurnState also writes the deliveries that were mirrored into
@@ -422,6 +423,7 @@ func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnSt
 	}
 	al.activeTurnStates.Delete(sessionKey)
 	al.flushMirroredDeliveries(sessionKey)
+	al.releaseParkedResults(sessionKey)
 }
 
 func (al *AgentLoop) getActiveTurnState(sessionKey string) *turnState {

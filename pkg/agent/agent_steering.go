@@ -103,7 +103,15 @@ func (al *AgentLoop) drainQueuedSteeringContinuations(
 
 func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
 	if msg.Channel == "system" {
-		return al.systemSteeringTarget(msg)
+		// A result for an idle conversation whose chat takes late replies
+		// (routeBackgroundResult let it through) takes the session like any
+		// other message and gets a turn of its own there. Main-session results
+		// keep running inline.
+		sessionKey, agent, ok := al.backgroundResultTarget(msg)
+		if !ok {
+			return "", "", false
+		}
+		return sessionKey, agent.ID, true
 	}
 
 	route, agent, err := al.resolveMessageRoute(msg)
@@ -113,16 +121,4 @@ func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, stri
 	allocation := al.allocateRouteSession(route, msg)
 
 	return resolveScopeKey(allocation.SessionKey, msg.SessionKey), agent.ID, true
-}
-
-// systemSteeringTarget: a result for a conversation whose chat receives replies
-// (see recordBackgroundResult) takes the session like any other message: a live
-// turn gets it queued, an idle conversation gets a turn of its own. Main-session
-// results keep running inline.
-func (al *AgentLoop) systemSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
-	sessionKey, agent, ok := al.backgroundResultTarget(msg)
-	if !ok {
-		return "", "", false
-	}
-	return sessionKey, agent.ID, true
 }

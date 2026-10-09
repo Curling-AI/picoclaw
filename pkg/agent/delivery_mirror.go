@@ -55,6 +55,10 @@ type deliveryMirror struct {
 	// Fica em memória: um pod que reinicia no meio do turno perde a cópia (a
 	// entrega em si já aconteceu).
 	pending map[string][]providers.Message
+	// parked segura resultados de trabalho em background (spawn) que chegaram
+	// com a conversa num turno; voltam ao bus quando o turno termina. Ver
+	// background_result.go.
+	parked map[string][]bus.InboundMessage
 	// turns conta os turnos vivos por sessão. O activeTurnStates guarda um só
 	// por chave, e no webhook dois turnos da mesma sessão correm juntos (uma
 	// goroutine por requisição, sem reserva): o segundo sobrescreve o primeiro
@@ -140,27 +144,7 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 		return
 	}
 
-	msg := providers.Message{Role: "assistant", Content: text}
-	// registerActiveTurn segura a mesma faixa: ou a entrega vê o turno, ou é
-	// gravada antes de ele começar.
-	stripe := al.mirror.stripe(target)
-	stripe.Lock()
-	defer stripe.Unlock()
-	al.mirror.mu.Lock()
-	deferred := al.mirrorBusyLocked(target)
-	var batch []providers.Message
-	if deferred {
-		al.queueMirroredLocked(target, msg)
-	} else {
-		// Uma entrega que ainda espera o flush (o turno acabou de liberar a
-		// sessão) vai antes desta, para a conversa manter a ordem de envio.
-		batch = append(al.mirror.pending[target], msg)
-		delete(al.mirror.pending, target)
-	}
-	al.mirror.mu.Unlock()
-	if !deferred {
-		al.writeMirrored(agent, target, batch)
-	}
+	deferred := al.deliverToConversation(agent, target, providers.Message{Role: "assistant", Content: text})
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
 		"chat_id":        chatID,
@@ -202,11 +186,37 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	al.writeMirrored(agent, sessionKey, pending)
 }
 
-// dropMirroredDeliveries discards what waits for the session's turn to end.
+// deliverToConversation writes msg into the session's history now, after
+// whatever was still waiting for a flush, or queues it when a turn holds the
+// session (true = deferred). It is the one place that takes the stripe and then
+// mu: registerActiveTurn holds the same stripe, so a write either sees the turn
+// or lands before it starts.
+func (al *AgentLoop) deliverToConversation(agent *AgentInstance, sessionKey string, msg providers.Message) bool {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	al.mirror.mu.Lock()
+	if al.mirrorBusyLocked(sessionKey) {
+		al.queueMirroredLocked(sessionKey, msg)
+		al.mirror.mu.Unlock()
+		return true
+	}
+	// Uma entrega que ainda espera o flush (o turno acabou de liberar a sessão)
+	// vai antes desta, para a conversa manter a ordem de envio.
+	batch := append(al.mirror.pending[sessionKey], msg)
+	delete(al.mirror.pending, sessionKey)
+	al.mirror.mu.Unlock()
+	al.writeMirrored(agent, sessionKey, batch)
+	return false
+}
+
+// dropMirroredDeliveries discards what waits for the session's turn to end:
+// mirrored deliveries and parked background results.
 func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
 	al.mirror.mu.Lock()
-	dropped := len(al.mirror.pending[sessionKey])
+	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
 	delete(al.mirror.pending, sessionKey)
+	delete(al.mirror.parked, sessionKey)
 	al.mirror.mu.Unlock()
 	if dropped > 0 {
 		logger.InfoCF("agent", "Dropped deliveries waiting for a turn of a cleared session",

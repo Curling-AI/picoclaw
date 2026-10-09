@@ -81,42 +81,7 @@ func (al *AgentLoop) ProcessDirectWithMedia(
 		SessionKey: sessionKey,
 	}
 
-	response, err := al.processMessage(ctx, msg)
-	if err != nil {
-		return response, err
-	}
-	al.continueQueuedAfterDirectTurn(ctx, sessionKey, channel, chatID)
-	return response, nil
-}
-
-// continueQueuedAfterDirectTurn runs what reached this session's steering
-// queue after the turn's last poll — a background result meant for a chat that
-// takes late replies — and sends its reply to the chat. The bus worker drains
-// that queue after each turn; direct turns (webhook-forwarded chats such as
-// WhatsApp) did not, so the result sat there until the user wrote again. A chat
-// that cannot take a late reply (a web run, whose stream ended with the run) is
-// left alone: its results are written into the conversation instead.
-func (al *AgentLoop) continueQueuedAfterDirectTurn(ctx context.Context, sessionKey, channel, chatID string) {
-	if sessionKey == "" || al.pendingSteeringCountForScope(sessionKey) == 0 {
-		return
-	}
-	if !al.originReachable(channel + ":" + chatID) {
-		return
-	}
-	target := &continuationTarget{SessionKey: sessionKey, Channel: channel, ChatID: chatID}
-	continued, err := al.drainQueuedSteeringContinuations(ctx, target)
-	if err != nil {
-		logger.WarnCF("agent", "Failed to continue queued steering after a direct turn", map[string]any{
-			"channel":     channel,
-			"chat_id":     chatID,
-			"session_key": sessionKey,
-			"error":       err.Error(),
-		})
-		return
-	}
-	if continued != "" {
-		al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, continued)
-	}
+	return al.processMessage(ctx, msg)
 }
 
 func (al *AgentLoop) ProcessHeartbeat(
