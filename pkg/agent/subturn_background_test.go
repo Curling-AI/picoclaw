@@ -61,20 +61,26 @@ func TestSpawnSubTurn_FailedChildStopsItsBackgroundProcesses(t *testing.T) {
 		t.Fatalf("err = %v, want ErrSubTurnTimeout", err)
 	}
 
-	lister := execTool
+	waitBackgroundJobStopped(t, execTool, backgroundMarker)
+}
+
+// waitBackgroundJobStopped fails unless the job running command was started and
+// is no longer running within a few seconds.
+func waitBackgroundJobStopped(t *testing.T, execTool *tools.ExecTool, command string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var listed struct {
 			Sessions []tools.SessionInfo `json:"sessions"`
 		}
-		raw := lister.Execute(context.Background(), map[string]any{"action": "list"}).ForLLM
+		raw := execTool.Execute(context.Background(), map[string]any{"action": "list"}).ForLLM
 		if err := json.Unmarshal([]byte(raw), &listed); err != nil {
 			t.Fatalf("list output %q: %v", raw, err)
 		}
 		running := false
 		found := false
 		for _, s := range listed.Sessions {
-			if s.Command == backgroundMarker {
+			if s.Command == command {
 				found = true
 				running = running || s.Status == "running"
 			}
@@ -95,7 +101,8 @@ func TestSpawnSubTurn_FailedChildStopsItsBackgroundProcesses(t *testing.T) {
 const handedOverMarker = "sleep 30 # mst277-handed-over"
 
 type backgroundThenAnswerProvider struct {
-	calls atomic.Int32
+	command string
+	calls   atomic.Int32
 }
 
 func (p *backgroundThenAnswerProvider) Chat(
@@ -110,7 +117,7 @@ func (p *backgroundThenAnswerProvider) Chat(
 			ID:        "bg",
 			Type:      "function",
 			Name:      "exec",
-			Arguments: map[string]any{"action": "run", "command": handedOverMarker, "background": "true"},
+			Arguments: map[string]any{"action": "run", "command": p.command, "background": "true"},
 		}}}, nil
 	}
 	return &providers.LLMResponse{Content: "servidor de pé em background"}, nil
@@ -120,7 +127,7 @@ func (p *backgroundThenAnswerProvider) GetDefaultModel() string { return "mock-m
 
 // A child that finished may have handed its background job over in its answer.
 func TestSpawnSubTurn_FinishedChildKeepsItsBackgroundProcesses(t *testing.T) {
-	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenAnswerProvider{})
+	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenAnswerProvider{command: handedOverMarker})
 	defer cleanup()
 	execTool, err := tools.NewExecTool("", false)
 	if err != nil {
@@ -154,4 +161,51 @@ func TestSpawnSubTurn_FinishedChildKeepsItsBackgroundProcesses(t *testing.T) {
 		}
 	}
 	t.Fatal("the child's background job was never started")
+}
+
+const abortedMarker = "sleep 30 # mst277-aborted"
+
+// hardAbortOnAnswerHook hard-aborts a turn when the model answers without a
+// tool call, the way a policy hook stops a turn.
+type hardAbortOnAnswerHook struct{}
+
+func (hardAbortOnAnswerHook) BeforeLLM(
+	_ context.Context,
+	req *LLMHookRequest,
+) (*LLMHookRequest, HookDecision, error) {
+	return req, HookDecision{Action: HookActionContinue}, nil
+}
+
+func (hardAbortOnAnswerHook) AfterLLM(
+	_ context.Context,
+	resp *LLMHookResponse,
+) (*LLMHookResponse, HookDecision, error) {
+	if resp.Response != nil && len(resp.Response.ToolCalls) == 0 {
+		return resp, HookDecision{Action: HookActionHardAbort}, nil
+	}
+	return resp, HookDecision{Action: HookActionContinue}, nil
+}
+
+// A hard-aborted child ends with no error, but it did not finish: nobody took
+// over what it left running.
+func TestSpawnSubTurn_AbortedChildStopsItsBackgroundProcesses(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenAnswerProvider{command: abortedMarker})
+	defer cleanup()
+	execTool, err := tools.NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("NewExecTool: %v", err)
+	}
+	agent.Tools.Register(execTool)
+	if err := al.MountHook(NamedHook("hard-abort-on-answer", hardAbortOnAnswerHook{})); err != nil {
+		t.Fatalf("MountHook: %v", err)
+	}
+
+	_, _ = spawnSubTurn(context.Background(), al, newStopTestParent(agent), SubTurnConfig{
+		Model:        "test-model",
+		Tools:        []tools.Tool{},
+		SystemPrompt: "suba o servidor",
+		Timeout:      5 * time.Second,
+	})
+
+	waitBackgroundJobStopped(t, execTool, abortedMarker)
 }

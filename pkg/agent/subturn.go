@@ -567,13 +567,12 @@ func spawnSubTurn(
 		semAcquired = false // prevent the defer from double-releasing
 	}
 
-	// Convert turnResult to tools.ToolResult
-	if turnErr != nil {
-		// A child that dies (deadline, stop, error) leaves nobody to poll or
-		// stop what it started in the background: in prod a script kept writing
-		// to the user's app long after the agent that launched it was gone.
-		// A child that finished keeps its processes; it may have handed them
-		// over in its answer.
+	// A child that dies (deadline, stop, error) or is hard-aborted, which ends
+	// with no error, leaves nobody to poll or stop what it started in the
+	// background: in prod a script kept writing to the user's app long after the
+	// agent that launched it was gone. A child that finished keeps its
+	// processes; it may have handed them over in its answer.
+	if turnErr != nil || turnRes.status == TurnEndStatusAborted {
 		if killed := tools.KillBackgroundSessions(childID); len(killed) > 0 {
 			logger.WarnCF("subturn", "Stopped background processes of a failed sub-turn", map[string]any{
 				"child_id":  childID,
@@ -581,6 +580,10 @@ func spawnSubTurn(
 				"sessions":  killed,
 			})
 		}
+	}
+
+	// Convert turnResult to tools.ToolResult
+	if turnErr != nil {
 		if !cfg.Async && ctx.Err() != nil {
 			turnErr = parentStoppedSubTurnError(turnErr, childTS)
 		} else {

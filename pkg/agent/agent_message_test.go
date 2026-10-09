@@ -407,10 +407,12 @@ func TestRun_ChatResultForAnIdleConversationRunsATurnThere(t *testing.T) {
 	}
 }
 
-// A conversation deleted while the work ran is not recreated with only the
-// result in it.
-func TestProcessSystemMessage_DeletedConversationFallsBackToMain(t *testing.T) {
-	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+// A conversation cleared or deleted while the work ran is not recreated with
+// only the result in it, and its result opens no turn in main, where it would
+// act on the old task unseen.
+func TestProcessSystemMessage_ResultOfAGoneConversationIsDropped(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, _, sessions := newSystemMessageTestLoop(t, provider)
 	sessions.SetHistory(conversationSession, nil)
 	mainKey := session.BuildMainSessionKey(al.registry.GetDefaultAgent().ID)
 
@@ -421,8 +423,44 @@ func TestProcessSystemMessage_DeletedConversationFallsBackToMain(t *testing.T) {
 	if got := len(sessions.GetHistory(conversationSession)); got != 0 {
 		t.Fatalf("deleted conversation came back with %d messages", got)
 	}
-	if got := len(sessions.GetHistory(mainKey)); got == 0 {
-		t.Fatal("main session got nothing")
+	if got := len(sessions.GetHistory(mainKey)); got != 0 {
+		t.Fatalf("main session got %d messages", got)
+	}
+	if provider.count() != 0 {
+		t.Fatalf("a turn ran for the result (%d model calls)", provider.count())
+	}
+}
+
+// Devin on #112: a result released when its turn ended can still be on the
+// inbound queue when the user clears the conversation. It must not reach
+// main as a turn of its own.
+func TestRun_ResultReleasedBeforeAClearOpensNoTurn(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	mainKey := session.BuildMainSessionKey(al.registry.GetDefaultAgent().ID)
+	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	if !al.routeBackgroundResult(msg) {
+		t.Fatal("the result was not parked")
+	}
+	al.clearActiveTurn(live)
+	waitFor(t, "the release", func() bool { return len(msgBus.InboundChan()) == 1 })
+
+	if _, err := al.ProcessDirect(context.Background(), "/clear", conversationSession); err != nil {
+		t.Fatalf("/clear: %v", err)
+	}
+	startRunLoop(t, al)
+	waitFor(t, "the loop to take the result", func() bool { return len(msgBus.InboundChan()) == 0 })
+	time.Sleep(300 * time.Millisecond)
+
+	if provider.count() != 0 {
+		t.Fatalf("the old result opened a turn (%d model calls)", provider.count())
+	}
+	if got := len(sessions.GetHistory(mainKey)); got != 0 {
+		t.Fatalf("main session got %d messages", got)
 	}
 }
 
@@ -553,8 +591,9 @@ func TestReleaseParkedResults_FullBusWritesTheResultIntoTheConversation(t *testi
 }
 
 // Local review: after a /stop the user wants the agent quiet. Results that
-// arrived during the stopped turn are written for the next turn, never opened
-// as turns of their own.
+// arrived during the stopped turn, or arrive before it ends, are written for the
+// next turn, never opened as turns of their own. Devin on #112: all of them,
+// more than the mirror queue holds.
 func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 	provider := &countingReplyProvider{}
 	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
@@ -562,7 +601,7 @@ func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
 	al.registerActiveTurn(live)
 	startRunLoop(t, al)
-	for i := range 3 {
+	publish := func(i int) {
 		msg := spawnResultMessage(conversationSession)
 		msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
 		msg.Content = fmt.Sprintf("Task %d completed", i)
@@ -570,16 +609,27 @@ func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 			t.Fatalf("PublishInbound: %v", err)
 		}
 	}
-	waitFor(t, "the results to wait", func() bool { return parkedResults(al, conversationSession) == 3 })
+	results := maxPendingMirrors + 5
+	for i := range results {
+		publish(i)
+	}
+	waitFor(t, "the results to wait", func() bool { return parkedResults(al, conversationSession) == results })
 
 	al.parkedResultsToNotes(conversationSession) // what a /stop does to them
+	publish(results)                             // arrives while the stopped turn winds down
+	waitFor(t, "the loop to take the late result", func() bool { return len(msgBus.InboundChan()) == 0 })
+	time.Sleep(100 * time.Millisecond) // parked right after it is taken
 	al.clearActiveTurn(live)
 
 	waitFor(t, "the results in the history", func() bool {
-		return len(sessions.GetHistory(conversationSession)) == 5
+		return len(sessions.GetHistory(conversationSession)) == 2+results+1
 	})
 	time.Sleep(200 * time.Millisecond)
 	if provider.count() != 0 {
 		t.Fatalf("results opened %d turns after the stop", provider.count())
+	}
+	history := sessions.GetHistory(conversationSession)
+	if first := history[2].Content; !strings.Contains(first, "Task 0 completed") {
+		t.Fatalf("first note = %q, want the oldest result", first)
 	}
 }

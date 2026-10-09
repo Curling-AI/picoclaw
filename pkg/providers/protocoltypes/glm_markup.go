@@ -49,8 +49,9 @@ var (
 	toolNameRe    = regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`)
 	// Process-unique ids: some providers refuse a replayed history with two
 	// tool calls sharing an id, and a per-process counter alone repeats after a
-	// restart within one conversation.
-	glmCallIDPrefix = fmt.Sprintf("glm_call_%x_", time.Now().UnixNano()&0xffffffff)
+	// restart within one conversation. The whole start time: its low 32 bits
+	// alone repeat every 4.3 s. Kept short: some providers cap the id length.
+	glmCallIDPrefix = fmt.Sprintf("glm_call_%x_", time.Now().UnixNano())
 	glmCallSeq      atomic.Uint64
 )
 

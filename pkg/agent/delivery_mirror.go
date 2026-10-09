@@ -59,6 +59,10 @@ type deliveryMirror struct {
 	// com a conversa num turno; voltam ao bus quando o turno termina. Ver
 	// background_result.go.
 	parked map[string][]bus.InboundMessage
+	// quiet marca as sessões em que um /stop pegou um turno vivo: o que está
+	// estacionado, e o que estacionar até o turno acabar, vira nota quando ele
+	// acaba, em vez de voltar ao bus.
+	quiet map[string]bool
 	// turns conta os turnos vivos por sessão. O activeTurnStates guarda um só
 	// por chave, e no webhook dois turnos da mesma sessão correm juntos (uma
 	// goroutine por requisição, sem reserva): o segundo sobrescreve o primeiro

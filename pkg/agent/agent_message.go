@@ -309,8 +309,20 @@ func (al *AgentLoop) processSystemMessage(
 	}
 
 	// The result belongs to the conversation whose turn launched the task (see
-	// background_result.go); main is the fallback.
+	// background_result.go). One whose conversation is gone (cleared or deleted
+	// while the work ran) goes with it, as /clear drops the results waiting for
+	// a turn: a turn of main would act on the old task where nobody sees it.
+	// Main only takes results that name no conversation.
 	if !namesSession {
+		if isExplicitSessionKey(msg.SessionKey) {
+			logger.InfoCF("agent", "Dropped background result of a conversation that no longer exists",
+				map[string]any{
+					"sender_id":   msg.SenderID,
+					"session_key": msg.SessionKey,
+					"content_len": len(msg.Content),
+				})
+			return "", nil
+		}
 		if agent = al.GetRegistry().GetDefaultAgent(); agent != nil {
 			sessionKey = session.BuildMainSessionKey(agent.ID)
 		}

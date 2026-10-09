@@ -34,8 +34,9 @@ const maxParkedResults = 100
 
 // backgroundResultTarget is the conversation a system message's result goes
 // to, with the agent that owns it. ok is false for a message that names no
-// session, comes from an internal chat, or names a conversation that no longer
-// exists (cleared or deleted while the work ran): those keep the main session.
+// session or comes from an internal chat, which keep the main session, and for
+// one that names a conversation that no longer exists (cleared or deleted while
+// the work ran), which processSystemMessage drops.
 func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *AgentInstance, bool) {
 	if msg.Channel != "system" || !isExplicitSessionKey(msg.SessionKey) {
 		return "", nil, false
@@ -142,20 +143,29 @@ func (al *AgentLoop) parkResultLocked(sessionKey string, msg bus.InboundMessage)
 
 // releaseParkedResults hands the results parked for a session back to the
 // inbound bus once no turn holds it, in arrival order, so each is routed as if
-// it had just arrived. Called where a turn ends, next to the mirror flush.
+// it had just arrived; after a /stop they become notes instead. Called where a
+// turn ends, next to the mirror flush.
 func (al *AgentLoop) releaseParkedResults(sessionKey string) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
 	al.mirror.mu.Lock()
-	parked := al.mirror.parked[sessionKey]
-	if len(parked) == 0 || al.mirrorBusyLocked(sessionKey) {
+	if al.mirrorBusyLocked(sessionKey) {
 		al.mirror.mu.Unlock()
 		stripe.Unlock()
 		return
 	}
+	parked := al.mirror.parked[sessionKey]
+	quiet := al.mirror.quiet[sessionKey]
 	delete(al.mirror.parked, sessionKey)
+	delete(al.mirror.quiet, sessionKey)
 	al.mirror.mu.Unlock()
+	if quiet {
+		al.writeNotesLocked(sessionKey, parked)
+	}
 	stripe.Unlock()
+	if quiet || len(parked) == 0 {
+		return
+	}
 
 	// Off the turn-end path: the inbound queue may be full, and its consumer
 	// is the loop this turn may be running on. A result the loop does not take
@@ -187,14 +197,48 @@ var releaseTimeout = 30 * time.Second
 // conversation, for its next turn to read, instead of handing them back to the
 // loop. A stop means the user wants the agent quiet: results that arrived
 // during the stopped turn must not each open a turn of their own afterwards.
+// With the turn still alive (it is being stopped), they stay parked, with what
+// parks until it ends, and become notes then, after its rollback: queued behind
+// the turn now, they would be cut by the cap of the mirror queue.
 func (al *AgentLoop) parkedResultsToNotes(sessionKey string) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
 	al.mirror.mu.Lock()
+	if al.mirrorBusyLocked(sessionKey) {
+		if al.mirror.quiet == nil {
+			al.mirror.quiet = make(map[string]bool)
+		}
+		al.mirror.quiet[sessionKey] = true
+		al.mirror.mu.Unlock()
+		return
+	}
 	parked := al.mirror.parked[sessionKey]
 	delete(al.mirror.parked, sessionKey)
 	al.mirror.mu.Unlock()
-	for _, msg := range parked {
-		al.recordBackgroundNote(msg)
+	al.writeNotesLocked(sessionKey, parked)
+}
+
+// writeNotesLocked writes results into their conversation as notes, all of
+// them, after what still waited for a flush. Requires the session's stripe,
+// with no turn holding the session.
+func (al *AgentLoop) writeNotesLocked(sessionKey string, results []bus.InboundMessage) {
+	var agent *AgentInstance
+	notes := make([]providers.Message, 0, len(results))
+	for _, msg := range results {
+		if _, owner, ok := al.backgroundResultTarget(msg); ok {
+			agent = owner
+			notes = append(notes, backgroundNote(msg))
+		}
 	}
+	if len(notes) == 0 {
+		return
+	}
+	al.mirror.mu.Lock()
+	batch := append(al.mirror.pending[sessionKey], notes...)
+	delete(al.mirror.pending, sessionKey)
+	al.mirror.mu.Unlock()
+	al.writeMirrored(agent, sessionKey, batch)
 }
 
 // recordBackgroundNote writes a result into its conversation for the next turn
