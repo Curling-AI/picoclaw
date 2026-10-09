@@ -18,7 +18,14 @@ import (
 type handoffProvider struct{ calls int }
 
 func (p *handoffProvider) GetDefaultModel() string { return "test-model" }
-func (p *handoffProvider) Chat(context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any) (*providers.LLMResponse, error) {
+
+func (p *handoffProvider) Chat(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+) (*providers.LLMResponse, error) {
 	p.calls++
 	if p.calls > 1 {
 		return nil, fmt.Errorf("LLM resumed after connector handoff")
@@ -43,6 +50,7 @@ func (t *handoffTool) Description() string { return "Test handoff tool" }
 func (t *handoffTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
+
 func (t *handoffTool) Execute(context.Context, map[string]any) *tools.ToolResult {
 	t.calls++
 	if t.name != "request_connectors" {
@@ -69,7 +77,9 @@ func TestConnectorHandoff_ErrorStopsMixedBatch(t *testing.T) {
 	p := &handoffProvider{}
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), p)
 	defer al.Close()
-	al.registry.GetDefaultAgent().Sessions = session.NewSessionManager(filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"))
+	al.registry.GetDefaultAgent().Sessions = session.NewSessionManager(
+		filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"),
+	)
 	before := &handoffTool{name: "before_card"}
 	after := &handoffTool{name: "after_card"}
 	blocked := &handoffTool{name: "request_connectors", fail: true}
@@ -78,7 +88,14 @@ func TestConnectorHandoff_ErrorStopsMixedBatch(t *testing.T) {
 	al.RegisterTool(blocked)
 	_, err := al.ProcessDirect(context.Background(), "create a connector automation", "blocked-conversation")
 	if err == nil || p.calls != 1 || before.calls != 1 || blocked.calls != 1 || after.calls != 0 {
-		t.Fatalf("error handoff continued: err=%v llm=%d before=%d blocked=%d after=%d", err, p.calls, before.calls, blocked.calls, after.calls)
+		t.Fatalf(
+			"error handoff continued: err=%v llm=%d before=%d blocked=%d after=%d",
+			err,
+			p.calls,
+			before.calls,
+			blocked.calls,
+			after.calls,
+		)
 	}
 	stored := session.NewSessionManager(filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"))
 	keys := stored.ListSessions()
@@ -86,7 +103,8 @@ func TestConnectorHandoff_ErrorStopsMixedBatch(t *testing.T) {
 		t.Fatal("error handoff was not persisted to disk")
 	}
 	history := stored.GetHistory(keys[0])
-	if last := history[len(history)-1]; last.Role != "assistant" || last.Content != "Nenhuma automação foi salva. Tente novamente depois." {
+	if last := history[len(history)-1]; last.Role != "assistant" ||
+		last.Content != "Nenhuma automação foi salva. Tente novamente depois." {
 		t.Fatalf("visible prerequisite error was not persisted: %+v", last)
 	}
 }
@@ -122,7 +140,9 @@ func TestConnectorHandoff_StopsMixedBatchAndPreservesReceipt(t *testing.T) {
 			p := &handoffProvider{}
 			al := NewAgentLoop(cfg, bus.NewMessageBus(), p)
 			defer al.Close()
-			al.registry.GetDefaultAgent().Sessions = session.NewSessionManager(filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"))
+			al.registry.GetDefaultAgent().Sessions = session.NewSessionManager(
+				filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"),
+			)
 			before := &handoffTool{name: "before_card"}
 			after := &handoffTool{name: "after_card"}
 			card := &handoffTool{name: "request_connectors", loop: al, steering: steering}

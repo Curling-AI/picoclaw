@@ -2,19 +2,27 @@ package agent
 
 import (
 	"context"
-	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sipeed/picoclaw/pkg/config"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 func TestConnectorReady_RequiresHandshakeAndCurrentRegisteredTools(t *testing.T) {
 	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "test", Version: "1"}, nil)
-	sdkmcp.AddTool(sdkServer, &sdkmcp.Tool{Name: "list_messages", Description: "List test messages"}, func(context.Context, *sdkmcp.CallToolRequest, map[string]any) (*sdkmcp.CallToolResult, any, error) {
-		return &sdkmcp.CallToolResult{}, nil, nil
-	})
-	server := httptest.NewServer(sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return sdkServer }, nil))
+	sdkmcp.AddTool(
+		sdkServer,
+		&sdkmcp.Tool{Name: "list_messages", Description: "List test messages"},
+		func(context.Context, *sdkmcp.CallToolRequest, map[string]any) (*sdkmcp.CallToolResult, any, error) {
+			return &sdkmcp.CallToolResult{}, nil, nil
+		},
+	)
+	server := httptest.NewServer(
+		sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server { return sdkServer }, nil),
+	)
 	defer server.Close()
 	al, cfg, _, _, cleanup := newTestAgentLoop(t)
 	defer cleanup()

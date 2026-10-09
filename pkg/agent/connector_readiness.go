@@ -1,7 +1,10 @@
 package agent
 
-import "github.com/sipeed/picoclaw/pkg/tools"
-import "slices"
+import (
+	"slices"
+
+	"github.com/sipeed/picoclaw/pkg/tools"
+)
 
 // ConnectorReady reports a completed MCP handshake with tools registered in
 // the current default agent. Callers serialize this check with config reloads.
