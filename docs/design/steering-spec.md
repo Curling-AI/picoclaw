@@ -57,7 +57,7 @@ Channels (Telegram, Discord, etc.) publish messages to the `MessageBus` via `Pub
 
 - **No active turn for the session**: The session key is atomically reserved via `LoadOrStore(sessionKey, struct{}{})`, and a **worker goroutine** is spawned to process the full turn lifecycle.
 - **Active turn exists for the session**: The message is enqueued directly into the steering queue via `enqueueSteeringMessage`. It will be picked up by the existing worker's steering drain loop.
-- **Non-routable (system)**: Processed synchronously in the main loop.
+- **System message (async result)**: Never enters the steering queue. A result for a conversation in a turn is parked until that turn ends (a note after a `/stop`); for an idle conversation it gets a turn there when the chat takes late replies, or is written for the next turn on a web run; a result whose conversation no longer exists is dropped; one that names no conversation is processed synchronously in the main loop. See `pkg/agent/background_result.go`.
 
 This enables **parallel processing of messages from different sessions** (up to `max_parallel_turns`) while keeping same-session messages strictly sequential.
 

@@ -98,7 +98,7 @@ When the provider returns a context length error (e.g., `context_length_exceeded
 
 ## Lifecycle and Cancellation
 
-SubTurns operate within an independent context but maintain a structural link to their parent `turnState`.
+An async SubTurn (`Async: true`) runs in a context of its own; a synchronous one ends with its caller (see [Independent Child Context](#independent-child-context)). Both keep a structural link to their parent `turnState`.
 
 ### Graceful Parent Finish
 When the parent task finishes naturally (`Finish(false)`):
@@ -107,8 +107,12 @@ When the parent task finishes naturally (`Finish(false)`):
 
 ### Hard Abort
 When the parent task is forcefully aborted (e.g., user interrupts with `/stop`):
-- A cascading cancellation is triggered, instantly terminating all child and grandchild sub-turns.
-- The root turn's session history rolls back to the snapshot taken at turn start (`initialHistoryLength`), preventing dirty context. SubTurns are not affected by this rollback as they use ephemeral sessions that are discarded anyway.
+- A cascading cancellation is triggered, instantly terminating all child and grandchild sub-turns, async ones included. A stopped sub-turn reports `ErrSubTurnParentCanceled`; the result of a stopped async one is written into the conversation as a note and never opens a turn.
+- The root turn's session history rolls back to the snapshot taken at turn start (`initialHistoryLength`), preventing dirty context, while the turn still holds the session: what is written into the conversation after the turn ended (a note, a mirrored delivery) stays. SubTurns are not affected by this rollback as they use ephemeral sessions that are discarded anyway.
+- If the stopped turn was opened by a background result, the rollback takes the result with it; it is written back as a note.
+
+### Background processes
+A sub-turn that fails (error, deadline, stop, hard abort, panic) kills the background processes it started with `exec`, including what their shell left running in its process group (`nohup cmd &`). A sub-turn that finishes hands them to the turn that launched it, whose own failure then kills them.
 
 ## Agent Loop Integration
 
@@ -117,7 +121,7 @@ When the parent task is forcefully aborted (e.g., user interrupts with `/stop`):
 When a message enters the `Run()` loop, the agent determines whether to start a new worker or enqueue to steering:
 
 - If **no active turn** exists for the message's session key, the session is atomically reserved and a **worker goroutine** is spawned. The worker processes the full turn lifecycle: `processMessage` → tool execution → steering drain → `Continue` for queued messages.
-- If an **active turn already exists** for the same session, the message is enqueued directly into that session's steering queue. It will be picked up by the existing worker's steering drain loop.
+- If an **active turn already exists** for the same session, the message is enqueued directly into that session's steering queue. It will be picked up by the existing worker's steering drain loop. A background result (`system` message) is the exception: it waits parked until the turn ends (see [steering.md](steering.md#automatic-bus-drain)).
 
 This ensures that:
 - Messages from **different sessions** are processed **in parallel** (up to `max_parallel_turns` concurrent workers)
@@ -209,11 +213,15 @@ ctx = withTurnState(ctx, turnState)
 
 ### Independent Child Context
 
-**Important**: The child SubTurn uses an **independent context** derived from `context.Background()`, not from the parent context. This design choice:
+**Important**: An **async** SubTurn (`Async: true`) uses an **independent context** derived from `context.Background()`, not from the parent context. This design choice:
 
-- Allows critical SubTurns to continue after parent cancellation
+- Allows critical async SubTurns to continue after the turn that launched them ends
 - Prevents parent timeout from affecting child execution
-- Child has its own timeout for self-protection (`Timeout` config or 5 minutes default)
+- Child has its own timeout for self-protection (`Timeout` config, or 5 minutes default; 20 minutes for async)
+
+A hard abort (`/stop`) still cancels async SubTurns, through the cascade above.
+
+A **synchronous** SubTurn has its caller blocked on it, so only its cancellation is linked to the caller's context: it ends when the caller's turn is stopped (or a new message comes after a stop) and returns `ErrSubTurnParentCanceled`, instead of holding the turn until its own deadline.
 
 ## Error Types
 
@@ -222,6 +230,8 @@ ctx = withTurnState(ctx, turnState)
 | `ErrDepthLimitExceeded` | SubTurn depth exceeds 3 levels |
 | `ErrInvalidSubTurnConfig` | Required field `Model` is empty |
 | `ErrConcurrencyTimeout` | All 5 concurrency slots occupied for 30+ seconds |
+| `ErrSubTurnTimeout` | The SubTurn hit its own time limit. The message names the limit and the iterations run, says it is not a provider failure, and tells the model to split the task instead of relaunching it unchanged |
+| `ErrSubTurnParentCanceled` | The turn that launched the SubTurn was stopped: a synchronous one with its caller, an async one by a `/stop`. It tells the model not to relaunch the task unless the user asks again |
 | Context errors | Parent context cancelled during semaphore acquisition |
 
 ## Thread Safety
