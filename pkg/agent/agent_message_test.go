@@ -364,3 +364,78 @@ func TestTurnState_OriginSessionKeyIsTheRootTurns(t *testing.T) {
 		t.Fatalf("originSessionKey = %q, want %q", got, conversationSession)
 	}
 }
+
+// Devin on #109: a result queued into a direct turn (webhook-forwarded chats
+// such as WhatsApp run through ProcessDirectWithMedia) after its last steering
+// poll sat in the queue until the user wrote again.
+func TestDirectTurn_LateResultIsContinuedForAChatThatTakesReplies(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, _ := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	agentID := al.registry.GetDefaultAgent().ID
+	result := providers.Message{Role: "user", Content: "[System: async:spawn] Spawn failed: subagent exceeded its 20 min limit"}
+
+	if err := al.enqueueSteeringMessage(conversationSession, agentID, result); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	al.continueQueuedAfterDirectTurn(context.Background(), conversationSession, "telegram", "123")
+
+	if provider.count() != 1 {
+		t.Fatalf("model calls = %d, want 1 continuation turn", provider.count())
+	}
+	if n := al.pendingSteeringCountForScope(conversationSession); n != 0 {
+		t.Fatalf("%d messages still queued", n)
+	}
+	select {
+	case out := <-msgBus.OutboundChan():
+		if out.Channel != "telegram" || out.ChatID != "123" || out.Content != "background result noted" {
+			t.Fatalf("outbound = %+v, want the continuation's reply to telegram:123", out)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the continuation's reply never reached the chat")
+	}
+}
+
+// A web run cannot take a late reply; its queue is left for the next turn.
+func TestDirectTurn_WebRunLeavesTheQueueAlone(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, _, _ := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	agentID := al.registry.GetDefaultAgent().ID
+	if err := al.enqueueSteeringMessage(conversationSession, agentID, providers.Message{Role: "user", Content: "e mais isso"}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	al.continueQueuedAfterDirectTurn(context.Background(), conversationSession, "grpc", "run-1")
+
+	if provider.count() != 0 || al.pendingSteeringCountForScope(conversationSession) != 1 {
+		t.Fatalf("calls = %d, queued = %d; want the queue untouched",
+			provider.count(), al.pendingSteeringCountForScope(conversationSession))
+	}
+}
+
+// Devin on #109: a result queued behind a turn survived /clear and the flush
+// wrote it into the cleared conversation, so the next turn read the old task.
+func TestClear_DropsResultsWaitingForTheTurn(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, _, sessions := newSystemMessageTestLoop(t, provider)
+	al.mirror.mu.Lock()
+	al.queueMirroredLocked(conversationSession, providers.Message{
+		Role:    "user",
+		Content: "[System: async:spawn] Task 'importação' completed.",
+	})
+	al.mirror.mu.Unlock()
+
+	if _, err := al.ProcessDirect(context.Background(), "/clear", conversationSession); err != nil {
+		t.Fatalf("/clear: %v", err)
+	}
+	if n := pendingNotes(al, conversationSession); n != 0 {
+		t.Fatalf("%d deliveries still waiting after /clear", n)
+	}
+	al.flushMirroredDeliveries(conversationSession)
+	for _, m := range sessions.GetHistory(conversationSession) {
+		if strings.Contains(m.Content, "Task 'importação' completed") {
+			t.Fatalf("the old result reached the cleared conversation: %q", m.Content)
+		}
+	}
+}

@@ -202,6 +202,18 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	al.writeMirrored(agent, sessionKey, pending)
 }
 
+// dropMirroredDeliveries discards what waits for the session's turn to end.
+func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
+	al.mirror.mu.Lock()
+	dropped := len(al.mirror.pending[sessionKey])
+	delete(al.mirror.pending, sessionKey)
+	al.mirror.mu.Unlock()
+	if dropped > 0 {
+		logger.InfoCF("agent", "Dropped deliveries waiting for a turn of a cleared session",
+			map[string]any{"session_key": sessionKey, "dropped": dropped})
+	}
+}
+
 // maxPendingMirrors limita a fila de uma sessão presa num turno longo: uma
 // automação de minuto contra um chat ocupado não cresce a fila sem fim. Sai a
 // mais antiga, que a conversa já não usaria.
