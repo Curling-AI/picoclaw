@@ -556,7 +556,8 @@ toolLoop:
 					ChatType: "direct",
 					SenderID: fmt.Sprintf("async:%s", asyncToolName),
 				},
-				Content: content,
+				Content:    content,
+				SessionKey: ts.originSessionKey(),
 			})
 		}
 

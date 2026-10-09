@@ -984,6 +984,17 @@ func (ts *turnState) Finished() chan struct{} {
 	return ts.finishedChan
 }
 
+// originSessionKey is the session of the root turn. A sub-turn runs in a
+// throwaway session ("subturn-N"); what it launches belongs to the conversation
+// that started the chain.
+func (ts *turnState) originSessionKey() string {
+	root := ts
+	for root.parentTurnState != nil {
+		root = root.parentTurnState
+	}
+	return root.sessionKey
+}
+
 // IsParentEnded checks if the parent turn has ended
 func (ts *turnState) IsParentEnded() bool {
 	if ts.parentTurnState == nil {
