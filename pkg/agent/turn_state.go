@@ -258,6 +258,14 @@ func newTurnExecution(
 type turnState struct {
 	mu sync.RWMutex
 
+	// offeredTools are the hidden tools this turn sends to the model: what the
+	// registry showed on the turn's first call, plus what the turn itself
+	// discovers, calls or heals. The set only grows, so neither another
+	// session's tool_search nor the agent-wide TTL tick rewrites the tools
+	// array under a running turn (each rewrite costs the whole prompt cache).
+	offeredTools  map[string]struct{}
+	offeredSeeded bool
+
 	agent   *AgentInstance
 	opts    processOptions
 	profile config.EffectiveTurnProfile
@@ -1076,4 +1084,47 @@ func turnStateFromContext(ctx context.Context) *turnState {
 // TurnStateFromContext retrieves turnState from context (exported for tools)
 func TurnStateFromContext(ctx context.Context) *turnState {
 	return turnStateFromContext(ctx)
+}
+
+// seedOfferedTools takes the registry's visible hidden tools as this turn's
+// starting set. Only the first call counts.
+func (ts *turnState) seedOfferedTools(registry *tools.ToolRegistry) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.offeredSeeded {
+		return
+	}
+	ts.offeredSeeded = true
+	if ts.offeredTools == nil {
+		ts.offeredTools = make(map[string]struct{})
+	}
+	for _, name := range registry.VisibleHiddenNames() {
+		ts.offeredTools[name] = struct{}{}
+	}
+}
+
+// offerTools adds names to the tools this turn sends to the model.
+func (ts *turnState) offerTools(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.offeredTools == nil {
+		ts.offeredTools = make(map[string]struct{}, len(names))
+	}
+	for _, name := range names {
+		ts.offeredTools[name] = struct{}{}
+	}
+}
+
+// offeredToolSet returns a copy of the tools offered so far.
+func (ts *turnState) offeredToolSet() map[string]struct{} {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	set := make(map[string]struct{}, len(ts.offeredTools))
+	for name := range ts.offeredTools {
+		set[name] = struct{}{}
+	}
+	return set
 }

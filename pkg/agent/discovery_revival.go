@@ -26,6 +26,7 @@ func (p *Pipeline) reviveDiscoveredTools(ts *turnState, exec *turnExecution, ite
 	if len(revived) == 0 {
 		return
 	}
+	ts.offerTools(revived)
 	exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 		Role:    "user",
 		Content: fmt.Sprintf(revivedToolsNudge, strings.Join(revived, ", ")),

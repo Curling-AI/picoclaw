@@ -176,7 +176,9 @@ func (p *Pipeline) CallLLM(
 	// reasoning-only/empty completions, permanently killing the conversation.
 	// Verified via A/B replay: with the referenced defs absent, glm-5.2
 	// returned empty 6/6; with them present, it acted 48/48.
+	ts.seedOfferedTools(ts.agent.Tools)
 	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
+		ts.offerTools(referenced)
 		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools referenced by session history",
 				map[string]any{
@@ -191,6 +193,7 @@ func (p *Pipeline) CallLLM(
 	// whole library.
 	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); len(mentioned) > 0 {
 		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
+		ts.offerTools(revived)
 		if len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools named by the model",
 				map[string]any{
@@ -201,7 +204,7 @@ func (p *Pipeline) CallLLM(
 		}
 	}
 
-	exec.providerToolDefs = ts.agent.Tools.ToProviderDefs()
+	exec.providerToolDefs = ts.agent.Tools.ToProviderDefsFor(ts.offeredToolSet())
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
 
 	// Native web search support

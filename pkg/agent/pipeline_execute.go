@@ -581,6 +581,11 @@ toolLoop:
 			logger.InfoCF("agent", "Revived expired deferred tool called by the model",
 				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
 		}
+		ts.offerTools([]string{toolName})
+		var visibleBefore []string
+		if tools.IsToolDiscoveryToolName(toolName) {
+			visibleBefore = ts.agent.Tools.VisibleHiddenNames()
+		}
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
@@ -589,6 +594,11 @@ toolLoop:
 			ts.chatID,
 			asyncCallback,
 		)
+		if tools.IsToolDiscoveryToolName(toolName) {
+			// What this search promoted joins the turn's tools; what other
+			// sessions promoted meanwhile mostly does not.
+			ts.offerTools(newNames(visibleBefore, ts.agent.Tools.VisibleHiddenNames()))
+		}
 		toolDuration := time.Since(toolStart)
 
 		if ts.hardAbortRequested() {
@@ -953,4 +963,19 @@ func (al *AgentLoop) skipToolCalls(
 		}
 	}
 	return answered
+}
+
+// newNames returns the names in after that are not in before.
+func newNames(before, after []string) []string {
+	seen := make(map[string]struct{}, len(before))
+	for _, name := range before {
+		seen[name] = struct{}{}
+	}
+	var added []string
+	for _, name := range after {
+		if _, ok := seen[name]; !ok {
+			added = append(added, name)
+		}
+	}
+	return added
 }
