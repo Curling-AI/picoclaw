@@ -57,8 +57,12 @@ func (al *AgentLoop) backgroundResultTarget(msg bus.InboundMessage) (string, *Ag
 // instead would silence every chat it cannot map (Discord, WhatsApp groups).
 func originTakesLateReplies(chatID string) bool {
 	channel, _ := parseSystemOrigin(chatID)
-	return channel != "grpc"
+	return channel != webRunChannel
 }
+
+// webRunChannel is the channel the Ethos gateway runs web chats on: one run per
+// message, whose stream ends with the run.
+const webRunChannel = "grpc"
 
 // routeBackgroundResult handles a result whose conversation is busy (parked)
 // or whose chat takes no late reply (written now). false = the caller runs a
@@ -100,14 +104,20 @@ func (al *AgentLoop) parkIfBusy(sessionKey string, msg bus.InboundMessage) bool 
 }
 
 // parkBackgroundResult holds a result whose conversation turned out to be busy
-// after routing (the session was claimed in between).
+// after routing (the session was claimed in between). The claimant may already
+// have ended and released an empty list by the time the result is parked, so a
+// session found idle hands the result straight back.
 func (al *AgentLoop) parkBackgroundResult(sessionKey string, msg bus.InboundMessage) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
-	defer stripe.Unlock()
 	al.mirror.mu.Lock()
-	defer al.mirror.mu.Unlock()
 	al.parkResultLocked(sessionKey, msg)
+	idle := !al.mirrorBusyLocked(sessionKey)
+	al.mirror.mu.Unlock()
+	stripe.Unlock()
+	if idle {
+		al.releaseParkedResults(sessionKey)
+	}
 }
 
 // parkResultLocked queues msg for when the session's turn ends. Requires mu.
@@ -148,18 +158,43 @@ func (al *AgentLoop) releaseParkedResults(sessionKey string) {
 	stripe.Unlock()
 
 	// Off the turn-end path: the inbound queue may be full, and its consumer
-	// is the loop this turn may be running on.
+	// is the loop this turn may be running on. A result the loop does not take
+	// in time (full or closed bus) is written into the conversation instead of
+	// being lost.
 	go func() {
 		for _, msg := range parked {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), releaseTimeout)
 			err := al.bus.PublishInbound(ctx, msg)
 			cancel()
-			if err != nil {
-				logger.ErrorCF("agent", "Failed to hand a parked background result back to the loop",
-					map[string]any{"session_key": sessionKey, "sender_id": msg.SenderID, "error": err.Error()})
+			if err == nil {
+				continue
 			}
+			logger.ErrorCF(
+				"agent",
+				"Parked background result could not go back to the loop; writing it into the conversation",
+				map[string]any{"session_key": sessionKey, "sender_id": msg.SenderID, "error": err.Error()},
+			)
+			al.recordBackgroundNote(msg)
 		}
 	}()
+}
+
+// releaseTimeout bounds how long a released result waits for room on the
+// inbound queue before it is written into the conversation instead.
+var releaseTimeout = 30 * time.Second
+
+// parkedResultsToNotes writes the results parked for a session into the
+// conversation, for its next turn to read, instead of handing them back to the
+// loop. A stop means the user wants the agent quiet: results that arrived
+// during the stopped turn must not each open a turn of their own afterwards.
+func (al *AgentLoop) parkedResultsToNotes(sessionKey string) {
+	al.mirror.mu.Lock()
+	parked := al.mirror.parked[sessionKey]
+	delete(al.mirror.parked, sessionKey)
+	al.mirror.mu.Unlock()
+	for _, msg := range parked {
+		al.recordBackgroundNote(msg)
+	}
 }
 
 // recordBackgroundNote writes a result into its conversation for the next turn

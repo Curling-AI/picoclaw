@@ -58,6 +58,7 @@ func (al *AgentLoop) stopActiveTurnForSession(sessionKey string) (commands.StopR
 	result := commands.StopResult{}
 	cleared := al.clearSteeringMessagesForScope(sessionKey)
 	al.clearPendingSkills(sessionKey)
+	al.parkedResultsToNotes(sessionKey)
 
 	ts := al.getActiveTurnState(sessionKey)
 	if ts == nil {

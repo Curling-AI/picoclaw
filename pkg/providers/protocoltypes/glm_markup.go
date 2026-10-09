@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // GLM-family models (glm-5.x, glm-5.x-flash) write tool calls in their own
@@ -27,9 +29,9 @@ import (
 //     The tool then rejects the call ("is not in enum") and the model repeats
 //     the same broken call over and over. Handled by RepairToolCallMarkup.
 //
-// Values stay strings. The executor already converts a string to the type the
-// tool's schema declares; guessing here turned "1.10" into 1.1 and long ids
-// into floats.
+// Values stay strings. The executor converts a string to the type the tool's
+// schema declares (numbers, booleans, and JSON text for arrays and objects);
+// guessing here turned "1.10" into 1.1 and long ids into floats.
 const (
 	glmArgKeyOpen    = "<arg_key>"
 	glmArgKeyClose   = "</arg_key>"
@@ -37,17 +39,87 @@ const (
 	glmArgValueClose = "</arg_value>"
 )
 
+const (
+	glmCallOpen  = "<tool_call>"
+	glmCallClose = "</tool_call>"
+)
+
 var (
-	// One block at a time: its body is parsed on its own, so a value missing
-	// its closing tag cannot swallow the prose and the call that follow.
-	glmToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*([A-Za-z0-9_.\-]+)(.*?)</tool_call>`)
+	glmCallNameRe = regexp.MustCompile(`^\s*([A-Za-z0-9_.\-]+)`)
 	toolNameRe    = regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`)
-	glmCallSeq    atomic.Uint64
+	// Process-unique ids: some providers refuse a replayed history with two
+	// tool calls sharing an id, and a per-process counter alone repeats after a
+	// restart within one conversation.
+	glmCallIDPrefix = fmt.Sprintf("glm_call_%x_", time.Now().UnixNano()&0xffffffff)
+	glmCallSeq      atomic.Uint64
 )
 
 type glmArg struct {
 	key   string
 	value string
+}
+
+// glmBlock is one <tool_call>NAME…</tool_call> span of the text.
+type glmBlock struct {
+	start, end int // byte offsets of the whole block, end exclusive
+	name, body string
+}
+
+// glmBlocks finds the GLM calls in text, one block at a time. A block ends at
+// the first </tool_call>, unless that tag falls inside a value still open and
+// the value's own </arg_value> comes before any next <tool_call>: then the
+// value just quotes the tag and the block runs on to the next </tool_call>.
+// A value that never closes stays in its block instead of swallowing the
+// prose and the call that follow.
+func glmBlocks(text string) []glmBlock {
+	var blocks []glmBlock
+	pos := 0
+	for {
+		open := strings.Index(text[pos:], glmCallOpen)
+		if open < 0 {
+			return blocks
+		}
+		start := pos + open
+		afterOpen := start + len(glmCallOpen)
+		name := glmCallNameRe.FindStringSubmatchIndex(text[afterOpen:])
+		if name == nil {
+			pos = afterOpen
+			continue
+		}
+		bodyStart := afterOpen + name[1]
+		closing := strings.Index(text[bodyStart:], glmCallClose)
+		if closing < 0 {
+			return blocks
+		}
+		end := bodyStart + closing
+		for valueStillOpen(text[bodyStart:end]) {
+			rest := text[end+len(glmCallClose):]
+			valueClose := strings.Index(rest, glmArgValueClose)
+			nextCall := strings.Index(rest, glmCallOpen)
+			if valueClose < 0 || (nextCall >= 0 && nextCall < valueClose) {
+				break
+			}
+			nextClose := strings.Index(rest[valueClose:], glmCallClose)
+			if nextClose < 0 {
+				break
+			}
+			end += len(glmCallClose) + valueClose + nextClose
+		}
+		body := text[bodyStart:end]
+		if glmBody(body) {
+			blocks = append(blocks, glmBlock{
+				start: start,
+				end:   end + len(glmCallClose),
+				name:  text[afterOpen+name[2] : afterOpen+name[3]],
+				body:  body,
+			})
+		}
+		pos = end + len(glmCallClose)
+	}
+}
+
+func valueStillOpen(body string) bool {
+	return strings.LastIndex(body, glmArgValueOpen) > strings.LastIndex(body, glmArgValueClose)
 }
 
 // glmBody reports whether the text after a tool name is a GLM argument list:
@@ -58,26 +130,24 @@ func glmBody(body string) bool {
 }
 
 func extractGLMToolCalls(text string) []ToolCall {
-	var result []ToolCall
-	for _, m := range glmToolCallRe.FindAllStringSubmatch(text, -1) {
-		if !glmBody(m[2]) {
-			continue
-		}
-		name := m[1]
+	blocks := glmBlocks(text)
+	if len(blocks) == 0 {
+		return nil
+	}
+	result := make([]ToolCall, 0, len(blocks))
+	for _, b := range blocks {
 		args := map[string]any{}
-		for _, a := range parseGLMArgs(m[2]) {
+		for _, a := range parseGLMArgs(b.body) {
 			args[a.key] = a.value
 		}
 
 		argsJSON, _ := json.Marshal(args)
 		result = append(result, ToolCall{
-			// Unique per process: some providers refuse a replayed history
-			// with two tool calls sharing an id.
-			ID:        fmt.Sprintf("glm_call_%d", glmCallSeq.Add(1)),
-			Name:      name,
+			ID:        glmCallIDPrefix + strconv.FormatUint(glmCallSeq.Add(1), 10),
+			Name:      b.name,
 			Arguments: args,
 			Function: &FunctionCall{
-				Name:      name,
+				Name:      b.name,
 				Arguments: string(argsJSON),
 			},
 		})
@@ -87,13 +157,18 @@ func extractGLMToolCalls(text string) []ToolCall {
 
 // stripGLMToolCalls removes the blocks extractGLMToolCalls turns into calls.
 func stripGLMToolCalls(text string) string {
-	return glmToolCallRe.ReplaceAllStringFunc(text, func(block string) string {
-		m := glmToolCallRe.FindStringSubmatch(block)
-		if m == nil || !glmBody(m[2]) {
-			return block
-		}
-		return ""
-	})
+	blocks := glmBlocks(text)
+	if len(blocks) == 0 {
+		return text
+	}
+	var b strings.Builder
+	prev := 0
+	for _, block := range blocks {
+		b.WriteString(text[prev:block.start])
+		prev = block.end
+	}
+	b.WriteString(text[prev:])
+	return b.String()
 }
 
 // parseGLMArgs reads a run of <arg_key>K</arg_key><arg_value>V</arg_value>

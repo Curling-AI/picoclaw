@@ -269,3 +269,20 @@ func TestParseGLMArgs_StaysLinear(t *testing.T) {
 		t.Fatalf("parsing took %s", elapsed)
 	}
 }
+
+// A value that quotes the closing tag (plausibly why the gateway's own parser
+// gave up) keeps its whole text, and nothing leaks into the content.
+func TestExtractGLMToolCall_ValueQuotingTheClosingTag(t *testing.T) {
+	text := "Anotado.\n<tool_call>write_file<arg_key>path</arg_key><arg_value>notes.md</arg_value>" +
+		"<arg_key>content</arg_key><arg_value>GLM ends calls with </tool_call> like this</arg_value></tool_call>"
+	calls := ExtractToolCallsFromText(text)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want one", calls)
+	}
+	if got := calls[0].Arguments["content"]; got != "GLM ends calls with </tool_call> like this" {
+		t.Errorf("content = %#v, want the whole value", got)
+	}
+	if got := StripToolCallsFromText(text); got != "Anotado." {
+		t.Errorf("stripped = %q, want only the prose", got)
+	}
+}

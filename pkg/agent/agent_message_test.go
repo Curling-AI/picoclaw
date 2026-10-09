@@ -490,3 +490,96 @@ func TestClear_DropsResultsWaitingForTheTurn(t *testing.T) {
 		}
 	}
 }
+
+// Local review: the Run loop parks a result for a session it saw claimed, but
+// the claimant can end (releasing an empty list) before the result is parked.
+// A session found idle hands the result straight back.
+func TestParkBackgroundResult_AfterTheClaimantEndedIsReleased(t *testing.T) {
+	al, msgBus, _ := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	al.SetDeliverySessionResolver(webResolver)
+	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
+	al.clearActiveTurn(live)
+
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	al.parkBackgroundResult(conversationSession, msg)
+
+	select {
+	case got := <-msgBus.InboundChan():
+		if got.SessionKey != conversationSession {
+			t.Fatalf("released %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the result stayed parked with no turn alive (%d parked)", parkedResults(al, conversationSession))
+	}
+}
+
+// Local review: a release that finds the inbound queue full (the loop busy on
+// a long inline message) or closed must not lose the result.
+func TestReleaseParkedResults_FullBusWritesTheResultIntoTheConversation(t *testing.T) {
+	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	al.SetDeliverySessionResolver(webResolver)
+	previous := releaseTimeout
+	releaseTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { releaseTimeout = previous })
+	for i := 0; ; i++ {
+		filler := spawnResultMessage("sk_v1_other")
+		filler.Content = fmt.Sprintf("filler %d", i)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		err := msgBus.PublishInbound(ctx, filler)
+		cancel()
+		if err != nil {
+			break // the queue is full
+		}
+	}
+	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
+	if !al.routeBackgroundResult(spawnResultMessage(conversationSession)) {
+		t.Fatal("the result was not parked")
+	}
+
+	al.clearActiveTurn(live)
+
+	waitFor(t, "the result written into the conversation", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 3
+	})
+	if got := sessions.GetHistory(conversationSession)[2]; !strings.HasPrefix(
+		got.Content,
+		"[System: async:spawn] Spawn failed",
+	) {
+		t.Fatalf("wrote %q", got.Content)
+	}
+}
+
+// Local review: after a /stop the user wants the agent quiet. Results that
+// arrived during the stopped turn are written for the next turn, never opened
+// as turns of their own.
+func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
+	al.SetDeliverySessionResolver(webResolver)
+	live := &turnState{turnID: "turn-9", sessionKey: conversationSession}
+	al.registerActiveTurn(live)
+	startRunLoop(t, al)
+	for i := range 3 {
+		msg := spawnResultMessage(conversationSession)
+		msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+		msg.Content = fmt.Sprintf("Task %d completed", i)
+		if err := msgBus.PublishInbound(context.Background(), msg); err != nil {
+			t.Fatalf("PublishInbound: %v", err)
+		}
+	}
+	waitFor(t, "the results to wait", func() bool { return parkedResults(al, conversationSession) == 3 })
+
+	al.parkedResultsToNotes(conversationSession) // what a /stop does to them
+	al.clearActiveTurn(live)
+
+	waitFor(t, "the results in the history", func() bool {
+		return len(sessions.GetHistory(conversationSession)) == 5
+	})
+	time.Sleep(200 * time.Millisecond)
+	if provider.count() != 0 {
+		t.Fatalf("results opened %d turns after the stop", provider.count())
+	}
+}

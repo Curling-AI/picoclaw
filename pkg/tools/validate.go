@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -46,10 +47,24 @@ func coerceToolArgs(schema map[string]any, args map[string]any) {
 				}
 			}
 		case "object":
+			// Models that write calls as markup (GLM) or stringify JSON hand
+			// an object over as its text.
+			if s, ok := val.(string); ok {
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &decoded); err == nil && decoded != nil {
+					args[key], val = decoded, decoded
+				}
+			}
 			if obj, ok := val.(map[string]any); ok {
 				coerceToolArgs(propSchema, obj)
 			}
 		case "array":
+			if s, ok := val.(string); ok {
+				var decoded []any
+				if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &decoded); err == nil && decoded != nil {
+					args[key], val = decoded, decoded
+				}
+			}
 			itemSchema, ok := propSchema["items"].(map[string]any)
 			if !ok {
 				continue

@@ -232,15 +232,11 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				msg = al.prepareInboundMessageForAgent(ctx, msg)
-				content := msg.Content
-				if isSystem {
-					content = systemMessageContent(msg)
-				}
 
 				// Another turn is already active (or reserved) for this session — enqueue
 				if err := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
 					Role:    "user",
-					Content: content,
+					Content: msg.Content,
 					Media:   append([]string(nil), msg.Media...),
 				}); err != nil {
 					logger.WarnCF("agent", "Failed to enqueue steering message",
@@ -314,6 +310,9 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				if al.takePendingStop(sessionKey) {
+					// Same rule as a stop on a live turn: what waited for this
+					// session becomes notes, not turns.
+					al.parkedResultsToNotes(sessionKey)
 					al.releaseSessionTurnState(sessionKey, nil)
 					if m.Channel == "system" {
 						// The user stopped this conversation: the result is
