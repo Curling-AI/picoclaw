@@ -23,6 +23,8 @@ type mcpTestTool struct {
 	countingTool
 	safety tools.RepeatSafety
 	fail   bool
+	// lost: the call runs on the server but the answer never comes back.
+	lost bool
 }
 
 func newMCPTestTool(name string, safety tools.RepeatSafety) *mcpTestTool {
@@ -47,8 +49,21 @@ func (m *mcpTestTool) Execute(context.Context, map[string]any) *tools.ToolResult
 	if m.fail {
 		return tools.ErrorResult("You are not allowed to create new projects. Upgrade your plan.")
 	}
+	if m.lost {
+		lost := tools.ErrorResult("MCP tool execution failed: unexpected EOF")
+		lost.OutcomeUnknown = true
+		return lost
+	}
 	return tools.NewToolResult(`{"projectId":64498,"name":"Unnamed"}`)
 }
+
+// serverNamedMCPTestTool is an MCP-like tool with the server's own name.
+type serverNamedMCPTestTool struct {
+	*mcpTestTool
+	serverName string
+}
+
+func (s serverNamedMCPTestTool) ServerToolName() string { return s.serverName }
 
 type stepCall struct {
 	tool string
@@ -156,12 +171,13 @@ func TestRepeatedSideEffectCallStopsAndEndsTheTurn(t *testing.T) {
 	if got := create.calls.Load(); got != maxUnchangedRuns {
 		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
 	}
-	if got := run.toolResults(repeatedSideEffectContent); got != maxRepeatRefusals {
-		t.Errorf("history has %d refusals, want %d (each refused call keeps its answer)", got, maxRepeatRefusals)
+	// Refused once, then again in the next round, after the model read it.
+	if got := run.toolResults(repeatedSideEffectContent); got != 2 {
+		t.Errorf("history has %d refusals, want 2 (each refused call keeps its answer)", got)
 	}
-	if run.provider.next != maxUnchangedRuns+maxRepeatRefusals {
+	if run.provider.next != maxUnchangedRuns+2 {
 		t.Errorf("LLM rounds = %d, want %d: the turn must end instead of looping to max_tool_iterations",
-			run.provider.next, maxUnchangedRuns+maxRepeatRefusals)
+			run.provider.next, maxUnchangedRuns+2)
 	}
 	if !strings.HasPrefix(run.resp, "I stopped this turn") {
 		t.Errorf("response = %q, want the stop summary", run.resp)
@@ -217,9 +233,9 @@ func TestStopSummaryIsStreamedAfterANarration(t *testing.T) {
 func TestEndingTheTurnAnswersTheRestOfTheReply(t *testing.T) {
 	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
 	exec := &countingTool{name: "exec"}
-	reply := append(times(createCall, 4), stepCall{tool: "exec"})
+	steps := [][]stepCall{times(createCall, 3), {createCall, {tool: "exec"}}}
 
-	run := runSteps(t, &stepProvider{steps: [][]stepCall{reply}}, create, exec)
+	run := runSteps(t, &stepProvider{steps: steps}, create, exec)
 
 	if got := create.calls.Load(); got != maxUnchangedRuns {
 		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
@@ -246,6 +262,10 @@ func TestCallsThatChangeNothingKeepTheRun(t *testing.T) {
 			tool:    &countingTool{name: tools.BM25SearchToolName},
 		},
 		{name: "native read", between: stepCall{tool: "read_file"}, tool: &countingTool{name: "read_file"}},
+		{name: "message to the user", between: stepCall{tool: "message"}, tool: &countingTool{name: "message"}},
+		{name: "reaction", between: stepCall{tool: "reaction"}, tool: &countingTool{name: "reaction"}},
+		{name: "memory note", between: stepCall{tool: "memory"}, tool: &countingTool{name: "memory"}},
+		{name: "workspace file edit", between: stepCall{tool: "write_file"}, tool: &countingTool{name: "write_file"}},
 		{
 			name:    "MCP read declared read-only",
 			between: stepCall{tool: statusToolName},
@@ -378,13 +398,18 @@ func TestNativeToolRepeatsAreNotGuarded(t *testing.T) {
 func TestIdenticalCallsInOneReplyShareTheRun(t *testing.T) {
 	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
 
-	run := runSteps(t, &stepProvider{steps: [][]stepCall{times(createCall, 3)}}, create)
+	run := runSteps(t, &stepProvider{steps: [][]stepCall{times(createCall, 5)}}, create)
 
 	if got := create.calls.Load(); got != maxUnchangedRuns {
 		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
 	}
-	if got := run.toolResults(repeatedSideEffectContent); got != 1 {
-		t.Errorf("%d refusals, want 1", got)
+	if got := run.toolResults(repeatedSideEffectContent); got != 3 {
+		t.Errorf("%d refusals, want 3", got)
+	}
+	// The model sent every copy before reading any refusal: it gets the chance
+	// to read them instead of having the turn ended for it.
+	if run.resp != "fim" {
+		t.Errorf("response = %q, want the model's own reply", run.resp)
 	}
 }
 
@@ -428,5 +453,116 @@ func TestRepeatGuardResetsEachTurn(t *testing.T) {
 	}
 	if got := create.calls.Load(); got != 3 {
 		t.Fatalf("project created %d times over three turns, want 3", got)
+	}
+}
+
+// Refusing a call, moving on and later refusing another one is not one call
+// kept being resent: the turn goes on, and no stop summary blames the second.
+func TestARefusalOfAnotherCallDoesntEndTheTurn(t *testing.T) {
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	other := stepCall{tool: createToolName, args: map[string]any{"name": "outro"}}
+	calls := append(times(createCall, 3), times(other, 3)...)
+
+	run := runSteps(t, &stepProvider{steps: oneCallPerStep(calls...)}, create)
+
+	if run.resp != "fim" {
+		t.Fatalf("response = %q, want the model's own reply", run.resp)
+	}
+	if got := run.toolResults(repeatedSideEffectContent); got != 2 {
+		t.Errorf("%d refusals, want 2 (one per call)", got)
+	}
+	if got := create.calls.Load(); got != 2*maxUnchangedRuns {
+		t.Errorf("tool ran %d times, want %d", got, 2*maxUnchangedRuns)
+	}
+}
+
+// A call answered by nothing (EOF, gateway timeout) may have gone through on
+// the server: it counts, or a lost answer keeps the loop going to
+// max_tool_iterations.
+func TestCallsWithUnknownOutcomeCount(t *testing.T) {
+	create := &mcpTestTool{countingTool: countingTool{name: createToolName}, lost: true}
+
+	run := runSteps(t, &stepProvider{steps: oneCallPerStep(times(createCall, 6)...)}, create)
+
+	if got := create.calls.Load(); got != maxUnchangedRuns {
+		t.Fatalf("tool ran %d times, want %d", got, maxUnchangedRuns)
+	}
+	if !strings.HasPrefix(run.resp, "I stopped this turn") {
+		t.Errorf("response = %q, want the stop summary", run.resp)
+	}
+}
+
+// The user knows the tool by the server's name, not the registry's prefixed one.
+func TestStopSummaryNamesTheServerTool(t *testing.T) {
+	create := serverNamedMCPTestTool{
+		mcpTestTool: newMCPTestTool(createToolName, tools.RepeatUnsafe),
+		serverName:  "skip_project_create",
+	}
+
+	run := runSteps(t, &stepProvider{steps: oneCallPerStep(times(createCall, 4)...)}, create)
+
+	if run.resp != repeatStopSummary("skip_project_create") {
+		t.Fatalf("response = %q, want the stop summary naming skip_project_create", run.resp)
+	}
+}
+
+// Two tools sent the same arguments are two actions.
+func TestTheToolIsPartOfTheCall(t *testing.T) {
+	const publishToolName = "mcp_skip_skip_project_publish"
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	publish := newMCPTestTool(publishToolName, tools.RepeatUnsafe)
+	publishCall := stepCall{tool: publishToolName}
+	calls := []stepCall{createCall, publishCall, createCall, publishCall, createCall, publishCall}
+
+	run := runSteps(t, &stepProvider{steps: oneCallPerStep(calls...)}, create, publish)
+
+	if got := run.toolResults(repeatedSideEffectContent); got != 0 {
+		t.Fatalf("%d calls refused, want none", got)
+	}
+	if got := create.calls.Load() + publish.calls.Load(); got != 6 {
+		t.Errorf("tools ran %d times, want 6", got)
+	}
+}
+
+// A different call starts its own run: it gets its two runs whatever the run
+// before it had used up.
+func TestANewCallStartsItsOwnRun(t *testing.T) {
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	other := stepCall{tool: createToolName, args: map[string]any{"name": "outro"}}
+
+	run := runSteps(t, &stepProvider{steps: oneCallPerStep(createCall, createCall, other, other)}, create)
+
+	if got := run.toolResults(repeatedSideEffectContent); got != 0 {
+		t.Fatalf("%d calls refused, want none", got)
+	}
+}
+
+// A sub-agent's result arriving mid-turn is not the user steering it: the run
+// goes on.
+func TestSubTurnResultKeepsTheRun(t *testing.T) {
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	provider := &stepProvider{steps: oneCallPerStep(times(createCall, 4)...)}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al.registry.GetDefaultAgent().Tools.Register(create)
+	provider.beforeStep = func(step int) {
+		if step == maxUnchangedRuns {
+			err := al.Steer(providers.Message{
+				Role:         "user",
+				Content:      "[subagent] relatório pronto",
+				PromptSource: string(PromptSourceSubTurnResult),
+			})
+			if err != nil {
+				t.Errorf("Steer: %v", err)
+			}
+		}
+	}
+
+	if _, err := al.ProcessDirect(context.Background(), "cria um projeto", "repeat-subturn"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if got := create.calls.Load(); got != maxUnchangedRuns {
+		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
 	}
 }

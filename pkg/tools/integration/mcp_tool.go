@@ -282,7 +282,10 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) *ToolResult 
 	result, err := t.manager.CallTool(ctx, t.serverName, t.tool.Name, args)
 	if err != nil {
 		t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallEnd, startedAt, true, err.Error())
-		return ErrorResult(fmt.Sprintf("MCP tool execution failed: %v", err)).WithError(err)
+		failed := ErrorResult(fmt.Sprintf("MCP tool execution failed: %v", err)).WithError(err)
+		// The server never answered: a create may have gone through anyway.
+		failed.OutcomeUnknown = true
+		return failed
 	}
 
 	if result == nil {

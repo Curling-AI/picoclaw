@@ -398,6 +398,9 @@ func TestMCPTool_Execute_ManagerError(t *testing.T) {
 	if !strings.Contains(result.ForLLM, "connection failed") {
 		t.Errorf("Error message should include original error, got: %s", result.ForLLM)
 	}
+	if !result.OutcomeUnknown {
+		t.Error("no answer from the server: the call may have run, OutcomeUnknown should be set")
+	}
 }
 
 // TestMCPTool_Execute_ServerError tests execution when server returns error
@@ -430,6 +433,9 @@ func TestMCPTool_Execute_ServerError(t *testing.T) {
 	}
 	if !strings.Contains(result.ForLLM, "Invalid API key") {
 		t.Errorf("Error message should include server message, got: %s", result.ForLLM)
+	}
+	if result.OutcomeUnknown {
+		t.Error("the server answered that the call failed: OutcomeUnknown should not be set")
 	}
 }
 

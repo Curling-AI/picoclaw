@@ -16,20 +16,6 @@ func hiddenServerTool(name, serverName string) *serverNamedMockTool {
 	}
 }
 
-func TestGetRegistered_ReturnsExpiredHiddenTools(t *testing.T) {
-	r := newTTLTestRegistry(t)
-
-	if _, ok := r.Get("mcp_a"); ok {
-		t.Fatal("precondition: mcp_a is expired and not callable")
-	}
-	if tool, ok := r.GetRegistered("mcp_a"); !ok || tool.Name() != "mcp_a" {
-		t.Fatalf("GetRegistered(mcp_a) = %v, %v; want the expired tool", tool, ok)
-	}
-	if _, ok := r.GetRegistered("unknown"); ok {
-		t.Fatal("GetRegistered(unknown) found a tool")
-	}
-}
-
 func TestExpiredToolAliases(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register(&mockRegistryTool{name: "read_file", desc: "core"})

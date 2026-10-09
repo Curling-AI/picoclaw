@@ -247,18 +247,6 @@ func (r *ToolRegistry) HasRegistered(name string) bool {
 	return ok
 }
 
-// GetRegistered returns a registered tool whether or not it is callable right
-// now (hidden tools whose TTL expired included).
-func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	entry, ok := r.tools[name]
-	if !ok {
-		return nil, false
-	}
-	return entry.Tool, true
-}
-
 // CoercedArgs returns a copy of args with the typing fixes ExecuteWithContext
 // applies before running the tool (numeric strings, stringified booleans), so
 // a caller can compare calls the way the tool will see them. The copy is deep:
@@ -266,7 +254,7 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 // the model sent them.
 func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
 	coerced, _ := cloneJSONValue(args).(map[string]any)
-	if tool, ok := r.GetRegistered(name); ok {
+	if tool, ok := r.Get(name); ok {
 		coerceToolArgs(tool.Parameters(), coerced)
 	}
 	return coerced
