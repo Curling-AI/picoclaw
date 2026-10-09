@@ -327,6 +327,9 @@ func (p *Pipeline) beginSynthesizedFinalStream(ctx context.Context, ts *turnStat
 		if clearer, ok := p.Bus.(bus.FinalizedStreamClearer); ok {
 			clearer.ClearFinalizedStream(ts.channel, ts.chatID, ts.sessionKey)
 		}
+		// A turn that only publishes interim messages delivers its final
+		// through the stream; without one, Finalize publishes it plainly.
+		exec.streamingFallback = true
 		return
 	}
 	exec.streamingPublisher = &streamingChunkPublisher{

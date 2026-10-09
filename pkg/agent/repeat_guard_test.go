@@ -566,3 +566,27 @@ func TestSubTurnResultKeepsTheRun(t *testing.T) {
 		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
 	}
 }
+
+// The incident tool had expired: the model called it by name and the agent
+// revived it right before each run. The guard must see it like a live one.
+func TestExpiredToolCallsAreGuarded(t *testing.T) {
+	create := newMCPTestTool(createToolName, tools.RepeatUnsafe)
+	provider := &stepProvider{steps: oneCallPerStep(times(createCall, 6)...)}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al.registry.GetDefaultAgent().Tools.RegisterHidden(create) // TTL 0: expired
+	provider.beforeStep = func(int) {
+		// Let it expire again before every call, as idle rounds do.
+		for range 50 {
+			al.registry.GetDefaultAgent().Tools.TickTTL()
+		}
+	}
+
+	if _, err := al.ProcessDirect(context.Background(), "cria um projeto", "repeat-expired"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if got := create.calls.Load(); got != maxUnchangedRuns {
+		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
+	}
+}

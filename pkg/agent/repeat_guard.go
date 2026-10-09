@@ -65,9 +65,11 @@ func classifyCall(registry *tools.ToolRegistry, toolName string) callEffect {
 	if nativeToolsThatAct[toolName] {
 		return effectChange
 	}
-	tool, ok := registry.Get(toolName)
+	// GetRegistered, not Get: ExecuteTools revives an expired deferred tool the
+	// model calls (EnsureVisible) right before running it.
+	tool, ok := registry.GetRegistered(toolName)
 	if !ok {
-		// Unknown or expired: the registry won't run it.
+		// Unknown: the registry won't run it.
 		return effectNone
 	}
 	hinter, ok := tool.(tools.SideEffectHinter)
@@ -87,7 +89,7 @@ func classifyCall(registry *tools.ToolRegistry, toolName string) callEffect {
 // displayToolName is the name the user knows a tool by: the server's own name
 // for an MCP tool, without the mcp_<server>_ prefix.
 func displayToolName(registry *tools.ToolRegistry, toolName string) string {
-	if tool, ok := registry.Get(toolName); ok {
+	if tool, ok := registry.GetRegistered(toolName); ok {
 		if named, ok := tool.(tools.ServerNamedTool); ok && named.ServerToolName() != "" {
 			return named.ServerToolName()
 		}

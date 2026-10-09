@@ -230,3 +230,33 @@ func TestNamedToolsAreRevivedOnePagePerTurn(t *testing.T) {
 		t.Fatalf("%d named tools offered over the turn, want %d", offered, maxRevivedDiscoveredTools)
 	}
 }
+
+// The revival before a retry and the mention heal share one page per turn.
+func TestRetryRevivalSharesTheTurnBudget(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &offerRecorder{offered: map[string]bool{}})
+	agent := al.registry.GetDefaultAgent()
+	names := make([]string, maxRevivedDiscoveredTools)
+	for i := range names {
+		names[i] = fmt.Sprintf("mcp_lib_tool_%02d", i)
+		agent.Tools.RegisterHidden(newServerTool(names[i], fmt.Sprintf("tool_%02d", i)))
+	}
+	ts := &turnState{agent: agent, discoveryRevivals: maxRevivedDiscoveredTools - 3}
+	exec := &turnExecution{messages: discoveryExchange(t, "search-1", names...)}
+
+	NewPipeline(al).reviveDiscoveredTools(ts, exec, 1)
+
+	visible := 0
+	for _, name := range names {
+		if _, ok := agent.Tools.Get(name); ok {
+			visible++
+		}
+	}
+	if visible != 3 {
+		t.Fatalf("%d tools revived before the retry, want the 3 left in the turn's budget", visible)
+	}
+	if ts.discoveryRevivals != maxRevivedDiscoveredTools {
+		t.Errorf("turn budget used = %d, want %d", ts.discoveryRevivals, maxRevivedDiscoveredTools)
+	}
+}

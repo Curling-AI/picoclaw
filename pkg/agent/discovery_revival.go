@@ -8,8 +8,9 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// maxRevivedDiscoveredTools matches one discovery page, so a retry never
-// offers more deferred tools than a single tool_search would.
+// maxRevivedDiscoveredTools matches one discovery page: a turn never offers
+// more uncalled deferred tools again than a single tool_search would, across
+// retries and the tools the model names (turnState.discoveryRevivals).
 const maxRevivedDiscoveredTools = 8
 
 const revivedToolsNudge = "[System] These tools you discovered earlier had expired and were missing from your " +
@@ -19,10 +20,12 @@ const revivedToolsNudge = "[System] These tools you discovered earlier had expir
 // model never called (EnsureVisible only heals called ones), before a retry.
 func (p *Pipeline) reviveDiscoveredTools(ts *turnState, exec *turnExecution, iteration int) {
 	discovered := discoveredToolNamesFromMessages(exec.messages)
-	if len(discovered) == 0 {
+	budget := maxRevivedDiscoveredTools - ts.discoveryRevivals
+	if len(discovered) == 0 || budget <= 0 {
 		return
 	}
-	revived := ts.agent.Tools.ReviveExpired(discovered, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
+	revived := ts.agent.Tools.ReviveExpired(discovered, discoveryPromoteTTL(p.Cfg), budget)
+	ts.discoveryRevivals += len(revived)
 	if len(revived) == 0 {
 		return
 	}

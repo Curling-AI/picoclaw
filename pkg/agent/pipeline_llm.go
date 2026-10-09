@@ -185,10 +185,10 @@ func (p *Pipeline) CallLLM(
 	// yet. The budget is one discovery page per turn, not per call: a text naming
 	// many tools would otherwise revive a page each round, and revive them again
 	// when they expire.
-	budget := maxRevivedDiscoveredTools - ts.mentionRevivals
+	budget := maxRevivedDiscoveredTools - ts.discoveryRevivals
 	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); budget > 0 && len(mentioned) > 0 {
 		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), budget)
-		ts.mentionRevivals += len(revived)
+		ts.discoveryRevivals += len(revived)
 		if len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools named by the model",
 				map[string]any{

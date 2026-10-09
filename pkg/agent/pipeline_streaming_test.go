@@ -1310,4 +1310,16 @@ func TestSynthesizedReplyWithoutAStreamClearsTheFinalizedMarker(t *testing.T) {
 		t.Fatalf("finalized-stream marker cleared %d times, want once (for the tool-limit reply)",
 			len(delegate.cleared))
 	}
+	// An interim-only turn has no post-turn outbound: Finalize must publish it.
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case outbound := <-msgBus.OutboundChan():
+			if outbound.Content == toolLimitResponse {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the tool-limit reply was never published")
+		}
+	}
 }
