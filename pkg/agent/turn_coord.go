@@ -303,6 +303,10 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 					turnStatus = TurnEndStatusError
 					return turnResult{}, fmt.Errorf("hook requested turn abort")
 				}
+				if exec.handoffError != nil {
+					turnStatus = TurnEndStatusError
+					return turnResult{}, exec.handoffError
+				}
 				// ExecuteTools returned ControlBreak:
 				// - allResponsesHandled=true: finalize without DefaultResponse (exec.finalContent empty)
 				// - allResponsesHandled=false: coordinator applies DefaultResponse before finalize

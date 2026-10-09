@@ -220,8 +220,9 @@ type turnExecution struct {
 	phase LLMPhase
 
 	// Abort signaling for coordinator (set by Pipeline methods)
-	abortedByHardAbort bool // true when hard abort triggered during LLM/tools
-	abortedByHook      bool // true when HookActionAbortTurn triggered
+	abortedByHardAbort bool  // true when hard abort triggered during LLM/tools
+	abortedByHook      bool  // true when HookActionAbortTurn triggered
+	handoffError       error // failed EndTurn tool; the caller may retry its resolution
 }
 
 func (exec *turnExecution) closeOwnedProviders() {

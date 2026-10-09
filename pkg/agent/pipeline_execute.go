@@ -357,6 +357,13 @@ toolLoop:
 						}
 					}
 
+					if hookResult.EndTurn && hookResult.IsError {
+						return finishFailedToolHandoff(ts, exec, messages, normalizedToolCalls[i+1:], hookResult.ForUser)
+					}
+					if hookResult.EndTurn {
+						return finishToolHandoff(ts, exec, messages, normalizedToolCalls[i+1:])
+					}
+
 					if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
 						exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 					}
@@ -773,6 +780,13 @@ toolLoop:
 				}))
 				resCancel()
 			}
+		}
+
+		if toolResult.EndTurn && toolResult.IsError {
+			return finishFailedToolHandoff(ts, exec, messages, normalizedToolCalls[i+1:], toolResult.ForUser)
+		}
+		if toolResult.EndTurn {
+			return finishToolHandoff(ts, exec, messages, normalizedToolCalls[i+1:])
 		}
 
 		// Loop-detection guardrail: evaluate the recorded tool call.

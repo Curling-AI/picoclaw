@@ -59,6 +59,10 @@ type ToolResult struct {
 	// user's request at the channel/output level, so the agent loop can stop
 	// without a follow-up assistant response.
 	ResponseHandled bool `json:"response_handled,omitempty"`
+
+	// EndTurn requires an explicit new user turn after this result is persisted.
+	// Unlike ResponseHandled, it also stops mixed tool batches and queued steering.
+	EndTurn bool `json:"end_turn,omitempty"`
 }
 
 // ContentForLLM returns the normalized textual content to append to the
@@ -71,7 +75,7 @@ func (tr *ToolResult) ContentForLLM() string {
 	if content == "" && tr.Err != nil {
 		content = tr.Err.Error()
 	}
-	if tr.ResponseHandled {
+	if tr.ResponseHandled && !tr.EndTurn {
 		if content == "" {
 			return HandledToolLLMNote
 		}
