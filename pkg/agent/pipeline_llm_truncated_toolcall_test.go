@@ -116,3 +116,74 @@ func TestTruncatedToolCallTextIsNeverDelivered(t *testing.T) {
 		}
 	}
 }
+
+// glmCutValue is the GLM shape that reached a user as the final answer
+// (2026-10-09): the reply IS the rest of a call, opening on a bare value.
+const glmCutValue = "<arg_value>pocketbase/migrations/0001"
+
+// truncatedAroundAToolCallProvider breaks twice in one turn with a real call
+// in between: the second glitch must get its own retry instead of ending the
+// turn with the fallback message.
+type truncatedAroundAToolCallProvider struct {
+	calls       atomic.Int32
+	nudgeOnCall [5]bool
+}
+
+func (p *truncatedAroundAToolCallProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (*providers.LLMResponse, error) {
+	n := p.calls.Add(1)
+	if int(n) < len(p.nudgeOnCall) {
+		for _, m := range messages {
+			if strings.Contains(m.Content, "tool call written out as text") {
+				p.nudgeOnCall[n] = true
+			}
+		}
+	}
+	switch n {
+	case 1, 3:
+		return &providers.LLMResponse{Content: glmCutValue}, nil
+	case 2:
+		return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
+			ID:        "call_read",
+			Type:      "function",
+			Name:      "read_file",
+			Arguments: map[string]any{"path": "README.md"},
+		}}}, nil
+	default:
+		return &providers.LLMResponse{Content: "migration criada"}, nil
+	}
+}
+
+func (p *truncatedAroundAToolCallProvider) GetDefaultModel() string { return "mock-model" }
+
+func TestTruncatedToolCallRetryStartsOverAfterARealCall(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &truncatedAroundAToolCallProvider{}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+
+	resp, err := al.ProcessDirect(context.Background(), "crie a migration", "truncated-reset-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != "migration criada" {
+		t.Errorf("response = %q, want the answer after the second retry", resp)
+	}
+	if got := provider.calls.Load(); got != 4 {
+		t.Errorf("provider calls = %d, want 4 (glitch, retry with a call, glitch, retry)", got)
+	}
+	if !provider.nudgeOnCall[2] {
+		t.Error("the first retry went out without the nudge")
+	}
+	if provider.nudgeOnCall[3] {
+		t.Error("the nudge kept riding along after the call it asked for went through")
+	}
+	if !provider.nudgeOnCall[4] {
+		t.Error("the second glitch was not retried with the nudge")
+	}
+}

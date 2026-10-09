@@ -125,10 +125,10 @@ type turnExecution struct {
 	// models). Capped so a persistently silent model still ends the turn.
 	emptyResponseRetries int
 
-	// truncatedToolCallRetries counts same-turn retries after the model
-	// answered with the tail of a pseudo-XML tool call instead of emitting it
-	// structurally. Capped like emptyResponseRetries so a model stuck in that
-	// shape still ends the turn.
+	// truncatedToolCallRetries counts retries in a row after the model
+	// answered with the tail of a tool call written as markup instead of
+	// emitting it structurally. Capped like emptyResponseRetries so a model
+	// stuck in that shape still ends the turn; reset by the next real call.
 	truncatedToolCallRetries int
 
 	// undeliveredAnnouncementRetries counts same-turn retries after the model
