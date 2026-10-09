@@ -168,6 +168,29 @@ func (t *MCPTool) Name() string {
 	return base + "_" + suffix
 }
 
+// ServerToolName returns the tool's own name on its MCP server, without the
+// mcp_<server>_ prefix of Name.
+func (t *MCPTool) ServerToolName() string {
+	return t.tool.Name
+}
+
+// RepeatSafety maps the server's annotations. Without them the MCP defaults
+// apply: the tool may change its environment, and running it again repeats the
+// change. The annotations are read once, when the pod connects to the server.
+func (t *MCPTool) RepeatSafety() toolshared.RepeatSafety {
+	hints := t.tool.Annotations
+	switch {
+	case hints == nil:
+		return toolshared.RepeatUnsafe
+	case hints.ReadOnlyHint:
+		return toolshared.RepeatReadOnly
+	case hints.IdempotentHint:
+		return toolshared.RepeatIdempotent
+	default:
+		return toolshared.RepeatUnsafe
+	}
+}
+
 // Description returns the tool description
 func (t *MCPTool) Description() string {
 	desc := t.tool.Description

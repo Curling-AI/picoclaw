@@ -296,6 +296,9 @@ type turnState struct {
 	loopDetector     *LoopDetector
 	loopDetectorInit bool
 
+	// repeats is the repeat guard (repeat_guard.go). Turn goroutine only.
+	repeats repeatGuard
+
 	followUps []bus.InboundMessage
 
 	gracefulInterrupt     bool
