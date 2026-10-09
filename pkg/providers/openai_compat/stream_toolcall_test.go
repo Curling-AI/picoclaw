@@ -29,7 +29,7 @@ func TestParseStreamResponse_ToolCallAtNonZeroIndex(t *testing.T) {
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestParseStreamResponse_ToolCallIndexGap(t *testing.T) {
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestParseStreamResponse_SnapshotIncludesNonZeroIndex(t *testing.T) {
 	)
 
 	var sawWriteFile bool
-	_, err := parseStreamResponse(context.Background(), strings.NewReader(body), func(chunk StreamChunk) {
+	_, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, func(chunk StreamChunk) {
 		for _, tc := range chunk.ToolCalls {
 			if tc.Function != nil && tc.Function.Name == "write_file" {
 				sawWriteFile = true
@@ -99,7 +99,7 @@ func TestParseStreamResponse_ToolCallInReasoningChannel(t *testing.T) {
 		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), readFileTool, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestParseStreamResponse_ReasoningNotSalvagedWhenContentExists(t *testing.T)
 		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestParseStreamResponse_ToolCallMarkupIsNotStreamed(t *testing.T) {
 	)
 
 	var published []string
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), func(c StreamChunk) {
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), readFileTool, func(c StreamChunk) {
 		if c.Content != "" {
 			published = append(published, c.Content)
 		}
@@ -165,5 +165,32 @@ func TestParseStreamResponse_ToolCallMarkupIsNotStreamed(t *testing.T) {
 	}
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "read_file" {
 		t.Fatalf("tool calls = %+v, want one read_file", resp.ToolCalls)
+	}
+}
+
+var readFileTool = []ToolDefinition{{Type: "function", Function: ToolFunctionDefinition{
+	Name: "read_file",
+	Parameters: map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"path": map[string]any{"type": "string"}},
+	},
+}}}
+
+// A call written in text is only lifted for a tool the request offered: a
+// summary or side question (no tools) keeps its text, and prose that shows a
+// call to some other tool stays prose instead of running it.
+func TestParseStreamResponse_TextCallOnlyForOfferedTools(t *testing.T) {
+	body := sse(
+		`{"choices":[{"delta":{"content":"<tool_call>exec<arg_key>command</arg_key><arg_value>rm -rf tmp</arg_value></tool_call>"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	)
+	for name, tools := range map[string][]ToolDefinition{"no tools": nil, "other tool": readFileTool} {
+		resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), tools, nil)
+		if err != nil {
+			t.Fatalf("%s: parseStreamResponse: %v", name, err)
+		}
+		if len(resp.ToolCalls) != 0 || !strings.Contains(resp.Content, "<tool_call>exec") {
+			t.Fatalf("%s: calls = %+v, content = %q; want the text left alone", name, resp.ToolCalls, resp.Content)
+		}
 	}
 }

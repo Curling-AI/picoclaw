@@ -521,28 +521,50 @@ func (p *Provider) Chat(
 	// streaming, and their GLM calls written as text used to reach the loop as
 	// a plain answer.
 	if len(out.ToolCalls) == 0 && out.Content != "" {
-		if extracted := protocoltypes.ExtractToolCallsFromText(out.Content); len(extracted) > 0 {
+		if extracted := liftTextToolCalls(out.Content, tools); len(extracted) > 0 {
 			out.ToolCalls = extracted
 			out.Content = protocoltypes.StripToolCallsFromText(out.Content)
 		}
 	}
-	repairToolCallMarkup(out.ToolCalls, out.UpstreamID, out.ResolvedProvider)
+	repairToolCallMarkup(out.ToolCalls, tools, out.UpstreamID, out.ResolvedProvider)
 	return out, nil
 }
 
+// liftTextToolCalls returns the tool calls the model wrote into text, only when
+// every one of them names a tool this request offered. A caller that offers no
+// tools (a summary, a side question, an image description) keeps its text, and
+// prose that quotes a call to a tool outside the request stays prose: run, it
+// would execute something the model only showed.
+func liftTextToolCalls(text string, tools []ToolDefinition) []ToolCall {
+	if len(tools) == 0 {
+		return nil
+	}
+	extracted := protocoltypes.ExtractToolCallsFromText(text)
+	if len(extracted) == 0 {
+		return nil
+	}
+	offered := make(map[string]struct{}, len(tools))
+	for _, t := range tools {
+		offered[t.Function.Name] = struct{}{}
+	}
+	for _, tc := range extracted {
+		if _, ok := offered[tc.Name]; !ok {
+			return nil
+		}
+	}
+	return extracted
+}
+
 // repairToolCallMarkup fixes, in place, structured tool calls that came back
-// with GLM argument markup inside them, and logs which tools needed it. The
+// with GLM argument markup inside them, and logs which ones needed it. The
 // log never carries argument values: they are user content.
-func repairToolCallMarkup(calls []ToolCall, upstreamID, resolvedProvider string) {
-	if protocoltypes.RepairToolCallMarkup(calls) == 0 {
+func repairToolCallMarkup(calls []ToolCall, tools []ToolDefinition, upstreamID, resolvedProvider string) {
+	repaired := protocoltypes.RepairToolCallMarkup(calls, tools)
+	if len(repaired) == 0 {
 		return
 	}
-	names := make([]string, 0, len(calls))
-	for _, tc := range calls {
-		names = append(names, tc.Name)
-	}
 	logger.WarnCF("openai_compat", "Repaired GLM argument markup inside tool calls", map[string]any{
-		"tools":             names,
+		"tools":             repaired,
 		"upstream_id":       upstreamID,
 		"resolved_provider": resolvedProvider,
 	})
@@ -625,6 +647,7 @@ func (p *Provider) ChatStreamEvents(
 	out, err := parseStreamResponse(
 		ctx,
 		withStreamingReadIdleTimeout(resp.Body, defaultStreamingReadIdleTimeout),
+		tools,
 		onChunk,
 	)
 	if err != nil {
@@ -683,6 +706,7 @@ func sortedToolIndexes[T any](m map[int]T) []int {
 func parseStreamResponse(
 	ctx context.Context,
 	reader io.Reader,
+	tools []ToolDefinition,
 	onChunk func(StreamChunk),
 ) (*LLMResponse, error) {
 	var textContent strings.Builder
@@ -927,7 +951,7 @@ func parseStreamResponse(
 	// text content instead of the structured tool_calls field. Extract them.
 	content := textContent.String()
 	if len(toolCalls) == 0 && content != "" {
-		if extracted := protocoltypes.ExtractToolCallsFromText(content); len(extracted) > 0 {
+		if extracted := liftTextToolCalls(content, tools); len(extracted) > 0 {
 			toolCalls = extracted
 			content = protocoltypes.StripToolCallsFromText(content)
 		}
@@ -946,14 +970,14 @@ func parseStreamResponse(
 			if thinking == "" {
 				continue
 			}
-			if extracted := protocoltypes.ExtractToolCallsFromText(thinking); len(extracted) > 0 {
+			if extracted := liftTextToolCalls(thinking, tools); len(extracted) > 0 {
 				toolCalls = extracted
 				break
 			}
 		}
 	}
 
-	repairToolCallMarkup(toolCalls, upstreamID, resolvedProvider)
+	repairToolCallMarkup(toolCalls, tools, upstreamID, resolvedProvider)
 
 	// Raw frames are the only way to tell reasoning-only from a dropped final
 	// chunk or broken framing after the fact.

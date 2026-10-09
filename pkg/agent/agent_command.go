@@ -396,14 +396,12 @@ func (al *AgentLoop) buildCommandsRuntime(
 				opts.Dispatch.SessionScope,
 				opts.Dispatch.SessionAliases,
 			)
-			if err := al.contextManager.Clear(ctx, opts.SessionKey); err != nil {
-				return err
-			}
-			// What waited behind a turn (a background result, a mirrored
-			// delivery) belongs to the history just cleared; flushed later, it
-			// would hand the old task to the next turn.
+			// What waits behind a turn (a mirrored delivery, a parked
+			// background result) belongs to the history being cleared; flushed
+			// later, it would hand the old task to the next turn. Dropped first,
+			// so no flush can slip in between.
 			al.dropMirroredDeliveries(opts.SessionKey)
-			return nil
+			return al.contextManager.Clear(ctx, opts.SessionKey)
 		}
 
 		rt.AskSideQuestion = func(ctx context.Context, question string) (string, error) {

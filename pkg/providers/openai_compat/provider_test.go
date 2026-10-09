@@ -2295,19 +2295,40 @@ func TestProviderChat_NonStreamingLiftsGLMCallFromText(t *testing.T) {
 	defer server.Close()
 
 	p := NewProvider("key", server.URL, "")
-	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "zai/glm-5.3-flash", nil)
+	tools := []ToolDefinition{glmTestTool("mcp_skip_skip_file_list", "projectId")}
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, tools, "zai/glm-5.3-flash", nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
 	if len(out.ToolCalls) != 1 || out.ToolCalls[0].Name != "mcp_skip_skip_file_list" {
 		t.Fatalf("ToolCalls = %#v, want the GLM call", out.ToolCalls)
 	}
-	if out.ToolCalls[0].Arguments["projectId"] != float64(65025) {
+	if out.ToolCalls[0].Arguments["projectId"] != "65025" {
 		t.Errorf("projectId = %#v", out.ToolCalls[0].Arguments["projectId"])
 	}
 	if out.Content != "" {
 		t.Errorf("Content = %q, want the markup stripped", out.Content)
 	}
+
+	// A caller that offers no tools (a summary, a side question) keeps the text.
+	out, err = p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "zai/glm-5.3-flash", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(out.ToolCalls) != 0 || !strings.Contains(out.Content, "<tool_call>") {
+		t.Fatalf("without tools: calls = %#v, content = %q; want the text untouched", out.ToolCalls, out.Content)
+	}
+}
+
+func glmTestTool(name string, props ...string) ToolDefinition {
+	properties := map[string]any{}
+	for _, prop := range props {
+		properties[prop] = map[string]any{"type": "string"}
+	}
+	return ToolDefinition{Type: "function", Function: ToolFunctionDefinition{
+		Name:       name,
+		Parameters: map[string]any{"type": "object", "properties": properties},
+	}}
 }
 
 func TestProviderChat_RepairsGLMMarkupInsideArguments(t *testing.T) {
@@ -2335,7 +2356,8 @@ func TestProviderChat_RepairsGLMMarkupInsideArguments(t *testing.T) {
 	defer server.Close()
 
 	p := NewProvider("key", server.URL, "")
-	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, nil, "zai/glm-5.3-flash", nil)
+	tools := []ToolDefinition{glmTestTool("memory", "action", "section", "content")}
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, tools, "zai/glm-5.3-flash", nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}

@@ -603,10 +603,6 @@ toolLoop:
 				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
 		}
 		ts.offerTools([]string{toolName})
-		var visibleBefore []string
-		if tools.IsToolDiscoveryToolName(toolName) {
-			visibleBefore = ts.agent.Tools.VisibleHiddenNames()
-		}
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
@@ -615,10 +611,12 @@ toolLoop:
 			ts.chatID,
 			asyncCallback,
 		)
-		if tools.IsToolDiscoveryToolName(toolName) {
-			// What this search promoted joins the turn's tools; what other
-			// sessions promoted meanwhile mostly does not.
-			ts.offerTools(newNames(visibleBefore, ts.agent.Tools.VisibleHiddenNames()))
+		if tools.IsToolDiscoveryToolName(toolName) && toolResult != nil {
+			// What the search told the model it unlocked joins the turn's
+			// tools — including a tool another session had already promoted,
+			// which a before/after diff of the registry would miss — and
+			// nothing promoted elsewhere in the meantime does.
+			ts.offerTools(tools.ParseDiscoveryResult(toolResult.ContentForLLM()))
 		}
 		toolDuration := time.Since(toolStart)
 
@@ -984,21 +982,6 @@ func (al *AgentLoop) skipToolCalls(
 		}
 	}
 	return answered
-}
-
-// newNames returns the names in after that are not in before.
-func newNames(before, after []string) []string {
-	seen := make(map[string]struct{}, len(before))
-	for _, name := range before {
-		seen[name] = struct{}{}
-	}
-	var added []string
-	for _, name := range after {
-		if _, ok := seen[name]; !ok {
-			added = append(added, name)
-		}
-	}
-	return added
 }
 
 // brokenArgumentsReason explains, for the model, a call whose arguments the

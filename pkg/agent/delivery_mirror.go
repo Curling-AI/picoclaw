@@ -211,8 +211,12 @@ func (al *AgentLoop) deliverToConversation(agent *AgentInstance, sessionKey stri
 }
 
 // dropMirroredDeliveries discards what waits for the session's turn to end:
-// mirrored deliveries and parked background results.
+// mirrored deliveries and parked background results. A task launched before
+// /clear ends with no trace in the cleared conversation, on purpose.
 func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
 	al.mirror.mu.Lock()
 	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
 	delete(al.mirror.pending, sessionKey)

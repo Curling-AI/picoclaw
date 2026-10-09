@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // cutWriteProvider writes a file in one call whose JSON ran past the output
@@ -67,4 +68,57 @@ func TestCutOffToolArgumentsAreExplainedNotRun(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace, "Index.tsx")); !os.IsNotExist(err) {
 		t.Errorf("the cut call ran anyway (stat err = %v)", err)
 	}
+}
+
+func TestBrokenArgumentsReason(t *testing.T) {
+	registry := tools.NewToolRegistry()
+	registry.Register(&rawArgTool{})
+	broken := map[string]any{"raw": `{"path":"a.md","content":"abc`}
+	capped := &providers.LLMResponse{Usage: &providers.UsageInfo{CompletionTokens: 32768}}
+	answered := &providers.LLMResponse{Usage: &providers.UsageInfo{CompletionTokens: 120}, FinishReason: "tool_calls"}
+
+	if got := brokenArgumentsReason(
+		registry,
+		"write_file",
+		broken,
+		capped,
+		32768,
+	); !strings.Contains(
+		got,
+		"output limit",
+	) {
+		t.Errorf("at the cap: %q", got)
+	}
+	if got := brokenArgumentsReason(
+		registry,
+		"write_file",
+		broken,
+		answered,
+		32768,
+	); !strings.Contains(
+		got,
+		"not valid JSON",
+	) {
+		t.Errorf("under the cap: %q", got)
+	}
+	if got := brokenArgumentsReason(registry, rawArgToolName, broken, capped, 32768); got != "" {
+		t.Errorf("a tool that takes a raw argument was refused: %q", got)
+	}
+	if got := brokenArgumentsReason(registry, "write_file", map[string]any{"path": "a.md"}, capped, 32768); got != "" {
+		t.Errorf("decoded arguments were refused: %q", got)
+	}
+}
+
+const rawArgToolName = "post_raw"
+
+type rawArgTool struct{}
+
+func (rawArgTool) Name() string        { return rawArgToolName }
+func (rawArgTool) Description() string { return "posts a raw body" }
+func (rawArgTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{"raw": map[string]any{"type": "string"}}}
+}
+
+func (rawArgTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+	return tools.NewToolResult("ok")
 }

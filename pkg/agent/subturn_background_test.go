@@ -91,3 +91,67 @@ func TestSpawnSubTurn_FailedChildStopsItsBackgroundProcesses(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+const handedOverMarker = "sleep 30 # mst277-handed-over"
+
+type backgroundThenAnswerProvider struct {
+	calls atomic.Int32
+}
+
+func (p *backgroundThenAnswerProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	if p.calls.Add(1) == 1 {
+		return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
+			ID:        "bg",
+			Type:      "function",
+			Name:      "exec",
+			Arguments: map[string]any{"action": "run", "command": handedOverMarker, "background": "true"},
+		}}}, nil
+	}
+	return &providers.LLMResponse{Content: "servidor de pé em background"}, nil
+}
+
+func (p *backgroundThenAnswerProvider) GetDefaultModel() string { return "mock-model" }
+
+// A child that finished may have handed its background job over in its answer.
+func TestSpawnSubTurn_FinishedChildKeepsItsBackgroundProcesses(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenAnswerProvider{})
+	defer cleanup()
+	execTool, err := tools.NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("NewExecTool: %v", err)
+	}
+	agent.Tools.Register(execTool)
+
+	if _, err = spawnSubTurn(context.Background(), al, newStopTestParent(agent), SubTurnConfig{
+		Model:        "test-model",
+		Tools:        []tools.Tool{},
+		SystemPrompt: "suba o servidor",
+		Timeout:      5 * time.Second,
+	}); err != nil {
+		t.Fatalf("spawnSubTurn: %v", err)
+	}
+
+	var listed struct {
+		Sessions []tools.SessionInfo `json:"sessions"`
+	}
+	raw := execTool.Execute(context.Background(), map[string]any{"action": "list"}).ForLLM
+	if err := json.Unmarshal([]byte(raw), &listed); err != nil {
+		t.Fatalf("list output %q: %v", raw, err)
+	}
+	for _, s := range listed.Sessions {
+		if s.Command == handedOverMarker {
+			if s.Status != "running" {
+				t.Fatalf("the finished child's job was stopped (status %q)", s.Status)
+			}
+			_ = execTool.Execute(context.Background(), map[string]any{"action": "kill", "sessionId": s.ID})
+			return
+		}
+	}
+	t.Fatal("the child's background job was never started")
+}

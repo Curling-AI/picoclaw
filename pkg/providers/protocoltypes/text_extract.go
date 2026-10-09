@@ -42,7 +42,7 @@ func ExtractToolCallsFromText(text string) []ToolCall {
 func StripToolCallsFromText(text string) string {
 	text = stripJSONWrapper(text)
 	text = xmlToolCallRe.ReplaceAllString(text, "")
-	text = glmToolCallRe.ReplaceAllString(text, "")
+	text = stripGLMToolCalls(text)
 	text = pseudoXMLFunctionRe.ReplaceAllString(text, "")
 	// The wrapper survives its own body: the function element is what carries
 	// the call, and a lone <tool_call>/</tool_call> left behind reads as markup
@@ -343,9 +343,10 @@ var truncatedToolCallSuffixes = []string{
 }
 
 // truncatedToolCallPrefixes are the tags a reply can only START with when it is
-// the rest of a tool call whose head the gateway consumed. Prose that discusses
-// this markup does not open with a bare tag.
-var truncatedToolCallPrefixes = []string{"<tool_call>", "<function=", "<parameter=", glmArgKeyOpen, glmArgValueOpen}
+// the rest of a GLM call whose head the gateway consumed. A bare <arg_value>
+// opens no sentence; "<tool_call> is the tag GLM uses" does, so the opening
+// tags of whole calls are left out.
+var truncatedToolCallPrefixes = []string{glmArgKeyOpen, glmArgValueOpen}
 
 // LooksLikeTruncatedToolCall reports whether text is a piece of a tool call
 // written as markup that could not be turned into a call: the TAIL of one whose

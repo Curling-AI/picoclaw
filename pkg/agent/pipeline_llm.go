@@ -102,6 +102,10 @@ func promptCacheScopeForSession(sessionKey string) string {
 // glitch; more would just stall visibly silent turns.
 const maxEmptyResponseRetries = 1
 
+// largeToolCount is where a turn's tools array is worth a warning: several
+// OpenAI-compatible endpoints refuse more than 128 tools.
+const largeToolCount = 100
+
 // maxTruncatedToolCallRetries caps retries IN A ROW after the model answered
 // with the tail of a tool call it failed to emit structurally. Same shape and
 // same reasoning as maxEmptyResponseRetries: one retry clears the glitch, more
@@ -206,6 +210,13 @@ func (p *Pipeline) CallLLM(
 
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefsFor(ts.offeredToolSet())
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
+	// The turn's set only grows (each search adds up to a page of tools), and
+	// OpenAI-compatible endpoints reject requests with more than 128 tools.
+	if n := len(exec.providerToolDefs); n > largeToolCount {
+		logger.WarnCF("agent", "Turn is offering a large number of tools", map[string]any{
+			"agent_id": ts.agent.ID, "iteration": iteration, "tools": n,
+		})
+	}
 
 	// Native web search support
 	webSearchEnabled := al.cfg.Tools.IsToolEnabled("web") && turnProfileToolAllowed(ts.profile, "web_search")

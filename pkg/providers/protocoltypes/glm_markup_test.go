@@ -3,11 +3,31 @@ package protocoltypes
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 // Shapes below are the ones seen in prod in 2026-10 (maestro-ultra and
 // maestro-flash, several providers); the values are synthetic.
+
+func toolDef(name string, props ...string) ToolDefinition {
+	properties := map[string]any{}
+	for _, p := range props {
+		properties[p] = map[string]any{"type": "string"}
+	}
+	return ToolDefinition{Type: "function", Function: ToolFunctionDefinition{
+		Name:       name,
+		Parameters: map[string]any{"type": "object", "properties": properties},
+	}}
+}
+
+var offeredTools = []ToolDefinition{
+	toolDef("memory", "action", "section", "content", "new_text", "old_text"),
+	toolDef("write_file", "path", "content"),
+	toolDef("exec", "command", "cwd"),
+	toolDef("mcp_skip_skip_file_read", "projectId", "path"),
+}
 
 func TestExtractGLMToolCall(t *testing.T) {
 	text := "Vou listar os arquivos.\n<tool_call>mcp_skip_skip_file_read\n" +
@@ -21,7 +41,8 @@ func TestExtractGLMToolCall(t *testing.T) {
 	if calls[0].Name != "mcp_skip_skip_file_read" {
 		t.Errorf("name = %q", calls[0].Name)
 	}
-	want := map[string]any{"projectId": float64(65025), "path": "src/App.tsx"}
+	// Values stay strings; the executor converts them by the tool's schema.
+	want := map[string]any{"projectId": "65025", "path": "src/App.tsx"}
 	if !reflect.DeepEqual(calls[0].Arguments, want) {
 		t.Errorf("args = %#v, want %#v", calls[0].Arguments, want)
 	}
@@ -38,7 +59,7 @@ func TestExtractGLMToolCall_NoArguments(t *testing.T) {
 }
 
 // A value holding code that looks like a bare JSON call must not be lifted out
-// as the call itself.
+// as the call itself, and keeps its exact text.
 func TestExtractGLMToolCall_WinsOverBareJSONInsideValue(t *testing.T) {
 	text := "<tool_call>write_file<arg_key>path</arg_key><arg_value>a.json</arg_value>" +
 		"<arg_key>content</arg_key><arg_value>{\"name\":\"x\",\"arguments\":{}}</arg_value></tool_call>"
@@ -46,8 +67,28 @@ func TestExtractGLMToolCall_WinsOverBareJSONInsideValue(t *testing.T) {
 	if len(calls) != 1 || calls[0].Name != "write_file" {
 		t.Fatalf("calls = %#v", calls)
 	}
-	if _, ok := calls[0].Arguments["content"].(map[string]any); !ok {
-		t.Errorf("content = %#v, want the decoded object", calls[0].Arguments["content"])
+	if got := calls[0].Arguments["content"]; got != `{"name":"x","arguments":{}}` {
+		t.Errorf("content = %#v, want the text as written", got)
+	}
+}
+
+// One value missing its closing tag must not run into the next call and eat
+// the prose between them.
+func TestExtractGLMToolCall_UnclosedValueStaysInItsBlock(t *testing.T) {
+	text := "<tool_call>exec<arg_key>command</arg_key><arg_value>ls</tool_call>\n" +
+		"Some prose.\n<tool_call>read_file<arg_key>path</arg_key><arg_value>a.txt</arg_value></tool_call>"
+	calls := ExtractToolCallsFromText(text)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %#v, want two", calls)
+	}
+	if calls[0].Arguments["command"] != "ls" || calls[1].Arguments["path"] != "a.txt" {
+		t.Errorf("args = %#v / %#v", calls[0].Arguments, calls[1].Arguments)
+	}
+	if calls[0].ID == calls[1].ID {
+		t.Errorf("both calls got id %q", calls[0].ID)
+	}
+	if got := StripToolCallsFromText(text); got != "Some prose." {
+		t.Errorf("stripped = %q, want the prose kept", got)
 	}
 }
 
@@ -72,6 +113,8 @@ func TestLooksLikeTruncatedToolCall_GLM(t *testing.T) {
 			false,
 		},
 		{"mentioning one tag", "Use a tag `<arg_value>` para o valor", false},
+		{"opening with the call tag in prose", "<tool_call> is the tag GLM uses; the answer is no.", false},
+		{"opening with the pseudo-XML tag in prose", "<function=foo> is how Qwen writes it.", false},
 		{"plain answer", "Pronto, o arquivo foi criado.", false},
 	}
 	for _, tc := range cases {
@@ -117,29 +160,12 @@ func TestRepairToolCallMarkup(t *testing.T) {
 			want:     map[string]any{"action": "add_section", "section": "Notas", "content": "texto"},
 		},
 		{
-			name: "argument the model wrote itself wins",
-			call: ToolCall{Name: "write_file", Arguments: map[string]any{
-				"path":    "a.txt",
-				"content": "x<arg_key>path</arg_key><arg_value>b.txt",
-			}},
-			wantName: "write_file",
-			want:     map[string]any{"path": "a.txt", "content": "x"},
-		},
-		{
-			name: "numeric value keeps its type",
+			name: "values keep their text",
 			call: ToolCall{Name: "mcp_skip_skip_file_read", Arguments: map[string]any{
-				"projectId": "65025<arg_key>path</arg_key><arg_value>src/App.tsx</arg_value>",
+				"projectId": "65025<arg_key>path</arg_key><arg_value>src/v1.10.tsx</arg_value>",
 			}},
 			wantName: "mcp_skip_skip_file_read",
-			want:     map[string]any{"projectId": float64(65025), "path": "src/App.tsx"},
-		},
-		{
-			name: "markup inside the argument name",
-			call: ToolCall{Name: "exec", Arguments: map[string]any{
-				"cena 1 do reel && echo ok</arg_value><arg_key>command": "ls -la",
-			}},
-			wantName: "exec",
-			want:     map[string]any{"command": "ls -la"},
+			want:     map[string]any{"projectId": "65025", "path": "src/v1.10.tsx"},
 		},
 		{
 			name:     "markup inside the tool name",
@@ -151,8 +177,8 @@ func TestRepairToolCallMarkup(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := []ToolCall{tc.call}
-			if n := RepairToolCallMarkup(calls); n != 1 {
-				t.Fatalf("repaired = %d, want 1", n)
+			if got := RepairToolCallMarkup(calls, offeredTools); !reflect.DeepEqual(got, []string{tc.wantName}) {
+				t.Fatalf("repaired = %v, want [%s]", got, tc.wantName)
 			}
 			got := calls[0]
 			if got.Name != tc.wantName {
@@ -175,15 +201,71 @@ func TestRepairToolCallMarkup(t *testing.T) {
 	}
 }
 
-func TestRepairToolCallMarkup_LeavesCleanCallsAlone(t *testing.T) {
-	calls := []ToolCall{{
-		Name:      "write_file",
-		Arguments: map[string]any{"path": "notes.md", "content": "Use <b>negrito</b> e `<arg_value>` no texto."},
-	}}
-	if n := RepairToolCallMarkup(calls); n != 0 {
-		t.Fatalf("repaired = %d, want 0", n)
+// Calls that merely carry this markup as content are normal calls: writing a
+// test fixture, grepping for the tag, a key the model already sent, a key the
+// tool does not take, a broken-key shape that would lose part of the call.
+func TestRepairToolCallMarkup_LeavesNormalCallsAlone(t *testing.T) {
+	cases := map[string]ToolCall{
+		"file content quoting the format": {Name: "write_file", Arguments: map[string]any{
+			"path":    "glm_test.go",
+			"content": "const sample = `<tool_call>exec<arg_key>command</arg_key><arg_value>ls</arg_value></tool_call>`",
+		}},
+		"grep for the tag": {Name: "exec", Arguments: map[string]any{
+			"command": "grep -rn '<arg_key>' pkg/ | head",
+		}},
+		"recovered key already given": {Name: "write_file", Arguments: map[string]any{
+			"path":    "a.txt",
+			"content": "x<arg_key>path</arg_key><arg_value>b.txt",
+		}},
+		"recovered key the tool does not take": {Name: "memory", Arguments: map[string]any{
+			"action": "add_section<arg_key>priority</arg_key><arg_value>high",
+		}},
+		"markup inside an argument name": {Name: "exec", Arguments: map[string]any{
+			"cena 1 && echo ok</arg_value><arg_key>command": "ls -la",
+		}},
+		"undecodable arguments": {Name: "write_file", Arguments: map[string]any{
+			"raw": `{"path":"a<arg_key>content</arg_key><arg_value>b`,
+		}},
+		"tag without a key": {Name: "write_file", Arguments: map[string]any{
+			"path": "notes.md", "content": "Use <b>negrito</b> e `<arg_value>` no texto.",
+		}},
 	}
-	if calls[0].Function != nil {
-		t.Error("an untouched call must not grow a Function block")
+	for name, call := range cases {
+		t.Run(name, func(t *testing.T) {
+			before, _ := json.Marshal(call.Arguments)
+			calls := []ToolCall{call}
+			if got := RepairToolCallMarkup(calls, offeredTools); len(got) != 0 {
+				t.Fatalf("repaired %v, want nothing", got)
+			}
+			after, _ := json.Marshal(calls[0].Arguments)
+			if string(before) != string(after) || calls[0].Name != call.Name || calls[0].Function != nil {
+				t.Errorf("call changed: %s %s -> %s %s", call.Name, before, calls[0].Name, after)
+			}
+		})
+	}
+}
+
+// Without the offered tools there is nothing to check recovered keys against.
+func TestRepairToolCallMarkup_NeedsTheOfferedTools(t *testing.T) {
+	calls := []ToolCall{{Name: "memory", Arguments: map[string]any{
+		"action": "replace_text<arg_key>new_text</arg_key><arg_value>x",
+	}}}
+	if got := RepairToolCallMarkup(calls, nil); len(got) != 0 {
+		t.Fatalf("repaired %v without tools", got)
+	}
+}
+
+// Many unclosed pairs must not make the parser quadratic.
+func TestParseGLMArgs_StaysLinear(t *testing.T) {
+	var b strings.Builder
+	for range 40_000 {
+		b.WriteString("<arg_key>k</arg_key><arg_value>value without its closing tag ")
+	}
+	start := time.Now()
+	if got := len(parseGLMArgs(b.String())); got != 40_000 {
+		t.Fatalf("pairs = %d", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("parsing took %s", elapsed)
 	}
 }
