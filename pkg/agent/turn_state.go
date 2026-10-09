@@ -298,6 +298,9 @@ type turnState struct {
 
 	// repeats is the repeat guard (repeat_guard.go). Turn goroutine only.
 	repeats repeatGuard
+	// mentionRevivals counts the tools revived this turn because the model
+	// named them (mentioned_tools.go). Turn goroutine only.
+	mentionRevivals int
 
 	followUps []bus.InboundMessage
 
