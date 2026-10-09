@@ -172,6 +172,19 @@ toolLoop:
 			continue
 		}
 
+		if reason := brokenArgumentsReason(ts.agent.Tools, toolName, toolArgs, exec.response, ts.agent.MaxTokens); reason != "" {
+			logger.WarnCF("agent", "Tool call arrived with arguments that are not JSON; not running it",
+				map[string]any{
+					"agent_id":          ts.agent.ID,
+					"iteration":         iteration,
+					"tool":              toolName,
+					"completion_tokens": responseCompletionTokens(exec.response),
+					"max_tokens":        ts.agent.MaxTokens,
+				})
+			skipToolCall(reason)
+			continue
+		}
+
 		if al.hooks != nil {
 			toolReq, decision := al.hooks.BeforeTool(turnCtx, &ToolCallHookRequest{
 				Meta:      ts.eventMeta("runTurn", "turn.tool.before"),
@@ -978,4 +991,56 @@ func newNames(before, after []string) []string {
 		}
 	}
 	return added
+}
+
+// brokenArgumentsReason explains, for the model, a call whose arguments the
+// provider could not decode (they arrive as a lone "raw" string). Running it
+// only earns a schema error ("missing required property") that does not say
+// what went wrong, and the model writes the same oversized call again. The
+// usual cause is the output cap: a whole file in one write_file plus long
+// reasoning ran past max_tokens and the JSON was cut (a subagent spent 258 s on
+// one such call in prod, 2026-10-09).
+func brokenArgumentsReason(
+	registry *tools.ToolRegistry,
+	tool string,
+	args map[string]any,
+	resp *providers.LLMResponse,
+	maxTokens int,
+) string {
+	if len(args) != 1 {
+		return ""
+	}
+	if _, ok := args["raw"].(string); !ok || toolDeclaresRawArgument(registry, tool) {
+		return ""
+	}
+	if responseHitOutputCap(resp, maxTokens) {
+		return fmt.Sprintf("The arguments of this %s call were cut off at your output limit (%d tokens), so it "+
+			"was not run. Split large content across several calls (write the first part, then append or patch "+
+			"the rest) and keep your reasoning short before calls that carry a lot of content.", tool, maxTokens)
+	}
+	return fmt.Sprintf("The arguments of this %s call were not valid JSON, so it was not run. Call it again "+
+		"with complete JSON arguments.", tool)
+}
+
+func responseHitOutputCap(resp *providers.LLMResponse, maxTokens int) bool {
+	if resp == nil {
+		return false
+	}
+	switch resp.FinishReason {
+	case "length", "truncated":
+		return true
+	}
+	return maxTokens > 0 && responseCompletionTokens(resp) >= maxTokens
+}
+
+// toolDeclaresRawArgument reports whether the tool really takes an argument
+// named "raw", in which case {"raw": "..."} is a legitimate call.
+func toolDeclaresRawArgument(registry *tools.ToolRegistry, name string) bool {
+	tool, ok := registry.GetRegistered(name)
+	if !ok {
+		return false
+	}
+	props, _ := tool.Parameters()["properties"].(map[string]any)
+	_, declared := props["raw"]
+	return declared
 }
