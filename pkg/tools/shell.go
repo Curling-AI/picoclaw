@@ -541,6 +541,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 		Command:    command,
 		PTY:        ptyEnabled,
 		Background: true,
+		Owner:      ToolSessionKey(ctx),
 		StartTime:  time.Now().Unix(),
 		Status:     "running",
 		ptyKeyMode: PtyKeyModeCSI,

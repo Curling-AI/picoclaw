@@ -34,12 +34,15 @@ var (
 )
 
 type ProcessSession struct {
-	mu              sync.Mutex
-	ID              string
-	PID             int
-	Command         string
-	PTY             bool
-	Background      bool
+	mu         sync.Mutex
+	ID         string
+	PID        int
+	Command    string
+	PTY        bool
+	Background bool
+	// Owner is the agent session that started the process (empty outside a
+	// turn), so the process can be stopped when that session dies.
+	Owner           string
 	StartTime       int64
 	ExitCode        int
 	Status          string
@@ -254,6 +257,39 @@ func (sm *SessionManager) List() []SessionInfo {
 	}
 
 	return result
+}
+
+// KillOwnedBy stops the running processes started by owner and returns their
+// session IDs. Finished sessions are left for the regular cleanup.
+func (sm *SessionManager) KillOwnedBy(owner string) []string {
+	if owner == "" {
+		return nil
+	}
+	sm.mu.RLock()
+	var owned []*ProcessSession
+	for _, session := range sm.sessions {
+		if session.Owner == owner && !session.IsDone() {
+			owned = append(owned, session)
+		}
+	}
+	sm.mu.RUnlock()
+
+	killed := make([]string, 0, len(owned))
+	for _, session := range owned {
+		if err := session.Kill(); err == nil {
+			killed = append(killed, session.ID)
+		}
+	}
+	return killed
+}
+
+// KillBackgroundSessions stops the background processes that the agent session
+// owner started with the exec tool and that are still running.
+func KillBackgroundSessions(owner string) []string {
+	if sm := getSessionManager(); sm != nil {
+		return sm.KillOwnedBy(owner)
+	}
+	return nil
 }
 
 func generateSessionID() string {
