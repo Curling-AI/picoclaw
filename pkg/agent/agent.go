@@ -194,10 +194,15 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				return nil
 			}
 
+			if al.recordBackgroundResult(msg) {
+				continue
+			}
+
 			// Resolve the session key for this message
 			sessionKey, agentID, ok := al.resolveSteeringTarget(msg)
 			if !ok {
-				// Non-routable message (e.g., system) — process immediately.
+				// Non-routable message (e.g., a system message for the main
+				// session) — process immediately.
 				// Note: system messages are processed in the main goroutine,
 				// so they block the receive loop but guarantee session serialization.
 				al.processMessageSync(ctx, msg)
@@ -215,16 +220,21 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				phase:  TurnPhaseSetup,
 			}
 			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
-				if al.tryHandleStopCommand(ctx, msg, sessionKey) {
+				isSystem := msg.Channel == "system"
+				if !isSystem && al.tryHandleStopCommand(ctx, msg, sessionKey) {
 					continue
 				}
 
 				msg = al.prepareInboundMessageForAgent(ctx, msg)
+				content := msg.Content
+				if isSystem {
+					content = systemMessageContent(msg)
+				}
 
 				// Another turn is already active (or reserved) for this session — enqueue
 				if err := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
 					Role:    "user",
-					Content: msg.Content,
+					Content: content,
 					Media:   append([]string(nil), msg.Media...),
 				}); err != nil {
 					logger.WarnCF("agent", "Failed to enqueue steering message",

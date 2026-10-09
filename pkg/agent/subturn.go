@@ -31,7 +31,49 @@ var (
 	ErrDepthLimitExceeded   = errors.New("sub-turn depth limit exceeded")
 	ErrInvalidSubTurnConfig = errors.New("invalid sub-turn config")
 	ErrConcurrencyTimeout   = errors.New("timeout waiting for concurrency slot")
+	// ErrSubTurnTimeout matches the error of a sub-turn stopped by its own time
+	// limit (see subTurnTimeoutError).
+	ErrSubTurnTimeout = errors.New("sub-turn time limit exceeded")
+	// ErrSubTurnParentCanceled is the error of a synchronous sub-turn stopped
+	// because the turn waiting on it was stopped. It stays in the history, so it
+	// tells the model not to pick the task up again on its own.
+	ErrSubTurnParentCanceled = errors.New(
+		"subagent stopped before finishing because its turn was stopped; " +
+			"do not relaunch it unless the user asks again")
 )
+
+// subTurnTimeoutError is what the caller reads when the sub-turn's own deadline
+// stopped it. The deadline usually cuts a model call in flight, and that error
+// ("LLM call failed after retries: context deadline exceeded") reads as a
+// provider failure: models retried the same task unchanged and hit the same
+// limit again.
+type subTurnTimeoutError struct {
+	limit      time.Duration
+	iterations int
+}
+
+func (e *subTurnTimeoutError) Error() string {
+	iterations := fmt.Sprintf("%d iterations", e.iterations)
+	if e.iterations == 1 {
+		iterations = "1 iteration"
+	}
+	return fmt.Sprintf("subagent exceeded its %s limit after %s and was stopped before finishing "+
+		"(a time limit, not a model or provider failure). Changes it already made stay in place. "+
+		"Do not relaunch the same task unchanged, it will hit the same limit: split it into smaller "+
+		"tasks and delegate them one at a time, or do the remaining part yourself",
+		formatSubTurnLimit(e.limit), iterations)
+}
+
+func (e *subTurnTimeoutError) Is(target error) bool {
+	return target == ErrSubTurnTimeout
+}
+
+func formatSubTurnLimit(limit time.Duration) string {
+	if limit >= time.Minute && limit%time.Minute == 0 {
+		return fmt.Sprintf("%d min", int(limit/time.Minute))
+	}
+	return limit.String()
+}
 
 // getSubTurnConfig returns the effective SubTurn configuration with defaults applied.
 func (al *AgentLoop) getSubTurnConfig() subTurnRuntimeConfig {
@@ -341,6 +383,16 @@ func spawnSubTurn(
 	// The child has its own timeout for self-protection.
 	childCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	// A synchronous child has its caller blocked on it, so it ends with the
+	// caller's turn: a stop (or a new message after one) must not leave the turn
+	// stuck until the child's deadline, then writing its result into the next
+	// turn. Only the cancellation is linked; the child keeps its own values.
+	// Background spawns stay independent, since the end of the turn that
+	// launched them cancels that turn's context.
+	if !cfg.Async {
+		stopLink := context.AfterFunc(ctx, cancel)
+		defer stopLink()
+	}
 
 	childID := al.generateSubTurnID()
 
@@ -517,6 +569,11 @@ func spawnSubTurn(
 
 	// Convert turnResult to tools.ToolResult
 	if turnErr != nil {
+		if !cfg.Async && ctx.Err() != nil {
+			turnErr = parentStoppedSubTurnError(turnErr, childTS)
+		} else {
+			turnErr = deadlineSubTurnError(turnErr, childTS, timeout)
+		}
 		err = turnErr
 		result = &tools.ToolResult{
 			Err:    turnErr,
@@ -530,6 +587,35 @@ func spawnSubTurn(
 	}
 
 	return result, err
+}
+
+// The two errors below replace the error of a sub-turn that its own context
+// stopped, which otherwise surfaces as whatever call was in flight. The
+// original goes to the log.
+
+func parentStoppedSubTurnError(turnErr error, child *turnState) error {
+	logger.InfoCF("subturn", "SubTurn stopped with its parent turn", map[string]any{
+		"child_id":   child.turnID,
+		"parent_id":  child.parentTurnID,
+		"iterations": child.currentIteration(),
+		"error":      turnErr.Error(),
+	})
+	return ErrSubTurnParentCanceled
+}
+
+func deadlineSubTurnError(turnErr error, child *turnState, limit time.Duration) error {
+	if !errors.Is(child.ctx.Err(), context.DeadlineExceeded) {
+		return turnErr
+	}
+	iterations := child.currentIteration()
+	logger.WarnCF("subturn", "SubTurn stopped by its time limit", map[string]any{
+		"child_id":   child.turnID,
+		"parent_id":  child.parentTurnID,
+		"limit":      limit.String(),
+		"iterations": iterations,
+		"error":      turnErr.Error(),
+	})
+	return &subTurnTimeoutError{limit: limit, iterations: iterations}
 }
 
 // ====================== Result Delivery ======================
