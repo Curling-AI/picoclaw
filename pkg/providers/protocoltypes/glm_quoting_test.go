@@ -186,3 +186,34 @@ func TestExtractGLMToolCall_UnclosedBlockQuotingACallLiftsNothing(t *testing.T) 
 		})
 	}
 }
+
+// A call quoted earlier does not cancel the real one that ends the text, in
+// the same format or another: only the trailing run counts, the rest stays
+// text.
+func TestLiftToolCallsFromText_QuotedCallBeforeTheRealOne(t *testing.T) {
+	bareA := `{"name":"read_file","arguments":{"path":"a"}}`
+	bareB := `{"name":"read_file","arguments":{"path":"b"}}`
+	pseudo := func(path string) string {
+		return "<function=read_file><parameter=path>" + path + "</parameter></function>"
+	}
+	xmlJSON := func(path string) string {
+		return `<tool_call>{"name":"read_file","arguments":{"path":"` + path + `"}}</tool_call>`
+	}
+	cases := map[string]string{
+		"bare JSON":                  "Exemplo: " + bareA + ". Agora vou chamar " + bareB,
+		"pseudo-XML":                 "Exemplo: " + pseudo("a") + ". Agora: " + pseudo("b"),
+		"JSON in a call tag":         "Exemplo: " + xmlJSON("a") + ". Agora: " + xmlJSON("b"),
+		"pseudo-XML, then bare JSON": "Exemplo: " + pseudo("a") + ". Agora: " + bareB,
+	}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			calls, rest := LiftToolCallsFromText(text)
+			if len(calls) != 1 || calls[0].Arguments["path"] != "b" {
+				t.Fatalf("calls = %#v, want only the call that ends the text", calls)
+			}
+			if !strings.Contains(rest, "Exemplo:") || strings.Contains(rest, `"b"`) || strings.Contains(rest, ">b<") {
+				t.Fatalf("rest = %q, want the quoted call kept and the real one removed", rest)
+			}
+		})
+	}
+}

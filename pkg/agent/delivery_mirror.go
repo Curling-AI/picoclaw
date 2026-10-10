@@ -211,6 +211,16 @@ func (al *AgentLoop) deliverToConversation(
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
 	defer stripe.Unlock()
+	return al.deliverToConversationLocked(agent, sessionKey, msg)
+}
+
+// deliverToConversationLocked is deliverToConversation for a caller that
+// holds the session's stripe.
+func (al *AgentLoop) deliverToConversationLocked(
+	agent *AgentInstance,
+	sessionKey string,
+	msg providers.Message,
+) (deferred bool, err error) {
 	al.mirror.mu.Lock()
 	if al.mirrorBusyLocked(sessionKey) {
 		al.queueMirroredLocked(sessionKey, msg)

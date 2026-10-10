@@ -41,31 +41,14 @@ func StripToolCallsFromText(text string) string {
 // left once their spans are removed. A call only counts as the last thing
 // written, outside a ``` fence: a model making a call stops there, and one
 // earlier in the text, or fenced, is a call it quotes (a page it summarizes,
-// an example it gives) or, in its reasoning, one it weighs.
+// an example it gives) or, in its reasoning, one it weighs. A quoted call does
+// not cancel the real one after it: it just stays in the text.
 func LiftToolCallsFromText(text string) ([]ToolCall, string) {
 	calls, spans := liftToolCalls(text)
-	if !endsText(text, spans) {
+	if len(calls) == 0 {
 		return nil, text
 	}
 	return calls, strings.TrimSpace(removeSpans(text, spans))
-}
-
-// endsText reports whether spans, in order, are the last thing in text with
-// only whitespace between them, and the first one is outside a ``` fence.
-func endsText(text string, spans []span) bool {
-	if len(spans) == 0 || insideCodeFence(text[:spans[0].start]) {
-		return false
-	}
-	for i, sp := range spans {
-		next := len(text)
-		if i+1 < len(spans) {
-			next = spans[i+1].start
-		}
-		if strings.TrimSpace(text[sp.end:next]) != "" {
-			return false
-		}
-	}
-	return true
 }
 
 func liftToolCalls(text string) ([]ToolCall, []span) {
@@ -87,11 +70,33 @@ func liftToolCalls(text string) ([]ToolCall, []span) {
 		extractPseudoXMLToolCalls,
 		extractBareToolCalls,
 	} {
-		if calls, spans := extract(text); len(calls) > 0 {
+		found, at := extract(text)
+		if calls, spans := trailingCalls(text, found, at); len(calls) > 0 {
 			return calls, spans
 		}
 	}
 	return nil, nil
+}
+
+// trailingCalls keeps the calls that end text: the last span and those before
+// it with only whitespace in between, the first of them outside a ``` fence.
+// Spans pair with calls one to one, except a JSON wrapper's single span, which
+// holds all of its calls.
+func trailingCalls(text string, calls []ToolCall, spans []span) ([]ToolCall, []span) {
+	first, end := len(spans), len(text)
+	for i := len(spans) - 1; i >= 0; i-- {
+		if strings.TrimSpace(text[spans[i].end:end]) != "" {
+			break
+		}
+		first, end = i, spans[i].start
+	}
+	if first == len(spans) || insideCodeFence(text[:spans[first].start]) {
+		return nil, nil
+	}
+	if len(spans) != len(calls) {
+		return calls, spans
+	}
+	return calls[first:], spans[first:]
 }
 
 // removeSpans returns text without the given spans, which are in order and

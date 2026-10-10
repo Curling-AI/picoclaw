@@ -80,9 +80,9 @@ func (al *AgentLoop) routeBackgroundResult(msg bus.InboundMessage) bool {
 	if originTakesLateReplies(msg.ChatID) {
 		return false
 	}
-	deferred, err := al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
+	deferred, err := al.deliverBackgroundNote(agent, sessionKey, msg)
 	if err != nil {
-		return true // writeMirrored logged it
+		return true // dropped or lost, logged where it happened
 	}
 	logger.InfoCF("agent", "Recorded background result in its conversation", map[string]any{
 		"sender_id":   msg.SenderID,
@@ -281,7 +281,31 @@ func (al *AgentLoop) recordBackgroundNote(msg bus.InboundMessage) {
 			})
 		return
 	}
-	_, _ = al.deliverToConversation(agent, sessionKey, backgroundNote(msg))
+	_, _ = al.deliverBackgroundNote(agent, sessionKey, msg)
+}
+
+// errClearedSinceLaunch: the conversation was cleared after the work behind
+// a result started.
+var errClearedSinceLaunch = errors.New("conversation cleared after the work started")
+
+// deliverBackgroundNote writes a result into its conversation as a note. The
+// target was resolved before; the clear stamp is checked again under the
+// session's stripe, which /clear stamps under, so a /clear in between drops
+// the result instead of letting it into the new conversation.
+func (al *AgentLoop) deliverBackgroundNote(
+	agent *AgentInstance,
+	sessionKey string,
+	msg bus.InboundMessage,
+) (deferred bool, err error) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	if !msg.LaunchedAt.IsZero() && al.clearedSince(sessionKey, msg.LaunchedAt) {
+		logger.InfoCF("agent", "Dropped background result: its conversation was cleared after the work started",
+			map[string]any{"session_key": sessionKey, "sender_id": msg.SenderID})
+		return false, errClearedSinceLaunch
+	}
+	return al.deliverToConversationLocked(agent, sessionKey, backgroundNote(msg))
 }
 
 func backgroundNote(msg bus.InboundMessage) providers.Message {

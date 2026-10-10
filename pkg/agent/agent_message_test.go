@@ -920,3 +920,23 @@ func TestWriteMirrored_AFailedAppendKeepsTheRestOfTheBatch(t *testing.T) {
 		t.Fatalf("history = %+v, want a and c written", history)
 	}
 }
+
+// A /clear between resolving a result's conversation and writing the note
+// into it drops the result: the check is made again where the note is written.
+func TestDeliverBackgroundNote_ClearedAfterTheCheckIsDropped(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	agent := al.registry.GetDefaultAgent()
+	msg := spawnResultMessage(conversationSession)
+	msg.LaunchedAt = time.Now()
+	if _, _, ok := al.backgroundResultTarget(msg); !ok {
+		t.Fatal("the conversation was not resolved")
+	}
+	al.dropMirroredDeliveries(conversationSession) // what /clear stamps
+
+	if _, err := al.deliverBackgroundNote(agent, conversationSession, msg); !errors.Is(err, errClearedSinceLaunch) {
+		t.Fatalf("err = %v, want the result dropped", err)
+	}
+	if got := len(sessions.GetHistory(conversationSession)); got != 2 {
+		t.Fatalf("history has %d messages, want the old result left out", got)
+	}
+}
