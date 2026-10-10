@@ -247,6 +247,98 @@ func (r *ToolRegistry) HasRegistered(name string) bool {
 	return ok
 }
 
+// GetRegistered returns a registered tool whether or not it is callable right
+// now (hidden tools whose TTL expired included).
+func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.tools[name]
+	if !ok {
+		return nil, false
+	}
+	return entry.Tool, true
+}
+
+// CoercedArgs returns a copy of args with the typing fixes ExecuteWithContext
+// applies before running the tool (numeric strings, stringified booleans), so
+// a caller can compare calls the way the tool will see them. The copy is deep:
+// coercion rewrites nested objects and arrays in place, and args must stay as
+// the model sent them.
+func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
+	coerced, _ := cloneJSONValue(args).(map[string]any)
+	if tool, ok := r.GetRegistered(name); ok {
+		coerceToolArgs(tool.Parameters(), coerced)
+	}
+	return coerced
+}
+
+// cloneJSONValue copies the objects and arrays of a decoded JSON value; the
+// scalars it holds are immutable and shared.
+func cloneJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		if v == nil {
+			return v
+		}
+		cloned := make(map[string]any, len(v))
+		for key, item := range v {
+			cloned[key] = cloneJSONValue(item)
+		}
+		return cloned
+	case []any:
+		if v == nil {
+			return v
+		}
+		cloned := make([]any, len(v))
+		for i, item := range v {
+			cloned[i] = cloneJSONValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+// ExpiredToolAliases maps each name the model may write for a hidden tool that
+// is currently expired to its registry name: the registry name itself and, for
+// MCP tools, the server's own tool name. Names that are plain words (no '_',
+// '-' or '.') are left out — they collide with prose — and so is a name shared
+// by two registered tools (visible or core ones included), since it can't say
+// which one the model meant. Keys are lowercase.
+func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	owners := make(map[string]string, len(r.tools))
+	ambiguous := make(map[string]struct{})
+	add := func(alias, name string) {
+		alias = strings.ToLower(alias)
+		if !strings.ContainsAny(alias, "_-.") {
+			return
+		}
+		if owner, ok := owners[alias]; ok && owner != name {
+			ambiguous[alias] = struct{}{}
+			return
+		}
+		owners[alias] = name
+	}
+	for name, entry := range r.tools {
+		add(name, name)
+		if named, ok := entry.Tool.(ServerNamedTool); ok {
+			add(named.ServerToolName(), name)
+		}
+	}
+	aliases := make(map[string]string)
+	for alias, name := range owners {
+		if _, skip := ambiguous[alias]; skip {
+			continue
+		}
+		if entry := r.tools[name]; !entry.IsCore && entry.TTL <= 0 {
+			aliases[alias] = name
+		}
+	}
+	return aliases
+}
+
 // HiddenToolSnapshot holds a consistent snapshot of hidden tools and the
 // registry version at which it was taken. Used by BM25SearchTool cache.
 type HiddenToolSnapshot struct {
