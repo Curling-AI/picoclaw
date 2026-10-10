@@ -3,15 +3,18 @@ package integrationtools
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
@@ -400,6 +403,48 @@ func TestMCPTool_Execute_ManagerError(t *testing.T) {
 	}
 	if !result.OutcomeUnknown {
 		t.Error("no answer from the server: the call may have run, OutcomeUnknown should be set")
+	}
+}
+
+// Only a failure that may have reached the tool leaves its outcome unknown.
+func TestMCPTool_Execute_ErrorOutcome(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		unknown bool
+	}{
+		{
+			name:    "transport lost the answer",
+			err:     fmt.Errorf("failed to call tool: %w", io.ErrUnexpectedEOF),
+			unknown: true,
+		},
+		{name: "never left the pod", err: picomcp.NotSent(fmt.Errorf("server skip not found")), unknown: false},
+		{
+			name: "server answered with a JSON-RPC error",
+			err: fmt.Errorf(
+				"failed to call tool: %w",
+				&jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "bad args"},
+			),
+			unknown: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &MockMCPManager{
+				callToolFunc: func(context.Context, string, string, map[string]any) (*mcp.CallToolResult, error) {
+					return nil, tt.err
+				},
+			}
+			result := NewMCPTool(manager, "skip", &mcp.Tool{Name: "skip_project_create"}).
+				Execute(context.Background(), map[string]any{})
+
+			if !result.IsError {
+				t.Fatal("want an error result")
+			}
+			if result.OutcomeUnknown != tt.unknown {
+				t.Errorf("OutcomeUnknown = %v, want %v", result.OutcomeUnknown, tt.unknown)
+			}
+		})
 	}
 }
 

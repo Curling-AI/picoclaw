@@ -573,6 +573,8 @@ toolLoop:
 			asyncCallback,
 		)
 		toolDuration := time.Since(toolStart)
+		// Read before an AfterTool hook can replace the result (repeat guard).
+		outcomeUnknown := toolResult != nil && toolResult.OutcomeUnknown
 
 		if ts.hardAbortRequested() {
 			exec.abortedByHardAbort = true
@@ -715,7 +717,7 @@ toolLoop:
 			toolErrorSummary(toolResult),
 			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 		)
-		if !toolResult.IsError || toolResult.OutcomeUnknown {
+		if !toolResult.IsError || outcomeUnknown {
 			ts.repeats.recordRun(effect, repeatKey)
 		}
 		messages = append(messages, toolResultMsg)

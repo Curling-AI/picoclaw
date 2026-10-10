@@ -15,6 +15,7 @@ import (
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
@@ -283,8 +284,8 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) *ToolResult 
 	if err != nil {
 		t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallEnd, startedAt, true, err.Error())
 		failed := ErrorResult(fmt.Sprintf("MCP tool execution failed: %v", err)).WithError(err)
-		// The server never answered: a create may have gone through anyway.
-		failed.OutcomeUnknown = true
+		// No answer from the server: a create may have gone through anyway.
+		failed.OutcomeUnknown = picomcp.CallOutcomeUnknown(err)
 		return failed
 	}
 

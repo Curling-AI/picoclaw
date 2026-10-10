@@ -474,14 +474,14 @@ func (m *Manager) CallTool(
 ) (*mcp.CallToolResult, error) {
 	// Check if closed before acquiring lock (fast path)
 	if m.closed.Load() {
-		return nil, fmt.Errorf("manager is closed")
+		return nil, NotSent(fmt.Errorf("manager is closed"))
 	}
 
 	m.mu.RLock()
 	// Double-check after acquiring lock to prevent TOCTOU race
 	if m.closed.Load() {
 		m.mu.RUnlock()
-		return nil, fmt.Errorf("manager is closed")
+		return nil, NotSent(fmt.Errorf("manager is closed"))
 	}
 	conn, ok := m.servers[serverName]
 	if ok {
@@ -490,7 +490,7 @@ func (m *Manager) CallTool(
 	m.mu.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("server %s not found", serverName)
+		return nil, NotSent(fmt.Errorf("server %s not found", serverName))
 	}
 	defer m.wg.Done()
 
@@ -511,7 +511,8 @@ func (m *Manager) CallTool(
 
 			reconnectedConn, reconnectErr := m.reconnectServer(ctx, serverName, conn)
 			if reconnectErr != nil {
-				return nil, fmt.Errorf("failed to recover lost MCP session: %w", reconnectErr)
+				// The server had no session for the call, so the tool didn't run.
+				return nil, NotSent(fmt.Errorf("failed to recover lost MCP session: %w", reconnectErr))
 			}
 
 			result, err = reconnectedConn.Session.CallTool(ctx, params)
