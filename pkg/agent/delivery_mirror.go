@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 	"strings"
 	"sync"
@@ -236,16 +237,26 @@ func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
 	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
 	delete(al.mirror.pending, sessionKey)
 	delete(al.mirror.parked, sessionKey)
+	now := time.Now()
 	if al.mirror.cleared == nil {
 		al.mirror.cleared = make(map[string]time.Time)
 	}
-	al.mirror.cleared[sessionKey] = time.Now()
+	for key, at := range al.mirror.cleared {
+		if now.Sub(at) > clearStampTTL {
+			delete(al.mirror.cleared, key)
+		}
+	}
+	al.mirror.cleared[sessionKey] = now
 	al.mirror.mu.Unlock()
 	if dropped > 0 {
 		logger.InfoCF("agent", "Dropped deliveries waiting for a turn of a cleared session",
 			map[string]any{"session_key": sessionKey, "dropped": dropped})
 	}
 }
+
+// clearStampTTL is how long a /clear is remembered, far beyond any sub-turn's
+// time limit: work launched before the clear has ended by then.
+const clearStampTTL = 24 * time.Hour
 
 // clearedSince reports whether the session was cleared after t.
 func (al *AgentLoop) clearedSince(sessionKey string, t time.Time) bool {
@@ -279,14 +290,11 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 // o erro de uma escrita que não chegou ao store: o que está aqui pode ser a
 // única cópia (resultado de subagente numa conversa web, nota de um /stop).
 func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
-	for i, msg := range msgs {
+	var lost []error
+	for _, msg := range msgs {
 		if err := appendToSession(agent.Sessions, sessionKey, msg); err != nil {
-			logger.ErrorCF("agent", "Could not write into the conversation", map[string]any{
-				"session_key": sessionKey,
-				"lost":        len(msgs) - i,
-				"error":       err.Error(),
-			})
-			return err
+			lost = append(lost, err)
+			continue
 		}
 		if al.contextManager == nil {
 			continue
@@ -299,17 +307,27 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 				map[string]any{"session_key": sessionKey, "error": err.Error()})
 		}
 	}
+	if len(lost) > 0 {
+		logger.ErrorCF("agent", "Could not write into the conversation", map[string]any{
+			"session_key": sessionKey,
+			"lost":        len(lost),
+			"of":          len(msgs),
+			"error":       lost[0].Error(),
+		})
+	}
 	// O backend JSON (fallback quando o JSONL não sobe) só persiste no Save; no
 	// JSONL cada mensagem já foi gravada e o Save só compacta, como no fim de
-	// todo turno.
+	// todo turno: lá uma falha do Save não perde o que o append confirmou.
 	if err := agent.Sessions.Save(sessionKey); err != nil {
 		logger.WarnCF("agent", "Failed to save mirrored delivery", map[string]any{
 			"session_key": sessionKey,
 			"error":       err.Error(),
 		})
-		return err
+		if _, checked := agent.Sessions.(session.CheckedAppender); !checked {
+			lost = append(lost, err)
+		}
 	}
-	return nil
+	return errors.Join(lost...)
 }
 
 // appendToSession appends msg and reports a failed write when the store can

@@ -203,6 +203,9 @@ var backgroundPublishTimeout = 30 * time.Second
 // turn is gone, when nothing else keeps it from opening a turn. A result the
 // loop does not take in time is written as a note too, rather than lost.
 func (al *AgentLoop) deliverAsyncResult(msg bus.InboundMessage, workErr error) {
+	// The callback fills Context only; routing reads the mirrored fields that
+	// the bus would otherwise fill on publish.
+	msg = bus.NormalizeInboundMessage(msg)
 	if errors.Is(workErr, ErrSubTurnParentCanceled) {
 		al.recordBackgroundNote(msg)
 		return

@@ -249,7 +249,7 @@ func TestRun_WebResultForABusyConversationIsWrittenWhenItsTurnEnds(t *testing.T)
 	}
 }
 
-// nickgs1337 on #2106: in the live turn's steering queue the result could be
+// In the live turn's steering queue the result could be
 // lost (a direct turn never drains it, /stop clears it, the queue caps at 10)
 // and it skipped the rest of the tool batch as if the user had written. It
 // waits outside that queue and gets a turn of its own when the live one ends.
@@ -319,7 +319,7 @@ func TestRun_ManyResultsForABusyConversationAllArrive(t *testing.T) {
 	}
 }
 
-// nickgs1337 on #2106: the resolver answers "" for chats it cannot map
+// The resolver answers "" for chats it cannot map
 // (Discord, WhatsApp groups), which read as a web run and silenced them.
 func TestRun_ResultForAChatTheResolverCannotMapStillGetsAReply(t *testing.T) {
 	provider := &countingReplyProvider{}
@@ -335,7 +335,7 @@ func TestRun_ResultForAChatTheResolverCannotMapStillGetsAReply(t *testing.T) {
 	waitFor(t, "a turn for the result", func() bool { return provider.count() == 1 })
 }
 
-// nickgs1337 on #2106: with a stop pending for the conversation the worker
+// With a stop pending for the conversation the worker
 // returned early and dropped the result, and built the continuation from the
 // system message's channel. The result is written for the next turn instead.
 func TestRun_ResultForAStoppedConversationIsWrittenNotRun(t *testing.T) {
@@ -407,7 +407,7 @@ func TestRun_ChatResultForAnIdleConversationRunsATurnThere(t *testing.T) {
 	if provider.count() != 1 {
 		t.Fatalf("model calls = %d, want one turn", provider.count())
 	}
-	// nickgs1337 on #112: the result's turn answers once, in its chat.
+	// The result's turn answers once, in its chat.
 	var replies []bus.OutboundMessage
 	deadline := time.After(300 * time.Millisecond)
 	for collecting := true; collecting; {
@@ -447,7 +447,7 @@ func TestProcessSystemMessage_ResultOfAGoneConversationIsDropped(t *testing.T) {
 	}
 }
 
-// Devin on #112: a result released when its turn ended can still be on the
+// A result released when its turn ended can still be on the
 // inbound queue when the user clears the conversation. It must not reach
 // main as a turn of its own.
 func TestRun_ResultReleasedBeforeAClearOpensNoTurn(t *testing.T) {
@@ -519,7 +519,7 @@ func TestTurnState_OriginSessionKeyIsTheRootTurns(t *testing.T) {
 	}
 }
 
-// Devin on #109: a result queued behind a turn survived /clear and the flush
+// A result queued behind a turn survived /clear and the flush
 // wrote it into the cleared conversation, so the next turn read the old task.
 func TestClear_DropsResultsWaitingForTheTurn(t *testing.T) {
 	provider := &countingReplyProvider{}
@@ -533,7 +533,7 @@ func TestClear_DropsResultsWaitingForTheTurn(t *testing.T) {
 		Content: "[System: async:spawn] Task 'importação' completed.",
 	})
 	al.mirror.mu.Unlock()
-	// nickgs1337 on #112: and a result really parked behind the live turn.
+	// And a result really parked behind the live turn.
 	parked := spawnResultMessage(conversationSession)
 	parked.Context.ChatID, parked.ChatID = "telegram:123", "telegram:123"
 	parked.Content = "Task 'exportação' completed."
@@ -560,7 +560,7 @@ func TestClear_DropsResultsWaitingForTheTurn(t *testing.T) {
 	}
 }
 
-// Local review: the Run loop parks a result for a session it saw claimed, but
+// The Run loop parks a result for a session it saw claimed, but
 // the claimant can end (releasing an empty list) before the result is parked.
 // A session found idle hands the result straight back.
 func TestParkBackgroundResult_AfterTheClaimantEndedIsReleased(t *testing.T) {
@@ -584,7 +584,7 @@ func TestParkBackgroundResult_AfterTheClaimantEndedIsReleased(t *testing.T) {
 	}
 }
 
-// Local review: a release that finds the inbound queue full (the loop busy on
+// A release that finds the inbound queue full (the loop busy on
 // a long inline message) or closed must not lose the result.
 func TestReleaseParkedResults_FullBusWritesTheResultIntoTheConversation(t *testing.T) {
 	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
@@ -609,11 +609,10 @@ func TestReleaseParkedResults_FullBusWritesTheResultIntoTheConversation(t *testi
 	}
 }
 
-// Local review: after a /stop the user wants the agent quiet. Results that
+// After a /stop the user wants the agent quiet. Results that
 // arrived during the stopped turn, or arrive before it ends, are written for the
-// next turn, never opened as turns of their own. Devin on #112: all of them,
-// more than the mirror queue holds. nickgs1337 on #112: through the /stop path,
-// so dropping its call fails this test.
+// next turn, never opened as turns of their own: all of them, more than the
+// mirror queue holds, and through the /stop path itself.
 func TestStop_ParkedResultsBecomeNotes(t *testing.T) {
 	provider := &countingReplyProvider{}
 	al, msgBus, sessions := newSystemMessageTestLoop(t, provider)
@@ -677,7 +676,7 @@ func (p *stallingProvider) Chat(
 
 func (p *stallingProvider) GetDefaultModel() string { return "mock-model" }
 
-// nickgs1337 on #112: a /stop on the turn a result opened rolled the history
+// A /stop on the turn a result opened rolled the history
 // back with the result in it, so the subagent's work was in no conversation,
 // and the stop reply quoted the internal envelope as the task name.
 func TestStop_TurnOpenedByAResultKeepsTheResultAsANote(t *testing.T) {
@@ -765,14 +764,27 @@ func fillInboundQueue(t *testing.T, msgBus *bus.MessageBus) {
 	}
 }
 
-// nickgs1337 on #112: the result of a spawn the user stopped must not open a
-// turn, whenever it lands (the stopped turn may be gone by then). It is written
-// for the next turn instead, and nothing goes to the loop.
+// asyncResultAsBuilt is an async result the way the tool callback builds it:
+// only Context set, not yet normalized by the bus.
+func asyncResultAsBuilt(sessionKey, content string) bus.InboundMessage {
+	return bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "system",
+			ChatID:   "telegram:123",
+			ChatType: "direct",
+			SenderID: "async:spawn",
+		},
+		Content:    content,
+		SessionKey: sessionKey,
+	}
+}
+
+// The result of a spawn the user stopped must not open a turn, whenever it
+// lands (the stopped turn may be gone by then). It is written for the next
+// turn instead, and nothing goes to the loop.
 func TestDeliverAsyncResult_StoppedWorkIsANoteNotATurn(t *testing.T) {
 	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
-	msg := spawnResultMessage(conversationSession)
-	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
-	msg.Content = "Spawn failed: " + ErrSubTurnParentCanceled.Error()
+	msg := asyncResultAsBuilt(conversationSession, "Spawn failed: "+ErrSubTurnParentCanceled.Error())
 
 	al.deliverAsyncResult(msg, fmt.Errorf("spawn: %w", ErrSubTurnParentCanceled))
 
@@ -785,16 +797,37 @@ func TestDeliverAsyncResult_StoppedWorkIsANoteNotATurn(t *testing.T) {
 	}
 }
 
-// nickgs1337 on #112: the first publish of an async result only logged when
-// the queue was full; the result is written into the conversation instead.
+// A result the loop does not take in time is written into the conversation,
+// not only logged.
 func TestDeliverAsyncResult_FullBusWritesTheResultIntoTheConversation(t *testing.T) {
 	al, msgBus, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
 	fillInboundQueue(t, msgBus)
 
-	al.deliverAsyncResult(spawnResultMessage(conversationSession), nil)
+	al.deliverAsyncResult(asyncResultAsBuilt(conversationSession, "Task 'x' completed."), nil)
 
 	if got := len(sessions.GetHistory(conversationSession)); got != 3 {
 		t.Fatalf("history has %d messages, want the result written", got)
+	}
+}
+
+// A stop armed after the worker's check but before the turn registers is
+// taken inside runTurn: the turn aborts at once and its rollback removes the
+// result that opened it. The result is written back as a note.
+func TestProcessSystemMessage_PendingStopKeepsTheResultAsANote(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	al.SetDeliverySessionResolver(webResolver)
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+	msg.Content = "Task 'importação' completed."
+	al.markPendingStop(conversationSession)
+
+	if _, err := al.processSystemMessage(context.Background(), msg); err != nil {
+		t.Fatalf("processSystemMessage: %v", err)
+	}
+
+	history := sessions.GetHistory(conversationSession)
+	if len(history) != 3 || !strings.Contains(history[2].Content, "Task 'importação' completed") {
+		t.Fatalf("history = %+v, want the result as a note", history)
 	}
 }
 
@@ -805,7 +838,7 @@ func (failingAppendStore) AppendMessage(string, providers.Message) error {
 	return errors.New("no space left on device")
 }
 
-// nickgs1337 on #112: a failed write was logged as "Recorded background result
+// A failed write was logged as "Recorded background result
 // in its conversation". The caller now gets the error.
 func TestDeliverToConversation_ReportsAFailedWrite(t *testing.T) {
 	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
@@ -820,7 +853,7 @@ func TestDeliverToConversation_ReportsAFailedWrite(t *testing.T) {
 	}
 }
 
-// nickgs1337 on #112: a task launched before /clear delivered into the new
+// A task launched before /clear delivered into the new
 // conversation once the user had typed anything, and spent a model call.
 func TestRun_ResultOfWorkLaunchedBeforeAClearIsDropped(t *testing.T) {
 	provider := &countingReplyProvider{}
@@ -852,4 +885,38 @@ func TestRun_ResultOfWorkLaunchedBeforeAClearIsDropped(t *testing.T) {
 		t.Fatalf("PublishInbound: %v", err)
 	}
 	waitFor(t, "work launched after the clear to arrive", func() bool { return provider.count() == 1 })
+}
+
+// losingOneStore loses the append of one message and keeps the others.
+type losingOneStore struct {
+	session.SessionStore
+	lose string
+}
+
+func (s losingOneStore) AppendMessage(key string, msg providers.Message) error {
+	if msg.Content == s.lose {
+		return errors.New("no space left on device")
+	}
+	s.AddFullMessage(key, msg)
+	return nil
+}
+
+// A failed write reports the loss without dropping the rest of the batch,
+// which was already taken off the queue.
+func TestWriteMirrored_AFailedAppendKeepsTheRestOfTheBatch(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	agent := al.registry.GetDefaultAgent()
+	agent.Sessions = losingOneStore{SessionStore: sessions, lose: "b"}
+
+	err := al.writeMirrored(agent, conversationSession, []providers.Message{
+		{Role: "user", Content: "a"}, {Role: "user", Content: "b"}, {Role: "user", Content: "c"},
+	})
+
+	if err == nil {
+		t.Fatal("the lost message was not reported")
+	}
+	history := sessions.GetHistory(conversationSession)
+	if len(history) != 4 || history[2].Content != "a" || history[3].Content != "c" {
+		t.Fatalf("history = %+v, want a and c written", history)
+	}
 }

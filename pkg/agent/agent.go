@@ -134,8 +134,9 @@ type processOptions struct {
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
 	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
 	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
-	// BackgroundResult is the async result this turn was opened for. A /stop
-	// rolls the turn back, result included, and writes it back as a note.
+	// BackgroundResult is the async result this turn was opened for. An abort
+	// rolls the turn back, result included; runAgentLoop writes it back as a
+	// note.
 	BackgroundResult *bus.InboundMessage
 }
 
@@ -644,6 +645,12 @@ func (al *AgentLoop) runAgentLoop(
 		return "", err
 	}
 	if result.status == TurnEndStatusAborted {
+		if note := opts.BackgroundResult; note != nil {
+			// The abort (a /stop, live or pending) rolled the turn back with the
+			// result that opened it. Written now that the turn is over, after
+			// the cut, so the work is not lost.
+			al.recordBackgroundNote(*note)
+		}
 		return "", nil
 	}
 

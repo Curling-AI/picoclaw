@@ -20,12 +20,13 @@ var xmlToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_cal
 //  5. Bare JSON:    {"name":"…","arguments":{…}}
 //
 // GLM goes first, and the other formats are only looked for outside its
-// blocks: a GLM value is arbitrary text (a file, a command) and may hold a
-// call in any of the JSON shapes, which is then something the model wrote
-// down, not a call it made. For the same reason the markup formats are tried
-// before bare JSON.
+// blocks (an unclosed one runs to the end of the text): a GLM value is
+// arbitrary text (a file, a command) and may hold a call in any of the JSON
+// shapes, which is then something the model wrote down, not a call it made.
+// For the same reason the markup formats are tried before bare JSON. Only
+// the calls that end the text count (see LiftToolCallsFromText).
 func ExtractToolCallsFromText(text string) []ToolCall {
-	calls, _ := liftToolCalls(text)
+	calls, _ := LiftToolCallsFromText(text)
 	return calls
 }
 
@@ -36,21 +37,24 @@ func StripToolCallsFromText(text string) string {
 	return rest
 }
 
-// LiftToolCallsFromText returns the tool calls written into text and the text
-// left once their spans are removed.
+// LiftToolCallsFromText returns the tool calls that end text and the text
+// left once their spans are removed. A call only counts as the last thing
+// written, outside a ``` fence: a model making a call stops there, and one
+// earlier in the text, or fenced, is a call it quotes (a page it summarizes,
+// an example it gives) or, in its reasoning, one it weighs.
 func LiftToolCallsFromText(text string) ([]ToolCall, string) {
 	calls, spans := liftToolCalls(text)
+	if !endsText(text, spans) {
+		return nil, text
+	}
 	return calls, strings.TrimSpace(removeSpans(text, spans))
 }
 
-// LiftTrailingToolCallsFromText is LiftToolCallsFromText for a model's
-// reasoning: there the calls count only when they are the last thing written,
-// outside a ``` fence. Earlier in the scratchpad a call is the model thinking
-// about one, not making it.
-func LiftTrailingToolCallsFromText(text string) []ToolCall {
-	calls, spans := liftToolCalls(text)
-	if len(calls) == 0 || insideCodeFence(text[:spans[0].start]) {
-		return nil
+// endsText reports whether spans, in order, are the last thing in text with
+// only whitespace between them, and the first one is outside a ``` fence.
+func endsText(text string, spans []span) bool {
+	if len(spans) == 0 || insideCodeFence(text[:spans[0].start]) {
+		return false
 	}
 	for i, sp := range spans {
 		next := len(text)
@@ -58,10 +62,10 @@ func LiftTrailingToolCallsFromText(text string) []ToolCall {
 			next = spans[i+1].start
 		}
 		if strings.TrimSpace(text[sp.end:next]) != "" {
-			return nil
+			return false
 		}
 	}
-	return calls
+	return true
 }
 
 func liftToolCalls(text string) ([]ToolCall, []span) {

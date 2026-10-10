@@ -153,7 +153,7 @@ func (p *searchAfterOtherSessionProvider) Chat(
 
 func (p *searchAfterOtherSessionProvider) GetDefaultModel() string { return "mock-model" }
 
-// Local review (MST-277): a before/after diff of the registry missed a tool another
+// A before/after diff of the registry missed a tool another
 // session had already promoted, so the search said "unlocked" and the next
 // call still did not offer it. The turn now offers what the search returned.
 func TestTurnToolsOfferWhatTheTurnsSearchReturned(t *testing.T) {

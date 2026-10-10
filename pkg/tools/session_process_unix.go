@@ -24,8 +24,13 @@ func killProcessGroup(pid int) error {
 }
 
 // killLeftoverGroup kills what is left in the group pid led, after pid itself
-// exited. Never pid alone: by now the number may belong to another process.
+// exited and was reaped. A number stays taken while it names a group with
+// members, so if pid answers again it belongs to another process now and our
+// group is empty: its group is not ours to signal.
 func killLeftoverGroup(pid int) error {
+	if syscall.Kill(pid, 0) == nil {
+		return errProcessGone
+	}
 	err := syscall.Kill(-pid, syscall.SIGKILL)
 	if errors.Is(err, syscall.ESRCH) {
 		return errProcessGone

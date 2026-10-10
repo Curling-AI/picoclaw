@@ -234,7 +234,7 @@ func (p *backgroundThenPanicProvider) Chat(
 
 func (p *backgroundThenPanicProvider) GetDefaultModel() string { return "mock-model" }
 
-// nickgs1337 on #112: a panic in the child's turn skipped the cleanup.
+// A panic in the child's turn skipped the cleanup.
 func TestSpawnSubTurn_PanickedChildStopsItsBackgroundProcesses(t *testing.T) {
 	al, agent, cleanup := newTurnCoordTestLoop(t, &backgroundThenPanicProvider{})
 	defer cleanup()
@@ -256,7 +256,7 @@ func TestSpawnSubTurn_PanickedChildStopsItsBackgroundProcesses(t *testing.T) {
 
 const grandchildMarker = "sleep 30 # mst277-handed-to-parent"
 
-// nickgs1337 on #112: what a finished child handed over was matched to nobody
+// What a finished child handed over was matched to nobody
 // when the turn above it died. It now belongs to the turn that launched the
 // child.
 func TestSpawnSubTurn_FinishedChildHandsItsProcessesToTheParent(t *testing.T) {

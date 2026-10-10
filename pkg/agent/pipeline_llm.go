@@ -195,17 +195,19 @@ func (p *Pipeline) CallLLM(
 	// Same heal (seucaranguejo fork) for tools the model named but hasn't called
 	// yet; capped like a discovery page so a long reasoning can't unhide the
 	// whole library.
-	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); len(mentioned) > 0 {
-		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
-		ts.offerTools(revived)
-		if len(revived) > 0 {
-			logger.InfoCF("agent", "Re-promoted deferred tools named by the model",
-				map[string]any{
-					"agent_id":  ts.agent.ID,
-					"iteration": iteration,
-					"tools":     revived,
-				})
+	// The turn's own set decides, as in reviveDiscoveredTools.
+	if mentioned := mentionedMissingToolNames(exec.messages, ts.agent.Tools, ts.offeredToolSet()); len(mentioned) > 0 {
+		if len(mentioned) > maxRevivedDiscoveredTools {
+			mentioned = mentioned[:maxRevivedDiscoveredTools]
 		}
+		ts.agent.Tools.EnsureVisible(mentioned, discoveryPromoteTTL(p.Cfg))
+		ts.offerTools(mentioned)
+		logger.InfoCF("agent", "Offered deferred tools named by the model",
+			map[string]any{
+				"agent_id":  ts.agent.ID,
+				"iteration": iteration,
+				"tools":     mentioned,
+			})
 	}
 
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefsFor(ts.offeredToolSet())

@@ -41,7 +41,7 @@ func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
-// nickgs1337 on #112: the session is done as soon as its sh exits, but what the
+// The session is done as soon as its sh exits, but what the
 // sh left in the background (nohup script &) keeps running in its group.
 func TestKillOwnedBy_StopsWhatTheShellLeftBehind(t *testing.T) {
 	tool, sm := newOwnerTestTool(t)
@@ -85,4 +85,10 @@ func TestHandOver_MovesTheProcessesToTheNewOwner(t *testing.T) {
 
 	require.Empty(t, sm.KillOwnedBy("subturn-9"))
 	require.Equal(t, []string{s.ID}, sm.KillOwnedBy("subturn-8"))
+}
+
+// A finished session's pid that now answers belongs to someone else (the
+// number was reused, so the old group is empty): its group is left alone.
+func TestKillLeftoverGroup_SparesAReusedPid(t *testing.T) {
+	require.ErrorIs(t, killLeftoverGroup(syscall.Getpid()), errProcessGone)
 }

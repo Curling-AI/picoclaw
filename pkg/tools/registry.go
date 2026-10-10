@@ -299,13 +299,14 @@ func cloneJSONValue(value any) any {
 	}
 }
 
-// ExpiredToolAliases maps each name the model may write for a hidden tool that
-// is currently expired to its registry name: the registry name itself and, for
-// MCP tools, the server's own tool name. Names that are plain words (no '_',
+// HiddenToolAliases maps each name the model may write for a hidden tool to its
+// registry name: the registry name itself and, for MCP tools, the server's own
+// tool name. Whatever the tool's TTL: whether it is missing depends on what the
+// turn offers, not on the shared registry. Names that are plain words (no '_',
 // '-' or '.') are left out — they collide with prose — and so is a name shared
 // by two registered tools (visible or core ones included), since it can't say
 // which one the model meant. Keys are lowercase.
-func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
+func (r *ToolRegistry) HiddenToolAliases() map[string]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	owners := make(map[string]string, len(r.tools))
@@ -332,7 +333,7 @@ func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
 		if _, skip := ambiguous[alias]; skip {
 			continue
 		}
-		if entry := r.tools[name]; !entry.IsCore && entry.TTL <= 0 {
+		if !r.tools[name].IsCore {
 			aliases[alias] = name
 		}
 	}

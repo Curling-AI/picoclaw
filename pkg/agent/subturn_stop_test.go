@@ -279,7 +279,7 @@ func TestSubagentTool_CancelledTurnDoesNotWaitForTheChild(t *testing.T) {
 	}
 }
 
-// nickgs1337 on #112: a /stop also cancels the async spawns of the stopped
+// A /stop also cancels the async spawns of the stopped
 // turn, and their result read "Spawn failed ... context canceled", like a
 // provider failure.
 func TestSpawnSubTurn_AsyncChildStoppedByAStopSaysSo(t *testing.T) {

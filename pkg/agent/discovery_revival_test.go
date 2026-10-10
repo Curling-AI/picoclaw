@@ -234,7 +234,7 @@ func (p *promotedElsewhereProvider) Chat(
 	return p.stuckWithoutToolProvider.Chat(ctx, messages, defs, model, opts)
 }
 
-// nickgs1337 on #112: the heal only offered what ReviveExpired returned (TTL
+// The heal only offered what ReviveExpired returned (TTL
 // <= 0), so a tool promoted by another session after this turn seeded was
 // never offered and the retry resent the same tools array.
 func TestAnnounceRetryOffersADiscoveredToolPromotedElsewhere(t *testing.T) {

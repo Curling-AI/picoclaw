@@ -547,14 +547,13 @@ func liftTextToolCalls(text string, tools []ToolDefinition) ([]ToolCall, string)
 	return extracted, rest
 }
 
-// liftReasoningToolCalls is liftTextToolCalls for a model's thinking, where a
-// call only counts as the last thing written (see
-// protocoltypes.LiftTrailingToolCallsFromText).
+// liftReasoningToolCalls is liftTextToolCalls for a model's thinking, under the
+// same rule: a call only counts as the last thing written.
 func liftReasoningToolCalls(thinking string, tools []ToolDefinition) []ToolCall {
 	if len(tools) == 0 {
 		return nil
 	}
-	extracted := protocoltypes.LiftTrailingToolCallsFromText(thinking)
+	extracted, _ := protocoltypes.LiftToolCallsFromText(thinking)
 	if !allOffered(extracted, tools) {
 		return nil
 	}

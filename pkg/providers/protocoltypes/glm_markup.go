@@ -72,6 +72,7 @@ type glmArg struct {
 type glmBlock struct {
 	start, end int // byte offsets of the whole block, end exclusive
 	name, body string
+	open       bool // never closed: runs to the end of the text
 }
 
 // span is a byte range of a text, end exclusive.
@@ -114,7 +115,9 @@ type glmScanner struct {
 // next <tool_call> may quote that tag. A value that never closes stays in its
 // block instead of swallowing the prose and the call that follow. An opener
 // not followed by an argument list (prose mentioning the tag) is skipped
-// alone, so the call after it is still found.
+// alone, so the call after it is still found. A block that never closes runs
+// to the end of the text and is marked open: a truncated call, never lifted,
+// whose values may still quote calls in other formats.
 func glmBlocks(text string) []glmBlock {
 	s := glmScanner{
 		opens:       newTagFinder(text, glmCallOpen),
@@ -138,7 +141,13 @@ func glmBlocks(text string) []glmBlock {
 		bodyStart := afterOpen + name[1]
 		end := s.blockEnd(bodyStart)
 		if end < 0 {
-			return blocks
+			return append(blocks, glmBlock{
+				start: start,
+				end:   len(text),
+				name:  text[afterOpen+name[2] : afterOpen+name[3]],
+				body:  text[bodyStart:],
+				open:  true,
+			})
 		}
 		blocks = append(blocks, glmBlock{
 			start: start,
@@ -185,6 +194,9 @@ func glmArgsFollow(rest string) bool {
 // is quoting (a page it summarizes, an example it gives). One ambiguous block
 // in the tail lifts nothing.
 func liftGLMToolCalls(text string, blocks []glmBlock) ([]ToolCall, []span) {
+	if blocks[len(blocks)-1].open {
+		return nil, nil
+	}
 	first, end := len(blocks), len(text)
 	for i := len(blocks) - 1; i >= 0; i-- {
 		if strings.TrimSpace(text[blocks[i].end:end]) != "" {

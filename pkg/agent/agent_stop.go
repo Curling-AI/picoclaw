@@ -90,11 +90,6 @@ func (al *AgentLoop) stopActiveTurnForSession(sessionKey string) (commands.StopR
 		return commands.StopResult{}, err
 	}
 
-	if note := ts.opts.BackgroundResult; note != nil {
-		// The rollback took the result with it. Written back after the cut
-		// (queued while the turn winds down), so the work is not lost.
-		al.recordBackgroundNote(*note)
-	}
 	result.Stopped = true
 	return result, nil
 }
