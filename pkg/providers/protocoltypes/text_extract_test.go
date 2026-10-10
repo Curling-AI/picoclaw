@@ -5,7 +5,7 @@ import (
 )
 
 func TestExtractToolCallsFromText_JSONWrapper(t *testing.T) {
-	text := `Let me check that. {"tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]} Done.`
+	text := `Let me check that. {"tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]}`
 
 	calls := ExtractToolCallsFromText(text)
 	if len(calls) != 1 {
@@ -79,19 +79,33 @@ func TestExtractToolCallsFromText_InvalidXML(t *testing.T) {
 }
 
 func TestStripToolCallsFromText_JSONWrapper(t *testing.T) {
-	text := `Let me check. {"tool_calls":[{"id":"c1","type":"function","function":{"name":"fn","arguments":"{}"}}]} Done.`
+	text := `Let me check. {"tool_calls":[{"id":"c1","type":"function","function":{"name":"fn","arguments":"{}"}}]}`
 	got := StripToolCallsFromText(text)
-	want := "Let me check.  Done."
+	want := "Let me check."
 	if got != want {
 		t.Fatalf("StripToolCallsFromText = %q, want %q", got, want)
 	}
 }
 
 func TestStripToolCallsFromText_XMLTag(t *testing.T) {
-	text := "Here you go.\n<tool_call>{\"name\":\"fn\",\"arguments\":{}}</tool_call>\nDone."
+	text := "Here you go.\n<tool_call>{\"name\":\"fn\",\"arguments\":{}}</tool_call>\n"
 	got := StripToolCallsFromText(text)
-	if got != "Here you go.\n\nDone." {
-		t.Fatalf("StripToolCallsFromText = %q, want %q", got, "Here you go.\n\nDone.")
+	if got != "Here you go." {
+		t.Fatalf("StripToolCallsFromText = %q, want %q", got, "Here you go.")
+	}
+}
+
+// A call followed by more prose is one the model quotes, not one it makes
+// (see LiftToolCallsFromText): it stays in the text.
+func TestStripToolCallsFromText_CallFollowedByProseStays(t *testing.T) {
+	for _, text := range []string{
+		`Let me check. {"tool_calls":[{"id":"c1","type":"function","function":{"name":"fn","arguments":"{}"}}]} Done.`,
+		"Here you go.\n<tool_call>{\"name\":\"fn\",\"arguments\":{}}</tool_call>\nDone.",
+		`I will do this. {"name":"spawn","arguments":{"task":"check"}} Done.`,
+	} {
+		if got := StripToolCallsFromText(text); got != text {
+			t.Errorf("StripToolCallsFromText(%q) = %q, want it unchanged", text, got)
+		}
 	}
 }
 
@@ -125,7 +139,7 @@ func TestExtractToolCallsFromText_BareJSON(t *testing.T) {
 }
 
 func TestExtractToolCallsFromText_BareJSONWithSurroundingText(t *testing.T) {
-	text := `I will spawn a subagent now. {"name":"spawn","arguments":{"task":"analyze code"}} Let me continue.`
+	text := `I will spawn a subagent now. {"name":"spawn","arguments":{"task":"analyze code"}}`
 
 	calls := ExtractToolCallsFromText(text)
 	if len(calls) != 1 {
@@ -140,9 +154,9 @@ func TestExtractToolCallsFromText_BareJSONWithSurroundingText(t *testing.T) {
 }
 
 func TestStripToolCallsFromText_BareJSON(t *testing.T) {
-	text := `I will do this. {"name":"spawn","arguments":{"task":"check"}} Done.`
+	text := `I will do this. {"name":"spawn","arguments":{"task":"check"}}`
 	got := StripToolCallsFromText(text)
-	want := "I will do this.  Done."
+	want := "I will do this."
 	if got != want {
 		t.Fatalf("StripToolCallsFromText = %q, want %q", got, want)
 	}

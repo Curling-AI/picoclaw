@@ -45,7 +45,7 @@ func discoveryExchange(t *testing.T, id string, names ...string) []providers.Mes
 	}
 }
 
-func TestMentionedExpiredToolNames(t *testing.T) {
+func TestMentionedMissingToolNames(t *testing.T) {
 	registry := tools.NewToolRegistry()
 	registry.RegisterHidden(newServerTool(statusToolName, "skip_project_status"))
 	registry.RegisterHidden(newServerTool("mcp_skip_skip_cloud_list_logs", "skip_cloud_list_logs"))
@@ -55,6 +55,10 @@ func TestMentionedExpiredToolNames(t *testing.T) {
 	registry.RegisterHidden(newServerTool("mcp_skip_skip_project_delete", "skip_project_delete"))
 	registry.RegisterHidden(newServerTool(createToolName, "skip_project_create"))
 	registry.PromoteTools([]string{createToolName}, 5)
+	// Promoted by another session after this turn seeded: live in the
+	// registry, still missing from the turn.
+	registry.PromoteTools([]string{"mcp_skip_skip_cloud_list_logs"}, 5)
+	offered := map[string]struct{}{createToolName: {}}
 
 	messages := discoveryExchange(t, "s1",
 		statusToolName, "mcp_skip_skip_cloud_list_logs", "mcp_skip_skip_cloud_list_migrations",
@@ -76,11 +80,11 @@ func TestMentionedExpiredToolNames(t *testing.T) {
 		},
 	)
 
-	got := strings.Join(mentionedExpiredToolNames(messages, registry), ",")
+	got := strings.Join(mentionedMissingToolNames(messages, registry, offered), ",")
 	want := statusToolName + ",mcp_skip_skip_cloud_list_logs,mcp_drive_files_get"
 	if got != want {
 		t.Errorf(
-			"mentioned = %s, want %s (newest first; live, undiscovered, user/tool text and older mentions ignored)",
+			"mentioned = %s, want %s (newest first; offered, undiscovered, user/tool text and older mentions ignored)",
 			got,
 			want,
 		)

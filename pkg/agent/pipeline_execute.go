@@ -172,6 +172,19 @@ toolLoop:
 			continue
 		}
 
+		if reason := brokenArgumentsReason(ts.agent.Tools, toolName, toolArgs, exec.response, ts.agent.MaxTokens); reason != "" {
+			logger.WarnCF("agent", "Tool call arrived with arguments that are not JSON; not running it",
+				map[string]any{
+					"agent_id":          ts.agent.ID,
+					"iteration":         iteration,
+					"tool":              toolName,
+					"completion_tokens": responseCompletionTokens(exec.response),
+					"max_tokens":        ts.agent.MaxTokens,
+				})
+			skipToolCall(reason)
+			continue
+		}
+
 		if al.hooks != nil {
 			toolReq, decision := al.hooks.BeforeTool(turnCtx, &ToolCallHookRequest{
 				Meta:      ts.eventMeta("runTurn", "turn.tool.before"),
@@ -519,6 +532,7 @@ toolLoop:
 
 		toolCallID := tc.ID
 		asyncToolName := toolName
+		launchedAt := time.Now()
 		asyncCallback := func(_ context.Context, result *tools.ToolResult) {
 			if !result.Silent && result.ForUser != "" {
 				outCtx, outCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -547,17 +561,17 @@ toolLoop:
 					ContentLen: len(content),
 				},
 			)
-			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer pubCancel()
-			_ = al.bus.PublishInbound(pubCtx, bus.InboundMessage{
+			al.deliverAsyncResult(bus.InboundMessage{
 				Context: bus.InboundContext{
 					Channel:  "system",
 					ChatID:   fmt.Sprintf("%s:%s", ts.channel, ts.chatID),
 					ChatType: "direct",
 					SenderID: fmt.Sprintf("async:%s", asyncToolName),
 				},
-				Content: content,
-			})
+				Content:    content,
+				SessionKey: ts.originSessionKey(),
+				LaunchedAt: launchedAt,
+			}, result.Err)
 		}
 
 		toolStart := time.Now()
@@ -580,6 +594,7 @@ toolLoop:
 			logger.InfoCF("agent", "Revived expired deferred tool called by the model",
 				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
 		}
+		ts.offerTools([]string{toolName})
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
@@ -588,6 +603,13 @@ toolLoop:
 			ts.chatID,
 			asyncCallback,
 		)
+		if tools.IsToolDiscoveryToolName(toolName) && toolResult != nil {
+			// What the search told the model it unlocked joins the turn's
+			// tools — including a tool another session had already promoted,
+			// which a before/after diff of the registry would miss — and
+			// nothing promoted elsewhere in the meantime does.
+			ts.offerTools(tools.ParseDiscoveryResult(toolResult.ContentForLLM()))
+		}
 		toolDuration := time.Since(toolStart)
 
 		if ts.hardAbortRequested() {
@@ -952,4 +974,56 @@ func (al *AgentLoop) skipToolCalls(
 		}
 	}
 	return answered
+}
+
+// brokenArgumentsReason explains, for the model, a call whose arguments the
+// provider could not decode (they arrive as a lone "raw" string). Running it
+// only earns a schema error ("missing required property") that does not say
+// what went wrong, and the model writes the same oversized call again. The
+// usual cause is the output cap: a whole file in one write_file plus long
+// reasoning ran past max_tokens and the JSON was cut (a subagent spent 258 s on
+// one such call in prod, 2026-10-09).
+func brokenArgumentsReason(
+	registry *tools.ToolRegistry,
+	tool string,
+	args map[string]any,
+	resp *providers.LLMResponse,
+	maxTokens int,
+) string {
+	if len(args) != 1 {
+		return ""
+	}
+	if _, ok := args["raw"].(string); !ok || toolDeclaresRawArgument(registry, tool) {
+		return ""
+	}
+	if responseHitOutputCap(resp, maxTokens) {
+		return fmt.Sprintf("The arguments of this %s call were cut off at your output limit (%d tokens), so it "+
+			"was not run. Split large content across several calls (write the first part, then append or patch "+
+			"the rest) and keep your reasoning short before calls that carry a lot of content.", tool, maxTokens)
+	}
+	return fmt.Sprintf("The arguments of this %s call were not valid JSON, so it was not run. Call it again "+
+		"with complete JSON arguments.", tool)
+}
+
+func responseHitOutputCap(resp *providers.LLMResponse, maxTokens int) bool {
+	if resp == nil {
+		return false
+	}
+	switch resp.FinishReason {
+	case "length", "truncated":
+		return true
+	}
+	return maxTokens > 0 && responseCompletionTokens(resp) >= maxTokens
+}
+
+// toolDeclaresRawArgument reports whether the tool really takes an argument
+// named "raw", in which case {"raw": "..."} is a legitimate call.
+func toolDeclaresRawArgument(registry *tools.ToolRegistry, name string) bool {
+	tool, ok := registry.GetRegistered(name)
+	if !ok {
+		return false
+	}
+	props, _ := tool.Parameters()["properties"].(map[string]any)
+	_, declared := props["raw"]
+	return declared
 }

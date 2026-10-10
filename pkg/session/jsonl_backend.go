@@ -130,10 +130,14 @@ func (b *JSONLBackend) AddMessage(sessionKey, role, content string) {
 }
 
 func (b *JSONLBackend) AddFullMessage(sessionKey string, msg providers.Message) {
-	sessionKey = b.resolveSessionKey(sessionKey)
-	if err := b.store.AddFullMessage(context.Background(), sessionKey, msg); err != nil {
+	if err := b.AppendMessage(sessionKey, msg); err != nil {
 		log.Printf("session: add full message: %v", err)
 	}
+}
+
+// AppendMessage is AddFullMessage returning the store's error (CheckedAppender).
+func (b *JSONLBackend) AppendMessage(sessionKey string, msg providers.Message) error {
+	return b.store.AddFullMessage(context.Background(), b.resolveSessionKey(sessionKey), msg)
 }
 
 func (b *JSONLBackend) GetHistory(key string) []providers.Message {

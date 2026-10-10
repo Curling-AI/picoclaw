@@ -174,7 +174,12 @@ When the agent loop (`Run()`) starts, it reads inbound messages from a shared me
 
 1. **No active turn for the message's session** — the message is dispatched to a **worker goroutine** that processes the full turn (LLM calls, tool execution, steering drain)
 2. **An active turn already exists for the same session** — the message is enqueued directly into that session's **steering queue** via `enqueueSteeringMessage`. No background drain goroutine is needed
-3. **Non-routable message** (e.g. `system`) — processed synchronously in the main loop
+3. **System message** (the result of async work, such as a `spawn`) — routed to the conversation that launched the work (`pkg/agent/background_result.go`), never through the steering queue:
+   - the conversation is in a turn: the result is **parked** and handled again when that turn ends, as if it had arrived then; after a `/stop` it is written into the conversation as a note instead
+   - the conversation is idle and its chat takes late replies (Telegram, WhatsApp, Discord...): it gets a turn of that conversation, like any message
+   - the conversation is idle and is a web run (channel `grpc`, whose stream ended with the run): the result is written into the conversation for its next turn, with no turn of its own
+   - the conversation no longer exists (deleted, or cleared after the work was launched): the result is dropped
+   - the message names no conversation: processed synchronously in the main loop, in the main session
 
 This design enables **parallel processing of messages from different sessions** while keeping same-session messages strictly sequential. Key implications:
 
@@ -182,7 +187,7 @@ This design enables **parallel processing of messages from different sessions** 
 - Messages from the same session are **serialized** — subsequent messages go to the steering queue
 - Users don't need to do anything special — their messages are automatically captured as steering when the agent is busy for their session
 - Audio messages are transcribed within the worker that processes the turn, so the agent receives text
-- `system` inbound messages are processed immediately and do not trigger steering
+- `system` inbound messages never trigger steering: a result for a busy conversation waits parked for its turn to end
 
 ## Steering with media
 

@@ -134,6 +134,10 @@ type processOptions struct {
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
 	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
 	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
+	// BackgroundResult is the async result this turn was opened for. An abort
+	// rolls the turn back, result included; runAgentLoop writes it back as a
+	// note.
+	BackgroundResult *bus.InboundMessage
 }
 
 type continuationTarget struct {
@@ -194,10 +198,15 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				return nil
 			}
 
+			if al.routeBackgroundResult(msg) {
+				continue
+			}
+
 			// Resolve the session key for this message
 			sessionKey, agentID, ok := al.resolveSteeringTarget(msg)
 			if !ok {
-				// Non-routable message (e.g., system) — process immediately.
+				// Non-routable message (e.g., a system message for the main
+				// session) — process immediately.
 				// Note: system messages are processed in the main goroutine,
 				// so they block the receive loop but guarantee session serialization.
 				al.processMessageSync(ctx, msg)
@@ -215,6 +224,13 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				phase:  TurnPhaseSetup,
 			}
 			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+				isSystem := msg.Channel == "system"
+				if isSystem {
+					// Claimed between routing and here: the result waits for
+					// that turn to end instead of riding its steering queue.
+					al.parkBackgroundResult(sessionKey, msg)
+					continue
+				}
 				if al.tryHandleStopCommand(ctx, msg, sessionKey) {
 					continue
 				}
@@ -298,7 +314,16 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				if al.takePendingStop(sessionKey) {
+					// Same rule as a stop on a live turn: what waited for this
+					// session becomes notes, not turns.
+					al.parkedResultsToNotes(sessionKey)
 					al.releaseSessionTurnState(sessionKey, nil)
+					if m.Channel == "system" {
+						// The user stopped this conversation: the result is
+						// written for its next turn instead of opening one.
+						al.recordBackgroundNote(m)
+						return
+					}
 					target := &continuationTarget{
 						SessionKey: sessionKey,
 						Channel:    m.Channel,
@@ -620,6 +645,12 @@ func (al *AgentLoop) runAgentLoop(
 		return "", err
 	}
 	if result.status == TurnEndStatusAborted {
+		if note := opts.BackgroundResult; note != nil {
+			// The abort (a /stop, live or pending) rolled the turn back with the
+			// result that opened it. Written now that the turn is over, after
+			// the cut, so the work is not lost.
+			al.recordBackgroundNote(*note)
+		}
 		return "", nil
 	}
 

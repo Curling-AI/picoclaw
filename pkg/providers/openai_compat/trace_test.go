@@ -14,7 +14,7 @@ func TestParseStreamResponse_CarriesUpstreamIDAndFinishReason(t *testing.T) {
 		`{"id":"chatcmpl-abc","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -33,6 +33,7 @@ func TestParseStreamResponse_MissingFinishReasonIsFlagged(t *testing.T) {
 	resp, err := parseStreamResponse(
 		context.Background(),
 		strings.NewReader(sse(`{"id":"chatcmpl-x","choices":[{"delta":{"content":"oi"}}]}`)),
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -110,7 +111,7 @@ func TestParseStreamResponse_CarriesResolvedProvider(t *testing.T) {
 		`{"id":"gen_1","choices":[{"delta":{"content":"oi"},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestParseStreamResponse_EmptyStreamStillNamesTheProvider(t *testing.T) {
 			`{"resolvedProvider":"baseten"}}}},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}

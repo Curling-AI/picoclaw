@@ -299,13 +299,14 @@ func cloneJSONValue(value any) any {
 	}
 }
 
-// ExpiredToolAliases maps each name the model may write for a hidden tool that
-// is currently expired to its registry name: the registry name itself and, for
-// MCP tools, the server's own tool name. Names that are plain words (no '_',
+// HiddenToolAliases maps each name the model may write for a hidden tool to its
+// registry name: the registry name itself and, for MCP tools, the server's own
+// tool name. Whatever the tool's TTL: whether it is missing depends on what the
+// turn offers, not on the shared registry. Names that are plain words (no '_',
 // '-' or '.') are left out — they collide with prose — and so is a name shared
 // by two registered tools (visible or core ones included), since it can't say
 // which one the model meant. Keys are lowercase.
-func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
+func (r *ToolRegistry) HiddenToolAliases() map[string]string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	owners := make(map[string]string, len(r.tools))
@@ -332,7 +333,7 @@ func (r *ToolRegistry) ExpiredToolAliases() map[string]string {
 		if _, skip := ambiguous[alias]; skip {
 			continue
 		}
-		if entry := r.tools[name]; !entry.IsCore && entry.TTL <= 0 {
+		if !r.tools[name].IsCore {
 			aliases[alias] = name
 		}
 	}
@@ -546,6 +547,60 @@ func (r *ToolRegistry) GetDefinitions() []map[string]any {
 // ToProviderDefs converts tool definitions to provider-compatible format.
 // This is the format expected by LLM provider APIs.
 func (r *ToolRegistry) ToProviderDefs() []providers.ToolDefinition {
+	return r.providerDefs(func(_ string, entry *ToolEntry) bool {
+		return entry.IsCore || entry.TTL > 0
+	})
+}
+
+// VisibleHiddenNames returns, sorted, the hidden tools promoted right now.
+func (r *ToolRegistry) VisibleHiddenNames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for _, name := range r.sortedToolNames() {
+		if entry := r.tools[name]; !entry.IsCore && entry.TTL > 0 {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// HiddenNames returns, in the given order, the names that are registered
+// hidden (non-core) tools, whatever their TTL.
+func (r *ToolRegistry) HiddenNames(names []string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var hidden []string
+	for _, name := range names {
+		if entry, exists := r.tools[name]; exists && !entry.IsCore {
+			hidden = append(hidden, name)
+		}
+	}
+	return hidden
+}
+
+// ToProviderDefsFor is ToProviderDefs for one turn: the core tools plus exactly
+// the hidden tools in offered, whatever their TTL is at this moment.
+//
+// The registry's TTL is shared by every session of the agent and ticks on each
+// of their iterations, so the visible set moves under a turn that did nothing:
+// a tool found by another conversation shows up, one this turn still holds
+// expires. Each move rewrites the tools array, which sits ahead of the
+// messages, and costs the whole prompt cache (36 of the 37 uncached calls of a
+// 100-iteration turn in prod, 2026-10-09). Names that are not registered hidden
+// tools are ignored. Calling an offered tool whose TTL ran out still works: the
+// executor revives the tool a call names.
+func (r *ToolRegistry) ToProviderDefsFor(offered map[string]struct{}) []providers.ToolDefinition {
+	return r.providerDefs(func(name string, entry *ToolEntry) bool {
+		if entry.IsCore {
+			return true
+		}
+		_, ok := offered[name]
+		return ok
+	})
+}
+
+func (r *ToolRegistry) providerDefs(include func(name string, entry *ToolEntry) bool) []providers.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -554,7 +609,7 @@ func (r *ToolRegistry) ToProviderDefs() []providers.ToolDefinition {
 	for _, name := range sorted {
 		entry := r.tools[name]
 
-		if !entry.IsCore && entry.TTL <= 0 {
+		if !include(name, entry) {
 			continue
 		}
 

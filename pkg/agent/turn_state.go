@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"strings"
 	"sync"
@@ -125,10 +126,10 @@ type turnExecution struct {
 	// models). Capped so a persistently silent model still ends the turn.
 	emptyResponseRetries int
 
-	// truncatedToolCallRetries counts same-turn retries after the model
-	// answered with the tail of a pseudo-XML tool call instead of emitting it
-	// structurally. Capped like emptyResponseRetries so a model stuck in that
-	// shape still ends the turn.
+	// truncatedToolCallRetries counts retries in a row after the model
+	// answered with the tail of a tool call written as markup instead of
+	// emitting it structurally. Capped like emptyResponseRetries so a model
+	// stuck in that shape still ends the turn; reset by the next real call.
 	truncatedToolCallRetries int
 
 	// undeliveredAnnouncementRetries counts same-turn retries after the model
@@ -257,6 +258,14 @@ func newTurnExecution(
 
 type turnState struct {
 	mu sync.RWMutex
+
+	// offeredTools are the hidden tools this turn sends to the model: what the
+	// registry showed on the turn's first call, plus what the turn itself
+	// discovers, calls or heals. The set only grows, so neither another
+	// session's tool_search nor the agent-wide TTL tick rewrites the tools
+	// array under a running turn (each rewrite costs the whole prompt cache).
+	offeredTools  map[string]struct{}
+	offeredSeeded bool
 
 	agent   *AgentInstance
 	opts    processOptions
@@ -401,6 +410,7 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 	// When a concurrent turn of the same session overwrote this one's entry, the
 	// release above is a no-op; the last turn to end still flushes.
 	al.flushMirroredDeliveries(ts.sessionKey)
+	al.releaseParkedResults(ts.sessionKey)
 }
 
 // releaseSessionTurnState also writes the deliveries that were mirrored into
@@ -414,6 +424,7 @@ func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnSt
 	}
 	al.activeTurnStates.Delete(sessionKey)
 	al.flushMirroredDeliveries(sessionKey)
+	al.releaseParkedResults(sessionKey)
 }
 
 func (al *AgentLoop) getActiveTurnState(sessionKey string) *turnState {
@@ -984,6 +995,17 @@ func (ts *turnState) Finished() chan struct{} {
 	return ts.finishedChan
 }
 
+// originSessionKey is the session of the root turn. A sub-turn runs in a
+// throwaway session ("subturn-N"); what it launches belongs to the conversation
+// that started the chain.
+func (ts *turnState) originSessionKey() string {
+	root := ts
+	for root.parentTurnState != nil {
+		root = root.parentTurnState
+	}
+	return root.sessionKey
+}
+
 // IsParentEnded checks if the parent turn has ended
 func (ts *turnState) IsParentEnded() bool {
 	if ts.parentTurnState == nil {
@@ -1065,4 +1087,43 @@ func turnStateFromContext(ctx context.Context) *turnState {
 // TurnStateFromContext retrieves turnState from context (exported for tools)
 func TurnStateFromContext(ctx context.Context) *turnState {
 	return turnStateFromContext(ctx)
+}
+
+// seedOfferedTools takes the registry's visible hidden tools as this turn's
+// starting set. Only the first call counts.
+func (ts *turnState) seedOfferedTools(registry *tools.ToolRegistry) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.offeredSeeded {
+		return
+	}
+	ts.offeredSeeded = true
+	if ts.offeredTools == nil {
+		ts.offeredTools = make(map[string]struct{})
+	}
+	for _, name := range registry.VisibleHiddenNames() {
+		ts.offeredTools[name] = struct{}{}
+	}
+}
+
+// offerTools adds names to the tools this turn sends to the model.
+func (ts *turnState) offerTools(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.offeredTools == nil {
+		ts.offeredTools = make(map[string]struct{}, len(names))
+	}
+	for _, name := range names {
+		ts.offeredTools[name] = struct{}{}
+	}
+}
+
+// offeredToolSet returns a copy of the tools offered so far.
+func (ts *turnState) offeredToolSet() map[string]struct{} {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return maps.Clone(ts.offeredTools)
 }

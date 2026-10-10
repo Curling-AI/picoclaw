@@ -102,17 +102,26 @@ func promptCacheScopeForSession(sessionKey string) string {
 // glitch; more would just stall visibly silent turns.
 const maxEmptyResponseRetries = 1
 
-// maxTruncatedToolCallRetries caps same-turn retries after the model answered
+// largeToolCount is where a turn's tools array is worth a warning: several
+// OpenAI-compatible endpoints refuse more than 128 tools.
+const largeToolCount = 100
+
+// maxTruncatedToolCallRetries caps retries IN A ROW after the model answered
 // with the tail of a tool call it failed to emit structurally. Same shape and
 // same reasoning as maxEmptyResponseRetries: one retry clears the glitch, more
-// would burn the tool budget re-rolling a model that cannot get there.
+// would burn the tool budget re-rolling a model that cannot get there. The
+// count starts over once the model emits a real call again: on long GLM turns
+// the glitch comes back every few dozen iterations, and a turn-wide budget of
+// one made the second occurrence end a 48-iteration turn with the fallback
+// message (prod, 2026-10-09).
 const maxTruncatedToolCallRetries = 1
 
 // truncatedToolCallNudge tells the model what went wrong on the wire. Kept
 // concrete (name the syntax it just used) because a vague "try again" reliably
 // produces the same broken emission.
 const truncatedToolCallNudge = "[System] Your last reply reached us as the tail of a tool call written out as text " +
-	"(`<function=...><parameter=...>` markup), not as a tool call — so nothing ran and the user saw raw markup. " +
+	"(`<function=...><parameter=...>` or `<arg_key>...<arg_value>...` markup), not as a tool call — so nothing ran " +
+	"and the user saw raw markup. " +
 	"Re-issue that call using the tool-calling API. Do not describe the call, do not write the markup out, and do " +
 	"not paste the arguments into your reply."
 
@@ -171,7 +180,9 @@ func (p *Pipeline) CallLLM(
 	// reasoning-only/empty completions, permanently killing the conversation.
 	// Verified via A/B replay: with the referenced defs absent, glm-5.2
 	// returned empty 6/6; with them present, it acted 48/48.
+	ts.seedOfferedTools(ts.agent.Tools)
 	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
+		ts.offerTools(referenced)
 		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools referenced by session history",
 				map[string]any{
@@ -184,20 +195,30 @@ func (p *Pipeline) CallLLM(
 	// Same heal (seucaranguejo fork) for tools the model named but hasn't called
 	// yet; capped like a discovery page so a long reasoning can't unhide the
 	// whole library.
-	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); len(mentioned) > 0 {
-		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
-		if len(revived) > 0 {
-			logger.InfoCF("agent", "Re-promoted deferred tools named by the model",
-				map[string]any{
-					"agent_id":  ts.agent.ID,
-					"iteration": iteration,
-					"tools":     revived,
-				})
+	// The turn's own set decides, as in reviveDiscoveredTools.
+	if mentioned := mentionedMissingToolNames(exec.messages, ts.agent.Tools, ts.offeredToolSet()); len(mentioned) > 0 {
+		if len(mentioned) > maxRevivedDiscoveredTools {
+			mentioned = mentioned[:maxRevivedDiscoveredTools]
 		}
+		ts.agent.Tools.EnsureVisible(mentioned, discoveryPromoteTTL(p.Cfg))
+		ts.offerTools(mentioned)
+		logger.InfoCF("agent", "Offered deferred tools named by the model",
+			map[string]any{
+				"agent_id":  ts.agent.ID,
+				"iteration": iteration,
+				"tools":     mentioned,
+			})
 	}
 
-	exec.providerToolDefs = ts.agent.Tools.ToProviderDefs()
+	exec.providerToolDefs = ts.agent.Tools.ToProviderDefsFor(ts.offeredToolSet())
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
+	// The turn's set only grows (each search adds up to a page of tools), and
+	// OpenAI-compatible endpoints reject requests with more than 128 tools.
+	if n := len(exec.providerToolDefs); n > largeToolCount {
+		logger.WarnCF("agent", "Turn is offering a large number of tools", map[string]any{
+			"agent_id": ts.agent.ID, "iteration": iteration, "tools": n,
+		})
+	}
 
 	// Native web search support
 	webSearchEnabled := al.cfg.Tools.IsToolEnabled("web") && turnProfileToolAllowed(ts.profile, "web_search")
@@ -1116,6 +1137,10 @@ func (p *Pipeline) CallLLM(
 	for _, tc := range exec.normalizedToolCalls {
 		toolNames = append(toolNames, tc.Name)
 	}
+	if exec.truncatedToolCallRetries > 0 {
+		exec.truncatedToolCallRetries = 0
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, truncatedToolCallNudge)
+	}
 	logger.InfoCF("agent", "LLM requested tool calls",
 		map[string]any{
 			"agent_id":  ts.agent.ID,
@@ -1414,4 +1439,18 @@ func estimateTokensFromRunes(runes int) int {
 		return t
 	}
 	return 1
+}
+
+// withoutTransientMessage drops a one-shot correction once it has done its
+// job. Transient messages ride along on every remaining call of the turn, and
+// a "re-issue that call" note left at the end of each later request reads as
+// an instruction about a call that already went through.
+func withoutTransientMessage(msgs []providers.Message, content string) []providers.Message {
+	kept := msgs[:0:0]
+	for _, m := range msgs {
+		if m.Content != content {
+			kept = append(kept, m)
+		}
+	}
+	return kept
 }

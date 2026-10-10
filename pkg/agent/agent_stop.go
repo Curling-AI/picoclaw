@@ -58,6 +58,7 @@ func (al *AgentLoop) stopActiveTurnForSession(sessionKey string) (commands.StopR
 	result := commands.StopResult{}
 	cleared := al.clearSteeringMessagesForScope(sessionKey)
 	al.clearPendingSkills(sessionKey)
+	al.parkedResultsToNotes(sessionKey)
 
 	ts := al.getActiveTurnState(sessionKey)
 	if ts == nil {
@@ -66,7 +67,11 @@ func (al *AgentLoop) stopActiveTurnForSession(sessionKey string) (commands.StopR
 	}
 
 	snap := ts.snapshot()
-	result.TaskName = snap.UserMessage
+	if ts.opts.BackgroundResult == nil {
+		// A result's turn would quote the internal envelope; the generic reply
+		// says enough.
+		result.TaskName = snap.UserMessage
+	}
 
 	if strings.HasPrefix(snap.TurnID, pendingTurnPrefix) {
 		// A pending placeholder means this session is either idle (our own

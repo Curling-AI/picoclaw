@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"hash/fnv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -55,6 +57,17 @@ type deliveryMirror struct {
 	// Fica em memória: um pod que reinicia no meio do turno perde a cópia (a
 	// entrega em si já aconteceu).
 	pending map[string][]providers.Message
+	// parked segura resultados de trabalho em background (spawn) que chegaram
+	// com a conversa num turno; voltam ao bus quando o turno termina. Ver
+	// background_result.go.
+	parked map[string][]bus.InboundMessage
+	// quiet marca as sessões em que um /stop pegou um turno vivo: o que está
+	// estacionado, e o que estacionar até o turno acabar, vira nota quando ele
+	// acaba, em vez de voltar ao bus.
+	quiet map[string]bool
+	// cleared guarda quando cada sessão passou por /clear: o resultado de um
+	// trabalho lançado antes disso é da conversa apagada, não da nova.
+	cleared map[string]time.Time
 	// turns conta os turnos vivos por sessão. O activeTurnStates guarda um só
 	// por chave, e no webhook dois turnos da mesma sessão correm juntos (uma
 	// goroutine por requisição, sem reserva): o segundo sobrescreve o primeiro
@@ -140,26 +153,9 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 		return
 	}
 
-	msg := providers.Message{Role: "assistant", Content: text}
-	// registerActiveTurn segura a mesma faixa: ou a entrega vê o turno, ou é
-	// gravada antes de ele começar.
-	stripe := al.mirror.stripe(target)
-	stripe.Lock()
-	defer stripe.Unlock()
-	al.mirror.mu.Lock()
-	deferred := al.mirrorBusyLocked(target)
-	var batch []providers.Message
-	if deferred {
-		al.queueMirroredLocked(target, msg)
-	} else {
-		// Uma entrega que ainda espera o flush (o turno acabou de liberar a
-		// sessão) vai antes desta, para a conversa manter a ordem de envio.
-		batch = append(al.mirror.pending[target], msg)
-		delete(al.mirror.pending, target)
-	}
-	al.mirror.mu.Unlock()
-	if !deferred {
-		al.writeMirrored(agent, target, batch)
+	deferred, err := al.deliverToConversation(agent, target, providers.Message{Role: "assistant", Content: text})
+	if err != nil {
+		return // writeMirrored logged it
 	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
@@ -199,7 +195,85 @@ func (al *AgentLoop) flushMirroredDeliveries(sessionKey string) {
 	}
 	delete(al.mirror.pending, sessionKey)
 	al.mirror.mu.Unlock()
-	al.writeMirrored(agent, sessionKey, pending)
+	_ = al.writeMirrored(agent, sessionKey, pending) // logged there
+}
+
+// deliverToConversation writes msg into the session's history now, after
+// whatever was still waiting for a flush, or queues it when a turn holds the
+// session (deferred). err is a write that failed now (already logged). It is
+// the one place that takes the stripe and then mu: registerActiveTurn holds the
+// same stripe, so a write either sees the turn or lands before it starts.
+func (al *AgentLoop) deliverToConversation(
+	agent *AgentInstance,
+	sessionKey string,
+	msg providers.Message,
+) (deferred bool, err error) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	return al.deliverToConversationLocked(agent, sessionKey, msg)
+}
+
+// deliverToConversationLocked is deliverToConversation for a caller that
+// holds the session's stripe.
+func (al *AgentLoop) deliverToConversationLocked(
+	agent *AgentInstance,
+	sessionKey string,
+	msg providers.Message,
+) (deferred bool, err error) {
+	al.mirror.mu.Lock()
+	if al.mirrorBusyLocked(sessionKey) {
+		al.queueMirroredLocked(sessionKey, msg)
+		al.mirror.mu.Unlock()
+		return true, nil
+	}
+	// Uma entrega que ainda espera o flush (o turno acabou de liberar a sessão)
+	// vai antes desta, para a conversa manter a ordem de envio.
+	batch := append(al.mirror.pending[sessionKey], msg)
+	delete(al.mirror.pending, sessionKey)
+	al.mirror.mu.Unlock()
+	return false, al.writeMirrored(agent, sessionKey, batch)
+}
+
+// dropMirroredDeliveries discards what waits for the session's turn to end:
+// mirrored deliveries and parked background results. A task launched before
+// /clear ends with no trace in the cleared conversation, on purpose; the clear
+// is stamped so its results that arrive later are dropped too (clearedSince).
+func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	al.mirror.mu.Lock()
+	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
+	delete(al.mirror.pending, sessionKey)
+	delete(al.mirror.parked, sessionKey)
+	now := time.Now()
+	if al.mirror.cleared == nil {
+		al.mirror.cleared = make(map[string]time.Time)
+	}
+	for key, at := range al.mirror.cleared {
+		if now.Sub(at) > clearStampTTL {
+			delete(al.mirror.cleared, key)
+		}
+	}
+	al.mirror.cleared[sessionKey] = now
+	al.mirror.mu.Unlock()
+	if dropped > 0 {
+		logger.InfoCF("agent", "Dropped deliveries waiting for a turn of a cleared session",
+			map[string]any{"session_key": sessionKey, "dropped": dropped})
+	}
+}
+
+// clearStampTTL is how long a /clear is remembered, far beyond any sub-turn's
+// time limit: work launched before the clear has ended by then.
+const clearStampTTL = 24 * time.Hour
+
+// clearedSince reports whether the session was cleared after t.
+func (al *AgentLoop) clearedSince(sessionKey string, t time.Time) bool {
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	cleared, ok := al.mirror.cleared[sessionKey]
+	return ok && cleared.After(t)
 }
 
 // maxPendingMirrors limita a fila de uma sessão presa num turno longo: uma
@@ -222,10 +296,16 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 }
 
 // writeMirrored grava como um turno grava: o store e o context manager (o
-// seahorse monta o prompt da própria base, não do store).
-func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) {
+// seahorse monta o prompt da própria base, não do store). Devolve, já logado,
+// o erro de uma escrita que não chegou ao store: o que está aqui pode ser a
+// única cópia (resultado de subagente numa conversa web, nota de um /stop).
+func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
+	var lost []error
 	for _, msg := range msgs {
-		agent.Sessions.AddFullMessage(sessionKey, msg)
+		if err := appendToSession(agent.Sessions, sessionKey, msg); err != nil {
+			lost = append(lost, err)
+			continue
+		}
 		if al.contextManager == nil {
 			continue
 		}
@@ -237,15 +317,37 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 				map[string]any{"session_key": sessionKey, "error": err.Error()})
 		}
 	}
+	if len(lost) > 0 {
+		logger.ErrorCF("agent", "Could not write into the conversation", map[string]any{
+			"session_key": sessionKey,
+			"lost":        len(lost),
+			"of":          len(msgs),
+			"error":       lost[0].Error(),
+		})
+	}
 	// O backend JSON (fallback quando o JSONL não sobe) só persiste no Save; no
 	// JSONL cada mensagem já foi gravada e o Save só compacta, como no fim de
-	// todo turno.
+	// todo turno: lá uma falha do Save não perde o que o append confirmou.
 	if err := agent.Sessions.Save(sessionKey); err != nil {
 		logger.WarnCF("agent", "Failed to save mirrored delivery", map[string]any{
 			"session_key": sessionKey,
 			"error":       err.Error(),
 		})
+		if _, checked := agent.Sessions.(session.CheckedAppender); !checked {
+			lost = append(lost, err)
+		}
 	}
+	return errors.Join(lost...)
+}
+
+// appendToSession appends msg and reports a failed write when the store can
+// tell (session.CheckedAppender); other stores only report it on Save.
+func appendToSession(store session.SessionStore, sessionKey string, msg providers.Message) error {
+	if checked, ok := store.(session.CheckedAppender); ok {
+		return checked.AppendMessage(sessionKey, msg)
+	}
+	store.AddFullMessage(sessionKey, msg)
+	return nil
 }
 
 // synthesizedResponse reconhece os textos que o coordenador põe no lugar de uma

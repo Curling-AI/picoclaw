@@ -17,7 +17,14 @@ import (
 
 func (al *AgentLoop) buildContinuationTarget(msg bus.InboundMessage) (*continuationTarget, error) {
 	if msg.Channel == "system" {
-		return nil, nil
+		// A result run as a turn of its conversation leaves that conversation's
+		// queue to drain like any other turn; main-session results keep none.
+		sessionKey, _, ok := al.backgroundResultTarget(msg)
+		if !ok {
+			return nil, nil
+		}
+		channel, chatID := parseSystemOrigin(msg.ChatID)
+		return &continuationTarget{SessionKey: sessionKey, Channel: channel, ChatID: chatID}, nil
 	}
 
 	route, _, err := al.resolveMessageRoute(msg)
@@ -273,21 +280,15 @@ func (al *AgentLoop) processSystemMessage(
 		)
 	}
 
+	originChannel, originChatID := parseSystemOrigin(msg.ChatID)
+	sessionKey, agent, namesSession := al.backgroundResultTarget(msg)
+
 	logger.InfoCF("agent", "Processing system message",
 		map[string]any{
-			"sender_id": msg.SenderID,
-			"chat_id":   msg.ChatID,
+			"sender_id":   msg.SenderID,
+			"chat_id":     msg.ChatID,
+			"session_key": sessionKey,
 		})
-
-	// Parse origin channel from chat_id (format: "channel:chat_id")
-	var originChannel, originChatID string
-	if idx := strings.Index(msg.ChatID, ":"); idx > 0 {
-		originChannel = msg.ChatID[:idx]
-		originChatID = msg.ChatID[idx+1:]
-	} else {
-		originChannel = "cli"
-		originChatID = msg.ChatID
-	}
 
 	// Extract subagent result from message content
 	// Format: "Task 'label' completed.\n\nResult:\n<actual content>"
@@ -307,17 +308,35 @@ func (al *AgentLoop) processSystemMessage(
 		return "", nil
 	}
 
-	// Use default agent for system messages
-	agent := al.GetRegistry().GetDefaultAgent()
+	// The result belongs to the conversation whose turn launched the task (see
+	// background_result.go). One whose conversation is gone (cleared or deleted
+	// while the work ran) goes with it, as /clear drops the results waiting for
+	// a turn: a turn of main would act on the old task where nobody sees it.
+	// Main only takes results that name no conversation.
+	if !namesSession {
+		if isExplicitSessionKey(msg.SessionKey) {
+			logger.InfoCF("agent", "Dropped background result of a conversation that no longer exists",
+				map[string]any{
+					"sender_id":   msg.SenderID,
+					"session_key": msg.SessionKey,
+					"content_len": len(msg.Content),
+				})
+			return "", nil
+		}
+		if agent = al.GetRegistry().GetDefaultAgent(); agent != nil {
+			sessionKey = session.BuildMainSessionKey(agent.ID)
+		}
+	}
 	if agent == nil {
 		return "", fmt.Errorf("no default agent for system message")
 	}
 
-	// Use the origin session for context
-	sessionKey := session.BuildMainSessionKey(agent.ID)
 	dispatch := DispatchRequest{
 		SessionKey:  sessionKey,
-		UserMessage: fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
+		UserMessage: systemMessageContent(msg),
+	}
+	if metaStore, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok && namesSession {
+		dispatch.SessionScope = metaStore.GetSessionScope(sessionKey)
 	}
 	if originChannel != "" || originChatID != "" {
 		dispatch.InboundContext = &bus.InboundContext{
@@ -328,10 +347,29 @@ func (al *AgentLoop) processSystemMessage(
 		}
 	}
 
-	return al.runAgentLoop(ctx, agent, processOptions{
+	opts := processOptions{
 		Dispatch:        dispatch,
 		DefaultResponse: "Background task completed.",
 		EnableSummary:   false,
 		SendResponse:    true,
-	})
+	}
+	if namesSession {
+		opts.BackgroundResult = &msg
+	}
+	return al.runAgentLoop(ctx, agent, opts)
+}
+
+// parseSystemOrigin splits a system message's chat id ("channel:chat_id") into
+// the chat the async work was launched from.
+func parseSystemOrigin(chatID string) (string, string) {
+	if idx := strings.Index(chatID, ":"); idx > 0 {
+		return chatID[:idx], chatID[idx+1:]
+	}
+	return "cli", chatID
+}
+
+// systemMessageContent marks the text as coming from async work, not from the
+// user, whether it opens a turn or is written for the next one.
+func systemMessageContent(msg bus.InboundMessage) string {
+	return fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content)
 }

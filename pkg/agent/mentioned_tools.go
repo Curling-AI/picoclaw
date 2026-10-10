@@ -16,9 +16,9 @@ const mentionScanAssistantMessages = 3
 
 var identifierToken = regexp.MustCompile(`[A-Za-z0-9_.-]+`)
 
-// mentionedExpiredToolNames returns, most recent first, the tools a tool_search
-// listed earlier whose promotion expired and that the latest assistant
-// messages name in their text or reasoning. (seucaranguejo fork)
+// mentionedMissingToolNames returns, most recent first, the tools a tool_search
+// listed earlier that the turn does not offer (offered) and that the latest
+// assistant messages name in their text or reasoning. (seucaranguejo fork)
 //
 // A discovery promotion expires after a few idle rounds, so a tool the model
 // searched for and planned around, but hasn't called yet, can leave the tools
@@ -30,8 +30,12 @@ var identifierToken = regexp.MustCompile(`[A-Za-z0-9_.-]+`)
 //
 // A mention can also be a decision not to call the tool ("I won't use X"); that
 // costs one extra definition in the request, never a call.
-func mentionedExpiredToolNames(messages []providers.Message, registry *tools.ToolRegistry) []string {
-	aliases := registry.ExpiredToolAliases()
+func mentionedMissingToolNames(
+	messages []providers.Message,
+	registry *tools.ToolRegistry,
+	offered map[string]struct{},
+) []string {
+	aliases := registry.HiddenToolAliases()
 	if len(aliases) == 0 {
 		return nil
 	}
@@ -59,6 +63,9 @@ func mentionedExpiredToolNames(messages []providers.Message, registry *tools.Too
 					continue
 				}
 				if _, listed := discovered[name]; !listed {
+					continue
+				}
+				if _, has := offered[name]; has {
 					continue
 				}
 				if _, dup := seen[name]; dup {
