@@ -590,3 +590,83 @@ func TestExpiredToolCallsAreGuarded(t *testing.T) {
 		t.Fatalf("project created %d times, want %d", got, maxUnchangedRuns)
 	}
 }
+
+// resultReplacingHook swaps every tool result for a new one, as a hook that
+// rewrites failures would.
+type resultReplacingHook struct{}
+
+func (resultReplacingHook) BeforeTool(
+	_ context.Context,
+	call *ToolCallHookRequest,
+) (*ToolCallHookRequest, HookDecision, error) {
+	return call, HookDecision{Action: HookActionContinue}, nil
+}
+
+func (resultReplacingHook) AfterTool(
+	_ context.Context,
+	result *ToolResultHookResponse,
+) (*ToolResultHookResponse, HookDecision, error) {
+	next := result.Clone()
+	next.Result = tools.ErrorResult("the service did not answer")
+	return next, HookDecision{Action: HookActionModify}, nil
+}
+
+// A hook that replaces the result must not hide that the call may have run.
+func TestUnknownOutcomeSurvivesAResultReplacingHook(t *testing.T) {
+	create := &mcpTestTool{countingTool: countingTool{name: createToolName}, lost: true}
+	provider := &stepProvider{steps: oneCallPerStep(times(createCall, 6)...)}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al.registry.GetDefaultAgent().Tools.Register(create)
+	if err := al.MountHook(NamedHook("replace-results", resultReplacingHook{})); err != nil {
+		t.Fatalf("MountHook: %v", err)
+	}
+
+	if _, err := al.ProcessDirect(context.Background(), "cria um projeto", "repeat-hook"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if got := create.calls.Load(); got != maxUnchangedRuns {
+		t.Fatalf("tool ran %d times, want %d", got, maxUnchangedRuns)
+	}
+}
+
+// unionSchemaTool declares projectId the way pydantic and zod emit an
+// optional number, which the registry's typing fixes leave alone.
+type unionSchemaTool struct{ *mcpTestTool }
+
+func (unionSchemaTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"projectId": map[string]any{"type": []any{"integer", "null"}},
+			"orderId": map[string]any{
+				"anyOf": []any{map[string]any{"type": "integer"}, map[string]any{"type": "null"}},
+			},
+		},
+	}
+}
+
+func TestANumberAndItsStringAreOneCall(t *testing.T) {
+	registry := tools.NewToolRegistry()
+	registry.Register(unionSchemaTool{newMCPTestTool(createToolName, tools.RepeatUnsafe)})
+	key := func(args map[string]any) string { return callKey(registry, createToolName, args) }
+
+	if key(map[string]any{"projectId": "40235"}) != key(map[string]any{"projectId": float64(40235)}) {
+		t.Error(`projectId "40235" and 40235 are one call under a ["integer","null"] schema`)
+	}
+	if key(map[string]any{"orderId": "7"}) != key(map[string]any{"orderId": int64(7)}) {
+		t.Error(`orderId "7" and 7 are one call under an anyOf schema`)
+	}
+	// Two long IDs a float would merge stay two calls.
+	if key(
+		map[string]any{"projectId": "1234567890123456789"},
+	) == key(
+		map[string]any{"projectId": "1234567890123456788"},
+	) {
+		t.Error("two different long IDs got the same key")
+	}
+	if key(map[string]any{"projectId": "40235"}) == key(map[string]any{"projectId": "40236"}) {
+		t.Error("two different IDs got the same key")
+	}
+}

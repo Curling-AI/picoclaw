@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"encoding/json"
+	"strconv"
+
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -18,9 +21,9 @@ const (
 	maxUnchangedRuns = 2
 )
 
-const repeatedSideEffectContent = "Not executed: this exact call (same tool, same arguments) already " +
-	"ran twice in a row in this turn, and this tool doesn't declare itself read-only or safe to " +
-	"repeat, so running it again could repeat its effect. Its result is above. Do not send this " +
+const repeatedSideEffectContent = "Not executed: this exact call (same tool, same arguments) was " +
+	"already sent twice in a row in this turn, and this tool doesn't declare itself read-only or safe " +
+	"to repeat, so sending it again could repeat its effect. Its results are above. Do not send this " +
 	"call again in this turn: if you meant a different action, call the tool for that action; " +
 	"otherwise finish and report what was done."
 
@@ -30,8 +33,8 @@ const repeatStopSkipContent = "Not executed: the turn ended because a refused ca
 // the name the user knows the tool by (the server's, for an MCP tool).
 func repeatStopSummary(toolName string) string {
 	return "I stopped this turn: I kept sending the same " + toolName + " call after it had already " +
-		"run twice and been refused. This tool doesn't declare itself read-only or safe to repeat, so " +
-		"running it again could have repeated its effect. Nothing else ran after that. Tell me how " +
+		"been sent twice and refused. This tool doesn't declare itself read-only or safe to repeat, so " +
+		"sending it again could have repeated its effect. Nothing else ran after that. Tell me how " +
 		"you want to continue."
 }
 
@@ -98,9 +101,46 @@ func displayToolName(registry *tools.ToolRegistry, toolName string) string {
 }
 
 // callKey is the call as the tool will receive it: after the registry's typing
-// fixes, so "40235" and 40235 are one action.
+// fixes, so "40235" and 40235 are one action. A number and its string compare
+// equal even where the schema leaves them apart (a type list such as
+// ["integer","null"], an anyOf): an alternation must not slip past the guard.
 func callKey(registry *tools.ToolRegistry, toolName string, args map[string]any) string {
-	return toolName + "\x00" + normalizeArgs(registry.CoercedArgs(toolName, args))
+	coerced, _ := canonicalNumbers(registry.CoercedArgs(toolName, args)).(map[string]any)
+	return toolName + "\x00" + normalizeArgs(coerced)
+}
+
+// canonicalNumbers returns value with every number, and every string holding
+// a JSON number, as a json.Number. A string keeps its exact text: parsing it
+// as a float would merge two long IDs that differ in the last digits. Only the
+// key uses it; the tool gets its arguments as coerced by the registry.
+func canonicalNumbers(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = canonicalNumbers(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = canonicalNumbers(item)
+		}
+		return out
+	case float64:
+		return json.Number(strconv.FormatFloat(v, 'f', -1, 64))
+	case int:
+		return json.Number(strconv.Itoa(v))
+	case int64:
+		return json.Number(strconv.FormatInt(v, 10))
+	case string:
+		if _, err := strconv.ParseFloat(v, 64); err == nil && json.Valid([]byte(v)) {
+			return json.Number(v)
+		}
+		return v
+	default:
+		return value
+	}
 }
 
 // repeatGuard tracks the current run of identical guarded calls in a turn.

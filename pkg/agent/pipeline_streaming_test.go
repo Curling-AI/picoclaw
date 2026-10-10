@@ -1274,8 +1274,8 @@ func (d *consumedStreamDelegate) GetStreamer(
 	return d.streamer, true
 }
 
-func (d *consumedStreamDelegate) ClearFinalizedStream(channel, chatID, _ string) {
-	d.cleared = append(d.cleared, channel+":"+chatID)
+func (d *consumedStreamDelegate) ClearFinalizedStream(channel, chatID, sessionKey string) {
+	d.cleared = append(d.cleared, channel+"|"+chatID+"|"+sessionKey)
 }
 
 // Without a stream for the reply the turn wrote, the narration's marker would
@@ -1306,9 +1306,10 @@ func TestSynthesizedReplyWithoutAStreamClearsTheFinalizedMarker(t *testing.T) {
 	if got := runConfiguredStreamingTurn(t, al, "pico"); got != toolLimitResponse {
 		t.Fatalf("response = %q, want the tool-limit reply", got)
 	}
-	if len(delegate.cleared) != 1 {
-		t.Fatalf("finalized-stream marker cleared %d times, want once (for the tool-limit reply)",
-			len(delegate.cleared))
+	opts := configuredStreamingProcessOptions("pico")
+	want := opts.Channel + "|" + opts.ChatID + "|" + opts.SessionKey
+	if len(delegate.cleared) != 1 || delegate.cleared[0] != want {
+		t.Fatalf("finalized-stream markers cleared = %q, want [%q] (the turn's own, once)", delegate.cleared, want)
 	}
 	// An interim-only turn has no post-turn outbound: Finalize must publish it.
 	deadline := time.After(time.Second)

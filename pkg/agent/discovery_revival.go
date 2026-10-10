@@ -8,10 +8,39 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// maxRevivedDiscoveredTools matches one discovery page: a turn never offers
-// more uncalled deferred tools again than a single tool_search would, across
-// retries and the tools the model names (turnState.discoveryRevivals).
+// maxRevivedDiscoveredTools matches one discovery page: a turn never brings
+// back more distinct uncalled deferred tools than a single tool_search would
+// list, across retries and the tools the model names.
 const maxRevivedDiscoveredTools = 8
+
+// reviveWithinTurnBudget revives the expired tools among names. Each distinct
+// tool is charged once per turn: one the turn already brought back returns
+// free when it expires again — a long turn must not lose its read tools and
+// keep only the create, as in the incident — and new ones fill what is left
+// of the page. (seucaranguejo fork)
+func reviveWithinTurnBudget(ts *turnState, names []string, ttl int) []string {
+	var paid, unpaid []string
+	for _, name := range names {
+		if _, ok := ts.revivedTools[name]; ok {
+			paid = append(paid, name)
+		} else {
+			unpaid = append(unpaid, name)
+		}
+	}
+	revived := ts.agent.Tools.ReviveExpired(paid, ttl, 0)
+	left := maxRevivedDiscoveredTools - len(ts.revivedTools)
+	if left <= 0 {
+		return revived
+	}
+	fresh := ts.agent.Tools.ReviveExpired(unpaid, ttl, left)
+	if len(fresh) > 0 && ts.revivedTools == nil {
+		ts.revivedTools = make(map[string]struct{}, maxRevivedDiscoveredTools)
+	}
+	for _, name := range fresh {
+		ts.revivedTools[name] = struct{}{}
+	}
+	return append(revived, fresh...)
+}
 
 const revivedToolsNudge = "[System] These tools you discovered earlier had expired and were missing from your " +
 	"tools; they are available again: %s. If you meant to call one of them, call it now."
@@ -20,12 +49,10 @@ const revivedToolsNudge = "[System] These tools you discovered earlier had expir
 // model never called (EnsureVisible only heals called ones), before a retry.
 func (p *Pipeline) reviveDiscoveredTools(ts *turnState, exec *turnExecution, iteration int) {
 	discovered := discoveredToolNamesFromMessages(exec.messages)
-	budget := maxRevivedDiscoveredTools - ts.discoveryRevivals
-	if len(discovered) == 0 || budget <= 0 {
+	if len(discovered) == 0 {
 		return
 	}
-	revived := ts.agent.Tools.ReviveExpired(discovered, discoveryPromoteTTL(p.Cfg), budget)
-	ts.discoveryRevivals += len(revived)
+	revived := reviveWithinTurnBudget(ts, discovered, discoveryPromoteTTL(p.Cfg))
 	if len(revived) == 0 {
 		return
 	}

@@ -55,7 +55,9 @@ func mentionedExpiredToolNames(messages []providers.Message, registry *tools.Too
 
 // mentionedTools collects, in order and once each, the discovered tools a
 // text names. aliases only holds names with a '_', '-' or '.', so a plain
-// word never matches.
+// word never matches. A qualified name (functions.skip_project_status, the
+// way OpenAI- and Gemini-style models write tools) matches by its last part
+// when the whole token isn't an alias (files.get is one).
 type mentionedTools struct {
 	aliases    map[string]string
 	discovered map[string]struct{}
@@ -65,7 +67,7 @@ type mentionedTools struct {
 
 func (m *mentionedTools) scan(text string) {
 	for _, token := range identifierToken.FindAllString(text, -1) {
-		name, ok := m.aliases[strings.ToLower(strings.TrimRight(token, "."))]
+		name, ok := m.lookup(strings.ToLower(strings.TrimRight(token, ".")))
 		if !ok {
 			continue
 		}
@@ -77,4 +79,15 @@ func (m *mentionedTools) scan(text string) {
 		m.seen[name] = struct{}{}
 		m.names = append(m.names, name)
 	}
+}
+
+func (m *mentionedTools) lookup(token string) (string, bool) {
+	if name, ok := m.aliases[token]; ok {
+		return name, true
+	}
+	if dot := strings.LastIndexByte(token, '.'); dot >= 0 {
+		name, ok := m.aliases[token[dot+1:]]
+		return name, ok
+	}
+	return "", false
 }

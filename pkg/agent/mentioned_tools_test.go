@@ -242,7 +242,11 @@ func TestRetryRevivalSharesTheTurnBudget(t *testing.T) {
 		names[i] = fmt.Sprintf("mcp_lib_tool_%02d", i)
 		agent.Tools.RegisterHidden(newServerTool(names[i], fmt.Sprintf("tool_%02d", i)))
 	}
-	ts := &turnState{agent: agent, discoveryRevivals: maxRevivedDiscoveredTools - 3}
+	spent := map[string]struct{}{}
+	for i := range maxRevivedDiscoveredTools - 3 {
+		spent[fmt.Sprintf("mcp_other_tool_%02d", i)] = struct{}{}
+	}
+	ts := &turnState{agent: agent, revivedTools: spent}
 	exec := &turnExecution{messages: discoveryExchange(t, "search-1", names...)}
 
 	NewPipeline(al).reviveDiscoveredTools(ts, exec, 1)
@@ -256,7 +260,95 @@ func TestRetryRevivalSharesTheTurnBudget(t *testing.T) {
 	if visible != 3 {
 		t.Fatalf("%d tools revived before the retry, want the 3 left in the turn's budget", visible)
 	}
-	if ts.discoveryRevivals != maxRevivedDiscoveredTools {
-		t.Errorf("turn budget used = %d, want %d", ts.discoveryRevivals, maxRevivedDiscoveredTools)
+	if len(ts.revivedTools) != maxRevivedDiscoveredTools {
+		t.Errorf("turn budget used = %d, want %d", len(ts.revivedTools), maxRevivedDiscoveredTools)
+	}
+}
+
+// OpenAI- and Gemini-style models write tools qualified (functions.x).
+func TestQualifiedToolNamesMatch(t *testing.T) {
+	registry := tools.NewToolRegistry()
+	registry.RegisterHidden(newServerTool(statusToolName, "skip_project_status"))
+	registry.RegisterHidden(newServerTool("mcp_drive_files_get", "files.get"))
+	messages := append(discoveryExchange(t, "s1", statusToolName, "mcp_drive_files_get"),
+		providers.Message{Role: "assistant", Content: "Chamo functions.skip_project_status e files.get."})
+
+	got := strings.Join(mentionedExpiredToolNames(messages, registry), ",")
+	if want := statusToolName + ",mcp_drive_files_get"; got != want {
+		t.Fatalf("mentioned = %s, want %s", got, want)
+	}
+}
+
+// expiringRecorder records the tools each round offered, then lets every
+// promoted tool expire, as idle rounds do in a long turn.
+type expiringRecorder struct {
+	registry *tools.ToolRegistry
+	rounds   int
+	offered  []map[string]bool
+}
+
+func (p *expiringRecorder) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	defs []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	round := map[string]bool{}
+	for _, d := range defs {
+		round[d.Function.Name] = true
+	}
+	p.offered = append(p.offered, round)
+	for range 50 {
+		p.registry.TickTTL()
+	}
+	if p.rounds == 0 {
+		return &providers.LLMResponse{Content: "fim"}, nil
+	}
+	p.rounds--
+	return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
+		ID: fmt.Sprintf("noop-%d", p.rounds), Type: "function", Name: "noop", Arguments: map[string]any{},
+	}}}, nil
+}
+
+func (*expiringRecorder) GetDefaultModel() string { return "mock-model" }
+
+// A tool the turn already brought back returns free when it expires again: a
+// spent page must not leave a long turn with its read tools gone.
+func TestAToolTheTurnBroughtBackReturnsFree(t *testing.T) {
+	const named = maxRevivedDiscoveredTools + 1
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &expiringRecorder{rounds: 3}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	agent := al.registry.GetDefaultAgent()
+	provider.registry = agent.Tools
+	agent.Tools.Register(&countingTool{name: "noop"})
+	names := make([]string, named)
+	for i := range names {
+		names[i] = fmt.Sprintf("mcp_lib_tool_%02d", i)
+		agent.Tools.RegisterHidden(newServerTool(names[i], fmt.Sprintf("tool_%02d", i)))
+	}
+	key := directSessionKey(al)
+	agent.Sessions.AddFullMessage(key, providers.Message{Role: "user", Content: "usa a biblioteca"})
+	for _, m := range discoveryExchange(t, "search-1", names...) {
+		agent.Sessions.AddFullMessage(key, m)
+	}
+	agent.Sessions.AddFullMessage(key, providers.Message{
+		Role: "assistant", Content: "Vou usar " + strings.Join(names, ", ") + ".",
+	})
+
+	if _, err := al.ProcessDirect(context.Background(), "continue", "mention-paid"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	last := provider.offered[len(provider.offered)-1]
+	offered := 0
+	for _, name := range names {
+		if last[name] {
+			offered++
+		}
+	}
+	if offered != maxRevivedDiscoveredTools {
+		t.Fatalf("last round offered %d named tools, want the %d the turn paid for", offered, maxRevivedDiscoveredTools)
 	}
 }
