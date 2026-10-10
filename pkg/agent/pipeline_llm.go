@@ -182,10 +182,12 @@ func (p *Pipeline) CallLLM(
 		}
 	}
 	// Same heal (seucaranguejo fork) for tools the model named but hasn't called
-	// yet; capped like a discovery page so a long reasoning can't unhide the
-	// whole library.
+	// yet. The budget is one discovery page of distinct tools per turn, not per
+	// call: a text naming many tools would otherwise revive a page each round.
+	// The scan runs even with the page spent, since a tool the turn already
+	// brought back returns free when it expires again.
 	if mentioned := mentionedExpiredToolNames(exec.messages, ts.agent.Tools); len(mentioned) > 0 {
-		revived := ts.agent.Tools.ReviveExpired(mentioned, discoveryPromoteTTL(p.Cfg), maxRevivedDiscoveredTools)
+		revived := reviveWithinTurnBudget(ts, mentioned, discoveryPromoteTTL(p.Cfg))
 		if len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools named by the model",
 				map[string]any{
