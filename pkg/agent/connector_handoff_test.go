@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,23 @@ import (
 )
 
 type handoffProvider struct{ calls int }
+
+func TestConnectorHandoff_CancelledTurnDoesNotPersist(t *testing.T) {
+	storage := t.TempDir()
+	sessions := session.NewSessionManager(storage)
+	ts := &turnState{agent: &AgentInstance{Sessions: sessions}, sessionKey: "cancelled"}
+	exec := &turnExecution{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	control := finishToolHandoff(ctx, ts, exec, nil, []providers.ToolCall{{ID: "skipped"}})
+	if control != ToolControlBreak || !errors.Is(exec.handoffError, context.Canceled) {
+		t.Fatalf("cancelled handoff = %v, %v", control, exec.handoffError)
+	}
+	files, err := os.ReadDir(storage)
+	if err != nil || len(files) != 0 || len(sessions.ListSessions()) != 0 {
+		t.Fatalf("cancelled handoff wrote history: files=%v error=%v", files, err)
+	}
+}
 
 func (p *handoffProvider) GetDefaultModel() string { return "test-model" }
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -10,6 +11,7 @@ import (
 // A failed prerequisite check stops the batch but must remain retryable, rather
 // than completing the connector resolution as though its requested action ran.
 func finishFailedToolHandoff(
+	ctx context.Context,
 	ts *turnState,
 	exec *turnExecution,
 	messages []providers.Message,
@@ -17,27 +19,33 @@ func finishFailedToolHandoff(
 	forUser string,
 ) ToolControl {
 	exec.handoffError = errors.New("tool stopped the turn after a failed prerequisite check")
-	return persistToolHandoff(ts, exec, messages, remaining, forUser)
+	return persistToolHandoff(ctx, ts, exec, messages, remaining, forUser)
 }
 
 // finishToolHandoff persists a balanced tool batch before ending the turn.
 // Steering stays queued for an explicit new turn; it cannot cross the handoff.
 func finishToolHandoff(
+	ctx context.Context,
 	ts *turnState,
 	exec *turnExecution,
 	messages []providers.Message,
 	remaining []providers.ToolCall,
 ) ToolControl {
-	return persistToolHandoff(ts, exec, messages, remaining, handledToolResponseSummary)
+	return persistToolHandoff(ctx, ts, exec, messages, remaining, handledToolResponseSummary)
 }
 
 func persistToolHandoff(
+	ctx context.Context,
 	ts *turnState,
 	exec *turnExecution,
 	messages []providers.Message,
 	remaining []providers.ToolCall,
 	summary string,
 ) ToolControl {
+	if err := ctx.Err(); err != nil {
+		exec.handoffError = errors.Join(exec.handoffError, err)
+		return ToolControlBreak
+	}
 	for _, call := range remaining {
 		msg := providers.Message{
 			Role:       "tool",
@@ -57,7 +65,9 @@ func persistToolHandoff(
 			ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
 			ts.recordPersistedMessage(msg)
 		}
-		if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
+		if err := ctx.Err(); err != nil {
+			exec.handoffError = errors.Join(exec.handoffError, err)
+		} else if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
 			exec.handoffError = errors.Join(exec.handoffError, fmt.Errorf("save tool handoff: %w", err))
 		}
 	}
