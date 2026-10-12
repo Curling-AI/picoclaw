@@ -83,6 +83,7 @@ const (
 // =============================================================================
 
 type turnResult struct {
+	incomplete   bool
 	finalContent string
 	modelName    string
 	status       TurnEndStatus
@@ -113,6 +114,7 @@ type ActiveTurnInfo struct {
 // =============================================================================
 
 type turnExecution struct {
+	incomplete bool
 	// Core message state (accumulates throughout the turn)
 	messages         []providers.Message // built from ContextBuilder, grows per-iteration
 	pendingMessages  []providers.Message // steering/SubTurn messages awaiting injection
