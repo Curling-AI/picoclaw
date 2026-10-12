@@ -347,7 +347,7 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
 		if job.ID == jobID {
-			jobCopy := *job
+			jobCopy := cloneCronJob(*job)
 			callbackJob = &jobCopy
 			break
 		}

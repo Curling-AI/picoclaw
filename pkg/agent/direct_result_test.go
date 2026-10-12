@@ -100,3 +100,20 @@ func TestDirectResultDoesNotInferSuccessFromFallbackText(t *testing.T) {
 		t.Fatal("legacy contract changed", legacy, err)
 	}
 }
+
+func TestDirectResultReportsExhaustedEmptyResponsesAsFailed(t *testing.T) {
+	_, cfg, msgBus, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	al := NewAgentLoop(cfg, msgBus, new(alwaysEmptyProvider))
+	result, err := al.ProcessDirectWithResult(context.Background(), turnresult.Request{
+		Progress: nil, Media: nil,
+		Content: "hello", SessionKey: "empty-result", Channel: "test", ChatID: "direct",
+	})
+	if err != nil || result.Status != turnresult.Failed || result.Content != defaultResponse {
+		t.Fatal("empty response fallback confused with completion", result, err)
+	}
+	legacy, err := al.ProcessDirectWithChannel(context.Background(), "hello", "empty-legacy", "test", "direct")
+	if err != nil || legacy != defaultResponse {
+		t.Fatal("legacy empty response behavior changed", legacy, err)
+	}
+}

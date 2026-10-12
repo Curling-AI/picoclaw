@@ -279,6 +279,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				exec.finalIsFallback = true
 			}
 			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+			result.incomplete = exec.incomplete || exec.finalIsFallback
 			if finalizeErr != nil {
 				turnStatus = TurnEndStatusError
 			}
@@ -312,6 +313,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 					finalContent = ""
 				}
 				result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+				result.incomplete = exec.incomplete || exec.finalIsFallback
 				if finalizeErr != nil {
 					turnStatus = TurnEndStatusError
 				}
@@ -344,7 +346,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
-	result.incomplete = exec.incomplete
+	result.incomplete = exec.incomplete || exec.finalIsFallback
 	if err != nil {
 		turnStatus = TurnEndStatusError
 	}

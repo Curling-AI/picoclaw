@@ -59,3 +59,30 @@ func TestExecutionHandlerDistinguishesManualAndScheduledRuns(t *testing.T) {
 		}
 	}
 }
+
+func TestExecutionHandlerCannotMutateLiveSchedule(t *testing.T) {
+	service := NewCronService(filepath.Join(t.TempDir(), "cron.json"), nil)
+	job, err := service.AddJob(
+		"fixture",
+		CronSchedule{Kind: "every", EveryMS: int64Ptr(60000), AtMS: nil, Expr: "", TZ: ""},
+		"run",
+		"cli",
+		"direct",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetOnExecution(t.Context(), func(_ context.Context, run Execution) (string, error) {
+		*run.Job.Schedule.EveryMS = 1
+		if run.Job.State.NextRunAtMS != nil {
+			*run.Job.State.NextRunAtMS = 0
+		}
+		return "ok", nil
+	})
+	service.executeJobByID(job.ID)
+	got, ok := service.GetJob(job.ID)
+	if !ok || *got.Schedule.EveryMS != 60000 || got.State.NextRunAtMS == nil ||
+		*got.State.NextRunAtMS <= time.Now().UnixMilli() {
+		t.Fatal("callback changed the live schedule", got)
+	}
+}
