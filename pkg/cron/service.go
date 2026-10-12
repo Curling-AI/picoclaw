@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/adhocore/gronx"
+	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
@@ -35,6 +36,10 @@ type CronPayload struct {
 	// (e.g. the seeded memory-refresh job); the agent-facing cron tool leaves
 	// it empty.
 	Model string `json:"model,omitempty"`
+	// Execution origin is assigned by the platform, never by the agent tool.
+	LoopSlug  string `json:"loop_slug,omitempty"`
+	RoundKind string `json:"round_kind,omitempty"`
+	GoalID    string `json:"goal_id,omitempty"`
 }
 
 type CronJobState struct {
@@ -95,16 +100,18 @@ const idleProbeTimeout = 10 * time.Second
 const maxConcurrentJobs = 4
 
 type CronService struct {
-	storePath string
-	store     *CronStore
-	onJob     JobHandler
-	mu        sync.RWMutex
-	running   bool
-	stopChan  chan struct{}
-	wakeChan  chan struct{}
-	gronx     *gronx.Gronx
-	execSlots chan struct{}
-	idleProbe IdleProbe
+	storePath        string
+	store            *CronStore
+	onJob            JobHandler
+	onExecution      ExecutionHandler
+	executionContext context.Context
+	mu               sync.RWMutex
+	running          bool
+	stopChan         chan struct{}
+	wakeChan         chan struct{}
+	gronx            *gronx.Gronx
+	execSlots        chan struct{}
+	idleProbe        IdleProbe
 }
 
 // SetIdleProbe instala (ou remove, com nil) a fonte de "houve atividade?".
@@ -322,15 +329,20 @@ func (cs *CronService) checkJobs() {
 		go func(id string) {
 			cs.execSlots <- struct{}{}
 			defer func() { <-cs.execSlots }()
-			cs.executeJobByID(id)
+			cs.executeJob(id, Scheduled)
 		}(jobID)
 	}
 }
 
 func (cs *CronService) executeJobByID(jobID string) {
+	cs.executeJob(jobID, Scheduled)
+}
+
+func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 	startTime := time.Now().UnixMilli()
 
 	cs.mu.RLock()
+	handler, legacy, executionContext := cs.onExecution, cs.onJob, cs.executionContext
 	var callbackJob *CronJob
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
@@ -361,8 +373,16 @@ func (cs *CronService) executeJobByID(jobID string) {
 		callbackJob.Name, jobID, callbackJob.Schedule.Kind, callbackJob.Payload.Channel)
 
 	var err error
-	if cs.onJob != nil {
-		_, err = cs.onJob(callbackJob)
+	if handler != nil {
+		if executionContext == nil {
+			executionContext = context.Background()
+		}
+		_, err = handler(
+			executionContext,
+			Execution{Progress: nil, RunID: uuid.NewString(), Trigger: trigger, Job: callbackJob},
+		)
+	} else if legacy != nil {
+		_, err = legacy(callbackJob)
 	}
 
 	execDuration := time.Now().UnixMilli() - startTime
@@ -556,6 +576,26 @@ func (cs *CronService) AddJobWithModel(
 	message string,
 	channel, to, model string,
 ) (*CronJob, error) {
+	return cs.AddJobWithPayload(
+		name,
+		schedule,
+		CronPayload{
+			Kind:      "agent_turn",
+			Message:   message,
+			Channel:   channel,
+			To:        to,
+			Model:     model,
+			Command:   "",
+			LoopSlug:  "",
+			RoundKind: "",
+			GoalID:    "",
+		},
+	)
+}
+
+// AddJobWithPayload persists platform metadata atomically before the scheduler
+// can admit the job. The agent-facing tool continues using AddJob.
+func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, payload CronPayload) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -569,13 +609,7 @@ func (cs *CronService) AddJobWithModel(
 		Name:     name,
 		Enabled:  true,
 		Schedule: schedule,
-		Payload: CronPayload{
-			Kind:    "agent_turn",
-			Message: message,
-			Channel: channel,
-			To:      to,
-			Model:   model,
-		},
+		Payload:  payload,
 		State: CronJobState{
 			NextRunAtMS: cs.computeNextRun(&schedule, now),
 		},
@@ -763,7 +797,7 @@ func (cs *CronService) RunNow(jobID string) bool {
 	go func() {
 		cs.execSlots <- struct{}{}
 		defer func() { <-cs.execSlots }()
-		cs.executeJobByID(jobID)
+		cs.executeJob(jobID, Manual)
 	}()
 	return true
 }

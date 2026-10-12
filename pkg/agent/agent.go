@@ -28,6 +28,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
+	"github.com/sipeed/picoclaw/pkg/turnresult"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -95,6 +96,7 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
+	ExecutionProgress func(stage string)
 	Dispatch          DispatchRequest // Normalized routed request boundary for this turn
 	SessionKey        string          // Session identifier for history/context
 	SessionAliases    []string        // Compatibility aliases for the session key
@@ -569,6 +571,15 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
+	result, err := al.runAgentLoopResult(ctx, agent, opts)
+	return result.Content, err
+}
+
+func (al *AgentLoop) runAgentLoopResult(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts processOptions,
+) (turnresult.Result, error) {
 	opts = normalizeProcessOptions(opts)
 	// Resolve o Loop AQUI porque runAgentLoop é o funil de todos os caminhos —
 	// web, canais, cron, heartbeat e subturns. Um ponto só cobre todos, em vez
@@ -584,7 +595,7 @@ func (al *AgentLoop) runAgentLoop(
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
-		return "", err
+		return turnresult.Failure(err), err
 	}
 
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
@@ -617,10 +628,10 @@ func (al *AgentLoop) runAgentLoop(
 	pipeline := NewPipeline(al)
 	result, err := al.runTurn(ctx, ts, pipeline)
 	if err != nil {
-		return "", err
+		return turnresult.Failure(err), err
 	}
 	if result.status == TurnEndStatusAborted {
-		return "", nil
+		return turnresult.Result{Status: turnresult.Canceled, Content: ""}, nil
 	}
 
 	for _, followUp := range result.followUps {
@@ -690,7 +701,11 @@ func (al *AgentLoop) runAgentLoop(
 			})
 	}
 
-	return result.finalContent, nil
+	status := turnresult.Completed
+	if result.status == TurnEndStatusError || result.incomplete {
+		status = turnresult.Failed
+	}
+	return turnresult.Result{Status: status, Content: result.finalContent}, nil
 }
 
 // selectCandidates returns the model candidates and resolved model name to use

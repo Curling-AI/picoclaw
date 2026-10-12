@@ -249,6 +249,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 		// Execute LLM call via Pipeline
 		ts.setPhase(TurnPhaseRunning)
+		ts.reportExecutionStage("thinking")
 		ctrl, callErr := pipeline.CallLLM(ctx, turnCtx, ts, exec, iteration)
 		if callErr != nil {
 			turnStatus = TurnEndStatusError
@@ -284,6 +285,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			return result, finalizeErr
 		case ControlToolLoop:
 			// Execute tools via Pipeline
+			ts.reportExecutionStage("tool")
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
 			exec.toolRanThisTurn = true
 			switch toolCtrl {
@@ -324,6 +326,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	if finalContent == "" {
+		exec.incomplete = true
 		if ts.currentIteration() >= maxIter && maxIter > 0 {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
@@ -341,6 +344,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+	result.incomplete = exec.incomplete
 	if err != nil {
 		turnStatus = TurnEndStatusError
 	}

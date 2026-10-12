@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/turnresult"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -22,6 +24,10 @@ type JobExecutor interface {
 	// PublishResponseIfNeeded sends response to the outbound bus only when the
 	// agent did not already deliver content through the message tool in this round.
 	PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string)
+}
+
+type resultJobExecutor interface {
+	ProcessDirectWithResult(ctx context.Context, request turnresult.Request) (turnresult.Result, error)
 }
 
 // JobAccessPolicy lets a remote turn reach a job created in another chat.
@@ -661,6 +667,22 @@ func (t *CronTool) enableJob(ctx context.Context, args map[string]any, enable bo
 
 // ExecuteJob executes a cron job through the agent
 func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
+	_, err := t.ExecuteJobWithResult(
+		ctx,
+		cron.Execution{Progress: nil, RunID: uuid.NewString(), Trigger: cron.Scheduled, Job: job},
+	)
+	if err != nil && job.Payload.Command == "" {
+		return fmt.Sprintf("Error: %v", err)
+	}
+	return "ok"
+}
+
+func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Execution) (turnresult.Result, error) {
+	job := execution.Job
+	if job == nil || uuid.Validate(execution.RunID) != nil {
+		err := errors.New("invalid cron execution identity")
+		return turnresult.Failure(err), err
+	}
 	// Get channel/chatID from job payload
 	channel := job.Payload.Channel
 	chatID := job.Payload.To
@@ -683,7 +705,8 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 				Context: bus.NewOutboundContext(channel, chatID, ""),
 				Content: output,
 			})
-			return "ok"
+			err := errors.New("scheduled command execution disabled")
+			return turnresult.Failure(err), err
 		}
 
 		args := map[string]any{
@@ -707,16 +730,23 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 			Context: bus.NewOutboundContext(channel, chatID, ""),
 			Content: output,
 		})
-		return "ok"
+		if ctx.Err() != nil {
+			return turnresult.Failure(ctx.Err()), ctx.Err()
+		}
+		if result.IsError {
+			err := errors.New("scheduled command failed")
+			return turnresult.Failure(err), err
+		}
+		return turnresult.Result{Status: turnresult.Completed, Content: ""}, nil
 	}
 
-	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, uuid.New().String())
+	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, execution.RunID)
 	// A job with a fixed Model runs on agents.defaults.cron_model. The pipeline
 	// reads the intent off the session-key prefix (the only per-turn signal it
 	// already has), so encode it here. Keep "agent:cronmodel-" in sync with
 	// agent.CronModelSessionPrefix.
 	if strings.TrimSpace(job.Payload.Model) != "" {
-		sessionKey = fmt.Sprintf("agent:cronmodel-%s-%s", job.ID, uuid.New().String())
+		sessionKey = fmt.Sprintf("agent:cronmodel-%s-%s", job.ID, execution.RunID)
 	}
 
 	// System note prepended to EVERY scheduled run. Two purposes:
@@ -753,19 +783,44 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 		job.Name, job.Payload.Message, job.ID, job.ID)
 
 	// Call agent with the job message
-	response, err := t.executor.ProcessDirectWithChannel(
+	result, err := t.executePrompt(
 		ctx,
-		message,
-		sessionKey,
-		channel,
-		chatID,
+		turnresult.Request{
+			Media:      nil,
+			Progress:   execution.Progress,
+			Content:    message,
+			SessionKey: sessionKey,
+			Channel:    channel,
+			ChatID:     chatID,
+		},
 	)
 	if err != nil {
-		return fmt.Sprintf("Error: %v", err)
+		return result, err
 	}
 
-	if response != "" {
-		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, response)
+	if result.Content != "" {
+		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, result.Content)
 	}
-	return "ok"
+	return result, nil
+}
+
+func (t *CronTool) executePrompt(ctx context.Context, request turnresult.Request) (turnresult.Result, error) {
+	if executor, ok := t.executor.(resultJobExecutor); ok {
+		return executor.ProcessDirectWithResult(ctx, request)
+	}
+	if t.executor == nil {
+		err := errors.New("cron executor unavailable")
+		return turnresult.Failure(err), err
+	}
+	response, err := t.executor.ProcessDirectWithChannel(
+		ctx,
+		request.Content,
+		request.SessionKey,
+		request.Channel,
+		request.ChatID,
+	)
+	if err != nil {
+		return turnresult.Failure(err), err
+	}
+	return turnresult.Result{Status: turnresult.Indeterminate, Content: response}, nil
 }
