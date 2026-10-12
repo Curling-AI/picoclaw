@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/turnresult"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -52,6 +53,29 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
 	return al.ProcessDirectWithMedia(ctx, content, sessionKey, channel, chatID, nil)
+}
+
+// ProcessDirectWithResult preserves the actual terminal pipeline status,
+// including hard-abort and a failed pipeline with a synthesized response.
+func (al *AgentLoop) ProcessDirectWithResult(
+	ctx context.Context,
+	request turnresult.Request,
+) (turnresult.Result, error) {
+	if err := al.ensureHooksInitialized(ctx); err != nil {
+		return turnresult.Failure(err), err
+	}
+	if err := al.ensureMCPInitialized(ctx); err != nil {
+		return turnresult.Failure(err), err
+	}
+	var message bus.InboundMessage
+	message.Context.Channel = request.Channel
+	message.Context.ChatID = request.ChatID
+	message.Context.ChatType = "direct"
+	message.Context.SenderID = "cron"
+	message.Content = request.Content
+	message.SessionKey = request.SessionKey
+	message.Media = append([]string(nil), request.Media...)
+	return al.processMessageResult(ctx, message, request.Progress)
 }
 
 // ProcessDirectWithMedia is ProcessDirectWithChannel plus media attachments:
@@ -140,6 +164,15 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 }
 
 func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	result, err := al.processMessageResult(ctx, msg, nil)
+	return result.Content, err
+}
+
+func (al *AgentLoop) processMessageResult(
+	ctx context.Context,
+	msg bus.InboundMessage,
+	progress func(string),
+) (turnresult.Result, error) {
 	msg = al.prepareInboundMessageForAgent(ctx, msg)
 
 	// Add message preview to log (show full content for error messages)
@@ -162,12 +195,16 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 
 	// Route system messages to processSystemMessage
 	if msg.Channel == "system" {
-		return al.processSystemMessage(ctx, msg)
+		content, err := al.processSystemMessage(ctx, msg)
+		if err != nil {
+			return turnresult.Failure(err), err
+		}
+		return turnresult.Result{Status: turnresult.Indeterminate, Content: content}, nil
 	}
 
 	route, agent, routeErr := al.resolveMessageRoute(msg)
 	if routeErr != nil {
-		return "", routeErr
+		return turnresult.Failure(routeErr), routeErr
 	}
 
 	allocation := al.allocateRouteSession(route, msg)
@@ -196,6 +233,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		})
 
 	opts := processOptions{
+		ExecutionProgress: progress,
 		Dispatch: DispatchRequest{
 			SessionKey:     sessionKey,
 			SessionAliases: buildSessionAliases(sessionKey, append(allocation.SessionAliases, msg.SessionKey)...),
@@ -215,13 +253,13 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
-		return "", err
+		return turnresult.Failure(err), err
 	}
 
 	// context-dependent commands check their own Runtime fields and report
 	// "unavailable" when the required capability is nil.
 	if response, handled := al.handleCommand(ctx, msg, agent, &opts); handled {
-		return response, nil
+		return turnresult.Result{Status: turnresult.Indeterminate, Content: response}, nil
 	}
 
 	if pending := al.takePendingSkills(opts.Dispatch.SessionKey); len(pending) > 0 {
@@ -242,7 +280,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 			map[string]any{"session_key": opts.Dispatch.SessionKey, "tier": tier})
 	}
 
-	return al.runAgentLoop(ctx, agent, opts)
+	return al.runAgentLoopResult(ctx, agent, opts)
 }
 
 func (al *AgentLoop) resolveMessageRoute(msg bus.InboundMessage) (routing.ResolvedRoute, *AgentInstance, error) {
