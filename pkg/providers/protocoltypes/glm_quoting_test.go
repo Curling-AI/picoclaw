@@ -5,6 +5,59 @@ import (
 	"testing"
 )
 
+func TestLiftToolCallsFromText_InvalidGLMTailDoesNotPromoteEarlierCalls(t *testing.T) {
+	quoted := map[string]string{
+		"bare JSON":    `{"name":"exec","arguments":{"command":"echo example"}}`,
+		"XML JSON":     `<tool_call>{"name":"exec","arguments":{"command":"echo example"}}</tool_call>`,
+		"JSON wrapper": `{"tool_calls":[{"id":"example","type":"function","function":{"name":"exec","arguments":"{\"command\":\"echo example\"}"}}]}`,
+		"pseudo XML":   `<function=exec><parameter=command>echo example</parameter></function>`,
+	}
+	tails := map[string]string{
+		"truncated":     `<tool_call>write_file<arg_key>path</arg_key><arg_value>notes.md`,
+		"duplicate key": `<tool_call>exec<arg_key>command</arg_key><arg_value>ls</arg_value><arg_key>command</arg_key><arg_value>pwd</arg_value></tool_call>`,
+	}
+	for format, example := range quoted {
+		for condition, tail := range tails {
+			t.Run(format+"/"+condition, func(t *testing.T) {
+				text := "Example only: " + example + "\n" + tail
+				calls, rest := LiftToolCallsFromText(text)
+				if len(calls) != 0 {
+					t.Fatalf("lifted the earlier example: %#v", calls)
+				}
+				if rest != text {
+					t.Fatalf("changed response: %q", rest)
+				}
+				if !LooksLikeTruncatedToolCall(text) {
+					t.Fatal("invalid GLM tail must remain visible to the retry guard")
+				}
+			})
+		}
+	}
+}
+
+func TestLiftToolCallsFromText_GLMSyntaxInsideAnotherCallStaysArgumentText(t *testing.T) {
+	content := `<tool_call>exec<arg_key>command</arg_key><arg_value>echo example</arg_value></tool_call>`
+	cases := map[string]string{
+		"bare JSON":  `{"name":"write_file","arguments":{"path":"notes.md","content":"` + content + `"}}`,
+		"XML JSON":   `<tool_call>{"name":"write_file","arguments":{"path":"notes.md","content":"` + content + `"}}</tool_call>`,
+		"pseudo XML": `<function=write_file><parameter=path>notes.md</parameter><parameter=content>` + content + `</parameter></function>`,
+	}
+	for name, text := range cases {
+		t.Run(name, func(t *testing.T) {
+			calls, rest := LiftToolCallsFromText(text)
+			if len(calls) != 1 || calls[0].Name != "write_file" {
+				t.Fatalf("calls = %#v, want write_file", calls)
+			}
+			if got := calls[0].Arguments["content"]; got != content {
+				t.Fatalf("content = %q, want the exact original argument %q", got, content)
+			}
+			if rest != "" {
+				t.Fatalf("rest = %q", rest)
+			}
+		})
+	}
+}
+
 // An argument is arbitrary text and may quote a call in any format. Read as
 // the model's own call, a quote runs a command the model only wrote down or
 // rebinds the arguments of the real call.

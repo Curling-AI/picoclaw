@@ -19,7 +19,8 @@ var xmlToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_cal
 //  4. Pseudo-XML:   <function=NAME><parameter=KEY>VALUE</parameter></function>
 //  5. Bare JSON:    {"name":"…","arguments":{…}}
 //
-// GLM goes first, and the other formats are only looked for outside its
+// Apart from complete calls enclosing GLM argument text, GLM goes first,
+// and the other formats are only looked for outside its
 // blocks (an unclosed one runs to the end of the text): a GLM value is
 // arbitrary text (a file, a command) and may hold a call in any of the JSON
 // shapes, which is then something the model wrote down, not a call it made.
@@ -52,30 +53,60 @@ func LiftToolCallsFromText(text string) ([]ToolCall, string) {
 }
 
 func liftToolCalls(text string) ([]ToolCall, []span) {
+	extractors := []func(string) ([]ToolCall, []span){
+		extractJSONWrapper,
+		extractXMLToolCalls,
+		extractPseudoXMLToolCalls,
+		extractBareToolCalls,
+	}
 	if blocks := glmBlocks(text); len(blocks) > 0 {
+		// A complete enclosing call owns its arguments. GLM examples inside
+		// those arguments are data and must not be blanked by the mask below.
+		for _, extract := range extractors {
+			found, at := extract(text)
+			calls, spans := trailingCalls(text, found, at)
+			if enclosesGLMBlocks(spans, blocks) {
+				return calls, spans
+			}
+		}
 		if calls, spans := liftGLMToolCalls(text, blocks); len(calls) > 0 {
 			return calls, spans
 		}
 		masked := []byte(text)
 		for _, b := range blocks {
-			for i := b.start; i < b.end; i++ {
+			// Keep an opaque boundary so an invalid GLM tail cannot make an
+			// earlier quoted call look like the end of the response.
+			for i := b.start + 1; i < b.end; i++ {
 				masked[i] = ' '
 			}
 		}
 		text = string(masked)
 	}
-	for _, extract := range []func(string) ([]ToolCall, []span){
-		extractJSONWrapper,
-		extractXMLToolCalls,
-		extractPseudoXMLToolCalls,
-		extractBareToolCalls,
-	} {
+	for _, extract := range extractors {
 		found, at := extract(text)
 		if calls, spans := trailingCalls(text, found, at); len(calls) > 0 {
 			return calls, spans
 		}
 	}
 	return nil, nil
+}
+
+func enclosesGLMBlocks(spans []span, blocks []glmBlock) bool {
+	encloses := false
+	for _, sp := range spans {
+		for _, block := range blocks {
+			if sp.start >= block.end || sp.end <= block.start {
+				continue
+			}
+			// A call inside a GLM value still belongs to that value, even if
+			// it encloses another GLM example of its own.
+			if sp.start >= block.start || sp.end < block.end {
+				return false
+			}
+			encloses = true
+		}
+	}
+	return encloses
 }
 
 // trailingCalls keeps the calls that end text: the last span and those before
