@@ -15,8 +15,20 @@ import (
 func TestToolTurnOrigin_DelegationKeepsRootAuthorizationAfterParentEnds(t *testing.T) {
 	root := &turnState{sessionKey: "parent", chatID: "root-run", userMessage: "user connector decisions"}
 	root.isFinished.Store(true)
-	child := &turnState{sessionKey: "child", chatID: "child-run", userMessage: "model-generated prompt", parentTurnID: "root", parentTurnState: root, depth: 1}
-	nested := &turnState{userMessage: "another generated prompt", parentTurnID: "child", parentTurnState: child, depth: 2}
+	child := &turnState{
+		sessionKey:      "child",
+		chatID:          "child-run",
+		userMessage:     "model-generated prompt",
+		parentTurnID:    "root",
+		parentTurnState: root,
+		depth:           1,
+	}
+	nested := &turnState{
+		userMessage:     "another generated prompt",
+		parentTurnID:    "child",
+		parentTurnState: child,
+		depth:           2,
+	}
 	for _, ts := range []*turnState{root, child, nested} {
 		ctx := withToolTurnOrigin(context.Background(), ts)
 		message, ok := RootTurnUserMessage(ctx)
