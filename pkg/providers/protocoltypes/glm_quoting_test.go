@@ -316,3 +316,14 @@ func TestLiftToolCallsFromText_FenceInAnUnclosedGLMValueStillQuotes(t *testing.T
 		t.Fatalf("lifted %s(%v) from inside the prose fence", calls[0].Name, calls[0].Arguments)
 	}
 }
+
+// A value may quote the GLM tags themselves. Closed, it is still the value's
+// data, ``` included, and the call that ends the text still runs.
+func TestLiftToolCallsFromText_QuotedGLMTagsInAClosedValueLeaveTheTrailingCall(t *testing.T) {
+	text := "<tool_call>write_file<arg_key>content</arg_key><arg_value>show <arg_value> and ```go</arg_value></tool_call>\nNow run:\n" +
+		`{"name":"exec","arguments":{"command":"echo done"}}`
+	calls, _ := LiftToolCallsFromText(text)
+	if len(calls) != 1 || calls[0].Name != "exec" {
+		t.Fatalf("calls = %#v, want the trailing exec", calls)
+	}
+}

@@ -111,9 +111,15 @@ func glmBlockWellFormed(b glmBlock) bool {
 		return false
 	}
 	args, rest, ok := parseGLMArgs(b.body)
-	return ok && strings.TrimSpace(rest) == "" &&
-		strings.Count(b.body, glmArgValueOpen) == len(args) &&
-		strings.Count(b.body, glmArgValueClose) == len(args)
+	if !ok || strings.TrimSpace(rest) != "" {
+		return false
+	}
+	for _, a := range args {
+		if !a.closed {
+			return false
+		}
+	}
+	return true
 }
 
 func enclosesGLMBlocks(spans []span, blocks []glmBlock) bool {

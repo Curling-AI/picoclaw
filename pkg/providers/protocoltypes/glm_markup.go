@@ -66,6 +66,9 @@ var (
 type glmArg struct {
 	key   string
 	value string
+	// closed: the value ended at its </arg_value>, not at the next key or at
+	// the end of the block (a model that forgot the tag).
+	closed bool
 }
 
 // glmBlock is one <tool_call>NAME…</tool_call> span of the text.
@@ -279,9 +282,9 @@ func parseGLMArgs(s string) (args []glmArg, rest string, ok bool) {
 			return nil, "", false
 		}
 		value = value[len(glmArgValueOpen):]
-		after := ""
+		after, closed := "", false
 		if closing := strings.Index(value, glmArgValueClose); closing >= 0 {
-			value, after = value[:closing], value[closing+len(glmArgValueClose):]
+			value, after, closed = value[:closing], value[closing+len(glmArgValueClose):], true
 			if next != "" && strings.TrimSpace(after) != "" {
 				return nil, "", false
 			}
@@ -289,7 +292,7 @@ func parseGLMArgs(s string) (args []glmArg, rest string, ok bool) {
 		if strings.Contains(value, glmCallOpen) {
 			return nil, "", false
 		}
-		args = append(args, glmArg{key: key, value: glmValue(value)})
+		args = append(args, glmArg{key: key, value: glmValue(value), closed: closed})
 		if next == "" {
 			return args, after, true
 		}
