@@ -327,3 +327,19 @@ func TestLiftToolCallsFromText_QuotedGLMTagsInAClosedValueLeaveTheTrailingCall(t
 		t.Fatalf("calls = %#v, want the trailing exec", calls)
 	}
 }
+
+// A JSON wrapper quoted earlier (here, fenced) does not hide the wrapper that
+// ends the text: every wrapper is found, and only the trailing one runs.
+func TestLiftToolCallsFromText_QuotedWrapperDoesNotCancelTheTrailingWrapper(t *testing.T) {
+	wrapper := func(id, command string) string {
+		return `{"tool_calls":[{"id":"` + id + `","type":"function","function":{"name":"exec","arguments":"{\"command\":\"` + command + `\"}"}}]}`
+	}
+	text := "Exemplo:\n```\n" + wrapper("quoted", "rm -rf build") + "\n```\nAgora:\n" + wrapper("actual", "ls")
+	calls, rest := LiftToolCallsFromText(text)
+	if len(calls) != 1 || calls[0].ID != "actual" {
+		t.Fatalf("calls = %#v, want only the trailing wrapper", calls)
+	}
+	if !strings.Contains(rest, `"quoted"`) || strings.Contains(rest, `"actual"`) {
+		t.Fatalf("rest = %q, want the quoted wrapper kept and the real one removed", rest)
+	}
+}

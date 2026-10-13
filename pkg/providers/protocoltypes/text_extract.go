@@ -196,19 +196,49 @@ func FindMatchingBrace(text string, pos int) int {
 
 // --- JSON wrapper format ---
 
+// extractJSONWrapper finds every {"tool_calls": [...]} wrapper. Only those
+// that end the text can be calls (trailingCalls decides), so the run of
+// wrappers at the end, with nothing but whitespace between them, goes as one
+// span holding all of their calls. A wrapper quoted earlier no longer hides
+// the one that closes the reply.
 func extractJSONWrapper(text string) ([]ToolCall, []span) {
-	start := strings.Index(text, `{"tool_calls"`)
-	if start == -1 {
+	type wrapper struct {
+		calls []ToolCall
+		at    span
+	}
+	var found []wrapper
+	for pos := 0; pos < len(text); {
+		i := strings.Index(text[pos:], `{"tool_calls"`)
+		if i < 0 {
+			break
+		}
+		start := pos + i
+		end := FindMatchingBrace(text, start)
+		calls := parseToolCallsWrapper(text[start:end])
+		if end == start || len(calls) == 0 {
+			pos = start + 1
+			continue
+		}
+		found = append(found, wrapper{calls: calls, at: span{start, end}})
+		pos = end
+	}
+	if len(found) == 0 {
 		return nil, nil
 	}
-
-	end := FindMatchingBrace(text, start)
-	if end == start {
-		return nil, nil
+	first := len(found) - 1
+	for first > 0 && strings.TrimSpace(text[found[first-1].at.end:found[first].at.start]) == "" {
+		first--
 	}
+	var calls []ToolCall
+	for _, w := range found[first:] {
+		calls = append(calls, w.calls...)
+	}
+	return calls, []span{{found[first].at.start, found[len(found)-1].at.end}}
+}
 
-	jsonStr := text[start:end]
-
+// parseToolCallsWrapper reads the calls of one {"tool_calls": [...]} object;
+// nil when it is not one.
+func parseToolCallsWrapper(jsonStr string) []ToolCall {
 	var wrapper struct {
 		ToolCalls []struct {
 			ID       string `json:"id"`
@@ -219,11 +249,9 @@ func extractJSONWrapper(text string) ([]ToolCall, []span) {
 			} `json:"function"`
 		} `json:"tool_calls"`
 	}
-
 	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
-		return nil, nil
+		return nil
 	}
-
 	var result []ToolCall
 	for _, tc := range wrapper.ToolCalls {
 		var args map[string]any
@@ -240,10 +268,7 @@ func extractJSONWrapper(text string) ([]ToolCall, []span) {
 			},
 		})
 	}
-	if len(result) == 0 {
-		return nil, nil
-	}
-	return result, []span{{start, end}}
+	return result
 }
 
 // --- Bare JSON format ---
