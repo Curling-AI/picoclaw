@@ -301,11 +301,13 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 // única cópia (resultado de subagente numa conversa web, nota de um /stop).
 func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
 	var lost []error
+	written := 0
 	for _, msg := range msgs {
 		if err := appendToSession(agent.Sessions, sessionKey, msg); err != nil {
 			lost = append(lost, err)
 			continue
 		}
+		written++
 		if al.contextManager == nil {
 			continue
 		}
@@ -335,9 +337,12 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 		})
 		if _, checked := agent.Sessions.(session.CheckedAppender); !checked {
 			lost = append(lost, err)
+			written = 0
 		}
 	}
-	if len(lost) == 0 {
+	// What got written is in the history even when other messages of the
+	// batch were lost; whoever keeps a copy of it must hear so.
+	if written > 0 {
 		al.notifySessionHistoryChanged(sessionKey)
 	}
 	return errors.Join(lost...)

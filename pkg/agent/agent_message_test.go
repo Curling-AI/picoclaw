@@ -907,6 +907,8 @@ func TestWriteMirrored_AFailedAppendKeepsTheRestOfTheBatch(t *testing.T) {
 	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
 	agent := al.registry.GetDefaultAgent()
 	agent.Sessions = losingOneStore{SessionStore: sessions, lose: "b"}
+	notified := 0
+	al.SetSessionHistoryObserver(func(string) { notified++ })
 
 	err := al.writeMirrored(agent, conversationSession, []providers.Message{
 		{Role: "user", Content: "a"}, {Role: "user", Content: "b"}, {Role: "user", Content: "c"},
@@ -918,6 +920,27 @@ func TestWriteMirrored_AFailedAppendKeepsTheRestOfTheBatch(t *testing.T) {
 	history := sessions.GetHistory(conversationSession)
 	if len(history) != 4 || history[2].Content != "a" || history[3].Content != "c" {
 		t.Fatalf("history = %+v, want a and c written", history)
+	}
+	// a and c are in the history: whoever keeps a copy of it must hear so.
+	if notified != 1 {
+		t.Fatalf("observer notified %d times, want once for the messages that were written", notified)
+	}
+}
+
+// A batch that wrote nothing announces nothing.
+func TestWriteMirrored_NothingWrittenIsNotAnnounced(t *testing.T) {
+	al, _, sessions := newSystemMessageTestLoop(t, &countingReplyProvider{})
+	agent := al.registry.GetDefaultAgent()
+	agent.Sessions = failingAppendStore{sessions}
+	notified := 0
+	al.SetSessionHistoryObserver(func(string) { notified++ })
+
+	err := al.writeMirrored(agent, conversationSession, []providers.Message{{Role: "user", Content: "a"}})
+	if err == nil {
+		t.Fatal("the lost message was not reported")
+	}
+	if notified != 0 {
+		t.Fatalf("observer notified %d times for a batch that wrote nothing", notified)
 	}
 }
 
