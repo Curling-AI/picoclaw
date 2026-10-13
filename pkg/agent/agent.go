@@ -28,6 +28,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
+	"github.com/sipeed/picoclaw/pkg/turnresult"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -72,6 +73,9 @@ type AgentLoop struct {
 	mirror deliveryMirror
 	mu     sync.RWMutex
 
+	sessionHistoryObserverMu sync.RWMutex
+	sessionHistoryObserver   func(string)
+
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
 
@@ -95,6 +99,7 @@ type AgentLoop struct {
 
 // processOptions configures how a message is processed
 type processOptions struct {
+	ExecutionProgress func(stage string)
 	Dispatch          DispatchRequest // Normalized routed request boundary for this turn
 	SessionKey        string          // Session identifier for history/context
 	SessionAliases    []string        // Compatibility aliases for the session key
@@ -134,6 +139,10 @@ type processOptions struct {
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
 	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
 	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
+	// BackgroundResult is the async result this turn was opened for. An abort
+	// rolls the turn back, result included; runAgentLoop writes it back as a
+	// note.
+	BackgroundResult *bus.InboundMessage
 }
 
 type continuationTarget struct {
@@ -194,10 +203,15 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				return nil
 			}
 
+			if al.routeBackgroundResult(msg) {
+				continue
+			}
+
 			// Resolve the session key for this message
 			sessionKey, agentID, ok := al.resolveSteeringTarget(msg)
 			if !ok {
-				// Non-routable message (e.g., system) — process immediately.
+				// Non-routable message (e.g., a system message for the main
+				// session) — process immediately.
 				// Note: system messages are processed in the main goroutine,
 				// so they block the receive loop but guarantee session serialization.
 				al.processMessageSync(ctx, msg)
@@ -215,6 +229,13 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				phase:  TurnPhaseSetup,
 			}
 			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+				isSystem := msg.Channel == "system"
+				if isSystem {
+					// Claimed between routing and here: the result waits for
+					// that turn to end instead of riding its steering queue.
+					al.parkBackgroundResult(sessionKey, msg)
+					continue
+				}
 				if al.tryHandleStopCommand(ctx, msg, sessionKey) {
 					continue
 				}
@@ -298,7 +319,16 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}
 
 				if al.takePendingStop(sessionKey) {
+					// Same rule as a stop on a live turn: what waited for this
+					// session becomes notes, not turns.
+					al.parkedResultsToNotes(sessionKey)
 					al.releaseSessionTurnState(sessionKey, nil)
+					if m.Channel == "system" {
+						// The user stopped this conversation: the result is
+						// written for its next turn instead of opening one.
+						al.recordBackgroundNote(m)
+						return
+					}
 					target := &continuationTarget{
 						SessionKey: sessionKey,
 						Channel:    m.Channel,
@@ -569,6 +599,15 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
+	result, err := al.runAgentLoopResult(ctx, agent, opts)
+	return result.Content, err
+}
+
+func (al *AgentLoop) runAgentLoopResult(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts processOptions,
+) (turnresult.Result, error) {
 	opts = normalizeProcessOptions(opts)
 	// Resolve o Loop AQUI porque runAgentLoop é o funil de todos os caminhos —
 	// web, canais, cron, heartbeat e subturns. Um ponto só cobre todos, em vez
@@ -584,7 +623,7 @@ func (al *AgentLoop) runAgentLoop(
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
-		return "", err
+		return turnresult.Failure(err), err
 	}
 
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
@@ -617,10 +656,16 @@ func (al *AgentLoop) runAgentLoop(
 	pipeline := NewPipeline(al)
 	result, err := al.runTurn(ctx, ts, pipeline)
 	if err != nil {
-		return "", err
+		return turnresult.Failure(err), err
 	}
 	if result.status == TurnEndStatusAborted {
-		return "", nil
+		if note := opts.BackgroundResult; note != nil {
+			// The abort (a /stop, live or pending) rolled the turn back with the
+			// result that opened it. Written now that the turn is over, after
+			// the cut, so the work is not lost.
+			al.recordBackgroundNote(*note)
+		}
+		return turnresult.Result{Status: turnresult.Canceled, Content: ""}, nil
 	}
 
 	for _, followUp := range result.followUps {
@@ -690,7 +735,11 @@ func (al *AgentLoop) runAgentLoop(
 			})
 	}
 
-	return result.finalContent, nil
+	status := turnresult.Completed
+	if result.status == TurnEndStatusError || result.incomplete {
+		status = turnresult.Failed
+	}
+	return turnresult.Result{Status: status, Content: result.finalContent}, nil
 }
 
 // selectCandidates returns the model candidates and resolved model name to use

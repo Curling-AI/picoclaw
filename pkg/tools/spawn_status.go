@@ -8,10 +8,11 @@ import (
 	"time"
 )
 
-// webInternalChannel is the channel web turns run on. Its chat id is PER RUN,
-// not per conversation, so it cannot be used to scope anything that must
-// survive from one turn to the next.
-const webInternalChannel = "grpc"
+// WebRunChannel is the channel web turns run on: one run per message, whose
+// stream ends with the run. Its chat id is PER RUN, not per conversation, so it
+// cannot be used to scope anything that must survive from one turn to the
+// next, and nothing can reply on it after the run.
+const WebRunChannel = "grpc"
 
 // scopeChatID returns the chat id to filter by, empty when filtering by it
 // would be wrong.
@@ -28,7 +29,7 @@ const webInternalChannel = "grpc"
 // WhatsApp, Slack) têm chat id estável e seguem filtrados — lá o escopo é o
 // que impede uma conversa de ver a tarefa de outra.
 func scopeChatID(channel, chatID string) string {
-	if channel == webInternalChannel {
+	if channel == WebRunChannel {
 		return ""
 	}
 	return chatID

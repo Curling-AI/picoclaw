@@ -396,6 +396,11 @@ func (al *AgentLoop) buildCommandsRuntime(
 				opts.Dispatch.SessionScope,
 				opts.Dispatch.SessionAliases,
 			)
+			// What waits behind a turn (a mirrored delivery, a parked
+			// background result) belongs to the history being cleared; flushed
+			// later, it would hand the old task to the next turn. Dropped first,
+			// so no flush can slip in between.
+			al.dropMirroredDeliveries(opts.SessionKey)
 			return al.contextManager.Clear(ctx, opts.SessionKey)
 		}
 

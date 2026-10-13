@@ -12,9 +12,14 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
-func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipeline) (turnResult, error) {
+func (al *AgentLoop) runTurn(
+	ctx context.Context,
+	ts *turnState,
+	pipeline *Pipeline,
+) (outcome turnResult, turnErr error) {
 	if ts != nil && ts.agent != nil {
 		modelMu := ts.agent.modelStateMutex()
 		modelMu.RLock()
@@ -27,9 +32,13 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
+	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
+	defer func() {
+		ts.finishBackgroundProcesses(turnErr == nil && outcome.status == TurnEndStatusCompleted && turnCtx.Err() == nil)
+	}()
 
 	if al.takePendingStop(ts.sessionKey) {
 		_ = ts.requestHardAbort()
@@ -254,6 +263,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 		// Execute LLM call via Pipeline
 		ts.setPhase(TurnPhaseRunning)
+		ts.reportExecutionStage("thinking")
 		ctrl, callErr := pipeline.CallLLM(ctx, turnCtx, ts, exec, iteration)
 		if callErr != nil {
 			turnStatus = TurnEndStatusError
@@ -283,12 +293,14 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				exec.finalIsFallback = true
 			}
 			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+			result.incomplete = exec.incomplete || exec.finalIsFallback
 			if finalizeErr != nil {
 				turnStatus = TurnEndStatusError
 			}
 			return result, finalizeErr
 		case ControlToolLoop:
 			// Execute tools via Pipeline
+			ts.reportExecutionStage("tool")
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
 			exec.toolRanThisTurn = true
 			switch toolCtrl {
@@ -308,6 +320,10 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 					turnStatus = TurnEndStatusError
 					return turnResult{}, fmt.Errorf("hook requested turn abort")
 				}
+				if exec.handoffError != nil {
+					turnStatus = TurnEndStatusError
+					return turnResult{}, exec.handoffError
+				}
 				// ExecuteTools returned ControlBreak:
 				// - allResponsesHandled=true: finalize without DefaultResponse (exec.finalContent empty)
 				// - allResponsesHandled=false: finalize with the text ExecuteTools left in
@@ -318,6 +334,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 					finalContent = exec.finalContent
 				}
 				result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+				result.incomplete = exec.incomplete || exec.finalIsFallback
 				if finalizeErr != nil {
 					turnStatus = TurnEndStatusError
 				}
@@ -333,6 +350,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 	synthesized := finalContent == ""
 	if synthesized {
+		exec.incomplete = true
 		if ts.currentIteration() >= maxIter && maxIter > 0 {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
@@ -353,6 +371,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+	result.incomplete = exec.incomplete || exec.finalIsFallback
 	if err != nil {
 		turnStatus = TurnEndStatusError
 	}

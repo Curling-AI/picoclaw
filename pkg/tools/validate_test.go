@@ -542,3 +542,39 @@ func TestCoerceToolArgs_AmbiguousLeftForValidation(t *testing.T) {
 		t.Error("expected validation to still reject the unparseable value")
 	}
 }
+
+// A model that writes calls as markup (GLM) hands arrays and objects over as
+// their JSON text; text that is not JSON of the declared type stays as it is.
+func TestCoerceToolArgs_DecodesJSONTextForArraysAndObjects(t *testing.T) {
+	schema := map[string]any{
+		"properties": map[string]any{
+			"to":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"ids":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+			"headers": map[string]any{"type": "object"},
+			"broken":  map[string]any{"type": "array"},
+			"wrong":   map[string]any{"type": "object"},
+		},
+	}
+	args := map[string]any{
+		"to":      `["a@x.com", "b@x.com"]`,
+		"ids":     ` ["1", "2"] `,
+		"headers": `{"X-Trace": "1"}`,
+		"broken":  "[a, b",
+		"wrong":   `["not", "an", "object"]`,
+	}
+
+	coerceToolArgs(schema, args)
+
+	if to, ok := args["to"].([]any); !ok || len(to) != 2 || to[0] != "a@x.com" {
+		t.Errorf("to = %#v, want the decoded list", args["to"])
+	}
+	if ids, ok := args["ids"].([]any); !ok || ids[1] != int64(2) {
+		t.Errorf("ids = %#v, want decoded and item-coerced", args["ids"])
+	}
+	if h, ok := args["headers"].(map[string]any); !ok || h["X-Trace"] != "1" {
+		t.Errorf("headers = %#v, want the decoded object", args["headers"])
+	}
+	if args["broken"] != "[a, b" || args["wrong"] != `["not", "an", "object"]` {
+		t.Errorf("text that is not JSON of the declared type changed: %#v / %#v", args["broken"], args["wrong"])
+	}
+}

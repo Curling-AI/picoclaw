@@ -30,7 +30,7 @@ func TestGetRegistered_ReturnsExpiredHiddenTools(t *testing.T) {
 	}
 }
 
-func TestExpiredToolAliases(t *testing.T) {
+func TestHiddenToolAliases(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register(&mockRegistryTool{name: "read_file", desc: "core"})
 	r.RegisterHidden(hiddenServerTool("mcp_skip_skip_project_status", "skip_project_status"))
@@ -43,7 +43,7 @@ func TestExpiredToolAliases(t *testing.T) {
 	r.RegisterHidden(hiddenServerTool("mcp_drive_files_get", "files.get"))
 	r.PromoteTools([]string{"mcp_skip_skip_project_create"}, 5)
 
-	aliases := r.ExpiredToolAliases()
+	aliases := r.HiddenToolAliases()
 
 	want := map[string]string{
 		"mcp_skip_skip_project_status": "mcp_skip_skip_project_status",
@@ -56,6 +56,9 @@ func TestExpiredToolAliases(t *testing.T) {
 		"get-contact":                  "mcp_crm_Get-Contact",
 		"mcp_drive_files_get":          "mcp_drive_files_get",
 		"files.get":                    "mcp_drive_files_get",
+		// Live in the registry: whether a turn lacks it is the turn's call.
+		"skip_project_create":          "mcp_skip_skip_project_create",
+		"mcp_skip_skip_project_create": "mcp_skip_skip_project_create",
 	}
 	for alias, name := range want {
 		if got := aliases[alias]; got != name {
@@ -63,11 +66,9 @@ func TestExpiredToolAliases(t *testing.T) {
 		}
 	}
 	for _, absent := range []string{
-		"skip_project_create",          // live: nothing to heal
-		"mcp_skip_skip_project_create", // live
-		"get_issue",                    // two servers have it
-		"search",                       // plain word
-		"read_file",                    // also a core tool
+		"get_issue", // two servers have it
+		"search",    // plain word
+		"read_file", // also a core tool
 	} {
 		if name, ok := aliases[absent]; ok {
 			t.Errorf("aliases[%q] = %q, want no entry", absent, name)

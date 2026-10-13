@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -14,6 +15,21 @@ import (
 const maxOutputBufferSize = 1 * 1024 * 1024 // 1MB
 
 const outputTruncateMarker = "\n... [output truncated, exceeded 1MB]\n"
+
+type backgroundProcessOwnerKey struct{}
+
+// WithBackgroundProcessOwner scopes exec processes to one turn, independently
+// of the conversation session used by tools for routing and persistence.
+func WithBackgroundProcessOwner(ctx context.Context, owner string) context.Context {
+	return context.WithValue(ctx, backgroundProcessOwnerKey{}, owner)
+}
+
+func backgroundProcessOwner(ctx context.Context) string {
+	if owner, ok := ctx.Value(backgroundProcessOwnerKey{}).(string); ok {
+		return owner
+	}
+	return ToolSessionKey(ctx)
+}
 
 // PtyKeyMode represents arrow key encoding mode for PTY sessions.
 // Programs send smkx/rmkx sequences to switch between CSI and SS3 modes.
@@ -31,15 +47,21 @@ var (
 	ErrSessionDone     = errors.New("session already completed")
 	ErrPTYNotSupported = errors.New("PTY is not supported on this platform")
 	ErrNoStdin         = errors.New("no stdin available")
+
+	// errProcessGone: the process had already exited, nothing was killed.
+	errProcessGone = errors.New("process already gone")
 )
 
 type ProcessSession struct {
-	mu              sync.Mutex
-	ID              string
-	PID             int
-	Command         string
-	PTY             bool
-	Background      bool
+	mu         sync.Mutex
+	ID         string
+	PID        int
+	Command    string
+	PTY        bool
+	Background bool
+	// Owner is the turn that started or inherited the process, so a later
+	// failed turn in the same conversation leaves earlier successful work alone.
+	Owner           string
 	StartTime       int64
 	ExitCode        int
 	Status          string
@@ -96,6 +118,15 @@ func (s *ProcessSession) SetExitCode(code int) {
 }
 
 func (s *ProcessSession) killProcess() error {
+	if err := s.terminate(); err != nil && !errors.Is(err, errProcessGone) {
+		return err
+	}
+	return nil
+}
+
+// terminate kills the session's process group and marks the session done;
+// errProcessGone when the process had already exited.
+func (s *ProcessSession) terminate() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -108,13 +139,26 @@ func (s *ProcessSession) killProcess() error {
 		return ErrSessionNotFound
 	}
 
-	if err := killProcessGroup(pid); err != nil {
+	err := killProcessGroup(pid)
+	if err != nil && !errors.Is(err, errProcessGone) {
 		return err
 	}
 
 	s.Status = "done"
 	s.ExitCode = -1
-	return nil
+	return err
+}
+
+func (s *ProcessSession) owner() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Owner
+}
+
+func (s *ProcessSession) pid() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.PID
 }
 
 func (s *ProcessSession) Kill() error {
@@ -254,6 +298,86 @@ func (sm *SessionManager) List() []SessionInfo {
 	}
 
 	return result
+}
+
+// KillOwnedBy stops the processes started by owner and returns the session IDs
+// of those it actually stopped. A session whose shell already exited still
+// counts: what the shell left in the background (nohup script &) keeps running
+// in its process group.
+func (sm *SessionManager) KillOwnedBy(owner string) []string {
+	if owner == "" {
+		return nil
+	}
+	sm.mu.RLock()
+	var owned []*ProcessSession
+	live := make(map[int]string) // pid of a running session -> its id
+	for _, session := range sm.sessions {
+		if !session.IsDone() {
+			live[session.pid()] = session.ID
+		}
+		if session.owner() == owner {
+			owned = append(owned, session)
+		}
+	}
+	sm.mu.RUnlock()
+
+	killed := make([]string, 0, len(owned))
+	for _, session := range owned {
+		if stopSession(session, live) {
+			killed = append(killed, session.ID)
+		}
+	}
+	return killed
+}
+
+// stopSession kills a running session's group, or what is left of a finished
+// one's, and reports whether something was killed. A finished session's pid
+// that now leads another running session's group is left alone.
+func stopSession(session *ProcessSession, live map[int]string) bool {
+	err := session.terminate()
+	if errors.Is(err, ErrSessionDone) {
+		pid := session.pid()
+		if id, ok := live[pid]; ok && id != session.ID {
+			return false
+		}
+		err = killLeftoverGroup(pid)
+	}
+	return err == nil
+}
+
+// HandOver gives the processes started by from to owner: a sub-turn that
+// finished hands what it left running to the turn that launched it, whose
+// failure must then stop them.
+func (sm *SessionManager) HandOver(from, owner string) {
+	if from == "" || owner == "" {
+		return
+	}
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	for _, session := range sm.sessions {
+		session.mu.Lock()
+		if session.Owner == from {
+			session.Owner = owner
+		}
+		session.mu.Unlock()
+	}
+}
+
+// KillBackgroundSessions stops the background processes that the agent session
+// owner started with the exec tool, including what their shells left running.
+func KillBackgroundSessions(owner string) []string {
+	if sm := getSessionManager(); sm != nil {
+		return sm.KillOwnedBy(owner)
+	}
+	return nil
+}
+
+// HandOverBackgroundSessions gives the background processes of the agent
+// session from to owner (see SessionManager.HandOver).
+func HandOverBackgroundSessions(from, owner string) {
+	if sm := getSessionManager(); sm != nil {
+		sm.HandOver(from, owner)
+	}
 }
 
 func generateSessionID() string {

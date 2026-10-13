@@ -517,7 +517,78 @@ func (p *Provider) Chat(
 		return nil, err
 	}
 	out.ProviderRequestID = resp.Header.Get(requestIDHeader)
+	// Same rescue the streaming path does inline: subagents call without
+	// streaming, and their GLM calls written as text used to reach the loop as
+	// a plain answer.
+	if len(out.ToolCalls) == 0 && out.Content != "" {
+		if extracted, rest := liftTextToolCalls(out.Content, tools); len(extracted) > 0 {
+			out.ToolCalls = extracted
+			out.Content = rest
+		}
+	}
+	repairToolCallMarkup(out.ToolCalls, tools, out.UpstreamID, out.ResolvedProvider)
 	return out, nil
+}
+
+// liftTextToolCalls returns the tool calls the model wrote into text, and the
+// text without them, only when every one of them names a tool this request
+// offered. A caller that offers no tools (a summary, a side question, an image
+// description) keeps its text, and prose that quotes a call to a tool outside
+// the request stays prose: run, it would execute something the model only
+// showed.
+func liftTextToolCalls(text string, tools []ToolDefinition) ([]ToolCall, string) {
+	if len(tools) == 0 {
+		return nil, text
+	}
+	extracted, rest := protocoltypes.LiftToolCallsFromText(text)
+	if !allOffered(extracted, tools) {
+		return nil, text
+	}
+	return extracted, rest
+}
+
+// liftReasoningToolCalls is liftTextToolCalls for a model's thinking, under the
+// same rule: a call only counts as the last thing written.
+func liftReasoningToolCalls(thinking string, tools []ToolDefinition) []ToolCall {
+	if len(tools) == 0 {
+		return nil
+	}
+	extracted, _ := protocoltypes.LiftToolCallsFromText(thinking)
+	if !allOffered(extracted, tools) {
+		return nil
+	}
+	return extracted
+}
+
+func allOffered(calls []ToolCall, tools []ToolDefinition) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	offered := make(map[string]struct{}, len(tools))
+	for _, t := range tools {
+		offered[t.Function.Name] = struct{}{}
+	}
+	for _, tc := range calls {
+		if _, ok := offered[tc.Name]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// repairToolCallMarkup fixes, in place, structured tool calls that came back
+// with GLM argument markup inside them, and logs which ones needed it. The
+// log never carries argument values: they are user content.
+func repairToolCallMarkup(calls []ToolCall, tools []ToolDefinition, upstreamID, resolvedProvider string) {
+	repaired := protocoltypes.RepairToolCallMarkup(calls, tools)
+	if len(repaired) == 0 {
+		return
+	}
+	logger.WarnCF("openai_compat", "Repaired GLM argument markup inside tool calls", map[string]any{
+		"tools":             repaired,
+		"upstream_id":       upstreamID,
+		"resolved_provider": resolvedProvider,
+	})
 }
 
 // ChatStream implements streaming via OpenAI-compatible SSE (stream: true).
@@ -597,6 +668,7 @@ func (p *Provider) ChatStreamEvents(
 	out, err := parseStreamResponse(
 		ctx,
 		withStreamingReadIdleTimeout(resp.Body, defaultStreamingReadIdleTimeout),
+		tools,
 		onChunk,
 	)
 	if err != nil {
@@ -655,6 +727,7 @@ func sortedToolIndexes[T any](m map[int]T) []int {
 func parseStreamResponse(
 	ctx context.Context,
 	reader io.Reader,
+	tools []ToolDefinition,
 	onChunk func(StreamChunk),
 ) (*LLMResponse, error) {
 	var textContent strings.Builder
@@ -899,9 +972,9 @@ func parseStreamResponse(
 	// text content instead of the structured tool_calls field. Extract them.
 	content := textContent.String()
 	if len(toolCalls) == 0 && content != "" {
-		if extracted := protocoltypes.ExtractToolCallsFromText(content); len(extracted) > 0 {
+		if extracted, rest := liftTextToolCalls(content, tools); len(extracted) > 0 {
 			toolCalls = extracted
-			content = protocoltypes.StripToolCallsFromText(content)
+			content = rest
 		}
 	}
 
@@ -912,18 +985,21 @@ func parseStreamResponse(
 	//
 	// Gated on empty content on purpose. A model that answered AND merely
 	// mused "I could call read_file" in its scratchpad must not have that
-	// musing promoted to a real call.
+	// musing promoted to a real call. For the same reason only a call that
+	// ends the thinking counts: one mid-scratchpad is the model weighing it.
 	if len(toolCalls) == 0 && content == "" {
 		for _, thinking := range []string{reasoningContent.String(), reasoning.String()} {
 			if thinking == "" {
 				continue
 			}
-			if extracted := protocoltypes.ExtractToolCallsFromText(thinking); len(extracted) > 0 {
+			if extracted := liftReasoningToolCalls(thinking, tools); len(extracted) > 0 {
 				toolCalls = extracted
 				break
 			}
 		}
 	}
+
+	repairToolCallMarkup(toolCalls, tools, upstreamID, resolvedProvider)
 
 	// Raw frames are the only way to tell reasoning-only from a dropped final
 	// chunk or broken framing after the fact.

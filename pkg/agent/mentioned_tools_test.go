@@ -45,7 +45,7 @@ func discoveryExchange(t *testing.T, id string, names ...string) []providers.Mes
 	}
 }
 
-func TestMentionedExpiredToolNames(t *testing.T) {
+func TestMentionedMissingToolNames(t *testing.T) {
 	registry := tools.NewToolRegistry()
 	registry.RegisterHidden(newServerTool(statusToolName, "skip_project_status"))
 	registry.RegisterHidden(newServerTool("mcp_skip_skip_cloud_list_logs", "skip_cloud_list_logs"))
@@ -55,6 +55,10 @@ func TestMentionedExpiredToolNames(t *testing.T) {
 	registry.RegisterHidden(newServerTool("mcp_skip_skip_project_delete", "skip_project_delete"))
 	registry.RegisterHidden(newServerTool(createToolName, "skip_project_create"))
 	registry.PromoteTools([]string{createToolName}, 5)
+	// Promoted by another session after this turn seeded: live in the
+	// registry, still missing from the turn.
+	registry.PromoteTools([]string{"mcp_skip_skip_cloud_list_logs"}, 5)
+	offered := map[string]struct{}{createToolName: {}}
 
 	messages := discoveryExchange(t, "s1",
 		statusToolName, "mcp_skip_skip_cloud_list_logs", "mcp_skip_skip_cloud_list_migrations",
@@ -76,11 +80,11 @@ func TestMentionedExpiredToolNames(t *testing.T) {
 		},
 	)
 
-	got := strings.Join(mentionedExpiredToolNames(messages, registry), ",")
+	got := strings.Join(mentionedMissingToolNames(messages, registry, offered), ",")
 	want := statusToolName + ",mcp_skip_skip_cloud_list_logs,mcp_drive_files_get"
 	if got != want {
 		t.Errorf(
-			"mentioned = %s, want %s (newest first; live, undiscovered, user/tool text and older mentions ignored)",
+			"mentioned = %s, want %s (newest first; offered, undiscovered, user/tool text and older mentions ignored)",
 			got,
 			want,
 		)
@@ -160,7 +164,7 @@ func TestMentionsMatchWhateverTheCase(t *testing.T) {
 	messages := append(discoveryExchange(t, "s1", statusToolName),
 		providers.Message{Role: "assistant", Content: "Lendo com SKIP_PROJECT_STATUS agora."})
 
-	if got := mentionedExpiredToolNames(messages, registry); len(got) != 1 || got[0] != statusToolName {
+	if got := mentionedMissingToolNames(messages, registry, nil); len(got) != 1 || got[0] != statusToolName {
 		t.Fatalf("mentioned = %v, want [%s]", got, statusToolName)
 	}
 }
@@ -273,7 +277,7 @@ func TestQualifiedToolNamesMatch(t *testing.T) {
 	messages := append(discoveryExchange(t, "s1", statusToolName, "mcp_drive_files_get"),
 		providers.Message{Role: "assistant", Content: "Chamo functions.skip_project_status e files.get."})
 
-	got := strings.Join(mentionedExpiredToolNames(messages, registry), ",")
+	got := strings.Join(mentionedMissingToolNames(messages, registry, nil), ",")
 	if want := statusToolName + ",mcp_drive_files_get"; got != want {
 		t.Fatalf("mentioned = %s, want %s", got, want)
 	}
@@ -313,9 +317,9 @@ func (p *expiringRecorder) Chat(
 
 func (*expiringRecorder) GetDefaultModel() string { return "mock-model" }
 
-// A tool the turn already brought back returns free when it expires again: a
-// spent page must not leave a long turn with its read tools gone.
-func TestAToolTheTurnBroughtBackReturnsFree(t *testing.T) {
+// A tool the turn brought back stays offered after the registry's TTL expires
+// it: a spent page must not leave a long turn with its read tools gone.
+func TestToolsTheTurnBroughtBackStayOffered(t *testing.T) {
 	const named = maxRevivedDiscoveredTools + 1
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()

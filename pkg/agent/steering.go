@@ -543,15 +543,30 @@ func (al *AgentLoop) HardAbort(sessionKey string) error {
 	// Use isHardAbort=true for hard abort to immediately cancel all children.
 	ts.Finish(true)
 
-	// Roll back session history to the state before the turn started.
-	if ts.session != nil {
-		history := ts.session.GetHistory(sessionKey)
-		if ts.initialHistoryLength < len(history) {
-			ts.session.SetHistory(sessionKey, history[:ts.initialHistoryLength])
-		}
-	}
-
+	al.rollBackAbortedTurn(sessionKey, ts)
 	return nil
+}
+
+// rollBackAbortedTurn cuts the session history back to where the turn started,
+// while the turn still holds the session. A turn that already ended restored
+// its own snapshot, and what was written into the conversation after it (a
+// background result note, a mirrored delivery) must stay. Under the session's
+// delivery stripe, so such a write lands either behind the turn (queued, written
+// when it ends) or after this cut.
+func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
+	if ts.session == nil {
+		return
+	}
+	stripe := al.mirror.stripe(sessionKey)
+	stripe.Lock()
+	defer stripe.Unlock()
+	if al.getActiveTurnState(sessionKey) != ts {
+		return
+	}
+	history := ts.session.GetHistory(sessionKey)
+	if ts.initialHistoryLength < len(history) {
+		ts.session.SetHistory(sessionKey, history[:ts.initialHistoryLength])
+	}
 }
 
 // ====================== Follow-Up Injection ======================

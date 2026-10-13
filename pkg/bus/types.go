@@ -1,5 +1,7 @@
 package bus
 
+import "time"
+
 // SenderInfo provides structured sender identity information.
 type SenderInfo struct {
 	Platform    string `json:"platform,omitempty"`     // "telegram", "discord", "slack", ...
@@ -48,6 +50,10 @@ type InboundMessage struct {
 	SenderID  string `json:"sender_id"`
 	ChatID    string `json:"chat_id"`
 	MessageID string `json:"message_id,omitempty"` // platform message ID
+
+	// LaunchedAt is when the async work behind a system message started. A
+	// conversation cleared after that is not the one the work belongs to.
+	LaunchedAt time.Time `json:"launched_at,omitzero"`
 }
 
 // OutboundScope captures the structured session scope associated with an

@@ -2,6 +2,7 @@ package openai_compat
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestParseStreamResponse_ToolCallAtNonZeroIndex(t *testing.T) {
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestParseStreamResponse_ToolCallIndexGap(t *testing.T) {
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -74,7 +75,7 @@ func TestParseStreamResponse_SnapshotIncludesNonZeroIndex(t *testing.T) {
 	)
 
 	var sawWriteFile bool
-	_, err := parseStreamResponse(context.Background(), strings.NewReader(body), func(chunk StreamChunk) {
+	_, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, func(chunk StreamChunk) {
 		for _, tc := range chunk.ToolCalls {
 			if tc.Function != nil && tc.Function.Name == "write_file" {
 				sawWriteFile = true
@@ -99,7 +100,7 @@ func TestParseStreamResponse_ToolCallInReasoningChannel(t *testing.T) {
 		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), readFileTool, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -114,6 +115,23 @@ func TestParseStreamResponse_ToolCallInReasoningChannel(t *testing.T) {
 	}
 }
 
+// Nor when the thinking weighs a call and moves on: only a call that ends the
+// thinking is one the model meant to make.
+func TestParseStreamResponse_ReasoningCallMidThoughtIsNotLifted(t *testing.T) {
+	body := sse(
+		`{"choices":[{"delta":{"reasoning_content":"Poderia chamar <function=read_file>\n<parameter=path>a.txt</parameter>\n</function> mas já li esse arquivo."}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), readFileTool, nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("tool calls = %+v, want none", resp.ToolCalls)
+	}
+}
+
 // The same salvage must NOT fire when the model actually answered: musing
 // "I could call read_file" in the scratchpad is not a call, and promoting it
 // would run tools the model never asked for.
@@ -124,7 +142,7 @@ func TestParseStreamResponse_ReasoningNotSalvagedWhenContentExists(t *testing.T)
 		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
 	)
 
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil)
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), nil, nil)
 	if err != nil {
 		t.Fatalf("parseStreamResponse: %v", err)
 	}
@@ -146,7 +164,7 @@ func TestParseStreamResponse_ToolCallMarkupIsNotStreamed(t *testing.T) {
 	)
 
 	var published []string
-	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), func(c StreamChunk) {
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), readFileTool, func(c StreamChunk) {
 		if c.Content != "" {
 			published = append(published, c.Content)
 		}
@@ -165,5 +183,55 @@ func TestParseStreamResponse_ToolCallMarkupIsNotStreamed(t *testing.T) {
 	}
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "read_file" {
 		t.Fatalf("tool calls = %+v, want one read_file", resp.ToolCalls)
+	}
+}
+
+var readFileTool = []ToolDefinition{{Type: "function", Function: ToolFunctionDefinition{
+	Name: "read_file",
+	Parameters: map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"path": map[string]any{"type": "string"}},
+	},
+}}}
+
+// A call written in text is only lifted for a tool the request offered: a
+// summary or side question (no tools) keeps its text, and prose that shows a
+// call to some other tool stays prose instead of running it.
+func TestParseStreamResponse_TextCallOnlyForOfferedTools(t *testing.T) {
+	body := sse(
+		`{"choices":[{"delta":{"content":"<tool_call>exec<arg_key>command</arg_key><arg_value>rm -rf tmp</arg_value></tool_call>"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	)
+	for name, tools := range map[string][]ToolDefinition{"no tools": nil, "other tool": readFileTool} {
+		resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), tools, nil)
+		if err != nil {
+			t.Fatalf("%s: parseStreamResponse: %v", name, err)
+		}
+		if len(resp.ToolCalls) != 0 || !strings.Contains(resp.Content, "<tool_call>exec") {
+			t.Fatalf("%s: calls = %+v, content = %q; want the text left alone", name, resp.ToolCalls, resp.Content)
+		}
+	}
+}
+
+// quotedCallBeforeCutGLMBlock quotes a complete call and then starts the real
+// one, which the output cap cuts.
+const quotedCallBeforeCutGLMBlock = `Example only: {"name":"exec","arguments":{"command":"echo example"}}` +
+	"\n<tool_call>write_file<arg_key>path</arg_key><arg_value>draft.md"
+
+// A call quoted before a GLM block the output cap cut is not the last thing
+// written: nothing runs, and the text stays for the loop to retry.
+func TestParseStreamResponse_QuotedCallBeforeACutGLMBlockIsNotLifted(t *testing.T) {
+	delta, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"delta": map[string]any{"content": quotedCallBeforeCutGLMBlock}}},
+	})
+	body := sse(string(delta), `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
+	tools := []ToolDefinition{glmTestTool("exec", "command"), glmTestTool("write_file", "path", "content")}
+
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), tools, nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 || resp.Content != quotedCallBeforeCutGLMBlock {
+		t.Fatalf("calls = %+v, content = %q; want the text untouched", resp.ToolCalls, resp.Content)
 	}
 }
