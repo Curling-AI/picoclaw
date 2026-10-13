@@ -356,7 +356,10 @@ func spawnSubTurn(
 	// 4. Create INDEPENDENT child context (not derived from parent ctx).
 	// This allows the child to continue running after parent finishes gracefully.
 	// The child has its own timeout for self-protection.
-	childCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Retain trusted request metadata (including client capabilities), while
+	// detaching cancellation/deadlines so graceful parent completion does not
+	// revoke the child's authorization context or cancel independent work.
+	childCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	// A synchronous child has its caller blocked on it, so it ends with the
 	// caller's turn: a stop (or a new message after one) must not leave the turn

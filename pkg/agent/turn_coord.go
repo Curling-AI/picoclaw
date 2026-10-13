@@ -320,6 +320,10 @@ func (al *AgentLoop) runTurn(
 					turnStatus = TurnEndStatusError
 					return turnResult{}, fmt.Errorf("hook requested turn abort")
 				}
+				if exec.handoffError != nil {
+					turnStatus = TurnEndStatusError
+					return turnResult{}, exec.handoffError
+				}
 				// ExecuteTools returned ControlBreak:
 				// - allResponsesHandled=true: finalize without DefaultResponse (exec.finalContent empty)
 				// - allResponsesHandled=false: finalize with the text ExecuteTools left in

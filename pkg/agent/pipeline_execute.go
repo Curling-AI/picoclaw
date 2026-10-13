@@ -116,6 +116,7 @@ func (p *Pipeline) ExecuteTools(
 	iteration int,
 ) ToolControl {
 	al := p.al
+	turnCtx = withToolTurnOrigin(turnCtx, ts)
 	normalizedToolCalls := exec.normalizedToolCalls
 
 	ts.setPhase(TurnPhaseTools)
@@ -371,6 +372,13 @@ toolLoop:
 							}))
 							resCancel()
 						}
+					}
+
+					if hookResult.EndTurn && hookResult.IsError {
+						return finishFailedToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:], hookResult.ForUser)
+					}
+					if hookResult.EndTurn {
+						return finishToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:])
 					}
 
 					if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
@@ -780,6 +788,13 @@ toolLoop:
 				}))
 				resCancel()
 			}
+		}
+
+		if toolResult.EndTurn && toolResult.IsError {
+			return finishFailedToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:], toolResult.ForUser)
+		}
+		if toolResult.EndTurn {
+			return finishToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:])
 		}
 
 		// Loop-detection guardrail: evaluate the recorded tool call.
