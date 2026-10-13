@@ -897,3 +897,26 @@ func TestCloseIdempotent(t *testing.T) {
 		t.Fatalf("expected ErrBusClosed after multiple closes, got %v", err)
 	}
 }
+
+type clearingDelegate struct{ cleared []string }
+
+func (*clearingDelegate) GetStreamer(context.Context, string, string, string) (Streamer, bool) {
+	return nil, false
+}
+
+func (d *clearingDelegate) ClearFinalizedStream(channel, chatID, sessionKey string) {
+	d.cleared = append(d.cleared, channel+":"+chatID+":"+sessionKey)
+}
+
+func TestClearFinalizedStreamReachesADelegateThatTracksThem(t *testing.T) {
+	mb := NewMessageBus()
+	mb.ClearFinalizedStream("pico", "chat", "s") // no delegate: a no-op
+
+	d := &clearingDelegate{}
+	mb.SetStreamDelegate(d)
+	mb.ClearFinalizedStream("pico", "chat", "s")
+
+	if len(d.cleared) != 1 || d.cleared[0] != "pico:chat:s" {
+		t.Fatalf("cleared = %v, want [pico:chat:s]", d.cleared)
+	}
+}

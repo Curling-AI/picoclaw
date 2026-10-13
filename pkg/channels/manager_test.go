@@ -3543,3 +3543,20 @@ func TestSplitMarkerStreamerForwardsTurnUsage(t *testing.T) {
 		t.Errorf("inner usage = (%d, %d), want (1234, 567)", inner.inputTokens, inner.outputTokens)
 	}
 }
+
+func TestClearFinalizedStreamForgetsTheSessionMarker(t *testing.T) {
+	m := &Manager{}
+	key := streamSuppressionKey("pico", "chat", "s")
+	other := streamSuppressionKey("pico", "chat", "other")
+	m.streamActive.Store(key, true)
+	m.streamActive.Store(other, true)
+
+	m.ClearFinalizedStream("pico", "chat", "s")
+
+	if _, ok := m.streamActive.Load(key); ok {
+		t.Fatal("marker still set: the next final outbound would be dropped as a duplicate")
+	}
+	if _, ok := m.streamActive.Load(other); !ok {
+		t.Fatal("another session's marker was cleared")
+	}
+}

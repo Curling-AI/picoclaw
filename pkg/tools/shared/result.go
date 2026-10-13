@@ -41,6 +41,13 @@ type ToolResult struct {
 	// Used for internal error handling and logging.
 	Err error `json:"-"`
 
+	// OutcomeUnknown marks an error with no answer from the other side (EOF,
+	// gateway timeout, canceled context, unreachable server): the call may
+	// still have run there. A server that answered with an error result
+	// reported the call as not done, so it stays false there.
+	// (seucaranguejo fork)
+	OutcomeUnknown bool `json:"-"`
+
 	// Media contains media store refs produced by this tool.
 	// When non-empty, the agent will publish these as OutboundMediaMessage.
 	Media []string `json:"media,omitempty"`

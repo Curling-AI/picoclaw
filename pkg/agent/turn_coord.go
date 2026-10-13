@@ -348,7 +348,8 @@ func (al *AgentLoop) runTurn(
 		return al.abortTurn(ts)
 	}
 
-	if finalContent == "" {
+	synthesized := finalContent == ""
+	if synthesized {
 		exec.incomplete = true
 		if ts.currentIteration() >= maxIter && maxIter > 0 {
 			// The tool-limit fallback stays in history on purpose: next turn
@@ -358,13 +359,15 @@ func (al *AgentLoop) runTurn(
 			finalContent = ts.opts.DefaultResponse
 			exec.finalIsFallback = true
 		}
-		pipeline.beginSynthesizedFinalStream(turnCtx, ts, exec)
 	}
 
 	// Check hard abort before finalizing (may have been set during tool execution)
 	if ts.hardAbortRequested() {
 		turnStatus = TurnEndStatusAborted
 		return al.abortTurn(ts)
+	}
+	if synthesized {
+		pipeline.beginSynthesizedFinalStream(turnCtx, ts, exec)
 	}
 
 	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)

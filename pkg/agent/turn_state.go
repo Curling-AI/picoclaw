@@ -310,6 +310,11 @@ type turnState struct {
 
 	// repeats is the repeat guard (repeat_guard.go). Turn goroutine only.
 	repeats repeatGuard
+	// revivedTools holds the discovered tools this turn added to its set
+	// without the model calling them: named by the model (mentioned_tools.go)
+	// or before a retry (discovery_revival.go). Both share one page of distinct
+	// tools per turn (takeHealBudget). Turn goroutine only.
+	revivedTools map[string]struct{}
 
 	followUps []bus.InboundMessage
 

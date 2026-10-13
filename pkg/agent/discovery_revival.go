@@ -8,9 +8,31 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// maxRevivedDiscoveredTools matches one discovery page, so a retry never
-// offers more deferred tools than a single tool_search would.
+// maxRevivedDiscoveredTools matches one discovery page: a turn never brings
+// back more distinct uncalled deferred tools than a single tool_search would
+// list, across retries and the tools the model names.
 const maxRevivedDiscoveredTools = 8
+
+// takeHealBudget returns the part of missing this turn may still bring back,
+// and charges it: one page of distinct tools per turn, shared by the retry
+// revival and the mention heal. The turn's set only grows, so a tool brought
+// back stays offered and is never charged twice. (seucaranguejo fork)
+func takeHealBudget(ts *turnState, missing []string) []string {
+	left := maxRevivedDiscoveredTools - len(ts.revivedTools)
+	if left <= 0 || len(missing) == 0 {
+		return nil
+	}
+	if len(missing) > left {
+		missing = missing[:left]
+	}
+	if ts.revivedTools == nil {
+		ts.revivedTools = make(map[string]struct{}, maxRevivedDiscoveredTools)
+	}
+	for _, name := range missing {
+		ts.revivedTools[name] = struct{}{}
+	}
+	return missing
+}
 
 const revivedToolsNudge = "[System] These tools you discovered earlier were missing from your tools; " +
 	"they are available again: %s. If you meant to call one of them, call it now."
@@ -28,14 +50,11 @@ func (p *Pipeline) reviveDiscoveredTools(ts *turnState, exec *turnExecution, ite
 	offered := ts.offeredToolSet()
 	var missing []string
 	for _, name := range ts.agent.Tools.HiddenNames(discovered) {
-		if _, ok := offered[name]; ok {
-			continue
-		}
-		missing = append(missing, name)
-		if len(missing) == maxRevivedDiscoveredTools {
-			break
+		if _, ok := offered[name]; !ok {
+			missing = append(missing, name)
 		}
 	}
+	missing = takeHealBudget(ts, missing)
 	if len(missing) == 0 {
 		return
 	}

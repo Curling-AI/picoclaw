@@ -193,21 +193,22 @@ func (p *Pipeline) CallLLM(
 		}
 	}
 	// Same heal (seucaranguejo fork) for tools the model named but hasn't called
-	// yet; capped like a discovery page so a long reasoning can't unhide the
-	// whole library.
-	// The turn's own set decides, as in reviveDiscoveredTools.
-	if mentioned := mentionedMissingToolNames(exec.messages, ts.agent.Tools, ts.offeredToolSet()); len(mentioned) > 0 {
-		if len(mentioned) > maxRevivedDiscoveredTools {
-			mentioned = mentioned[:maxRevivedDiscoveredTools]
+	// yet. The turn's own set decides, as in reviveDiscoveredTools, and both
+	// share one discovery page per turn: a text naming many tools would
+	// otherwise add a page each round. With the page spent there is nothing
+	// left to scan for.
+	if len(ts.revivedTools) < maxRevivedDiscoveredTools {
+		mentioned := mentionedMissingToolNames(exec.messages, ts.agent.Tools, ts.offeredToolSet())
+		if mentioned = takeHealBudget(ts, mentioned); len(mentioned) > 0 {
+			ts.agent.Tools.EnsureVisible(mentioned, discoveryPromoteTTL(p.Cfg))
+			ts.offerTools(mentioned)
+			logger.InfoCF("agent", "Offered deferred tools named by the model",
+				map[string]any{
+					"agent_id":  ts.agent.ID,
+					"iteration": iteration,
+					"tools":     mentioned,
+				})
 		}
-		ts.agent.Tools.EnsureVisible(mentioned, discoveryPromoteTTL(p.Cfg))
-		ts.offerTools(mentioned)
-		logger.InfoCF("agent", "Offered deferred tools named by the model",
-			map[string]any{
-				"agent_id":  ts.agent.ID,
-				"iteration": iteration,
-				"tools":     mentioned,
-			})
 	}
 
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefsFor(ts.offeredToolSet())

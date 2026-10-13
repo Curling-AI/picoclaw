@@ -142,24 +142,8 @@ toolLoop:
 		// skipToolCall answers the call with content instead of running it.
 		skipToolCall := func(content string) {
 			exec.allResponsesHandled = false
-			al.emitEvent(
-				runtimeevents.KindAgentToolExecSkipped,
-				ts.eventMeta("runTurn", "turn.tool.skipped"),
-				ToolExecSkippedPayload{
-					Tool:   toolName,
-					Reason: content,
-				},
-			)
-			skippedMsg := providers.Message{
-				Role:       "tool",
-				Content:    content,
-				ToolCallID: tc.ID,
-			}
-			messages = append(messages, skippedMsg)
-			if !ts.opts.NoHistory {
-				ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
-				ts.recordPersistedMessage(skippedMsg)
-			}
+			skipped := providers.ToolCall{ID: tc.ID, Name: toolName}
+			messages = append(messages, al.skipToolCalls(ts, []providers.ToolCall{skipped}, content, content)...)
 		}
 		denyByTurnProfile := func() bool {
 			if turnProfileToolAllowed(ts.profile, toolName) {
@@ -462,7 +446,7 @@ toolLoop:
 						"iteration":   iteration,
 					})
 				skipToolCall(repeatedSideEffectContent)
-				if !ts.repeats.recordRefusal() {
+				if !ts.repeats.recordRefusal(iteration) {
 					continue
 				}
 				logger.WarnCF("agent", "Turn ended: the model kept repeating a refused tool call",
@@ -477,7 +461,7 @@ toolLoop:
 				// The coordinator finalizes with this text like any reply, so the
 				// user gets it on every channel and the next turn sees it.
 				exec.messages = messages
-				exec.finalContent = repeatStopSummary(toolName)
+				exec.finalContent = repeatStopSummary(displayToolName(ts.agent.Tools, toolName))
 				p.beginSynthesizedFinalStream(turnCtx, ts, exec)
 				return ToolControlBreak
 			}
@@ -619,6 +603,8 @@ toolLoop:
 			ts.offerTools(tools.ParseDiscoveryResult(toolResult.ContentForLLM()))
 		}
 		toolDuration := time.Since(toolStart)
+		// Read before an AfterTool hook can replace the result (repeat guard).
+		outcomeUnknown := toolResult != nil && toolResult.OutcomeUnknown
 
 		if ts.hardAbortRequested() {
 			exec.abortedByHardAbort = true
@@ -761,8 +747,8 @@ toolLoop:
 			toolErrorSummary(toolResult),
 			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 		)
-		if !toolResult.IsError {
-			ts.repeats.recordSuccess(effect, repeatKey)
+		if !toolResult.IsError || outcomeUnknown {
+			ts.repeats.recordRun(effect, repeatKey)
 		}
 		messages = append(messages, toolResultMsg)
 		if !ts.opts.NoHistory {

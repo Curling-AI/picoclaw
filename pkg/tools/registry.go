@@ -248,7 +248,9 @@ func (r *ToolRegistry) HasRegistered(name string) bool {
 }
 
 // GetRegistered returns a registered tool whether or not it is callable right
-// now (hidden tools whose TTL expired included).
+// now (hidden tools whose TTL expired included). The agent revives an expired
+// deferred tool the model calls right before running it, so a check made
+// before the call must see it too.
 func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

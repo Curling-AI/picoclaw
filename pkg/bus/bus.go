@@ -70,6 +70,13 @@ type StreamDelegate interface {
 	GetStreamer(ctx context.Context, channel, chatID, sessionKey string) (Streamer, bool)
 }
 
+// FinalizedStreamClearer is implemented by a StreamDelegate that remembers a
+// finalized stream so it can drop the final outbound that duplicates it.
+// (seucaranguejo fork)
+type FinalizedStreamClearer interface {
+	ClearFinalizedStream(channel, chatID, sessionKey string)
+}
+
 // Streamer pushes incremental content to a streaming-capable channel.
 // Defined here so the agent loop can use it without importing pkg/channels.
 type Streamer interface {
@@ -330,6 +337,15 @@ func (mb *MessageBus) GetStreamer(ctx context.Context, channel, chatID, sessionK
 		return d.GetStreamer(ctx, channel, chatID, sessionKey)
 	}
 	return nil, false
+}
+
+// ClearFinalizedStream makes the delegate forget a finalized stream, so the
+// next final outbound of the session is delivered. A no-op when the delegate
+// doesn't track finalized streams. (seucaranguejo fork)
+func (mb *MessageBus) ClearFinalizedStream(channel, chatID, sessionKey string) {
+	if c, ok := mb.streamDelegate.Load().(FinalizedStreamClearer); ok && c != nil {
+		c.ClearFinalizedStream(channel, chatID, sessionKey)
+	}
 }
 
 func (mb *MessageBus) Stats() MessageBusStats {
