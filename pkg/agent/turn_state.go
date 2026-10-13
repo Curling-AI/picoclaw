@@ -319,6 +319,10 @@ type turnState struct {
 	providerCancel        context.CancelFunc
 	turnCancel            context.CancelFunc
 
+	backgroundMu         sync.Mutex
+	backgroundFailed     bool
+	backgroundHandedOver bool
+
 	restorePointHistory []providers.Message
 	restorePointSummary string
 	persistedMessages   []providers.Message

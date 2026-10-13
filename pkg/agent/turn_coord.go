@@ -12,9 +12,14 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
-func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipeline) (turnResult, error) {
+func (al *AgentLoop) runTurn(
+	ctx context.Context,
+	ts *turnState,
+	pipeline *Pipeline,
+) (outcome turnResult, turnErr error) {
 	if ts != nil && ts.agent != nil {
 		modelMu := ts.agent.modelStateMutex()
 		modelMu.RLock()
@@ -27,9 +32,13 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
+	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
+	defer func() {
+		ts.finishBackgroundProcesses(turnErr == nil && outcome.status == TurnEndStatusCompleted && turnCtx.Err() == nil)
+	}()
 
 	if al.takePendingStop(ts.sessionKey) {
 		_ = ts.requestHardAbort()

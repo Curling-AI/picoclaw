@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -14,6 +15,21 @@ import (
 const maxOutputBufferSize = 1 * 1024 * 1024 // 1MB
 
 const outputTruncateMarker = "\n... [output truncated, exceeded 1MB]\n"
+
+type backgroundProcessOwnerKey struct{}
+
+// WithBackgroundProcessOwner scopes exec processes to one turn, independently
+// of the conversation session used by tools for routing and persistence.
+func WithBackgroundProcessOwner(ctx context.Context, owner string) context.Context {
+	return context.WithValue(ctx, backgroundProcessOwnerKey{}, owner)
+}
+
+func backgroundProcessOwner(ctx context.Context) string {
+	if owner, ok := ctx.Value(backgroundProcessOwnerKey{}).(string); ok {
+		return owner
+	}
+	return ToolSessionKey(ctx)
+}
 
 // PtyKeyMode represents arrow key encoding mode for PTY sessions.
 // Programs send smkx/rmkx sequences to switch between CSI and SS3 modes.
@@ -43,8 +59,8 @@ type ProcessSession struct {
 	Command    string
 	PTY        bool
 	Background bool
-	// Owner is the agent session that started the process (empty outside a
-	// turn), so the process can be stopped when that session dies.
+	// Owner is the turn that started or inherited the process, so a later
+	// failed turn in the same conversation leaves earlier successful work alone.
 	Owner           string
 	StartTime       int64
 	ExitCode        int

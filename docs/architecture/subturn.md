@@ -112,7 +112,7 @@ When the parent task is forcefully aborted (e.g., user interrupts with `/stop`):
 - If the stopped turn was opened by a background result, the rollback takes the result with it; it is written back as a note.
 
 ### Background processes
-A sub-turn that fails (error, deadline, stop, hard abort, panic) kills the background processes it started with `exec`, including what their shell left running in its process group (`nohup cmd &`). A sub-turn that finishes hands them to the turn that launched it, whose own failure then kills them.
+Any turn that fails (error, deadline, stop, hard abort, panic) kills the background processes it started or inherited with `exec`, including what their shell left running in its process group (`nohup cmd &`). A sub-turn that finishes hands them to the turn that launched it, whose own failure then kills them. Ownership is scoped to the individual turn, so a later failure in the same conversation preserves processes from earlier successful turns. A child finishing after a failed parent cannot hand processes back to it; nested late handovers follow the chain to the surviving ancestor.
 
 ## Agent Loop Integration
 

@@ -527,31 +527,9 @@ func spawnSubTurn(
 		)
 	}()
 
-	// What the child left running in the background. A child that dies
-	// (deadline, stop, error, panic) or is hard-aborted, which ends with no
-	// error, leaves nobody to poll or stop it: in prod a script kept writing to
-	// the user's app long after the agent that launched it was gone. A child
-	// that finished may have handed its processes over in its answer: they
-	// pass to the turn that launched it, so that turn's own failure stops them.
-	childFinished := false
-	defer func() {
-		if childFinished {
-			tools.HandOverBackgroundSessions(childID, parentTS.sessionKey)
-			return
-		}
-		if killed := tools.KillBackgroundSessions(childID); len(killed) > 0 {
-			logger.WarnCF("subturn", "Stopped background processes of a failed sub-turn", map[string]any{
-				"child_id":  childID,
-				"parent_id": parentTS.turnID,
-				"sessions":  killed,
-			})
-		}
-	}()
-
 	// 8. Execute sub-turn via the real agent loop.
 	pipeline := NewPipeline(al)
 	turnRes, turnErr := al.runTurn(childCtx, childTS, pipeline)
-	childFinished = turnErr == nil && turnRes.status != TurnEndStatusAborted
 
 	// Release the concurrency semaphore immediately after runTurn completes,
 	// before the cleanup defer runs. This prevents a deadlock where:

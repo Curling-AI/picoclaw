@@ -279,7 +279,7 @@ func TestSpawnSubTurn_FinishedChildHandsItsProcessesToTheParent(t *testing.T) {
 		t.Fatalf("spawnSubTurn: %v", err)
 	}
 
-	if killed := tools.KillBackgroundSessions(parent.sessionKey); len(killed) != 1 {
+	if killed := tools.KillBackgroundSessions(parent.backgroundProcessOwner()); len(killed) != 1 {
 		t.Fatalf("the parent's failure stopped %v, want the job its child handed over", killed)
 	}
 	waitBackgroundJobStopped(t, execTool, grandchildMarker)
