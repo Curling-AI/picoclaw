@@ -103,13 +103,17 @@ func liftToolCalls(text string) ([]ToolCall, []span) {
 }
 
 // glmBlockWellFormed reports whether b is a closed block whose body reads as
-// argument pairs only, with nothing ambiguous left over.
+// argument pairs only, each value closed, with nothing ambiguous left over. A
+// value missing its </arg_value> runs to the end of the block, so where it
+// really ended cannot be told.
 func glmBlockWellFormed(b glmBlock) bool {
 	if b.open {
 		return false
 	}
-	_, rest, ok := parseGLMArgs(b.body)
-	return ok && strings.TrimSpace(rest) == ""
+	args, rest, ok := parseGLMArgs(b.body)
+	return ok && strings.TrimSpace(rest) == "" &&
+		strings.Count(b.body, glmArgValueOpen) == len(args) &&
+		strings.Count(b.body, glmArgValueClose) == len(args)
 }
 
 func enclosesGLMBlocks(spans []span, blocks []glmBlock) bool {

@@ -305,3 +305,14 @@ func TestLiftToolCallsFromText_FenceInsideAWellFormedGLMValueLeavesTheTrailingCa
 		t.Fatalf("calls = %#v, want the trailing exec", calls)
 	}
 }
+
+// A value that never closes runs to the end of its block: where it really
+// ended, and whether the ``` in it opened a fence in the prose, cannot be
+// told. Its ``` count, and a call after it inside that fence is quoted.
+func TestLiftToolCallsFromText_FenceInAnUnclosedGLMValueStillQuotes(t *testing.T) {
+	text := "Exemplo: <tool_call>exec<arg_key>command</arg_key><arg_value>ls\n```\n</tool_call>\nE depois:\n" +
+		`{"name":"exec","arguments":{"command":"rm -rf build"}}`
+	if calls, _ := LiftToolCallsFromText(text); len(calls) != 0 {
+		t.Fatalf("lifted %s(%v) from inside the prose fence", calls[0].Name, calls[0].Arguments)
+	}
+}
