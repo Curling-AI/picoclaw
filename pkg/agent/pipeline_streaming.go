@@ -305,6 +305,29 @@ func finalizeConfiguredStreamingLLM(
 	return nil
 }
 
+// beginSynthesizedFinalStream opens a stream for a final reply the turn wrote
+// itself, which no LLM call streamed. A narration streamed earlier in the turn
+// leaves the channel's finalized-stream marker set, and the channel then drops
+// the next plain final outbound as a duplicate of a streamed answer. With this
+// stream, Finalize delivers the reply as it delivers a streamed answer.
+// (seucaranguejo fork)
+func (p *Pipeline) beginSynthesizedFinalStream(ctx context.Context, ts *turnState, exec *turnExecution) {
+	if exec.streamingPublisher != nil || !p.configuredStreamingEligible(ts, exec) {
+		return
+	}
+	streamer, ok := p.Bus.GetStreamer(ctx, ts.channel, ts.chatID, ts.sessionKey)
+	if !ok || streamer == nil {
+		return
+	}
+	exec.streamingPublisher = &streamingChunkPublisher{
+		streamer:  streamer,
+		channel:   ts.channel,
+		chatID:    ts.chatID,
+		modelName: exec.llmModelName,
+		ts:        ts,
+	}
+}
+
 func cancelConfiguredStreamingLLM(ctx context.Context, exec *turnExecution) {
 	if exec == nil || exec.streamingPublisher == nil {
 		return

@@ -83,6 +83,7 @@ const (
 // =============================================================================
 
 type turnResult struct {
+	incomplete   bool
 	finalContent string
 	modelName    string
 	status       TurnEndStatus
@@ -113,6 +114,7 @@ type ActiveTurnInfo struct {
 // =============================================================================
 
 type turnExecution struct {
+	incomplete bool
 	// Core message state (accumulates throughout the turn)
 	messages         []providers.Message // built from ContextBuilder, grows per-iteration
 	pendingMessages  []providers.Message // steering/SubTurn messages awaiting injection
@@ -295,6 +297,9 @@ type turnState struct {
 	// turn's own goroutine, so no locking. nil when detection is disabled.
 	loopDetector     *LoopDetector
 	loopDetectorInit bool
+
+	// repeats is the repeat guard (repeat_guard.go). Turn goroutine only.
+	repeats repeatGuard
 
 	followUps []bus.InboundMessage
 

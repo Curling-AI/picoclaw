@@ -637,6 +637,27 @@ PicoClaw supports scheduled reminders and recurring tasks through the `cron` too
 
 See [docs/reference/cron.md](docs/reference/cron.md) for current schedule types, execution modes, command-job gates, and persistence details.
 
+## Embedded execution outcomes
+
+Embedders can call `AgentLoop.ProcessDirectWithResult` with a `turnresult.Request`
+to receive a synchronous `completed`, `failed`, `canceled` or `indeterminate`
+outcome. A hard abort reports cancellation even when the legacy string API
+returns no error. A synthesized response after exhausting tool iterations is
+reported as failed. Existing `ProcessDirect*` string methods retain their
+response and history behavior.
+
+The optional request progress callback reports `thinking`, `tool` and `preparing`
+directly from the executing pipeline. It carries no prompt, tool arguments or
+result content and does not consume the chat stream or runtime event bus.
+
+`CronService.SetOnExecution` is an opt-in replacement for the legacy job callback.
+Each admitted execution receives one UUID, a `scheduled` or `manual` trigger,
+and an immutable job copy. `CronTool.ExecuteJobWithResult` uses that UUID for
+the executor session and preserves its actual outcome. The embedding context
+owns cancellation; `CronService.Stop` still stops scheduling only. Platform
+metadata can be persisted atomically through `AddJobWithPayload`; the agent
+tool continues using the existing restricted `AddJob` path.
+
 ## 📚 Documentation
 
 For detailed guides beyond this README:

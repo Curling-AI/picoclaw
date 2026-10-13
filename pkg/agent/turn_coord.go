@@ -212,6 +212,11 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			for i, pm := range pendingMessages {
 				messages = append(messages, resolvedPending[i])
 				totalContentLen += len(pm.Content)
+				// The user steered the turn: a repeat they ask for is theirs
+				// to make (repeat guard, seucaranguejo fork).
+				if pm.PromptSource != string(PromptSourceSubTurnResult) {
+					ts.repeats.reset()
+				}
 				if !ts.opts.NoHistory {
 					ts.agent.Sessions.AddFullMessage(ts.sessionKey, pm)
 					ts.recordPersistedMessage(pm)
@@ -249,6 +254,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 
 		// Execute LLM call via Pipeline
 		ts.setPhase(TurnPhaseRunning)
+		ts.reportExecutionStage("thinking")
 		ctrl, callErr := pipeline.CallLLM(ctx, turnCtx, ts, exec, iteration)
 		if callErr != nil {
 			turnStatus = TurnEndStatusError
@@ -278,12 +284,14 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				exec.finalIsFallback = true
 			}
 			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+			result.incomplete = exec.incomplete || exec.finalIsFallback
 			if finalizeErr != nil {
 				turnStatus = TurnEndStatusError
 			}
 			return result, finalizeErr
 		case ControlToolLoop:
 			// Execute tools via Pipeline
+			ts.reportExecutionStage("tool")
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
 			exec.toolRanThisTurn = true
 			switch toolCtrl {
@@ -305,11 +313,15 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				}
 				// ExecuteTools returned ControlBreak:
 				// - allResponsesHandled=true: finalize without DefaultResponse (exec.finalContent empty)
-				// - allResponsesHandled=false: coordinator applies DefaultResponse before finalize
+				// - allResponsesHandled=false: finalize with the text ExecuteTools left in
+				//   exec.finalContent (the repeat guard's stop summary; seucaranguejo fork)
 				if exec.allResponsesHandled {
 					finalContent = ""
+				} else {
+					finalContent = exec.finalContent
 				}
 				result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+				result.incomplete = exec.incomplete || exec.finalIsFallback
 				if finalizeErr != nil {
 					turnStatus = TurnEndStatusError
 				}
@@ -324,6 +336,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	if finalContent == "" {
+		exec.incomplete = true
 		if ts.currentIteration() >= maxIter && maxIter > 0 {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
@@ -332,6 +345,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			finalContent = ts.opts.DefaultResponse
 			exec.finalIsFallback = true
 		}
+		pipeline.beginSynthesizedFinalStream(turnCtx, ts, exec)
 	}
 
 	// Check hard abort before finalizing (may have been set during tool execution)
@@ -341,6 +355,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	}
 
 	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+	result.incomplete = exec.incomplete || exec.finalIsFallback
 	if err != nil {
 		turnStatus = TurnEndStatusError
 	}

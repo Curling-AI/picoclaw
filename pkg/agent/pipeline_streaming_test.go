@@ -1004,6 +1004,41 @@ func TestConfiguredStreamingFinalizesWithDefaultResponseWhenContentEmpty(t *test
 	}
 }
 
+// A narration streamed before the last tool calls leaves the channel marked
+// as holding the final answer: the tool-limit reply must go through the stream
+// or the channel drops it as that answer's duplicate.
+func TestConfiguredStreamingFinalizesToolLimitReplyAfterNarration(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	narratedCall := func(id string) configuredStreamingCall {
+		return configuredStreamingCall{
+			chunks: []string{"working on it"},
+			response: &providers.LLMResponse{
+				Content: "working on it",
+				ToolCalls: []providers.ToolCall{{
+					ID: id, Type: "function", Name: "tool_limit_test_tool", Arguments: map[string]any{"value": id},
+				}},
+			},
+		}
+	}
+	provider := &configuredStreamingProvider{streamPlan: []configuredStreamingCall{
+		narratedCall("call-1"), narratedCall("call-2"), narratedCall("call-3"),
+	}}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.GetRegistry().GetDefaultAgent().Tools.Register(&toolLimitTestTool{})
+
+	got := runConfiguredStreamingTurn(t, al, "pico")
+
+	if got != toolLimitResponse {
+		t.Fatalf("response = %q, want the tool-limit reply", got)
+	}
+	if n := len(streamer.finalized); n == 0 || streamer.finalized[n-1] != toolLimitResponse {
+		t.Fatalf("stream finalized = %q, want the tool-limit reply last", streamer.finalized)
+	}
+}
+
 func TestConfiguredStreamingToolCallsUseCompleteStreamResponse(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	streamer := &recordingStreamer{}
