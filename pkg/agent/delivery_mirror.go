@@ -337,6 +337,9 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 			lost = append(lost, err)
 		}
 	}
+	if len(lost) == 0 {
+		al.notifySessionHistoryChanged(sessionKey)
+	}
 	return errors.Join(lost...)
 }
 
