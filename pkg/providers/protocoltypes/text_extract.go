@@ -53,7 +53,7 @@ func LiftToolCallsFromText(text string) ([]ToolCall, string) {
 }
 
 func liftToolCalls(text string) ([]ToolCall, []span) {
-	original := text
+	fenceView := text
 	extractors := []func(string) ([]ToolCall, []span){
 		extractJSONWrapper,
 		extractXMLToolCalls,
@@ -74,25 +74,42 @@ func liftToolCalls(text string) ([]ToolCall, []span) {
 			return calls, spans
 		}
 		masked := []byte(text)
+		fence := []byte(text)
 		for _, b := range blocks {
 			// Keep an opaque boundary so an invalid GLM tail cannot make an
 			// earlier quoted call look like the end of the response.
 			for i := b.start + 1; i < b.end; i++ {
 				masked[i] = ' '
 			}
+			// A ``` inside a well-formed block is its value's. A malformed or
+			// open block may have run over the prose and swallowed the ```
+			// that opened a fence there, so its ``` still count.
+			if glmBlockWellFormed(b) {
+				for i := b.start + 1; i < b.end; i++ {
+					fence[i] = ' '
+				}
+			}
 		}
-		text = string(masked)
+		text, fenceView = string(masked), string(fence)
 	}
 	for _, extract := range extractors {
 		found, at := extract(text)
 		calls, spans := trailingCalls(text, found, at)
-		// The mask also hides a ``` that a GLM block running over the prose
-		// swallowed: a call inside a fence in either reading is quoted.
-		if len(calls) > 0 && !insideCodeFence(original[:spans[0].start]) {
+		if len(calls) > 0 && !insideCodeFence(fenceView[:spans[0].start]) {
 			return calls, spans
 		}
 	}
 	return nil, nil
+}
+
+// glmBlockWellFormed reports whether b is a closed block whose body reads as
+// argument pairs only, with nothing ambiguous left over.
+func glmBlockWellFormed(b glmBlock) bool {
+	if b.open {
+		return false
+	}
+	_, rest, ok := parseGLMArgs(b.body)
+	return ok && strings.TrimSpace(rest) == ""
 }
 
 func enclosesGLMBlocks(spans []span, blocks []glmBlock) bool {

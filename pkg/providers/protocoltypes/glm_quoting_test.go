@@ -284,13 +284,24 @@ func TestLiftToolCallsFromText_FenceInsideAGLMValueDoesNotCloseTheProseFence(t *
 	}
 }
 
-// A GLM block runs to the first </tool_call> after a value that never closes,
-// so it can swallow the ``` that opened a fence in the prose. Masked, that
-// fence is gone: a call inside it, in either reading, is quoted.
-func TestLiftToolCallsFromText_FenceSwallowedByAGLMBlockStillQuotes(t *testing.T) {
+// A malformed GLM block (text left between its last value and </tool_call>)
+// may have run over the prose and swallowed the ``` that opened a fence
+// there. Its ``` still count: a call after it, inside that fence, is quoted.
+func TestLiftToolCallsFromText_FenceSwallowedByAMalformedGLMBlockStillQuotes(t *testing.T) {
 	text := "O GLM abre com <tool_call>exec<arg_key>command</arg_key><arg_value>... e fecha assim:\n```\n" +
-		"</arg_value></tool_call>\nOu em JSON:\n" + `{"name":"exec","arguments":{"command":"rm -rf build"}}`
+		"</arg_value> e só depois </tool_call>\nOu em JSON:\n" + `{"name":"exec","arguments":{"command":"rm -rf build"}}`
 	if calls, _ := LiftToolCallsFromText(text); len(calls) != 0 {
 		t.Fatalf("lifted %s(%v) from inside the prose fence", calls[0].Name, calls[0].Arguments)
+	}
+}
+
+// A ``` inside a well-formed GLM value is the value's data: it does not open
+// a fence over the prose, and the call that ends the text still runs.
+func TestLiftToolCallsFromText_FenceInsideAWellFormedGLMValueLeavesTheTrailingCall(t *testing.T) {
+	text := "<tool_call>write_file<arg_key>content</arg_key><arg_value>```go</arg_value></tool_call>\nNow run:\n" +
+		`{"name":"exec","arguments":{"command":"echo done"}}`
+	calls, _ := LiftToolCallsFromText(text)
+	if len(calls) != 1 || calls[0].Name != "exec" {
+		t.Fatalf("calls = %#v, want the trailing exec", calls)
 	}
 }
