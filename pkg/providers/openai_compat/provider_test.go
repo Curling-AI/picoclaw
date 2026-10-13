@@ -2350,6 +2350,32 @@ func TestProviderChat_QuotedGLMBlockIsNotLifted(t *testing.T) {
 	}
 }
 
+// The non-stream path (subagents) does not lift a call quoted before a GLM
+// block the output cap cut.
+func TestProviderChat_QuotedCallBeforeACutGLMBlockIsNotLifted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"content": quotedCallBeforeCutGLMBlock},
+				"finish_reason": "length",
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	p := NewProvider("key", server.URL, "")
+	tools := []ToolDefinition{glmTestTool("exec", "command"), glmTestTool("write_file", "path", "content")}
+	out, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "hi"}}, tools, "zai/glm-5.3-flash", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if len(out.ToolCalls) != 0 || out.Content != quotedCallBeforeCutGLMBlock {
+		t.Fatalf("calls = %#v, content = %q; want the text untouched", out.ToolCalls, out.Content)
+	}
+}
+
 func glmTestTool(name string, props ...string) ToolDefinition {
 	properties := map[string]any{}
 	for _, prop := range props {

@@ -270,3 +270,16 @@ func TestLiftToolCallsFromText_QuotedCallBeforeTheRealOne(t *testing.T) {
 		})
 	}
 }
+
+// A ``` inside a GLM value belongs to the value, not to the prose: a fence the
+// prose opened before the block is still open after it, and a call there is
+// quoted.
+func TestLiftToolCallsFromText_FenceInsideAGLMValueDoesNotCloseTheProseFence(t *testing.T) {
+	text := "Formato:\n```\n" +
+		"<tool_call>write_file<arg_key>path</arg_key><arg_value>a.md</arg_value>" +
+		"<arg_key>content</arg_key><arg_value>```go\nx\n</arg_value></tool_call> e depois\n" +
+		`{"name":"exec","arguments":{"command":"echo example"}}`
+	if calls, _ := LiftToolCallsFromText(text); len(calls) != 0 {
+		t.Fatalf("lifted %s(%v) from inside the prose fence", calls[0].Name, calls[0].Arguments)
+	}
+}

@@ -2,6 +2,7 @@ package openai_compat
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -209,5 +210,28 @@ func TestParseStreamResponse_TextCallOnlyForOfferedTools(t *testing.T) {
 		if len(resp.ToolCalls) != 0 || !strings.Contains(resp.Content, "<tool_call>exec") {
 			t.Fatalf("%s: calls = %+v, content = %q; want the text left alone", name, resp.ToolCalls, resp.Content)
 		}
+	}
+}
+
+// quotedCallBeforeCutGLMBlock quotes a complete call and then starts the real
+// one, which the output cap cuts.
+const quotedCallBeforeCutGLMBlock = `Example only: {"name":"exec","arguments":{"command":"echo example"}}` +
+	"\n<tool_call>write_file<arg_key>path</arg_key><arg_value>draft.md"
+
+// A call quoted before a GLM block the output cap cut is not the last thing
+// written: nothing runs, and the text stays for the loop to retry.
+func TestParseStreamResponse_QuotedCallBeforeACutGLMBlockIsNotLifted(t *testing.T) {
+	delta, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"delta": map[string]any{"content": quotedCallBeforeCutGLMBlock}}},
+	})
+	body := sse(string(delta), `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
+	tools := []ToolDefinition{glmTestTool("exec", "command"), glmTestTool("write_file", "path", "content")}
+
+	resp, err := parseStreamResponse(context.Background(), strings.NewReader(body), tools, nil)
+	if err != nil {
+		t.Fatalf("parseStreamResponse: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 || resp.Content != quotedCallBeforeCutGLMBlock {
+		t.Fatalf("calls = %+v, content = %q; want the text untouched", resp.ToolCalls, resp.Content)
 	}
 }
