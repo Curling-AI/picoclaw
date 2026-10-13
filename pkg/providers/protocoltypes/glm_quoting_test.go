@@ -283,3 +283,14 @@ func TestLiftToolCallsFromText_FenceInsideAGLMValueDoesNotCloseTheProseFence(t *
 		t.Fatalf("lifted %s(%v) from inside the prose fence", calls[0].Name, calls[0].Arguments)
 	}
 }
+
+// A GLM block runs to the first </tool_call> after a value that never closes,
+// so it can swallow the ``` that opened a fence in the prose. Masked, that
+// fence is gone: a call inside it, in either reading, is quoted.
+func TestLiftToolCallsFromText_FenceSwallowedByAGLMBlockStillQuotes(t *testing.T) {
+	text := "O GLM abre com <tool_call>exec<arg_key>command</arg_key><arg_value>... e fecha assim:\n```\n" +
+		"</arg_value></tool_call>\nOu em JSON:\n" + `{"name":"exec","arguments":{"command":"rm -rf build"}}`
+	if calls, _ := LiftToolCallsFromText(text); len(calls) != 0 {
+		t.Fatalf("lifted %s(%v) from inside the prose fence", calls[0].Name, calls[0].Arguments)
+	}
+}

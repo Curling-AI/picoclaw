@@ -53,6 +53,7 @@ func LiftToolCallsFromText(text string) ([]ToolCall, string) {
 }
 
 func liftToolCalls(text string) ([]ToolCall, []span) {
+	original := text
 	extractors := []func(string) ([]ToolCall, []span){
 		extractJSONWrapper,
 		extractXMLToolCalls,
@@ -84,7 +85,10 @@ func liftToolCalls(text string) ([]ToolCall, []span) {
 	}
 	for _, extract := range extractors {
 		found, at := extract(text)
-		if calls, spans := trailingCalls(text, found, at); len(calls) > 0 {
+		calls, spans := trailingCalls(text, found, at)
+		// The mask also hides a ``` that a GLM block running over the prose
+		// swallowed: a call inside a fence in either reading is quoted.
+		if len(calls) > 0 && !insideCodeFence(original[:spans[0].start]) {
 			return calls, spans
 		}
 	}
