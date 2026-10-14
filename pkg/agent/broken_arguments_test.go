@@ -19,6 +19,7 @@ import (
 // what the agent answered.
 type cutWriteProvider struct {
 	maxTokens  int
+	args       map[string]any // nil: JSON cut mid-way
 	calls      atomic.Int32
 	toolResult string
 }
@@ -31,6 +32,10 @@ func (p *cutWriteProvider) Chat(
 	_ map[string]any,
 ) (*providers.LLMResponse, error) {
 	if p.calls.Add(1) == 1 {
+		args := p.args
+		if args == nil {
+			args = map[string]any{"raw": `{"path":"Index.tsx","content":"export default function Ind`}
+		}
 		return &providers.LLMResponse{
 			FinishReason: "tool_calls",
 			Usage:        &providers.UsageInfo{CompletionTokens: p.maxTokens},
@@ -38,7 +43,7 @@ func (p *cutWriteProvider) Chat(
 				ID:        "call_write",
 				Type:      "function",
 				Name:      "write_file",
-				Arguments: map[string]any{"raw": `{"path":"Index.tsx","content":"export default function Ind`},
+				Arguments: args,
 			}},
 		}, nil
 	}
@@ -67,6 +72,24 @@ func TestCutOffToolArgumentsAreExplainedNotRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "Index.tsx")); !os.IsNotExist(err) {
 		t.Errorf("the cut call ran anyway (stat err = %v)", err)
+	}
+}
+
+// The cap can also land before the first byte of the arguments: glm-5.3 spent
+// a 1,024-token reply on reasoning, streamed only the tool name, and still
+// reported finish_reason "tool_calls". The call arrives with no arguments at
+// all, and running it only earns a schema error.
+func TestToolCallCutBeforeItsArgumentsIsExplainedNotRun(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &cutWriteProvider{maxTokens: cfg.Agents.Defaults.MaxTokens, args: map[string]any{}}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+
+	if _, err := al.ProcessDirect(context.Background(), "crie o relatório", "cut-empty-args-session"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if !strings.Contains(provider.toolResult, "cut off at your output limit") {
+		t.Errorf("tool result = %q, want the cut-off explanation", provider.toolResult)
 	}
 }
 
@@ -107,6 +130,20 @@ func TestBrokenArgumentsReason(t *testing.T) {
 	if got := brokenArgumentsReason(registry, "write_file", map[string]any{"path": "a.md"}, capped, 32768); got != "" {
 		t.Errorf("decoded arguments were refused: %q", got)
 	}
+
+	registry.Register(&pathArgTool{})
+	if got := brokenArgumentsReason(registry, pathArgToolName, map[string]any{}, capped, 32768); !strings.Contains(
+		got,
+		"output limit",
+	) {
+		t.Errorf("no arguments at the cap: %q", got)
+	}
+	if got := brokenArgumentsReason(registry, pathArgToolName, map[string]any{}, answered, 32768); got != "" {
+		t.Errorf("no arguments under the cap is left to the schema check: %q", got)
+	}
+	if got := brokenArgumentsReason(registry, rawArgToolName, map[string]any{}, capped, 32768); got != "" {
+		t.Errorf("a tool without required arguments was refused: %q", got)
+	}
 }
 
 const rawArgToolName = "post_raw"
@@ -120,5 +157,23 @@ func (rawArgTool) Parameters() map[string]any {
 }
 
 func (rawArgTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+	return tools.NewToolResult("ok")
+}
+
+const pathArgToolName = "save_note"
+
+type pathArgTool struct{}
+
+func (pathArgTool) Name() string        { return pathArgToolName }
+func (pathArgTool) Description() string { return "saves a note" }
+func (pathArgTool) Parameters() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"path": map[string]any{"type": "string"}},
+		"required":   []string{"path"},
+	}
+}
+
+func (pathArgTool) Execute(context.Context, map[string]any) *tools.ToolResult {
 	return tools.NewToolResult("ok")
 }

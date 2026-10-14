@@ -983,7 +983,8 @@ func (al *AgentLoop) skipToolCalls(
 // what went wrong, and the model writes the same oversized call again. The
 // usual cause is the output cap: a whole file in one write_file plus long
 // reasoning ran past max_tokens and the JSON was cut (a subagent spent 258 s on
-// one such call in prod, 2026-10-09).
+// one such call in prod, 2026-10-09). The cap can also land before the first
+// byte of the arguments, and the call then arrives with none at all.
 func brokenArgumentsReason(
 	registry *tools.ToolRegistry,
 	tool string,
@@ -991,6 +992,12 @@ func brokenArgumentsReason(
 	resp *providers.LLMResponse,
 	maxTokens int,
 ) string {
+	if len(args) == 0 {
+		if responseHitOutputCap(resp, maxTokens) && toolRequiresArguments(registry, tool) {
+			return cutOffArgumentsReason(tool, maxTokens)
+		}
+		return ""
+	}
 	if len(args) != 1 {
 		return ""
 	}
@@ -998,12 +1005,16 @@ func brokenArgumentsReason(
 		return ""
 	}
 	if responseHitOutputCap(resp, maxTokens) {
-		return fmt.Sprintf("The arguments of this %s call were cut off at your output limit (%d tokens), so it "+
-			"was not run. Split large content across several calls (write the first part, then append or patch "+
-			"the rest) and keep your reasoning short before calls that carry a lot of content.", tool, maxTokens)
+		return cutOffArgumentsReason(tool, maxTokens)
 	}
 	return fmt.Sprintf("The arguments of this %s call were not valid JSON, so it was not run. Call it again "+
 		"with complete JSON arguments.", tool)
+}
+
+func cutOffArgumentsReason(tool string, maxTokens int) string {
+	return fmt.Sprintf("The arguments of this %s call were cut off at your output limit (%d tokens), so it "+
+		"was not run. Split large content across several calls (write the first part, then append or patch "+
+		"the rest) and keep your reasoning short before calls that carry a lot of content.", tool, maxTokens)
 }
 
 func responseHitOutputCap(resp *providers.LLMResponse, maxTokens int) bool {
@@ -1015,6 +1026,22 @@ func responseHitOutputCap(resp *providers.LLMResponse, maxTokens int) bool {
 		return true
 	}
 	return maxTokens > 0 && responseCompletionTokens(resp) >= maxTokens
+}
+
+// toolRequiresArguments reports whether the tool's schema lists a required
+// argument, so a call that carries none cannot be a complete one.
+func toolRequiresArguments(registry *tools.ToolRegistry, name string) bool {
+	tool, ok := registry.GetRegistered(name)
+	if !ok {
+		return false
+	}
+	switch required := tool.Parameters()["required"].(type) {
+	case []string:
+		return len(required) > 0
+	case []any:
+		return len(required) > 0
+	}
+	return false
 }
 
 // toolDeclaresRawArgument reports whether the tool really takes an argument
