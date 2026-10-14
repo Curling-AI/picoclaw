@@ -66,8 +66,9 @@ func (t *RecallTool) Description() string {
 		"- durable: your long-term memory (MEMORY.md), organized in topic sections. Facts that stay true.\n" +
 		"- episodic: the daily notes — one line per event, the record of what actually happened on a " +
 		"given day (decisions, what you did, what the user said).\n" +
-		"The prompt shows your durable memory in full but only the last few days of notes, so use this " +
-		"for anything older or beyond that window. Query by topic (\"the postgres incident\") OR by date " +
+		"The prompt shows your durable memory only up to a size budget (past it, only the first and the " +
+		"latest sections are listed by heading) and only the last few days of notes, so use this for " +
+		"anything left out, older or beyond that window. Query by topic (\"the postgres incident\") OR by date " +
 		"(\"2026-07-12\", \"20260712\") to see what happened then. Narrow with 'scope' only when you are " +
 		"sure which kind you want."
 }
@@ -201,8 +202,9 @@ func (t *RecallTool) search(docs []recallDoc, query string, limit int, kind stri
 
 // collectCorpora reads the two memory stores into their own doc lists.
 //
-// USER.md and SOUL.md are deliberately absent: both go into EVERY prompt in
-// full, so indexing them would only return what the agent is already reading.
+// USER.md and SOUL.md are deliberately absent: both go into EVERY prompt (up
+// to their budget, with a marker pointing read_file at the rest), so indexing
+// them would mostly return what the agent is already reading.
 func (t *RecallTool) collectCorpora() (durable, episodic []recallDoc) {
 	memoryDir := filepath.Join(t.workspace, "memory")
 

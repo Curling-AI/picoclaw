@@ -190,6 +190,9 @@ func (ms *MemoryStore) GetRecentDailyNotes(days int) string {
 // written by the agent and edited by the user, so whatever level we pick, a
 // `## Important Rules` typed into a section body used to land as a sibling of
 // the prompt's real sections. A delimiter holds regardless of what is inside.
+//
+// MEMORY.md enters up to its prompt budget; beyond it the block is cut with a
+// marker listing what was left out (memory_budget.go). The file is untouched.
 func (ms *MemoryStore) GetMemoryContext(recentDays int) string {
 	longTerm := ms.ReadLongTerm()
 	recentNotes := ""
@@ -208,7 +211,7 @@ func (ms *MemoryStore) GetMemoryContext(recentDays int) string {
 
 	if longTerm != "" {
 		sb.WriteString("<memory scope=\"long-term\">\n")
-		sb.WriteString(strings.TrimSpace(longTerm))
+		sb.WriteString(capMemoryForPrompt(longTerm, assistantLongTermFile, ms.memoryFile))
 		sb.WriteString("\n</memory>")
 	}
 
