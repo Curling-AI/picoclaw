@@ -31,7 +31,8 @@ func TestCronAddUsesTaskNameWithoutChangingPayload(t *testing.T) {
 				t.Fatal(result.ForLLM)
 			}
 			saved := cron.NewCronService(path, nil).ListJobs(true)
-			if len(saved) != 1 || saved[0].Name != tc.want || saved[0].Payload.Message != tc.message || saved[0].Payload.To != "run" {
+			if len(saved) != 1 || saved[0].Name != tc.want || saved[0].Payload.Message != tc.message ||
+				saved[0].Payload.To != "run" {
 				t.Fatalf("incorrect persisted job: %+v", saved)
 			}
 		})

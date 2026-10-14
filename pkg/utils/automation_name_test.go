@@ -32,7 +32,11 @@ func TestAutomationName(t *testing.T) {
 	if got := AutomationName(strings.Repeat("á", 100), ""); len([]rune(got)) != maxAutomationNameRunes {
 		t.Fatalf("incorrect Unicode length: %q", got)
 	}
-	if got := AutomationName("", strings.Repeat("界", 40)+"private task details"); len([]rune(got)) > maxAutomationFallbackRunes || strings.Contains(got, "private task details") {
+	if got := AutomationName(
+		"",
+		strings.Repeat("界", 40)+"private task details",
+	); len([]rune(got)) > maxAutomationFallbackRunes ||
+		strings.Contains(got, "private task details") {
 		t.Fatalf("fallback exposed task details: %q", got)
 	}
 }
