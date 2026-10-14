@@ -5,45 +5,176 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // xmlToolCallRe matches <tool_call>...</tool_call> blocks used by qwen and similar models.
 var xmlToolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
 
 // ExtractToolCallsFromText parses tool calls embedded in response text.
-// It supports four formats:
-//  1. JSON wrapper: {"tool_calls": [{"id":"…","type":"function","function":{…}}]}
-//  2. XML tag:      <tool_call>{"name":"…","arguments":{…}}</tool_call>
-//  3. Pseudo-XML:   <function=NAME><parameter=KEY>VALUE</parameter></function>
-//  4. Bare JSON:    {"name":"…","arguments":{…}}
+// It supports five formats:
+//  1. GLM:          <tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value></tool_call>
+//  2. JSON wrapper: {"tool_calls": [{"id":"…","type":"function","function":{…}}]}
+//  3. XML tag:      <tool_call>{"name":"…","arguments":{…}}</tool_call>
+//  4. Pseudo-XML:   <function=NAME><parameter=KEY>VALUE</parameter></function>
+//  5. Bare JSON:    {"name":"…","arguments":{…}}
 //
-// Pseudo-XML is tried BEFORE bare JSON: its argument values are arbitrary text
-// (patches, code) that can contain a {"name":…,"arguments":…} object, and the
-// bare scanner would happily lift that inner object out as the call.
+// Apart from complete calls enclosing GLM argument text, GLM goes first,
+// and the other formats are only looked for outside its
+// blocks (an unclosed one runs to the end of the text): a GLM value is
+// arbitrary text (a file, a command) and may hold a call in any of the JSON
+// shapes, which is then something the model wrote down, not a call it made.
+// For the same reason the markup formats are tried before bare JSON. Only
+// the calls that end the text count (see LiftToolCallsFromText).
 func ExtractToolCallsFromText(text string) []ToolCall {
-	if calls := extractJSONWrapper(text); len(calls) > 0 {
-		return calls
-	}
-	if calls := extractXMLToolCalls(text); len(calls) > 0 {
-		return calls
-	}
-	if calls := extractPseudoXMLToolCalls(text); len(calls) > 0 {
-		return calls
-	}
-	return extractBareToolCalls(text)
+	calls, _ := LiftToolCallsFromText(text)
+	return calls
 }
 
-// StripToolCallsFromText removes tool call JSON/XML from response text.
+// StripToolCallsFromText removes from text the calls ExtractToolCallsFromText
+// finds in it, and only those: markup the model merely quoted stays.
 func StripToolCallsFromText(text string) string {
-	text = stripJSONWrapper(text)
-	text = xmlToolCallRe.ReplaceAllString(text, "")
-	text = pseudoXMLFunctionRe.ReplaceAllString(text, "")
-	// The wrapper survives its own body: the function element is what carries
-	// the call, and a lone <tool_call>/</tool_call> left behind reads as markup
-	// leaking into the answer.
-	text = strings.NewReplacer("<tool_call>", "", "</tool_call>", "").Replace(text)
-	text = stripBareToolCalls(text)
-	return strings.TrimSpace(text)
+	_, rest := LiftToolCallsFromText(text)
+	return rest
+}
+
+// LiftToolCallsFromText returns the tool calls that end text and the text
+// left once their spans are removed. A call only counts as the last thing
+// written, outside a ``` fence: a model making a call stops there, and one
+// earlier in the text, or fenced, is a call it quotes (a page it summarizes,
+// an example it gives) or, in its reasoning, one it weighs. A quoted call does
+// not cancel the real one after it: it just stays in the text.
+func LiftToolCallsFromText(text string) ([]ToolCall, string) {
+	calls, spans := liftToolCalls(text)
+	if len(calls) == 0 {
+		return nil, text
+	}
+	return calls, strings.TrimSpace(removeSpans(text, spans))
+}
+
+func liftToolCalls(text string) ([]ToolCall, []span) {
+	fenceView := text
+	extractors := []func(string) ([]ToolCall, []span){
+		extractJSONWrapper,
+		extractXMLToolCalls,
+		extractPseudoXMLToolCalls,
+		extractBareToolCalls,
+	}
+	if blocks := glmBlocks(text); len(blocks) > 0 {
+		// A complete enclosing call owns its arguments. GLM examples inside
+		// those arguments are data and must not be blanked by the mask below.
+		for _, extract := range extractors {
+			found, at := extract(text)
+			calls, spans := trailingCalls(text, found, at)
+			if enclosesGLMBlocks(spans, blocks) {
+				return calls, spans
+			}
+		}
+		if calls, spans := liftGLMToolCalls(text, blocks); len(calls) > 0 {
+			return calls, spans
+		}
+		masked := []byte(text)
+		fence := []byte(text)
+		for _, b := range blocks {
+			// Keep an opaque boundary so an invalid GLM tail cannot make an
+			// earlier quoted call look like the end of the response.
+			for i := b.start + 1; i < b.end; i++ {
+				masked[i] = ' '
+			}
+			// A ``` inside a well-formed block is its value's. A malformed or
+			// open block may have run over the prose and swallowed the ```
+			// that opened a fence there, so its ``` still count.
+			if glmBlockWellFormed(b) {
+				for i := b.start + 1; i < b.end; i++ {
+					fence[i] = ' '
+				}
+			}
+		}
+		text, fenceView = string(masked), string(fence)
+	}
+	for _, extract := range extractors {
+		found, at := extract(text)
+		calls, spans := trailingCalls(text, found, at)
+		if len(calls) > 0 && !insideCodeFence(fenceView[:spans[0].start]) {
+			return calls, spans
+		}
+	}
+	return nil, nil
+}
+
+// glmBlockWellFormed reports whether b is a closed block whose body reads as
+// argument pairs only, each value closed, with nothing ambiguous left over. A
+// value missing its </arg_value> runs to the end of the block, so where it
+// really ended cannot be told.
+func glmBlockWellFormed(b glmBlock) bool {
+	if b.open {
+		return false
+	}
+	args, rest, ok := parseGLMArgs(b.body)
+	if !ok || strings.TrimSpace(rest) != "" {
+		return false
+	}
+	for _, a := range args {
+		if !a.closed {
+			return false
+		}
+	}
+	return true
+}
+
+func enclosesGLMBlocks(spans []span, blocks []glmBlock) bool {
+	encloses := false
+	for _, sp := range spans {
+		for _, block := range blocks {
+			if sp.start >= block.end || sp.end <= block.start {
+				continue
+			}
+			// A call inside a GLM value still belongs to that value, even if
+			// it encloses another GLM example of its own.
+			if sp.start >= block.start || sp.end < block.end {
+				return false
+			}
+			encloses = true
+		}
+	}
+	return encloses
+}
+
+// trailingCalls keeps the calls that end text: the last span and those before
+// it with only whitespace in between, the first of them outside a ``` fence.
+// Spans pair with calls one to one, except a JSON wrapper's single span, which
+// holds all of its calls.
+func trailingCalls(text string, calls []ToolCall, spans []span) ([]ToolCall, []span) {
+	first, end := len(spans), len(text)
+	for i := len(spans) - 1; i >= 0; i-- {
+		if strings.TrimSpace(text[spans[i].end:end]) != "" {
+			break
+		}
+		first, end = i, spans[i].start
+	}
+	if first == len(spans) || insideCodeFence(text[:spans[first].start]) {
+		return nil, nil
+	}
+	if len(spans) != len(calls) {
+		return calls, spans
+	}
+	return calls[first:], spans[first:]
+}
+
+// removeSpans returns text without the given spans, which are in order and
+// do not overlap.
+func removeSpans(text string, spans []span) string {
+	if len(spans) == 0 {
+		return text
+	}
+	var b strings.Builder
+	prev := 0
+	for _, sp := range spans {
+		b.WriteString(text[prev:sp.start])
+		prev = sp.end
+	}
+	b.WriteString(text[prev:])
+	return b.String()
 }
 
 // FindMatchingBrace finds the index after the closing brace matching the
@@ -65,19 +196,49 @@ func FindMatchingBrace(text string, pos int) int {
 
 // --- JSON wrapper format ---
 
-func extractJSONWrapper(text string) []ToolCall {
-	start := strings.Index(text, `{"tool_calls"`)
-	if start == -1 {
-		return nil
+// extractJSONWrapper finds every {"tool_calls": [...]} wrapper. Only those
+// that end the text can be calls (trailingCalls decides), so the run of
+// wrappers at the end, with nothing but whitespace between them, goes as one
+// span holding all of their calls. A wrapper quoted earlier no longer hides
+// the one that closes the reply.
+func extractJSONWrapper(text string) ([]ToolCall, []span) {
+	type wrapper struct {
+		calls []ToolCall
+		at    span
 	}
-
-	end := FindMatchingBrace(text, start)
-	if end == start {
-		return nil
+	var found []wrapper
+	for pos := 0; pos < len(text); {
+		i := strings.Index(text[pos:], `{"tool_calls"`)
+		if i < 0 {
+			break
+		}
+		start := pos + i
+		end := FindMatchingBrace(text, start)
+		calls := parseToolCallsWrapper(text[start:end])
+		if end == start || len(calls) == 0 {
+			pos = start + 1
+			continue
+		}
+		found = append(found, wrapper{calls: calls, at: span{start, end}})
+		pos = end
 	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	first := len(found) - 1
+	for first > 0 && strings.TrimSpace(text[found[first-1].at.end:found[first].at.start]) == "" {
+		first--
+	}
+	var calls []ToolCall
+	for _, w := range found[first:] {
+		calls = append(calls, w.calls...)
+	}
+	return calls, []span{{found[first].at.start, found[len(found)-1].at.end}}
+}
 
-	jsonStr := text[start:end]
-
+// parseToolCallsWrapper reads the calls of one {"tool_calls": [...]} object;
+// nil when it is not one.
+func parseToolCallsWrapper(jsonStr string) []ToolCall {
 	var wrapper struct {
 		ToolCalls []struct {
 			ID       string `json:"id"`
@@ -88,11 +249,9 @@ func extractJSONWrapper(text string) []ToolCall {
 			} `json:"function"`
 		} `json:"tool_calls"`
 	}
-
 	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
 		return nil
 	}
-
 	var result []ToolCall
 	for _, tc := range wrapper.ToolCalls {
 		var args map[string]any
@@ -109,29 +268,15 @@ func extractJSONWrapper(text string) []ToolCall {
 			},
 		})
 	}
-
 	return result
-}
-
-func stripJSONWrapper(text string) string {
-	start := strings.Index(text, `{"tool_calls"`)
-	if start == -1 {
-		return text
-	}
-
-	end := FindMatchingBrace(text, start)
-	if end == start {
-		return text
-	}
-
-	return strings.TrimSpace(text[:start] + text[end:])
 }
 
 // --- Bare JSON format ---
 // Matches {"name":"…","arguments":{…}} directly in text without any wrapper.
 
-func extractBareToolCalls(text string) []ToolCall {
+func extractBareToolCalls(text string) ([]ToolCall, []span) {
 	var result []ToolCall
+	var spans []span
 	idx := 0
 	for idx < len(text) {
 		start := strings.Index(text[idx:], "{")
@@ -167,64 +312,33 @@ func extractBareToolCalls(text string) []ToolCall {
 				Arguments: string(argsJSON),
 			},
 		})
+		spans = append(spans, span{start, end})
 
 		idx = end
 	}
 
 	if len(result) == 0 {
-		return nil
+		return nil, nil
 	}
-	return result
-}
-
-func stripBareToolCalls(text string) string {
-	idx := 0
-	for idx < len(text) {
-		start := strings.Index(text[idx:], "{")
-		if start == -1 {
-			break
-		}
-		start += idx
-
-		end := FindMatchingBrace(text, start)
-		if end == start {
-			idx = start + 1
-			continue
-		}
-
-		jsonStr := text[start:end]
-
-		var raw struct {
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
-		}
-		if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil || raw.Name == "" || raw.Arguments == nil {
-			idx = start + 1
-			continue
-		}
-
-		text = text[:start] + text[end:]
-		// don't advance idx — next JSON object may start at same position
-	}
-
-	return text
+	return result, spans
 }
 
 // --- XML <tool_call> format ---
 
-func extractXMLToolCalls(text string) []ToolCall {
-	matches := xmlToolCallRe.FindAllStringSubmatch(text, -1)
+func extractXMLToolCalls(text string) ([]ToolCall, []span) {
+	matches := xmlToolCallRe.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var result []ToolCall
+	var spans []span
 	for i, m := range matches {
 		var raw struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
-		if err := json.Unmarshal([]byte(m[1]), &raw); err != nil {
+		if err := json.Unmarshal([]byte(text[m[2]:m[3]]), &raw); err != nil {
 			continue
 		}
 
@@ -239,12 +353,13 @@ func extractXMLToolCalls(text string) []ToolCall {
 				Arguments: string(argsJSON),
 			},
 		})
+		spans = append(spans, span{m[0], m[1]})
 	}
 
 	if len(result) == 0 {
-		return nil
+		return nil, nil
 	}
-	return result
+	return result, spans
 }
 
 // --- Pseudo-XML <function=…>/<parameter=…> format ---
@@ -275,17 +390,18 @@ var (
 	pseudoXMLParameterRe = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_.\-]+)\s*>(.*?)</parameter>`)
 )
 
-func extractPseudoXMLToolCalls(text string) []ToolCall {
-	matches := pseudoXMLFunctionRe.FindAllStringSubmatch(text, -1)
+func extractPseudoXMLToolCalls(text string) ([]ToolCall, []span) {
+	matches := pseudoXMLFunctionRe.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	var result []ToolCall
+	result := make([]ToolCall, 0, len(matches))
+	spans := make([]span, 0, len(matches))
 	for i, m := range matches {
-		name := m[1]
+		name := text[m[2]:m[3]]
 		args := map[string]any{}
-		for _, p := range pseudoXMLParameterRe.FindAllStringSubmatch(m[2], -1) {
+		for _, p := range pseudoXMLParameterRe.FindAllStringSubmatch(text[m[4]:m[5]], -1) {
 			args[p[1]] = decodePseudoXMLValue(p[2])
 		}
 
@@ -299,9 +415,24 @@ func extractPseudoXMLToolCalls(text string) []ToolCall {
 				Arguments: string(argsJSON),
 			},
 		})
+		spans = append(spans, pseudoXMLSpan(text, m[0], m[1]))
 	}
 
-	return result
+	return result, spans
+}
+
+// pseudoXMLSpan widens a function element to the <tool_call> wrapper around
+// it, whichever of its two tags survived: left behind, a lone tag reads as
+// markup leaking into the answer.
+func pseudoXMLSpan(text string, start, end int) span {
+	if before := strings.TrimRightFunc(text[:start], unicode.IsSpace); strings.HasSuffix(before, glmCallOpen) {
+		start = len(before) - len(glmCallOpen)
+	}
+	after := strings.TrimLeftFunc(text[end:], unicode.IsSpace)
+	if strings.HasPrefix(after, glmCallClose) {
+		end = len(text) - len(after) + len(glmCallClose)
+	}
+	return span{start, end}
 }
 
 // decodePseudoXMLValue recovers one argument value from its element body.
@@ -326,30 +457,128 @@ func decodePseudoXMLValue(raw string) any {
 	return v
 }
 
-// truncatedToolCallSuffixes are the closing tags a pseudo-XML tool call ends
-// with. Nothing else in prose ends this way.
+// truncatedToolCallSuffixes are the closing tags that end a tool call written
+// as markup (pseudo-XML, and the wrapper GLM shares).
 var truncatedToolCallSuffixes = []string{"</tool_call>", "</function>", "</parameter>"}
 
-// LooksLikeTruncatedToolCall reports whether text is the TAIL of a pseudo-XML
-// tool call whose opening tags never reached us — the shape a gateway leaves
-// behind when its own tool parser starts matching `<tool_call><function=…>` and
-// then bails, forwarding the remainder as ordinary text.
+// glmClosingSuffixes close a GLM argument. Unlike the tags above they also end
+// a sentence about the format ("the closing tag is </arg_value>"), so they only
+// count next to evidence of a GLM call.
+var glmClosingSuffixes = []string{glmArgValueClose, glmArgKeyClose}
+
+// truncatedToolCallPrefixes are the tags a reply can only START with when it is
+// the rest of a GLM call whose head the gateway consumed (prod: a reply that
+// was just "<arg_value>pocketbase/migrations/0001"). A bare <arg_value> opens
+// no sentence; "<tool_call> is the tag GLM uses" does, so the opening tags of
+// whole calls are left out.
+var truncatedToolCallPrefixes = []string{glmArgKeyOpen, glmArgValueOpen}
+
+// markupTags are the tags a reply cut mid-tag can end with a piece of.
+var markupTags = []string{
+	glmCallOpen, glmCallClose, glmArgKeyOpen, glmArgKeyClose, glmArgValueOpen, glmArgValueClose,
+	"</function>", "</parameter>",
+}
+
+var (
+	// glmPairRe is a key followed by its value: GLM call markup, not a
+	// mention of one tag.
+	glmPairRe = regexp.MustCompile(`</arg_key>\s*<arg_value>`)
+	// glmCallHeadRe is a GLM call opener with its tool name, written the way
+	// the model writes it: no space after the tag.
+	glmCallHeadRe = regexp.MustCompile(`<tool_call>[A-Za-z0-9_.\-]+`)
+	glmKeyPieceRe = regexp.MustCompile(`^[A-Za-z0-9_.\-]*$`)
+)
+
+// LooksLikeTruncatedToolCall reports whether text is a piece of a tool call
+// written as markup that could not be turned into a call: the TAIL of one whose
+// opening tags never reached us (a gateway parser matched `<tool_call>…`, bailed
+// and forwarded the remainder), a reply that IS the rest of such a call (it
+// opens with a bare `<arg_value>`), a whole call that was not lifted (ambiguous
+// markup, or a tool the request did not offer), or a GLM call cut off anywhere:
+// inside a value, inside a key, right after the tool name, or mid-tag.
 //
 // Callers must treat such text as a FAILED tool call, never as an answer: with
-// the `<function=NAME>` tag gone the call cannot be reconstructed (there is no
-// name), and there is no way to tell where the model's prose ended and the call
-// began — so any prefix kept would be a guess.
+// the tool name gone the call cannot be reconstructed, and there is no way to
+// tell where the model's prose ended and the call began — so any prefix kept
+// would be a guess.
 //
-// The test is deliberately anchored at the END of the message. Requiring only
-// that a closing tag appear somewhere would fire on an assistant legitimately
-// explaining this markup, which happens the moment anyone debugs it.
+// The test is deliberately anchored at the START or END of the message.
+// Requiring only that a tag appear somewhere would fire on an assistant
+// legitimately explaining this markup, which happens the moment anyone debugs
+// it.
 func LooksLikeTruncatedToolCall(text string) bool {
-	trimmed := strings.TrimRight(text, " \t\r\n")
+	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return false
 	}
 	for _, suffix := range truncatedToolCallSuffixes {
 		if strings.HasSuffix(trimmed, suffix) {
+			return true
+		}
+	}
+	for _, prefix := range truncatedToolCallPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	glmCall := glmPairRe.MatchString(trimmed) || glmCallHeadRe.MatchString(trimmed)
+	for _, suffix := range glmClosingSuffixes {
+		if glmCall && strings.HasSuffix(trimmed, suffix) {
+			return true
+		}
+	}
+	return endsInsideGLMArgValue(trimmed) || endsInsideGLMArgKey(trimmed) ||
+		endsAfterGLMCallHead(trimmed) || endsMidTag(trimmed)
+}
+
+// endsInsideGLMArgValue reports whether text stops in the middle of a GLM
+// argument value: its last <arg_value> follows an </arg_key> and is never
+// closed. That is a call cut off mid-emission ("…</arg_key>\n<arg_value>src/App"),
+// not an explanation of the format, which would show both tags.
+func endsInsideGLMArgValue(text string) bool {
+	open := strings.LastIndex(text, glmArgValueOpen)
+	if open < 0 || strings.LastIndex(text, glmArgValueClose) > open {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSpace(text[:open]), glmArgKeyClose)
+}
+
+// endsInsideGLMArgKey reports whether text stops in the middle of a GLM key
+// ("…<arg_key>cont"): the last <arg_key> is never closed, what follows it could
+// still be a key, and it sits where a key goes — first in the reply, after a
+// value, or after the tool name.
+func endsInsideGLMArgKey(text string) bool {
+	open := strings.LastIndex(text, glmArgKeyOpen)
+	if open < 0 || !glmKeyPieceRe.MatchString(text[open+len(glmArgKeyOpen):]) {
+		return false
+	}
+	before := strings.TrimSpace(text[:open])
+	return before == "" || strings.HasSuffix(before, glmArgValueClose) || endsAfterGLMCallHead(before)
+}
+
+// endsAfterGLMCallHead reports whether text stops right after a GLM call's
+// tool name ("Vou criar o arquivo.\n<tool_call>write_file").
+func endsAfterGLMCallHead(text string) bool {
+	open := strings.LastIndex(text, glmCallOpen)
+	if open < 0 {
+		return false
+	}
+	head := text[open:]
+	loc := glmCallHeadRe.FindStringIndex(head)
+	return loc != nil && loc[0] == 0 && strings.TrimSpace(head[loc[1]:]) == ""
+}
+
+// endsMidTag reports whether text stops inside one of the call tags
+// ("…</arg_value>\n</tool_c"). Three characters past the "<" at least, so a
+// reply ending in a lone "<" or "</" is left alone.
+func endsMidTag(text string) bool {
+	open := strings.LastIndex(text, "<")
+	if open < 0 || len(text)-open < 4 {
+		return false
+	}
+	piece := text[open:]
+	for _, tag := range markupTags {
+		if len(piece) < len(tag) && strings.HasPrefix(tag, piece) {
 			return true
 		}
 	}
@@ -359,7 +588,7 @@ func LooksLikeTruncatedToolCall(text string) bool {
 // toolCallMarkupMarkers are the opening tokens of a tool call written as text.
 // Only OPENING ones: they are what a stream can recognize before the block is
 // complete, which is the whole point of catching this mid-stream.
-var toolCallMarkupMarkers = []string{"<tool_call>", "<function=", "<parameter="}
+var toolCallMarkupMarkers = []string{"<tool_call>", "<function=", "<parameter=", glmArgKeyOpen, glmArgValueOpen}
 
 // LooksLikeToolCallMarkup reports whether accumulated streamed text has turned
 // into a tool call written as markup — the signal to stop publishing it live.

@@ -2297,3 +2297,39 @@ func TestShellTool_DeletingWholeWorkspaceBlocked(t *testing.T) {
 		}
 	}
 }
+
+func TestKillOwnedBy_StopsOnlyTheOwnersProcesses(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	require.NoError(t, err)
+	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
+	tool.sessionManager = sm
+
+	start := func(owner string) string {
+		ctx := WithToolSessionContext(context.Background(), "main", owner, nil)
+		result := tool.Execute(ctx, map[string]any{"action": "run", "command": "sleep 30", "background": "true"})
+		require.False(t, result.IsError, result.ForLLM)
+		for _, s := range sm.List() {
+			if session, getErr := sm.Get(s.ID); getErr == nil && session.Owner == owner {
+				return s.ID
+			}
+		}
+		t.Fatalf("no session recorded for owner %q", owner)
+		return ""
+	}
+	dead := start("subturn-7")
+	alive := start("sk_v1_conversation")
+	t.Cleanup(func() { sm.KillOwnedBy("sk_v1_conversation") })
+
+	killed := sm.KillOwnedBy("subturn-7")
+	require.Equal(t, []string{dead}, killed)
+
+	require.Eventually(t, func() bool {
+		s, getErr := sm.Get(dead)
+		return getErr == nil && s.IsDone()
+	}, 5*time.Second, 50*time.Millisecond, "the owner's process kept running")
+	s, err := sm.Get(alive)
+	require.NoError(t, err)
+	require.False(t, s.IsDone(), "another session's process was stopped")
+	require.Empty(t, sm.KillOwnedBy(""), "an empty owner must not match processes started outside a turn")
+}

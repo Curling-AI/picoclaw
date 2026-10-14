@@ -32,3 +32,11 @@ type SessionStore interface {
 	// Close releases resources held by the store.
 	Close() error
 }
+
+// CheckedAppender is a SessionStore that tells whether an appended message
+// reached its storage. AddFullMessage only logs a failure, which is enough for
+// a turn's own messages; a caller holding the only copy of a message (a
+// background result written into a conversation) needs the error.
+type CheckedAppender interface {
+	AppendMessage(sessionKey string, msg providers.Message) error
+}

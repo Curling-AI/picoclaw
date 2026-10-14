@@ -12,9 +12,14 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
-func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipeline) (turnResult, error) {
+func (al *AgentLoop) runTurn(
+	ctx context.Context,
+	ts *turnState,
+	pipeline *Pipeline,
+) (outcome turnResult, turnErr error) {
 	if ts != nil && ts.agent != nil {
 		modelMu := ts.agent.modelStateMutex()
 		modelMu.RLock()
@@ -27,9 +32,13 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
+	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
+	defer func() {
+		ts.finishBackgroundProcesses(turnErr == nil && outcome.status == TurnEndStatusCompleted && turnCtx.Err() == nil)
+	}()
 
 	if al.takePendingStop(ts.sessionKey) {
 		_ = ts.requestHardAbort()
@@ -311,6 +320,10 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 					turnStatus = TurnEndStatusError
 					return turnResult{}, fmt.Errorf("hook requested turn abort")
 				}
+				if exec.handoffError != nil {
+					turnStatus = TurnEndStatusError
+					return turnResult{}, exec.handoffError
+				}
 				// ExecuteTools returned ControlBreak:
 				// - allResponsesHandled=true: finalize without DefaultResponse (exec.finalContent empty)
 				// - allResponsesHandled=false: finalize with the text ExecuteTools left in
@@ -335,7 +348,8 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		return al.abortTurn(ts)
 	}
 
-	if finalContent == "" {
+	synthesized := finalContent == ""
+	if synthesized {
 		exec.incomplete = true
 		if ts.currentIteration() >= maxIter && maxIter > 0 {
 			// The tool-limit fallback stays in history on purpose: next turn
@@ -345,13 +359,15 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			finalContent = ts.opts.DefaultResponse
 			exec.finalIsFallback = true
 		}
-		pipeline.beginSynthesizedFinalStream(turnCtx, ts, exec)
 	}
 
 	// Check hard abort before finalizing (may have been set during tool execution)
 	if ts.hardAbortRequested() {
 		turnStatus = TurnEndStatusAborted
 		return al.abortTurn(ts)
+	}
+	if synthesized {
+		pipeline.beginSynthesizedFinalStream(turnCtx, ts, exec)
 	}
 
 	result, err := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)

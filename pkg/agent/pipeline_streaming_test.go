@@ -1253,3 +1253,74 @@ func runConfiguredStreamingTurn(t *testing.T, al *AgentLoop, channel string) str
 	}
 	return got
 }
+
+// consumedStreamDelegate streams the LLM rounds and has no stream left for
+// anything after them (WeCom's Finalize consumes the turn); it records
+// finalized-stream clears.
+type consumedStreamDelegate struct {
+	streamer *recordingStreamer
+	streams  int
+	cleared  []string
+}
+
+func (d *consumedStreamDelegate) GetStreamer(
+	context.Context,
+	string, string, string,
+) (bus.Streamer, bool) {
+	if d.streams == 0 {
+		return nil, false
+	}
+	d.streams--
+	return d.streamer, true
+}
+
+func (d *consumedStreamDelegate) ClearFinalizedStream(channel, chatID, sessionKey string) {
+	d.cleared = append(d.cleared, channel+"|"+chatID+"|"+sessionKey)
+}
+
+// Without a stream for the reply the turn wrote, the narration's marker would
+// make the channel drop that reply as its duplicate: the marker is cleared.
+func TestSynthesizedReplyWithoutAStreamClearsTheFinalizedMarker(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+	// One stream per LLM round (MaxToolIterations is 3), none for the reply.
+	delegate := &consumedStreamDelegate{streamer: &recordingStreamer{}, streams: 3}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(delegate)
+	narratedCall := func(id string) configuredStreamingCall {
+		return configuredStreamingCall{
+			chunks: []string{"working on it"},
+			response: &providers.LLMResponse{
+				Content: "working on it",
+				ToolCalls: []providers.ToolCall{{
+					ID: id, Type: "function", Name: "tool_limit_test_tool", Arguments: map[string]any{"value": id},
+				}},
+			},
+		}
+	}
+	provider := &configuredStreamingProvider{streamPlan: []configuredStreamingCall{
+		narratedCall("call-1"), narratedCall("call-2"), narratedCall("call-3"),
+	}}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	al.GetRegistry().GetDefaultAgent().Tools.Register(&toolLimitTestTool{})
+
+	if got := runConfiguredStreamingTurn(t, al, "pico"); got != toolLimitResponse {
+		t.Fatalf("response = %q, want the tool-limit reply", got)
+	}
+	opts := configuredStreamingProcessOptions("pico")
+	want := opts.Channel + "|" + opts.ChatID + "|" + opts.SessionKey
+	if len(delegate.cleared) != 1 || delegate.cleared[0] != want {
+		t.Fatalf("finalized-stream markers cleared = %q, want [%q] (the turn's own, once)", delegate.cleared, want)
+	}
+	// An interim-only turn has no post-turn outbound: Finalize must publish it.
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case outbound := <-msgBus.OutboundChan():
+			if outbound.Content == toolLimitResponse {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the tool-limit reply was never published")
+		}
+	}
+}

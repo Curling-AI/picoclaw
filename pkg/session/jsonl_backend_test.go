@@ -1,6 +1,8 @@
 package session_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -548,5 +550,33 @@ func TestJSONLBackend_ListSessionRecordsCarriesAliasesOfCanonicalSession(t *test
 	}
 	if alias.Scope != nil {
 		t.Errorf("alias scope = %+v, want nil so callers must resolve it through the canonical aliases", alias.Scope)
+	}
+}
+
+var _ session.CheckedAppender = (*session.JSONLBackend)(nil)
+
+// fullDiskStore loses every full-message append and says so.
+type fullDiskStore struct{ memory.Store }
+
+func (fullDiskStore) AddFullMessage(context.Context, string, providers.Message) error {
+	return errors.New("no space left on device")
+}
+
+// AddFullMessage only logs a failed append; a caller holding the only copy of
+// a message needs the error.
+func TestJSONLBackend_AppendMessageReportsAFailedWrite(t *testing.T) {
+	store, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	ok := providers.Message{Role: "user", Content: "ok"}
+	if err := session.NewJSONLBackend(store).AppendMessage("s1", ok); err != nil {
+		t.Fatalf("append on a working store: %v", err)
+	}
+
+	b := session.NewJSONLBackend(fullDiskStore{store})
+	if err := b.AppendMessage("s1", providers.Message{Role: "user", Content: "lost"}); err == nil {
+		t.Fatal("a failed append reported success")
 	}
 }
