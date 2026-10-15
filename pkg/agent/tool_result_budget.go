@@ -3,10 +3,15 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -26,19 +31,36 @@ import (
 //   - boundToolResultForLLM trims a single result past the limit before it
 //     enters the turn, keeping its start and end and saving the full output
 //     to the workspace, where read_file can page through it;
-//   - elideTurnToolResultsToFit, on a context retry where even the turn alone
-//     does not fit, stands a short note in for the earliest results of the
-//     turn. Only in what is sent: the session keeps every result.
+//   - fitTurnByElision, on a context retry where even the turn alone does not
+//     fit, stands a short note in for the earliest results of the turn. Only
+//     in what is sent: the session keeps every result.
 
 // toolOutputDir sits under artifacts/ to share its persistent mount; the
 // Artifacts screen lists only the top level, so these files stay out of the
 // user's deliverables (as artifacts/mcp does).
 const toolOutputDir = "tool-output"
 
-// toolOutputHeadShare is the part of the kept characters taken from the start
-// of the output; the rest comes from its end, where commands print errors and
-// summaries.
-const toolOutputHeadShare = 0.75
+const (
+	// toolOutputHeadShare is the part of the kept characters taken from the
+	// start of the output; the rest comes from its end, where commands print
+	// errors and summaries.
+	toolOutputHeadShare = 0.75
+	// maxSavedToolOutputs bounds the directory on the persistent volume: a
+	// cron that snapshots a large page would otherwise add a file per run.
+	maxSavedToolOutputs = 32
+	// maxToolOutputNameLen keeps the file name far from the filesystem's
+	// limit; MCP tool names come from the servers.
+	maxToolOutputNameLen = 64
+)
+
+// The notice that opens a trimmed result. An elision note repeats where the
+// full output went, so the model reads the file instead of running the tool
+// again.
+const (
+	truncatedToolResultPrefix = "[Tool output truncated: "
+	savedToolOutputPrefix     = "The full output is saved at "
+	savedToolOutputSuffix     = ": read it in parts with read_file"
+)
 
 const (
 	elidedToolResultMarker = "[Tool output elided"
@@ -74,9 +96,12 @@ func (al *AgentLoop) boundToolResultForLLM(ts *turnState, toolName, content stri
 		fields["saved_to"] = path
 	}
 	logger.WarnCF("agent", "Tool result over the limit; trimmed before entering the turn", fields)
-	return truncateToolResult(content, limit, path)
+	return truncateToolResult(content, total, limit, path)
 }
 
+// saveToolOutput stores content under a name made from its hash: the same
+// output is stored once, and its trimmed form reads the same each time, which
+// the loop detector's no-progress check relies on.
 func saveToolOutput(workspace, toolName, content string) (string, error) {
 	if workspace == "" {
 		return "", fmt.Errorf("no workspace to save the full output")
@@ -85,28 +110,86 @@ func saveToolOutput(workspace, toolName, content string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
-	f, err := os.CreateTemp(dir, utils.SanitizeFilename(toolName)+"_*.txt")
-	if err != nil {
-		return "", fmt.Errorf("create output file: %w", err)
+	sum := sha256.Sum256([]byte(content))
+	path := filepath.Join(dir, toolOutputFileStem(toolName)+"_"+hex.EncodeToString(sum[:8])+".txt")
+	if _, err := os.Stat(path); err == nil {
+		now := time.Now()
+		_ = os.Chtimes(path, now, now) // a repeat counts as recent for pruning
+		return path, nil
 	}
-	path := f.Name()
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return "", fmt.Errorf("write %s: %w", path, err)
+	if err := writeFileAtomically(dir, path, content); err != nil {
+		return "", err
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", fmt.Errorf("close %s: %w", path, err)
-	}
+	pruneSavedToolOutputs(dir, maxSavedToolOutputs)
 	return path, nil
 }
 
-// truncateToolResult keeps the start and the end of content within limit
-// runes, notes included. savedPath is where the full output went, or "".
-func truncateToolResult(content string, limit int, savedPath string) string {
-	runes := []rune(content)
-	total := len(runes)
+func toolOutputFileStem(toolName string) string {
+	stem := utils.SanitizeFilename(toolName)
+	if len(stem) > maxToolOutputNameLen {
+		stem = stem[:maxToolOutputNameLen]
+	}
+	return stem
+}
+
+// writeFileAtomically writes through a temporary file, so a parallel call
+// with the same output never sees it half written.
+func writeFileAtomically(dir, path, content string) error {
+	f, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create output file: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename to %s: %w", path, err)
+	}
+	return nil
+}
+
+// pruneSavedToolOutputs keeps the keep most recent outputs. A failure leaves
+// extra files behind and is not worth failing the tool result over.
+func pruneSavedToolOutputs(dir string, keep int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type saved struct {
+		path    string
+		modTime time.Time
+	}
+	var files []saved
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			files = append(files, saved{filepath.Join(dir, e.Name()), info.ModTime()})
+		}
+	}
+	if len(files) <= keep {
+		return
+	}
+	slices.SortFunc(files, func(a, b saved) int { return b.modTime.Compare(a.modTime) })
+	for _, f := range files[keep:] {
+		_ = os.Remove(f.path)
+	}
+}
+
+// truncateToolResult keeps the start and the end of content, total runes long,
+// within limit runes, notes included. savedPath is where the full output went,
+// or "". It slices by byte offsets found rune by rune: a []rune of an 18MB
+// output would cost four times its size.
+func truncateToolResult(content string, total, limit int, savedPath string) string {
 	notice := truncatedToolResultNotice(total, savedPath)
 	// The omitted count is below total, so this marker is never shorter than
 	// the real one.
@@ -114,88 +197,164 @@ func truncateToolResult(content string, limit int, savedPath string) string {
 	keep := max(limit-utf8.RuneCountInString(notice)-markerRunes, 0)
 	head := int(float64(keep) * toolOutputHeadShare)
 	tail := keep - head
-	return notice + string(runes[:head]) + omittedToolOutputMarker(total-keep) + string(runes[total-tail:])
+	headEnd := 0
+	for range head {
+		_, size := utf8.DecodeRuneInString(content[headEnd:])
+		headEnd += size
+	}
+	tailStart := len(content)
+	for range tail {
+		_, size := utf8.DecodeLastRuneInString(content[:tailStart])
+		tailStart -= size
+	}
+	return notice + content[:headEnd] + omittedToolOutputMarker(total-keep) + content[tailStart:]
 }
 
 func truncatedToolResultNotice(total int, savedPath string) string {
 	where := "The full output could not be saved."
 	if savedPath != "" {
-		where = fmt.Sprintf(
-			"The full output is saved at %s: read it in parts with read_file (offset/length) or search it with grep.",
-			savedPath,
-		)
+		where = savedToolOutputPrefix + savedPath + savedToolOutputSuffix + " (offset/length) or search it with grep."
 	}
-	return fmt.Sprintf(
-		"[Tool output truncated: %d characters, too long for the conversation; only its start and end are shown. %s "+
-			"Narrow the request (filters, selectors, limits) instead of repeating it.]\n\n",
-		total,
-		where,
-	)
+	return fmt.Sprintf("%s%d characters, too long for the conversation; only its start and end are shown. %s "+
+		"Narrow the request (filters, selectors, limits) instead of repeating it.]\n\n",
+		truncatedToolResultPrefix, total, where)
 }
 
 func omittedToolOutputMarker(omitted int) string {
 	return fmt.Sprintf("\n\n[… %d characters omitted …]\n\n", omitted)
 }
 
-func elidedToolResultNote(chars int) string {
-	return fmt.Sprintf("%s to keep this turn within the context window (%d characters). "+
-		"Run the tool again with a narrower request if you still need it.]", elidedToolResultMarker, chars)
+// savedToolOutputPath returns where a result trimmed by boundToolResultForLLM
+// saved its full output, or "".
+func savedToolOutputPath(content string) string {
+	if !strings.HasPrefix(content, truncatedToolResultPrefix) {
+		return ""
+	}
+	notice, _, _ := strings.Cut(content, "]\n\n")
+	_, rest, found := strings.Cut(notice, savedToolOutputPrefix)
+	if !found {
+		return ""
+	}
+	path, _, found := strings.Cut(rest, savedToolOutputSuffix)
+	if !found {
+		return ""
+	}
+	return path
 }
 
-// withElidedToolResults returns messages with the results of the tool calls in
-// elided replaced by their note. messages is the turn's own history and is
-// never written; without elisions it is returned as is.
-func withElidedToolResults(messages []providers.Message, elided map[string]int) []providers.Message {
-	if len(elided) == 0 {
+// elidedToolResult is a tool result of the active turn a context retry
+// replaced with a note. The id guards against the turn's messages moving:
+// text-lifted tool calls reuse ids like "xml_call_0" in every response, so the
+// id alone cannot tell results apart.
+type elidedToolResult struct {
+	toolCallID string
+	chars      int
+	savedPath  string
+}
+
+// turnElisions maps offsets from the start of the active turn to the results
+// replaced there. The turn only grows by appending, so offsets stay put.
+type turnElisions map[int]elidedToolResult
+
+func elidedToolResultNote(e elidedToolResult) string {
+	next := "Run the tool again with a narrower request if you still need it."
+	if e.savedPath != "" {
+		next = "Its full output is saved at " + e.savedPath + ": read it from there instead of running the tool again."
+	}
+	return fmt.Sprintf("%s to keep this turn within the context window (%d characters). %s]",
+		elidedToolResultMarker, e.chars, next)
+}
+
+// withElidedToolResults returns messages, whose active turn starts at
+// turnStart, with the elided results replaced by their notes. messages is the
+// turn's own history and is never written; without elisions it is returned as
+// is.
+func withElidedToolResults(messages []providers.Message, turnStart int, elided turnElisions) []providers.Message {
+	if len(elided) == 0 || turnStart < 0 {
 		return messages
 	}
-	out := append([]providers.Message(nil), messages...)
-	for i := range out {
-		if chars, ok := elided[out[i].ToolCallID]; ok && out[i].Role == "tool" {
-			out[i].Content = elidedToolResultNote(chars)
+	var out []providers.Message
+	for offset, e := range elided {
+		i := turnStart + offset
+		if i >= len(messages) || messages[i].Role != "tool" || messages[i].ToolCallID != e.toolCallID {
+			continue
 		}
+		if out == nil {
+			out = append([]providers.Message(nil), messages...)
+		}
+		out[i].Content = elidedToolResultNote(e)
+	}
+	if out == nil {
+		return messages
 	}
 	return out
 }
 
-// elideTurnToolResultsToFit adds tool results of the active turn to elided,
-// oldest first, until the call fits with headroom tokens to spare, or at least
-// fits once nothing is left to elide. measure builds the call with a set of
-// elisions and says how many tokens it has past the window. It returns the
-// grown set, the call built with it and whether that call fits; elided itself
-// is not modified.
+// callBudget is the room a call must fit in.
+type callBudget struct {
+	window    int
+	toolDefs  []providers.ToolDefinition
+	maxTokens int
+}
+
+func (b callBudget) overflow(messages []providers.Message) int {
+	return contextBudgetOverflow(b.window, messages, b.toolDefs, b.maxTokens)
+}
+
+// fitTurnByElision is the context retry's last resort when even the active
+// turn alone is past the window. It elides tool results of the turn, keeping
+// headroom for the turn's next calls, then puts back as much of the earlier
+// history as still fits under that headroom. build makes the call from a slice
+// of the earlier history and a set of elisions.
+func fitTurnByElision(
+	stable, turn []providers.Message,
+	elided turnElisions,
+	budget callBudget,
+	build func([]providers.Message, turnElisions) []providers.Message,
+) (history, call []providers.Message, next turnElisions, ok bool) {
+	headroom := budget.window / elisionHeadroomDivisor
+	next, call, ok = elideTurnToolResultsToFit(turn, elided, headroom, func(e turnElisions) ([]providers.Message, int) {
+		msgs := build(nil, e)
+		return msgs, budget.overflow(msgs)
+	})
+	if !ok {
+		return nil, call, elided, false
+	}
+	kept, keptCall, fits := trimHistoryToFitContextWindow(
+		stable,
+		func(h []providers.Message) []providers.Message { return build(h, next) },
+		budget.window-headroom,
+		budget.toolDefs,
+		budget.maxTokens,
+	)
+	if fits && len(kept) > 0 {
+		return kept, keptCall, next, true
+	}
+	return nil, call, next, true
+}
+
+// elideTurnToolResultsToFit adds tool results of the active turn to elided
+// until measure says the call fits. Earlier results go first, oldest first,
+// until headroom tokens are spare; the newest batch, which the model has not
+// read yet, goes only when the call fits no other way. It returns the grown
+// set, the call built with it and whether that call fits; elided itself is
+// not modified.
 func elideTurnToolResultsToFit(
 	turn []providers.Message,
-	elided map[string]int,
+	elided turnElisions,
 	headroom int,
-	measure func(map[string]int) ([]providers.Message, int),
-) (map[string]int, []providers.Message, bool) {
+	measure func(turnElisions) ([]providers.Message, int),
+) (turnElisions, []providers.Message, bool) {
 	next := maps.Clone(elided)
 	if next == nil {
-		next = make(map[string]int)
+		next = make(turnElisions)
 	}
+	newest := newestToolBatchStart(turn)
 	messages, over := measure(next)
-	for over+headroom > 0 {
-		// Pick by estimated savings, then rebuild once to confirm.
-		saved, picked := 0, false
-		for _, msg := range turn {
-			if !elidableToolResult(msg, next) {
-				continue
-			}
-			chars := utf8.RuneCountInString(msg.Content)
-			next[msg.ToolCallID] = chars
-			note := msg
-			note.Content = elidedToolResultNote(chars)
-			saved += EstimateMessageTokens(msg) - EstimateMessageTokens(note)
-			picked = true
-			if saved >= over+headroom {
-				break
-			}
+	for _, phase := range []struct{ from, to, headroom int }{{0, newest, headroom}, {newest, len(turn), 0}} {
+		for over+phase.headroom > 0 && pickElisions(turn, phase.from, phase.to, next, over+phase.headroom) {
+			messages, over = measure(next)
 		}
-		if !picked {
-			break
-		}
-		messages, over = measure(next)
 	}
 	if over > 0 {
 		return elided, messages, false
@@ -203,12 +362,46 @@ func elideTurnToolResultsToFit(
 	return next, messages, true
 }
 
-func elidableToolResult(msg providers.Message, elided map[string]int) bool {
-	if msg.Role != "tool" || msg.ToolCallID == "" {
+// pickElisions adds results of turn[from:to] to next, oldest first, until
+// their estimated savings reach goal tokens. It reports whether it added any.
+func pickElisions(turn []providers.Message, from, to int, next turnElisions, goal int) bool {
+	saved, picked := 0, false
+	for offset := from; offset < to && saved < goal; offset++ {
+		msg := turn[offset]
+		if !elidableToolResult(msg, offset, next) {
+			continue
+		}
+		e := elidedToolResult{
+			toolCallID: msg.ToolCallID,
+			chars:      utf8.RuneCountInString(msg.Content),
+			savedPath:  savedToolOutputPath(msg.Content),
+		}
+		next[offset] = e
+		note := msg
+		note.Content = elidedToolResultNote(e)
+		saved += EstimateMessageTokens(msg) - EstimateMessageTokens(note)
+		picked = true
+	}
+	return picked
+}
+
+func elidableToolResult(msg providers.Message, offset int, elided turnElisions) bool {
+	if msg.Role != "tool" {
 		return false
 	}
-	if _, done := elided[msg.ToolCallID]; done {
+	if _, done := elided[offset]; done {
 		return false
 	}
 	return utf8.RuneCountInString(msg.Content) >= minElidableToolResultChars
+}
+
+// newestToolBatchStart is where the results of the turn's last tool calls
+// begin: right after its last assistant message.
+func newestToolBatchStart(turn []providers.Message) int {
+	for i := len(turn) - 1; i >= 0; i-- {
+		if turn[i].Role == "assistant" {
+			return i + 1
+		}
+	}
+	return 0
 }

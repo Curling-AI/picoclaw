@@ -141,6 +141,26 @@ func compactionCanHelp(
 	return !isOverContextBudget(contextWindow, build(nil), toolDefs, maxTokens)
 }
 
+// retryCompactionSkipReason says why a context retry must not run the
+// destructive compaction, or "" when it may. stable is the history before the
+// active turn; build is the guard's prompt builder (see compactionCanHelp).
+func retryCompactionSkipReason(
+	stable []providers.Message,
+	build func([]providers.Message) []providers.Message,
+	budget callBudget,
+) string {
+	if len(stable) == 0 {
+		// A compaction could only cut into the active turn: the legacy manager
+		// then keeps just its user message, and the model runs its tools
+		// again. (seucaranguejo fork)
+		return "no history before the active turn"
+	}
+	if !compactionCanHelp(build, budget.window, budget.toolDefs, budget.maxTokens) {
+		return "the active turn alone exceeds the budget"
+	}
+	return ""
+}
+
 // trimHistoryToFitContextWindow rebuilds the prompt from progressively newer
 // history slices until it fits within the context window. Oldest complete turns
 // are dropped first so tool-call sequences remain intact.

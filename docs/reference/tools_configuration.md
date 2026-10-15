@@ -37,6 +37,14 @@ See [Sensitive Data Filtering](../security/sensitive_data_filtering.md) for full
 | `filter_sensitive_data` | bool | `true` | Enable/disable filtering |
 | `filter_min_length` | int | `8` | Minimum content length to trigger filtering |
 
+## Tool Result Size
+
+A single tool result longer than `max_result_chars` characters enters the conversation trimmed: its start and end, with a note on how long it was. The full output is saved under `artifacts/tool-output/` in the workspace (the 32 most recent outputs are kept), where `read_file` can page through it. The active turn is never compacted, so without this bound one large result (a browser snapshot, a long command output) could push the turn past the model's context window.
+
+| Config | Type | Default | Description |
+|--------|------|---------|-------------|
+| `max_result_chars` | int | `131072` | Characters of a tool result kept in the conversation; values below `73728` (read_file's 64KB page plus its header) are raised to it. Env: `PICOCLAW_TOOLS_MAX_RESULT_CHARS` |
+
 ## Web Tools
 
 Web tools are used for web search and fetching.

@@ -1369,14 +1369,20 @@ type ToolsConfig struct {
 	MaxResultChars int `json:"max_result_chars,omitempty" yaml:"-" env:"PICOCLAW_TOOLS_MAX_RESULT_CHARS"`
 }
 
-// DefaultToolMaxResultChars sits above read_file's 64KB window, so paging a
-// file never trips it. (seucaranguejo fork)
-const DefaultToolMaxResultChars = 128 * 1024
+const (
+	// DefaultToolMaxResultChars sits above read_file's 64KB page, so paging a
+	// file never trips it. (seucaranguejo fork)
+	DefaultToolMaxResultChars = 128 * 1024
+	// MinToolMaxResultChars is read_file's 64KB page plus its header: below
+	// it, paging a saved output would trip the limit again.
+	MinToolMaxResultChars = 72 * 1024
+)
 
-// GetMaxResultChars returns the per-result limit (default: DefaultToolMaxResultChars).
+// GetMaxResultChars returns the per-result limit: DefaultToolMaxResultChars
+// when unset, never below MinToolMaxResultChars.
 func (c *ToolsConfig) GetMaxResultChars() int {
 	if c.MaxResultChars > 0 {
-		return c.MaxResultChars
+		return max(c.MaxResultChars, MinToolMaxResultChars)
 	}
 	return DefaultToolMaxResultChars
 }
