@@ -64,6 +64,11 @@ type CompactRequest struct {
 	SessionKey string                // session identifier
 	Reason     ContextCompressReason // proactive_budget | llm_retry | summarize
 	Budget     int                   // context window budget (used for retry aggressive compaction)
+	// ProtectedTail is how many messages at the end of the history the
+	// compaction must keep: the active turn, on a context retry. Its own
+	// steering messages and subturn results also start "turns" for the
+	// legacy cut, which would otherwise land inside it. (seucaranguejo fork)
+	ProtectedTail int
 }
 
 // IngestRequest is the input to Ingest.

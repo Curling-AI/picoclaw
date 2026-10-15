@@ -1360,6 +1360,31 @@ type ToolsConfig struct {
 	Subagent      ToolConfig `json:"subagent"       yaml:"-" envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	WebFetch      ToolConfig `json:"web_fetch"      yaml:"-" envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
 	WriteFile     ToolConfig `json:"write_file"     yaml:"-" envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
+
+	// MaxResultChars caps how much of a single tool result enters the turn;
+	// past it the result is trimmed and the full output saved to the
+	// workspace. The active turn is never compacted, so one oversized result
+	// used to make the turn alone overflow the context window.
+	// Default: DefaultToolMaxResultChars. (seucaranguejo fork)
+	MaxResultChars int `json:"max_result_chars,omitempty" yaml:"-" env:"PICOCLAW_TOOLS_MAX_RESULT_CHARS"`
+}
+
+const (
+	// DefaultToolMaxResultChars sits above read_file's 64KB page, so paging a
+	// file never trips it. (seucaranguejo fork)
+	DefaultToolMaxResultChars = 128 * 1024
+	// MinToolMaxResultChars is read_file's 64KB page plus its header: below
+	// it, paging a saved output would trip the limit again.
+	MinToolMaxResultChars = 72 * 1024
+)
+
+// GetMaxResultChars returns the per-result limit: DefaultToolMaxResultChars
+// when unset, never below MinToolMaxResultChars.
+func (c *ToolsConfig) GetMaxResultChars() int {
+	if c.MaxResultChars > 0 {
+		return max(c.MaxResultChars, MinToolMaxResultChars)
+	}
+	return DefaultToolMaxResultChars
 }
 
 // IsFilterSensitiveDataEnabled returns true if sensitive data filtering is enabled
