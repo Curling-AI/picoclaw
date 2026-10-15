@@ -663,8 +663,8 @@ func (p *Pipeline) CallLLM(
 			// routed to the small-context vision model needs its (128K) budget, not
 			// the main model's 1M, or the retry never trims enough and 400s again.
 			effectiveCW := turnContextWindow(ts, exec)
-			if exec.contextWindowCap > 0 {
-				effectiveCW = min(effectiveCW, exec.contextWindowCap)
+			if learned := exec.learnedContextWindow(); learned > 0 {
+				effectiveCW = min(effectiveCW, learned)
 			}
 			// The upstream refused, again, a call our estimate says fits: its
 			// tokenizer counts this content heavier (dense JSON, URLs). Measured
@@ -676,16 +676,17 @@ func (p *Pipeline) CallLLM(
 			if sent := estimateCallTokens(
 				exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens,
 			); contextRefusals > 1 && sent <= effectiveCW {
-				exec.contextWindowCap = sent * refusedCallWindowNum / refusedCallWindowDen
+				lowered := sent * refusedCallWindowNum / refusedCallWindowDen
+				exec.learnContextWindow(lowered)
 				logger.WarnCF("agent", "Upstream refused a call the estimate says fits; lowering the turn's window",
 					map[string]any{
 						"session_key":      ts.sessionKey,
 						"model":            exec.llmModelName,
 						"estimated_tokens": sent,
 						"window":           effectiveCW,
-						"lowered_to":       exec.contextWindowCap,
+						"lowered_to":       lowered,
 					})
-				effectiveCW = exec.contextWindowCap
+				effectiveCW = lowered
 			}
 			// exec.history is read when the turn starts and lacks what the turn
 			// persisted since, its tool results above all. Measured on it, the
