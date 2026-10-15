@@ -312,6 +312,7 @@ toolLoop:
 						}
 						toolResultMedia = append(toolResultMedia, hookResult.Media...)
 					}
+					contentForLLM = al.boundToolResultForLLM(ts, toolName, contentForLLM)
 					toolResultMsg := toolResultPromptMessage(contentForLLM, tc.ID, toolResultMedia)
 
 					al.emitEvent(
@@ -538,6 +539,7 @@ toolLoop:
 			}
 
 			content = al.cfg.FilterSensitiveData(content)
+			content = al.boundToolResultForLLM(ts, asyncToolName, content)
 
 			logger.InfoCF("agent", "Async tool completed, publishing result",
 				map[string]any{
@@ -723,6 +725,7 @@ toolLoop:
 		if al.cfg.Tools.IsFilterSensitiveDataEnabled() {
 			contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
 		}
+		contentForLLM = al.boundToolResultForLLM(ts, toolName, contentForLLM)
 
 		var toolResultMedia []string
 		if len(toolResult.Media) > 0 && !toolResult.ResponseHandled {

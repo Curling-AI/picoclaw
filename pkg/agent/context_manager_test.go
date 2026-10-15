@@ -350,6 +350,59 @@ func TestLegacyCompact_Overflow(t *testing.T) {
 	}
 }
 
+// The active turn's own steering messages and subturn results start "turns"
+// too: without the protected tail the legacy cut lands inside the turn and
+// drops its tool results for good.
+func TestLegacyCompact_Overflow_KeepsTheProtectedTail(t *testing.T) {
+	cfg := testConfig(t)
+	al := newCMTestAgentLoop(cfg)
+	defaultAgent := al.registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		t.Fatal("expected default agent")
+	}
+	activeTurn := []providers.Message{
+		{Role: "user", Content: "do the task"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "c1", Name: "exec"}}},
+		{Role: "tool", ToolCallID: "c1", Content: "result 1"},
+		{Role: "user", Content: "steering: also check X"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "c2", Name: "exec"}}},
+		{Role: "tool", ToolCallID: "c2", Content: "result 2"},
+		{Role: "user", Content: "steering: and Y"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "c3", Name: "exec"}}},
+		{Role: "tool", ToolCallID: "c3", Content: "result 3"},
+	}
+	history := append([]providers.Message{
+		{Role: "user", Content: "earlier question"},
+		{Role: "assistant", Content: "earlier answer"},
+	}, activeTurn...)
+	defaultAgent.Sessions.SetHistory("session-protected", history)
+
+	if err := al.contextManager.Compact(context.Background(), &CompactRequest{
+		SessionKey:    "session-protected",
+		Reason:        ContextCompressReasonRetry,
+		ProtectedTail: len(activeTurn),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	kept := defaultAgent.Sessions.GetHistory("session-protected")
+	if len(kept) != len(activeTurn) || kept[0].Content != "do the task" {
+		t.Fatalf("kept %d messages starting with %q, want the whole active turn", len(kept), kept[0].Content)
+	}
+
+	// Nothing before the protected tail: nothing to drop.
+	defaultAgent.Sessions.SetHistory("session-turn-only", activeTurn)
+	if err := al.contextManager.Compact(context.Background(), &CompactRequest{
+		SessionKey:    "session-turn-only",
+		Reason:        ContextCompressReasonRetry,
+		ProtectedTail: len(activeTurn),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := defaultAgent.Sessions.GetHistory("session-turn-only"); len(got) != len(activeTurn) {
+		t.Fatalf("compacted a history that is only the active turn: %d of %d messages left", len(got), len(activeTurn))
+	}
+}
+
 func TestLegacyCompact_Overflow_ProactiveReason(t *testing.T) {
 	cfg := testConfig(t)
 	al := newCMTestAgentLoop(cfg)

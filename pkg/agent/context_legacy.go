@@ -71,7 +71,7 @@ func (m *legacyContextManager) Compact(ctx context.Context, req *CompactRequest)
 	switch req.Reason {
 	case ContextCompressReasonProactive, ContextCompressReasonRetry:
 		// Sync emergency compression — budget exceeded.
-		if result, ok := m.forceCompression(req.SessionKey); ok {
+		if result, ok := m.forceCompression(req.SessionKey, req.ProtectedTail); ok {
 			m.al.emitEvent(
 				runtimeevents.KindAgentContextCompress,
 				m.al.newTurnEventScope("", req.SessionKey, nil).meta(0, "forceCompression", "turn.context.compress"),
@@ -150,7 +150,8 @@ type compressionResult struct {
 // forceCompression aggressively reduces context when the limit is hit.
 // It drops the oldest ~50% of Turns (a Turn is a complete user→LLM→response
 // cycle, as defined in #1316), so tool-call sequences are never split.
-func (m *legacyContextManager) forceCompression(sessionKey string) (compressionResult, bool) {
+// protectedTail messages at the end of the history are never dropped.
+func (m *legacyContextManager) forceCompression(sessionKey string, protectedTail int) (compressionResult, bool) {
 	agent := m.al.registry.GetDefaultAgent()
 	if agent == nil {
 		return compressionResult{}, false
@@ -167,6 +168,15 @@ func (m *legacyContextManager) forceCompression(sessionKey string) (compressionR
 		mid = turns[len(turns)/2]
 	} else {
 		mid = findSafeBoundary(history, len(history)/2)
+	}
+	if protectedTail > 0 {
+		start := len(history) - protectedTail
+		if start <= 0 {
+			return compressionResult{}, false
+		}
+		if mid <= 0 || mid > start {
+			mid = start
+		}
 	}
 	var keptHistory []providers.Message
 	if mid <= 0 {
