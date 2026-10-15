@@ -25,8 +25,17 @@ func (s *staticUsageProvider) GetDefaultModel() string { return "mock-model" }
 
 type failingUsageProvider struct{ staticUsageProvider }
 
-func (p *failingUsageProvider) Chat(context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any) (*providers.LLMResponse, error) {
-	return &providers.LLMResponse{Content: "partial", Usage: &providers.UsageInfo{PromptTokens: 10, CompletionTokens: 3}}, errors.New("provider unavailable")
+func (p *failingUsageProvider) Chat(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{
+		Content: "partial",
+		Usage:   &providers.UsageInfo{PromptTokens: 10, CompletionTokens: 3},
+	}, errors.New("provider unavailable")
 }
 
 type captureLLMHook struct {
@@ -54,7 +63,13 @@ func (c *captureLLMHook) AfterLLM(
 }
 
 func TestBackgroundUsageAbsenceRemainsObservable(t *testing.T) {
-	for _, path := range []string{"evolution provider", "vision delegate", "nil response", "evolution error", "vision error"} {
+	for _, path := range []string{
+		"evolution provider",
+		"vision delegate",
+		"nil response",
+		"evolution error",
+		"vision error",
+	} {
 		t.Run(path, func(t *testing.T) {
 			provider := &staticUsageProvider{}
 			al, instance, cleanup := newTurnCoordTestLoop(t, provider)
@@ -77,7 +92,14 @@ func TestBackgroundUsageAbsenceRemainsObservable(t *testing.T) {
 			case "vision delegate":
 				pipeline := &Pipeline{al: al}
 				turn := &turnState{agent: instance, sessionKey: "agent:cron-job-11111111-1111-4111-8111-111111111111"}
-				if _, err := pipeline.callVisionDelegate(ctx, turn, provider, "model", "", []string{"data:image/png;base64,abc"}); err != nil {
+				if _, err := pipeline.callVisionDelegate(
+					ctx,
+					turn,
+					provider,
+					"model",
+					"",
+					[]string{"data:image/png;base64,abc"},
+				); err != nil {
 					t.Fatal(err)
 				}
 			case "nil response":
@@ -92,7 +114,14 @@ func TestBackgroundUsageAbsenceRemainsObservable(t *testing.T) {
 			case "vision error":
 				pipeline := &Pipeline{al: al}
 				turn := &turnState{agent: instance, sessionKey: "agent:cron-job-11111111-1111-4111-8111-111111111111"}
-				if _, err := pipeline.callVisionDelegate(ctx, turn, &failingUsageProvider{}, "model", "", []string{"data:image/png;base64,abc"}); err == nil {
+				if _, err := pipeline.callVisionDelegate(
+					ctx,
+					turn,
+					&failingUsageProvider{},
+					"model",
+					"",
+					[]string{"data:image/png;base64,abc"},
+				); err == nil {
 					t.Fatal("vision error was hidden")
 				}
 			}
@@ -105,7 +134,9 @@ func TestBackgroundUsageAbsenceRemainsObservable(t *testing.T) {
 			if got.Response != nil && got.Response.Usage != nil {
 				t.Fatal("missing usage was replaced by invented zero usage")
 			}
-			if got.Meta.Source != source || got.Meta.SessionKey != "background:"+source || hook.contexts[0].Value(key) != "execution-context" {
+			if got.Meta.Source != source ||
+				got.Meta.SessionKey != "background:"+source ||
+				hook.contexts[0].Value(key) != "execution-context" {
 				t.Fatal("background source or execution context was lost")
 			}
 		})

@@ -22,7 +22,13 @@ type asyncCompactionProbeProvider struct {
 	fail         bool
 }
 
-func (p *asyncCompactionProbeProvider) Chat(ctx context.Context, _ []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any) (*providers.LLMResponse, error) {
+func (p *asyncCompactionProbeProvider) Chat(
+	ctx context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
 	if p.observations.Load() == 0 {
 		p.wrongOrder.Store(true)
 	}
@@ -41,7 +47,10 @@ func (p *asyncCompactionProbeProvider) Chat(ctx context.Context, _ []providers.M
 
 func (*asyncCompactionProbeProvider) GetDefaultModel() string { return "test-model" }
 
-func asyncCompactionFixture(t *testing.T, provider *asyncCompactionProbeProvider) (*legacyContextManager, *AgentInstance, []providers.Message) {
+func asyncCompactionFixture(
+	t *testing.T,
+	provider *asyncCompactionProbeProvider,
+) (*legacyContextManager, *AgentInstance, []providers.Message) {
 	t.Helper()
 	al := NewAgentLoop(testConfig(t), bus.NewMessageBus(), provider)
 	t.Cleanup(func() { al.Close() })
@@ -52,9 +61,12 @@ func asyncCompactionFixture(t *testing.T, provider *asyncCompactionProbeProvider
 	agent.ContextWindow, agent.SummarizeTokenPercent = 8000, 75
 	agent.SummarizeMessageThreshold, agent.KeepLastMessages = 2, 4
 	history := []providers.Message{
-		{Role: "user", Content: "q1"}, {Role: "assistant", Content: "a1"},
-		{Role: "user", Content: "q2"}, {Role: "assistant", Content: "a2"},
-		{Role: "user", Content: "q3"}, {Role: "assistant", Content: "a3"},
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "user", Content: "q3"},
+		{Role: "assistant", Content: "a3"},
 	}
 	return &legacyContextManager{al: al}, agent, history
 }
@@ -72,7 +84,7 @@ func TestLegacyCompactAsyncObserverPrecedesReturnAndProviderWithoutDuplicateLaun
 		unblock()
 		waitFor(t, "asynchronous compaction cleanup", func() bool { return !m.CompactionState(key).Active })
 	}()
-	// A cancelled turn and its values must not become the background provider's
+	// A canceled turn and its values must not become the background provider's
 	// lifetime or billing context. Only the synchronous observer sees them.
 	base, cancel := context.WithCancel(context.WithValue(t.Context(), asyncCompactionProbeKey{}, true))
 	cancel()
@@ -114,7 +126,12 @@ func TestLegacyCompactAsyncObserverPrecedesReturnAndProviderWithoutDuplicateLaun
 	}
 	waitFor(t, "second compaction completion", func() bool { return !m.CompactionState(key).Active })
 	if provider.calls.Load() != 2 || provider.wrongOrder.Load() || provider.wrongContext.Load() {
-		t.Fatal("observer order or background context changed", provider.calls.Load(), provider.wrongOrder.Load(), provider.wrongContext.Load())
+		t.Fatal(
+			"observer order or background context changed",
+			provider.calls.Load(),
+			provider.wrongOrder.Load(),
+			provider.wrongContext.Load(),
+		)
 	}
 }
 
