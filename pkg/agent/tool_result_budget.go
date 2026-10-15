@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -140,8 +141,8 @@ func saveToolOutput(workspace, toolName, content string) (string, error) {
 		})
 		return path, nil
 	}
-	if err := writeFileAtomically(dir, path, content); err != nil {
-		return "", err
+	if err := fileutil.WriteFileAtomic(path, []byte(content), 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	pruneSavedToolOutputs(dir, maxSavedToolOutputs, maxSavedToolOutputBytes)
 	return path, nil
@@ -155,33 +156,10 @@ func toolOutputFileStem(toolName string) string {
 	return stem
 }
 
-// writeFileAtomically writes through a temporary file, so a parallel call
-// with the same output never sees it half written.
-func writeFileAtomically(dir, path, content string) error {
-	f, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
-	}
-	tmp := f.Name()
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename to %s: %w", path, err)
-	}
-	return nil
-}
-
 // pruneSavedToolOutputs keeps the most recent outputs within maxFiles and
-// maxBytes (the newest always stays). A failure leaves extra files behind and
-// is not worth failing the tool result over.
+// maxBytes (the newest always stays), and drops the temporary files
+// fileutil.WriteFileAtomic leaves when a write is interrupted. A failure leaves
+// extra files behind and is not worth failing the tool result over.
 func pruneSavedToolOutputs(dir string, maxFiles int, maxBytes int64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -305,8 +283,22 @@ type elidedToolResult struct {
 }
 
 // turnElisions maps offsets from the start of the active turn to the results
-// replaced there. The turn only grows by appending, so offsets stay put.
+// replaced there. The turn only grows by appending, so offsets stay put while
+// its start does; see turnExecution.elisionsAt.
 type turnElisions map[int]elidedToolResult
+
+// elisionsAt returns the turn's elisions if they were taken on a tail of the
+// turn that starts where this one does, tailStart counting in the turn's
+// persisted messages. When the history leaves out the head of the turn (the
+// seahorse manager keeps only the newest messages of a long turn), the same
+// offset names another message, and with reused ids even the id guard would
+// pass, so the elisions start over. (seucaranguejo fork)
+func (exec *turnExecution) elisionsAt(tailStart int) turnElisions {
+	if tailStart != exec.elisionsTailStart {
+		return nil
+	}
+	return exec.elidedToolResults
+}
 
 func elidedToolResultNote(e elidedToolResult) string {
 	next := "Run the tool again with a narrower request if you still need it."
@@ -434,13 +426,13 @@ func elideTurnToolResultsToFit(
 	}
 	newest := newestToolBatchStart(turn.messages)
 	messages, over := measure(next)
-	for _, phase := range []elisionPhase{
-		{from: 0, to: newest, headroom: headroom},
-		{from: newest, to: len(turn.messages), excerpt: true},
-	} {
-		for over+phase.headroom > 0 && pickElisions(turn, phase, next, over+phase.headroom) {
-			messages, over = measure(next)
-		}
+	earlier := elisionPhase{from: 0, to: newest}
+	for over+headroom > 0 && pickElisions(turn, earlier, next, over+headroom) {
+		messages, over = measure(next)
+	}
+	newestBatch := elisionPhase{from: newest, to: len(turn.messages), excerpt: true}
+	for over > 0 && pickElisions(turn, newestBatch, next, over) {
+		messages, over = measure(next)
 	}
 	if over > 0 {
 		return turn.elided, messages, false
@@ -448,11 +440,11 @@ func elideTurnToolResultsToFit(
 	return next, messages, true
 }
 
-// elisionPhase is a range of the turn whose results may be elided, the spare
-// tokens to aim for and whether each note keeps an excerpt of its result.
+// elisionPhase is a range of the turn whose results may be elided and
+// whether each note keeps an excerpt of its result.
 type elisionPhase struct {
-	from, to, headroom int
-	excerpt            bool
+	from, to int
+	excerpt  bool
 }
 
 // pickElisions adds results of the phase's range to next, oldest first, until

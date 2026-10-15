@@ -164,6 +164,9 @@ type turnExecution struct {
 	// every remaining call of the turn and never touches exec.messages or the
 	// session. (seucaranguejo fork)
 	elidedToolResults turnElisions
+	// elisionsTailStart is where, in the turn's persisted messages, the tail
+	// the elisions were taken on starts; see elisionsAt.
+	elisionsTailStart int
 
 	// contextWindowCap, when set, is the window the rest of the turn is
 	// measured against: the upstream refused a call our estimate said fits,

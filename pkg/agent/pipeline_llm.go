@@ -520,6 +520,9 @@ func (p *Pipeline) CallLLM(
 		}
 		return messages
 	}
+	// contextRefusals counts this call's context-window refusals; retry also
+	// counts the transient ones (429, 5xx) before them.
+	contextRefusals := 0
 	for retry := 0; retry <= maxRetries; retry++ {
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
@@ -669,9 +672,10 @@ func (p *Pipeline) CallLLM(
 			// below would all find the call fitting and send it unchanged once
 			// more. A first refusal is retried as is: it may not be about size.
 			// (seucaranguejo fork)
-			if sent := effectiveCW + contextBudgetOverflow(
-				effectiveCW, exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens,
-			); retry > 0 && sent <= effectiveCW {
+			contextRefusals++
+			if sent := estimateCallTokens(
+				exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens,
+			); contextRefusals > 1 && sent <= effectiveCW {
 				exec.contextWindowCap = sent * refusedCallWindowNum / refusedCallWindowDen
 				logger.WarnCF("agent", "Upstream refused a call the estimate says fits; lowering the turn's window",
 					map[string]any{
@@ -689,19 +693,22 @@ func (p *Pipeline) CallLLM(
 			// compaction run, and it dropped older history (or, with nothing
 			// older, the turn's own tool results) without making the call fit.
 			// (seucaranguejo fork)
-			p.reassembleHistory(ctx, ts, exec, effectiveCW)
-			guardStable, guardTail := splitHistoryForActiveTurn(exec.history, ts.persistedMessagesSnapshot())
+			historyRead := p.reassembleHistory(ctx, ts, exec, effectiveCW)
+			persisted := ts.persistedMessagesSnapshot()
+			guardStable, guardTail := splitHistoryForActiveTurn(exec.history, persisted)
+			guardElisions := exec.elisionsAt(len(persisted) - len(guardTail))
 			guardBuild := func(trimmedHistory []providers.Message) []providers.Message {
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), guardTail...)
 				req := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				req.ActiveSkills = append([]string(nil), guardSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
 				rebuilt = callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail)))
-				return withElidedToolResults(rebuilt, len(rebuilt)-len(guardTail), exec.elidedToolResults)
+				return withElidedToolResults(rebuilt, len(rebuilt)-len(guardTail), guardElisions)
 			}
 			budget := callBudget{window: effectiveCW, toolDefs: exec.providerToolDefs, maxTokens: ts.agent.MaxTokens}
 			compacted := false
-			if reason := retryCompactionSkipReason(guardStable, guardBuild, budget); reason != "" {
+			guard := compactionGuard{historyRead: historyRead, stable: guardStable, build: guardBuild, budget: budget}
+			if reason := guard.skipReason(); reason != "" {
 				logger.WarnCF("agent",
 					"Context error retry: "+reason+" — skipping destructive compaction",
 					map[string]any{
@@ -720,9 +727,10 @@ func (p *Pipeline) CallLLM(
 				}
 
 				if compactErr := p.ContextManager.Compact(ctx, &CompactRequest{
-					SessionKey: ts.sessionKey,
-					Reason:     ContextCompressReasonRetry,
-					Budget:     effectiveCW,
+					SessionKey:    ts.sessionKey,
+					Reason:        ContextCompressReasonRetry,
+					Budget:        effectiveCW,
+					ProtectedTail: len(guardTail),
 				}); compactErr != nil {
 					logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
 						"session_key": ts.sessionKey,
@@ -740,10 +748,10 @@ func (p *Pipeline) CallLLM(
 				contextualSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForLoop(ts.activeSkills, ts.opts.Loop)
 			}
 			ts.recordSkillContextSnapshot(skillContextTriggerContextRetryRebuild, contextualSkills)
-			stableHistory, protectedTurnTail := splitHistoryForActiveTurn(
-				exec.history,
-				ts.persistedMessagesSnapshot(),
-			)
+			persisted = ts.persistedMessagesSnapshot()
+			stableHistory, protectedTurnTail := splitHistoryForActiveTurn(exec.history, persisted)
+			tailStart := len(persisted) - len(protectedTurnTail)
+			exec.elidedToolResults, exec.elisionsTailStart = exec.elisionsAt(tailStart), tailStart
 			buildMessages := func(trimmedHistory []providers.Message) []providers.Message {
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), protectedTurnTail...)
 				rebuildPromptReq := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
@@ -1486,17 +1494,25 @@ func (p *Pipeline) billsPartialStreams() bool {
 // rough ~4-chars-per-token heuristic (cross-language). Estimate only — used for
 // the aborted-stream metering above, never for billing.
 // reassembleHistory reloads the turn's history and summary from the context
-// manager; on failure the ones in hand stay.
-func (p *Pipeline) reassembleHistory(ctx context.Context, ts *turnState, exec *turnExecution, budget int) {
+// manager and reports whether it could. On failure the ones in hand stay, and
+// they may be the copy taken when the turn started.
+func (p *Pipeline) reassembleHistory(ctx context.Context, ts *turnState, exec *turnExecution, budget int) bool {
 	asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
 		SessionKey: ts.sessionKey,
 		Budget:     budget,
 		MaxTokens:  ts.agent.MaxTokens,
 	})
-	if asmErr == nil && asmResp != nil {
-		exec.history = asmResp.History
-		exec.summary = asmResp.Summary
+	if asmErr != nil || asmResp == nil {
+		fields := map[string]any{"session_key": ts.sessionKey}
+		if asmErr != nil {
+			fields["error"] = asmErr.Error()
+		}
+		logger.WarnCF("agent", "Context retry could not read the current history", fields)
+		return false
 	}
+	exec.history = asmResp.History
+	exec.summary = asmResp.Summary
+	return true
 }
 
 func estimateTokensFromRunes(runes int) int {

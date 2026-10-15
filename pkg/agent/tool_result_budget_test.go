@@ -445,24 +445,63 @@ func TestFitTurnByElision_PutsBackTheEarlierHistoryThatFits(t *testing.T) {
 	}
 }
 
-func TestRetryCompactionSkipReason(t *testing.T) {
+func TestCompactionGuard(t *testing.T) {
 	turn := []providers.Message{{Role: "user", Content: "go"}, {Role: "tool", ToolCallID: "a", Content: "result"}}
 	build := func(history []providers.Message) []providers.Message {
 		return append(append([]providers.Message(nil), history...), turn...)
 	}
 	roomy := callBudget{window: 1_000_000}
 	earlier := []providers.Message{{Role: "user", Content: "earlier question"}}
+	guard := func(historyRead bool, stable []providers.Message, budget callBudget) compactionGuard {
+		return compactionGuard{historyRead: historyRead, stable: stable, build: build, budget: budget}
+	}
 
+	// Without the current history the guard would measure the copy from the
+	// start of the turn, which lacks its tool results.
+	if reason := guard(false, earlier, roomy).skipReason(); reason == "" {
+		t.Fatal("allowed a compaction measured on history that could not be read")
+	}
 	// Even when the turn alone would fit, there is nothing before it to drop:
 	// compacting could only cut into the turn.
-	if reason := retryCompactionSkipReason(nil, build, roomy); reason == "" {
+	if reason := guard(true, nil, roomy).skipReason(); reason == "" {
 		t.Fatal("allowed a compaction with no history before the active turn")
 	}
-	if reason := retryCompactionSkipReason(earlier, build, callBudget{window: 1}); reason == "" {
+	if reason := guard(true, earlier, callBudget{window: 1}).skipReason(); reason == "" {
 		t.Fatal("allowed a compaction that cannot make the turn fit")
 	}
-	if reason := retryCompactionSkipReason(earlier, build, roomy); reason != "" {
+	if reason := guard(true, earlier, roomy).skipReason(); reason != "" {
 		t.Fatalf("refused a compaction that can help: %s", reason)
+	}
+}
+
+// Offsets count from the start of the active turn. When the history leaves out
+// the head of the turn, an old offset lands on another result, and with ids
+// reused across responses even the id guard passes: the elisions must start
+// over instead.
+func TestElisionsAt_StartOverWhenTheTurnStartMoves(t *testing.T) {
+	persisted := []providers.Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "xml_call_0"}}},
+		{Role: "tool", ToolCallID: "xml_call_0", Content: "first, read and elided"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "xml_call_0"}}},
+		{Role: "tool", ToolCallID: "xml_call_0", Content: "second, not read yet"},
+	}
+	exec := &turnExecution{
+		elidedToolResults: turnElisions{2: {toolCallID: "xml_call_0", chars: 22}},
+		elisionsTailStart: 0,
+	}
+	if got := exec.elisionsAt(0); len(got) != 1 {
+		t.Fatalf("elisionsAt(0) = %v, want the elisions taken on that tail", got)
+	}
+
+	// The history now keeps only the last three messages of the turn.
+	tail := persisted[2:]
+	shifted := withElidedToolResults(tail, 0, exec.elidedToolResults)
+	if !strings.HasPrefix(shifted[2].Content, elidedToolResultMarker) {
+		t.Fatal("expected the stale offset to hit the unread same-id result; the test no longer shows the hazard")
+	}
+	if got := exec.elisionsAt(len(persisted) - len(tail)); got != nil {
+		t.Fatalf("elisionsAt after the start moved = %v, want none", got)
 	}
 }
 

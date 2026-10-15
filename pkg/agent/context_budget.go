@@ -116,11 +116,17 @@ func contextBudgetOverflow(
 	toolDefs []providers.ToolDefinition,
 	maxTokens int,
 ) int {
-	msgTokens := 0
+	return estimateCallTokens(messages, toolDefs, maxTokens) - contextWindow
+}
+
+// estimateCallTokens is the estimated size of a call: its messages, its tool
+// definitions and the output reserve.
+func estimateCallTokens(messages []providers.Message, toolDefs []providers.ToolDefinition, maxTokens int) int {
+	tokens := EstimateToolDefsTokens(toolDefs) + maxTokens
 	for _, m := range messages {
-		msgTokens += EstimateMessageTokens(m)
+		tokens += EstimateMessageTokens(m)
 	}
-	return msgTokens + EstimateToolDefsTokens(toolDefs) + maxTokens - contextWindow
+	return tokens
 }
 
 // compactionCanHelp reports whether dropping conversation history could
@@ -141,21 +147,30 @@ func compactionCanHelp(
 	return !isOverContextBudget(contextWindow, build(nil), toolDefs, maxTokens)
 }
 
-// retryCompactionSkipReason says why a context retry must not run the
-// destructive compaction, or "" when it may. stable is the history before the
-// active turn; build is the guard's prompt builder (see compactionCanHelp).
-func retryCompactionSkipReason(
-	stable []providers.Message,
-	build func([]providers.Message) []providers.Message,
-	budget callBudget,
-) string {
-	if len(stable) == 0 {
-		// A compaction could only cut into the active turn: the legacy manager
-		// then keeps just its user message, and the model runs its tools
-		// again. (seucaranguejo fork)
+// compactionGuard is what a context retry checks before the destructive
+// compaction. stable is the history before the active turn, build the guard's
+// prompt builder (see compactionCanHelp). (seucaranguejo fork)
+type compactionGuard struct {
+	// historyRead says the current history was read. Without it the guard
+	// would measure the copy taken when the turn started, which lacks the
+	// turn's tool results, and let a useless compaction through.
+	historyRead bool
+	stable      []providers.Message
+	build       func([]providers.Message) []providers.Message
+	budget      callBudget
+}
+
+// skipReason says why the compaction must not run, or "" when it may.
+func (g compactionGuard) skipReason() string {
+	switch {
+	case !g.historyRead:
+		return "could not read the current history"
+	case len(g.stable) == 0:
+		// A compaction could only cut into the active turn: the legacy
+		// manager then keeps just its user message, and the model runs its
+		// tools again.
 		return "no history before the active turn"
-	}
-	if !compactionCanHelp(build, budget.window, budget.toolDefs, budget.maxTokens) {
+	case !compactionCanHelp(g.build, g.budget.window, g.budget.toolDefs, g.budget.maxTokens):
 		return "the active turn alone exceeds the budget"
 	}
 	return ""

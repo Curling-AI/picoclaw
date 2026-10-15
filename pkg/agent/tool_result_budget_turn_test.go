@@ -467,3 +467,47 @@ func TestOversizedAsyncToolResult_IsTrimmedBeforeItIsQueued(t *testing.T) {
 		)
 	}
 }
+
+// transientThenRefusalProvider fails a call once with a rate limit, then once
+// with a context refusal, then answers.
+type transientThenRefusalProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *transientThenRefusalProvider) Chat(
+	context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	switch p.calls {
+	case 1:
+		return nil, errors.New(
+			"API request failed:\n  Status: 429\n  Body:   {\"error\":{\"message\":\"rate limited\"}}",
+		)
+	case 2:
+		return nil, errInputExceedsContextWindow
+	}
+	return &providers.LLMResponse{Content: "done"}, nil
+}
+
+func (p *transientThenRefusalProvider) GetDefaultModel() string { return "flaky-model" }
+
+// A rate limit bumps the retry counter too. A single context refusal after
+// it is still the first: it must be retried as is, not shrink the window (a
+// window of 90% of a small call leaves no room for the output reserve).
+func TestContextRetry_ARateLimitDoesNotCountAsARefusal(t *testing.T) {
+	cfg := windowedConfig(t)
+	cfg.Agents.Defaults.LLMRetryBackoffSecs = 1
+	provider := &transientThenRefusalProvider{}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+
+	resp, err := al.ProcessDirectWithChannel(context.Background(), "hi", "sk_v1_flaky", "test", "flaky")
+	if err != nil {
+		t.Fatalf("turn failed: %v", err)
+	}
+	if resp != "done" || provider.calls != 3 {
+		t.Fatalf("response %q after %d calls, want done after 3", resp, provider.calls)
+	}
+}
