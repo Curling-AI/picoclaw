@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type CronSchedule struct {
@@ -545,7 +546,18 @@ func (cs *CronService) loadStore() error {
 		return err
 	}
 
-	return json.Unmarshal(data, cs.store)
+	if err := json.Unmarshal(data, cs.store); err != nil {
+		return err
+	}
+	// Start persists the loaded store before scheduling any execution. Repair
+	// only the known legacy label; name maintenance is not job activity.
+	for i := range cs.store.Jobs {
+		job := &cs.store.Jobs[i]
+		if _, prefixed := utils.StripAutomationRunPrefix(job.Name); prefixed {
+			job.Name = utils.AutomationName(job.Name, job.Payload.Message)
+		}
+	}
+	return nil
 }
 
 func (cs *CronService) saveStoreUnsafe() error {
@@ -606,7 +618,7 @@ func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, pay
 
 	job := CronJob{
 		ID:       generateID(),
-		Name:     name,
+		Name:     utils.AutomationName(name, payload.Message),
 		Enabled:  true,
 		Schedule: schedule,
 		Payload:  payload,
@@ -649,6 +661,9 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 		if cs.store.Jobs[i].ID == job.ID {
 			previous := cs.store.Jobs[i]
 			updated := cloneCronJob(*job)
+			if _, prefixed := utils.StripAutomationRunPrefix(updated.Name); prefixed {
+				updated.Name = utils.AutomationName(updated.Name, updated.Payload.Message)
+			}
 			now := time.Now().UnixMilli()
 			updated.UpdatedAtMS = now
 			if updated.Enabled {

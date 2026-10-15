@@ -127,7 +127,7 @@ func (t *CronTool) Parameters() map[string]any {
 			},
 			"name": map[string]any{
 				"type":        "string",
-				"description": "Optional job display name for update or add.",
+				"description": "Job display name. For add, provide a concise topic (2-6 words) in the user's language, e.g. 'Resumo diário de notícias'. Do not prefix it with 'Rodada da automação' or describe the scheduled run. Omit only when the task message already is a concise name.",
 			},
 			"message": map[string]any{
 				"type":        "string",
@@ -201,6 +201,10 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 	if !ok || message == "" {
 		return ErrorResult("message is required for add")
 	}
+	name, _, nameErr := optionalNonEmptyString(args, "name")
+	if nameErr != nil {
+		return nameErr
+	}
 
 	var schedule cron.CronSchedule
 
@@ -256,11 +260,8 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		}
 	}
 
-	// Truncate message for job name (max 30 chars)
-	messagePreview := utils.Truncate(message, 30)
-
 	job, err := t.cronService.AddJob(
-		messagePreview,
+		utils.AutomationName(name, message),
 		schedule,
 		message,
 		channel,
