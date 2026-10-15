@@ -5,7 +5,9 @@ package agent
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -77,6 +79,9 @@ const (
 	// Each later call of the turn adds its tool results: eliding just enough
 	// to fit would have the next call rejected again, at a round trip each.
 	elisionHeadroomDivisor = 10
+	// A window lowered after the upstream refused the same call twice is this
+	// share of the refused call's estimate (see turnExecution.contextWindowCap).
+	refusedCallWindowNum, refusedCallWindowDen = 9, 10
 )
 
 // boundToolResultForLLM returns content as the turn should keep it: unchanged
@@ -102,6 +107,7 @@ func (al *AgentLoop) boundToolResultForLLM(ts *turnState, toolName, content stri
 		fields["error"] = err.Error()
 	} else {
 		fields["saved_to"] = path
+		ts.recordSavedToolOutput(path)
 	}
 	logger.WarnCF("agent", "Tool result over the limit; trimmed before entering the turn", fields)
 	return truncateToolResult(content, total, limit, path)
@@ -120,9 +126,18 @@ func saveToolOutput(workspace, toolName, content string) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(content))
 	path := filepath.Join(dir, toolOutputFileStem(toolName)+"_"+hex.EncodeToString(sum[:8])+".txt")
-	if _, err := os.Stat(path); err == nil {
-		now := time.Now()
-		_ = os.Chtimes(path, now, now) // a repeat counts as recent for pruning
+	// A repeat only refreshes the file, so pruning counts it as recent. Gone
+	// meanwhile (a concurrent save pruned it), it is written again: the notice
+	// must not point at a file that no longer exists.
+	now := time.Now()
+	switch err := os.Chtimes(path, now, now); {
+	case err == nil:
+		return path, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		logger.WarnCF("agent", "Could not refresh a saved tool output", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
 		return path, nil
 	}
 	if err := writeFileAtomically(dir, path, content); err != nil {
@@ -187,7 +202,7 @@ func pruneSavedToolOutputs(dir string, maxFiles int, maxBytes int64) {
 		switch {
 		case strings.HasPrefix(e.Name(), ".tmp-"):
 			if time.Since(info.ModTime()) > staleToolOutputTempAge {
-				_ = os.Remove(path)
+				removeSavedToolOutput(path)
 			}
 		case strings.HasSuffix(e.Name(), ".txt"):
 			files = append(files, saved{path, info.ModTime(), info.Size()})
@@ -198,8 +213,19 @@ func pruneSavedToolOutputs(dir string, maxFiles int, maxBytes int64) {
 	for i, f := range files {
 		total += f.size
 		if i >= maxFiles || (i > 0 && total > maxBytes) {
-			_ = os.Remove(f.path)
+			removeSavedToolOutput(f.path)
 		}
+	}
+}
+
+// removeSavedToolOutput warns when it cannot remove path: otherwise the
+// directory's bounds would quietly stop holding.
+func removeSavedToolOutput(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		logger.WarnCF("agent", "Could not prune a saved tool output", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
 	}
 }
 
@@ -248,8 +274,9 @@ func omittedToolOutputMarker(omitted int) string {
 	return fmt.Sprintf("\n\n[… %d characters omitted …]\n\n", omitted)
 }
 
-// savedToolOutputPath returns where a result trimmed by boundToolResultForLLM
-// saved its full output, or "".
+// savedToolOutputPath returns the path a trimmed result's notice names, or "".
+// Any tool can print the same words, so callers check the path against what
+// the turn saved (activeTurn.savedOutput).
 func savedToolOutputPath(content string) string {
 	if !strings.HasPrefix(content, truncatedToolResultPrefix) {
 		return ""
@@ -341,27 +368,44 @@ func (b callBudget) overflow(messages []providers.Message) int {
 	return contextBudgetOverflow(b.window, messages, b.toolDefs, b.maxTokens)
 }
 
+// activeTurn is what a context retry may reshape: the history before the
+// active turn, the turn's own messages, the results already elided and the
+// full outputs this turn saved.
+type activeTurn struct {
+	stable, messages []providers.Message
+	elided           turnElisions
+	savedOutputs     map[string]bool
+}
+
+// savedOutput is where the full output of a trimmed result went, if this turn
+// saved it there: a result that only mimics the notice names nothing.
+func (t activeTurn) savedOutput(content string) string {
+	if path := savedToolOutputPath(content); t.savedOutputs[path] {
+		return path
+	}
+	return ""
+}
+
 // fitTurnByElision is the context retry's last resort when even the active
 // turn alone is past the window. It elides tool results of the turn, keeping
 // headroom for the turn's next calls, then puts back as much of the earlier
 // history as still fits under that headroom. build makes the call from a slice
 // of the earlier history and a set of elisions.
 func fitTurnByElision(
-	stable, turn []providers.Message,
-	elided turnElisions,
+	turn activeTurn,
 	budget callBudget,
 	build func([]providers.Message, turnElisions) []providers.Message,
 ) (history, call []providers.Message, next turnElisions, ok bool) {
 	headroom := budget.window / elisionHeadroomDivisor
-	next, call, ok = elideTurnToolResultsToFit(turn, elided, headroom, func(e turnElisions) ([]providers.Message, int) {
+	next, call, ok = elideTurnToolResultsToFit(turn, headroom, func(e turnElisions) ([]providers.Message, int) {
 		msgs := build(nil, e)
 		return msgs, budget.overflow(msgs)
 	})
 	if !ok {
-		return nil, call, elided, false
+		return nil, call, turn.elided, false
 	}
 	kept, keptCall, fits := trimHistoryToFitContextWindow(
-		stable,
+		turn.stable,
 		func(h []providers.Message) []providers.Message { return build(h, next) },
 		budget.window-headroom,
 		budget.toolDefs,
@@ -373,34 +417,33 @@ func fitTurnByElision(
 	return nil, call, next, true
 }
 
-// elideTurnToolResultsToFit adds tool results of the active turn to elided
-// until measure says the call fits. Earlier results go first, oldest first,
-// until headroom tokens are spare; the newest batch, which the model has not
-// read yet, goes only when the call fits no other way. It returns the grown
-// set, the call built with it and whether that call fits; elided itself is
-// not modified.
+// elideTurnToolResultsToFit adds tool results of the active turn to its
+// elisions until measure says the call fits. Earlier results go first, oldest
+// first, until headroom tokens are spare; the newest batch, which the model
+// has not read yet, goes only when the call fits no other way. It returns the
+// grown set, the call built with it and whether that call fits; the turn's own
+// set is not modified.
 func elideTurnToolResultsToFit(
-	turn []providers.Message,
-	elided turnElisions,
+	turn activeTurn,
 	headroom int,
 	measure func(turnElisions) ([]providers.Message, int),
 ) (turnElisions, []providers.Message, bool) {
-	next := maps.Clone(elided)
+	next := maps.Clone(turn.elided)
 	if next == nil {
 		next = make(turnElisions)
 	}
-	newest := newestToolBatchStart(turn)
+	newest := newestToolBatchStart(turn.messages)
 	messages, over := measure(next)
 	for _, phase := range []elisionPhase{
 		{from: 0, to: newest, headroom: headroom},
-		{from: newest, to: len(turn), excerpt: true},
+		{from: newest, to: len(turn.messages), excerpt: true},
 	} {
 		for over+phase.headroom > 0 && pickElisions(turn, phase, next, over+phase.headroom) {
 			messages, over = measure(next)
 		}
 	}
 	if over > 0 {
-		return elided, messages, false
+		return turn.elided, messages, false
 	}
 	return next, messages, true
 }
@@ -414,17 +457,17 @@ type elisionPhase struct {
 
 // pickElisions adds results of the phase's range to next, oldest first, until
 // their estimated savings reach goal tokens. It reports whether it added any.
-func pickElisions(turn []providers.Message, phase elisionPhase, next turnElisions, goal int) bool {
+func pickElisions(turn activeTurn, phase elisionPhase, next turnElisions, goal int) bool {
 	saved, picked := 0, false
 	for offset := phase.from; offset < phase.to && saved < goal; offset++ {
-		msg := turn[offset]
+		msg := turn.messages[offset]
 		if !elidableToolResult(msg, offset, next) {
 			continue
 		}
 		e := elidedToolResult{
 			toolCallID: msg.ToolCallID,
 			chars:      utf8.RuneCountInString(msg.Content),
-			savedPath:  savedToolOutputPath(msg.Content),
+			savedPath:  turn.savedOutput(msg.Content),
 		}
 		if phase.excerpt {
 			e.excerpt = toolResultExcerpt(msg.Content, e.chars)

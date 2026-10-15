@@ -343,6 +343,9 @@ type turnState struct {
 	restorePointHistory []providers.Message
 	restorePointSummary string
 	persistedMessages   []providers.Message
+	// savedToolOutputs are the full outputs this turn saved; see
+	// recordSavedToolOutput. (seucaranguejo fork)
+	savedToolOutputs map[string]bool
 
 	// SubTurn support (from HEAD)
 	depth                int                    // SubTurn depth (0 for root turn)
@@ -820,6 +823,24 @@ func (ts *turnState) recordPersistedMessage(msg providers.Message) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	ts.persistedMessages = append(ts.persistedMessages, msg)
+}
+
+// recordSavedToolOutput notes a full output this turn saved under
+// artifacts/tool-output: the only paths an elision note may point the model
+// at. (seucaranguejo fork)
+func (ts *turnState) recordSavedToolOutput(path string) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.savedToolOutputs == nil {
+		ts.savedToolOutputs = make(map[string]bool)
+	}
+	ts.savedToolOutputs[path] = true
+}
+
+func (ts *turnState) savedToolOutputsSnapshot() map[string]bool {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return maps.Clone(ts.savedToolOutputs)
 }
 
 func (ts *turnState) persistedMessagesSnapshot() []providers.Message {

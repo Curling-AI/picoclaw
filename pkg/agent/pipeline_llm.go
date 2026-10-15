@@ -672,7 +672,7 @@ func (p *Pipeline) CallLLM(
 			if sent := effectiveCW + contextBudgetOverflow(
 				effectiveCW, exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens,
 			); retry > 0 && sent <= effectiveCW {
-				exec.contextWindowCap = sent * 9 / 10
+				exec.contextWindowCap = sent * refusedCallWindowNum / refusedCallWindowDen
 				logger.WarnCF("agent", "Upstream refused a call the estimate says fits; lowering the turn's window",
 					map[string]any{
 						"session_key":      ts.sessionKey,
@@ -689,14 +689,7 @@ func (p *Pipeline) CallLLM(
 			// compaction run, and it dropped older history (or, with nothing
 			// older, the turn's own tool results) without making the call fit.
 			// (seucaranguejo fork)
-			if asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
-				SessionKey: ts.sessionKey,
-				Budget:     effectiveCW,
-				MaxTokens:  ts.agent.MaxTokens,
-			}); asmErr == nil && asmResp != nil {
-				exec.history = asmResp.History
-				exec.summary = asmResp.Summary
-			}
+			p.reassembleHistory(ctx, ts, exec, effectiveCW)
 			guardStable, guardTail := splitHistoryForActiveTurn(exec.history, ts.persistedMessagesSnapshot())
 			guardBuild := func(trimmedHistory []providers.Message) []providers.Message {
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), guardTail...)
@@ -740,14 +733,7 @@ func (p *Pipeline) CallLLM(
 			}
 			ts.refreshRestorePointFromSession(ts.agent)
 			if compacted {
-				if asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
-					SessionKey: ts.sessionKey,
-					Budget:     effectiveCW,
-					MaxTokens:  ts.agent.MaxTokens,
-				}); asmErr == nil && asmResp != nil {
-					exec.history = asmResp.History
-					exec.summary = asmResp.Summary
-				}
+				p.reassembleHistory(ctx, ts, exec, effectiveCW)
 			}
 			contextualSkills := ts.activeSkills
 			if ts.agent.ContextBuilder != nil {
@@ -797,8 +783,12 @@ func (p *Pipeline) CallLLM(
 				// Even the active turn alone is past the window: notes stand in
 				// for its earliest tool results rather than fail the turn.
 				// (seucaranguejo fork)
-				history, call, elided, ok := fitTurnByElision(
-					stableHistory, protectedTurnTail, exec.elidedToolResults, budget, buildCall)
+				history, call, elided, ok := fitTurnByElision(activeTurn{
+					stable:       stableHistory,
+					messages:     protectedTurnTail,
+					elided:       exec.elidedToolResults,
+					savedOutputs: ts.savedToolOutputsSnapshot(),
+				}, budget, buildCall)
 				if ok {
 					logger.WarnCF("agent", "Elided earlier tool results of the active turn to fit the context window",
 						map[string]any{
@@ -1495,6 +1485,20 @@ func (p *Pipeline) billsPartialStreams() bool {
 // estimateTokensFromRunes approximates a token count from a rune count using a
 // rough ~4-chars-per-token heuristic (cross-language). Estimate only — used for
 // the aborted-stream metering above, never for billing.
+// reassembleHistory reloads the turn's history and summary from the context
+// manager; on failure the ones in hand stay.
+func (p *Pipeline) reassembleHistory(ctx context.Context, ts *turnState, exec *turnExecution, budget int) {
+	asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
+		SessionKey: ts.sessionKey,
+		Budget:     budget,
+		MaxTokens:  ts.agent.MaxTokens,
+	})
+	if asmErr == nil && asmResp != nil {
+		exec.history = asmResp.History
+		exec.summary = asmResp.Summary
+	}
+}
+
 func estimateTokensFromRunes(runes int) int {
 	if runes <= 0 {
 		return 0

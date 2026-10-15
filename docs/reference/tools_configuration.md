@@ -39,7 +39,7 @@ See [Sensitive Data Filtering](../security/sensitive_data_filtering.md) for full
 
 ## Tool Result Size
 
-A single tool result longer than `max_result_chars` characters enters the conversation trimmed: its start and end, with a note on how long it was. The full output is saved under `artifacts/tool-output/` in the workspace (the 32 most recent outputs are kept), where `read_file` can page through it. The active turn is never compacted, so without this bound one large result (a browser snapshot, a long command output) could push the turn past the model's context window.
+A single tool result longer than `max_result_chars` characters enters the conversation trimmed: its start and end, with a note on how long it was. The full output is saved under `artifacts/tool-output/` in the workspace, where `read_file` can page through it. The directory keeps the most recent outputs within two bounds, 128 files and 256 MiB in total (the newest output always stays), shared by every conversation and cron of the assistant. The active turn is never compacted, so without this bound one large result (a browser snapshot, a long command output) could push the turn past the model's context window.
 
 | Config | Type | Default | Description |
 |--------|------|---------|-------------|
