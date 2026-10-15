@@ -230,23 +230,62 @@ func TestPruneSavedToolOutputs(t *testing.T) {
 	})
 }
 
-// A window lowered by one model's refusals says nothing about the next model.
-func TestModelSwap_ForgetsTheLoweredWindow(t *testing.T) {
-	p, ts, exec := mediaTierFixture(
-		true,
-		&recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
-		testImageDataURL,
-	)
-	ts.agent.ImageContextWindow = 128_000
-	exec.contextWindowCap = 100_000
-	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
-		t.Fatalf("routeTurnModel: %v", err)
+// A window lowered by one model's refusals says nothing about the next model,
+// whichever router switched to it, and stays with the model that taught it.
+func TestLearnedContextWindow_StaysWithTheModelThatTaughtIt(t *testing.T) {
+	cases := []struct {
+		name       string
+		delegation bool
+		vision     *recordingVisionProvider
+		media      string
+		tier       string
+		wantModel  string
+		wantWindow int
+	}{
+		{
+			name:       "the picked tier after the vision model refused the image",
+			delegation: true,
+			vision:     &recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
+			media:      testImageDataURL,
+			tier:       "gpt-6.1-sol",
+			wantModel:  "gpt-6.1-sol",
+		},
+		{
+			name:      "the vision model for an image",
+			vision:    &recordingVisionProvider{resp: "unused"},
+			media:     testImageDataURL,
+			tier:      "gpt-6.1-sol",
+			wantModel: "maestro-vision",
+		},
+		{
+			name:       "the same model",
+			delegation: true,
+			vision:     &recordingVisionProvider{resp: "unused"},
+			media:      "uploads/relatorio.pdf",
+			tier:       "flash",
+			wantModel:  "maestro-flash",
+			wantWindow: 100_000,
+		},
 	}
-	if exec.llmModelName != "gpt-6.1-sol" {
-		t.Fatalf("llmModelName = %q, want the picked tier to take the call", exec.llmModelName)
-	}
-	if exec.contextWindowCap != 0 {
-		t.Fatalf("contextWindowCap = %d after the model changed, want 0", exec.contextWindowCap)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, ts, exec := mediaTierFixture(tc.delegation, tc.vision, tc.media)
+			ts.modelTier = tc.tier
+			ts.agent.ImageContextWindow = 128_000
+			exec.learnContextWindow(100_000)
+			if got := exec.learnedContextWindow(); got != 100_000 {
+				t.Fatalf("learnedContextWindow = %d before routing, want 100000", got)
+			}
+			if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+				t.Fatalf("routeTurnModel: %v", err)
+			}
+			if exec.activeModel != tc.wantModel {
+				t.Fatalf("activeModel = %q, want %q", exec.activeModel, tc.wantModel)
+			}
+			if got := exec.learnedContextWindow(); got != tc.wantWindow {
+				t.Fatalf("learnedContextWindow = %d on %s, want %d", got, exec.activeModel, tc.wantWindow)
+			}
+		})
 	}
 }
 

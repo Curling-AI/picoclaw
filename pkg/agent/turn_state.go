@@ -169,9 +169,12 @@ type turnExecution struct {
 	elisionsTailStart int
 
 	// contextWindowCap, when set, is the window the rest of the turn is
-	// measured against: the upstream refused a call our estimate said fits,
-	// so its tokenizer counts this content heavier. (seucaranguejo fork)
-	contextWindowCap int
+	// measured against while contextWindowCapModel serves it: the upstream
+	// refused a call our estimate said fits, so its tokenizer counts this
+	// content heavier. Another model counts with its own tokenizer, whichever
+	// router switched to it. See learnedContextWindow. (seucaranguejo fork)
+	contextWindowCap      int
+	contextWindowCapModel string
 
 	// Turn output
 	finalContent string

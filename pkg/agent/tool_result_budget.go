@@ -300,6 +300,21 @@ func (exec *turnExecution) elisionsAt(tailStart int) turnElisions {
 	return exec.elidedToolResults
 }
 
+// learnContextWindow lowers the window of the rest of the turn for the model
+// now serving it.
+func (exec *turnExecution) learnContextWindow(tokens int) {
+	exec.contextWindowCap, exec.contextWindowCapModel = tokens, exec.activeModel
+}
+
+// learnedContextWindow is the window a refused call taught for the model now
+// serving the turn, or 0 when another model taught it.
+func (exec *turnExecution) learnedContextWindow() int {
+	if exec.contextWindowCapModel != exec.activeModel {
+		return 0
+	}
+	return exec.contextWindowCap
+}
+
 func elidedToolResultNote(e elidedToolResult) string {
 	next := "Run the tool again with a narrower request if you still need it."
 	if e.savedPath != "" {
