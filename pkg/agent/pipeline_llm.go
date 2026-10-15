@@ -240,13 +240,13 @@ func (p *Pipeline) CallLLM(
 		exec.providerToolDefs = filtered
 	}
 
-	exec.callMessages = exec.messages
+	exec.callMessages = withElidedToolResults(exec.messages, exec.elidedToolResults)
 	// Turn-scoped nudges (tool-budget steering) ride along on every remaining
 	// call of this turn but never enter exec.messages / session history — see
 	// turnExecution.transientTurnMessages.
 	if len(exec.transientTurnMessages) > 0 {
 		exec.callMessages = append(
-			append([]providers.Message(nil), exec.messages...),
+			append([]providers.Message(nil), exec.callMessages...),
 			exec.transientTurnMessages...)
 	}
 	if exec.gracefulTerminal {
@@ -656,22 +656,39 @@ func (p *Pipeline) CallLLM(
 			if ts.agent.ContextBuilder != nil {
 				guardSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForLoop(ts.activeSkills, ts.opts.Loop)
 			}
+			// Compact/trim to the model actually serving this turn: a media turn
+			// routed to the small-context vision model needs its (128K) budget, not
+			// the main model's 1M, or the retry never trims enough and 400s again.
+			effectiveCW := turnContextWindow(ts, exec)
+			// exec.history is read when the turn starts and lacks what the turn
+			// persisted since, its tool results above all. Measured on it, the
+			// active turn looked like the user message alone: the guard let the
+			// compaction run, and it dropped older history (or, with nothing
+			// older, the turn's own tool results) without making the call fit.
+			// (seucaranguejo fork)
+			if asmResp, asmErr := p.ContextManager.Assemble(ctx, &AssembleRequest{
+				SessionKey: ts.sessionKey,
+				Budget:     effectiveCW,
+				MaxTokens:  ts.agent.MaxTokens,
+			}); asmErr == nil && asmResp != nil {
+				exec.history = asmResp.History
+				exec.summary = asmResp.Summary
+			}
 			_, guardTail := splitHistoryForActiveTurn(exec.history, ts.persistedMessagesSnapshot())
 			guardBuild := func(trimmedHistory []providers.Message) []providers.Message {
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), guardTail...)
 				req := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				req.ActiveSkills = append([]string(nil), guardSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
-				return callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail)))
+				return withElidedToolResults(
+					callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail))),
+					exec.elidedToolResults,
+				)
 			}
-			// Compact/trim to the model actually serving this turn: a media turn
-			// routed to the small-context vision model needs its (128K) budget, not
-			// the main model's 1M, or the retry never trims enough and 400s again.
-			effectiveCW := turnContextWindow(ts, exec)
 			if !compactionCanHelp(guardBuild, effectiveCW, exec.providerToolDefs, ts.agent.MaxTokens) {
-				logger.ErrorCF(
+				logger.WarnCF(
 					"agent",
-					"Context error retry: budget exceeded even with empty history — skipping destructive compaction (check context_window/max_tokens)",
+					"Context error retry: the active turn alone exceeds the budget — skipping destructive compaction",
 					map[string]any{
 						"session_key":    ts.sessionKey,
 						"retry":          retry,
@@ -730,16 +747,19 @@ func (p *Pipeline) CallLLM(
 				)
 			}
 			originalHistoryCount := len(exec.history)
+			buildCall := func(trimmedHistory []providers.Message, elided map[string]int) []providers.Message {
+				rebuilt := withElidedToolResults(callView(buildMessages(trimmedHistory)), elided)
+				if exec.gracefulTerminal {
+					return append(append([]providers.Message(nil), rebuilt...), ts.interruptHintMessage())
+				}
+				return rebuilt
+			}
 			var fit bool
 			var trimmedStableHistory []providers.Message
 			trimmedStableHistory, exec.callMessages, fit = trimHistoryToFitContextWindow(
 				stableHistory,
 				func(trimmedHistory []providers.Message) []providers.Message {
-					rebuilt := callView(buildMessages(trimmedHistory))
-					if exec.gracefulTerminal {
-						return append(append([]providers.Message(nil), rebuilt...), ts.interruptHintMessage())
-					}
-					return rebuilt
+					return buildCall(trimmedHistory, exec.elidedToolResults)
 				},
 				effectiveCW,
 				exec.providerToolDefs,
@@ -749,8 +769,36 @@ func (p *Pipeline) CallLLM(
 			exec.messages = buildMessages(trimmedStableHistory)
 			exec.currentTurnStart = len(exec.messages) - len(protectedTurnTail)
 			if exec.gracefulTerminal {
-				msgs := append([]providers.Message(nil), callView(exec.messages)...)
+				msgs := append(
+					[]providers.Message(nil),
+					withElidedToolResults(callView(exec.messages), exec.elidedToolResults)...)
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
+			}
+			if !fit {
+				// Even the active turn alone is past the window: stand notes in for
+				// its earliest tool results rather than fail the turn. (seucaranguejo fork)
+				elided, callMessages, fits := elideTurnToolResultsToFit(
+					protectedTurnTail,
+					exec.elidedToolResults,
+					effectiveCW/elisionHeadroomDivisor,
+					func(elided map[string]int) ([]providers.Message, int) {
+						msgs := buildCall(trimmedStableHistory, elided)
+						return msgs, contextBudgetOverflow(effectiveCW, msgs, exec.providerToolDefs, ts.agent.MaxTokens)
+					},
+				)
+				if fits {
+					logger.WarnCF("agent", "Elided earlier tool results of the active turn to fit the context window",
+						map[string]any{
+							"session_key":    ts.sessionKey,
+							"retry":          retry,
+							"newly_elided":   len(elided) - len(exec.elidedToolResults),
+							"elided_total":   len(elided),
+							"context_window": effectiveCW,
+						})
+					exec.elidedToolResults = elided
+					exec.callMessages = callMessages
+					fit = true
+				}
 			}
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
 				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{

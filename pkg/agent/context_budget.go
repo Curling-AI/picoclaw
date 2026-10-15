@@ -105,15 +105,22 @@ func isOverContextBudget(
 	toolDefs []providers.ToolDefinition,
 	maxTokens int,
 ) bool {
+	return contextBudgetOverflow(contextWindow, messages, toolDefs, maxTokens) > 0
+}
+
+// contextBudgetOverflow is how many tokens the call has past the window; zero
+// or less when it fits.
+func contextBudgetOverflow(
+	contextWindow int,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	maxTokens int,
+) int {
 	msgTokens := 0
 	for _, m := range messages {
 		msgTokens += EstimateMessageTokens(m)
 	}
-
-	toolTokens := EstimateToolDefsTokens(toolDefs)
-	total := msgTokens + toolTokens + maxTokens
-
-	return total > contextWindow
+	return msgTokens + EstimateToolDefsTokens(toolDefs) + maxTokens - contextWindow
 }
 
 // compactionCanHelp reports whether dropping conversation history could

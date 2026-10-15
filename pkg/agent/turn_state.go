@@ -159,6 +159,12 @@ type turnExecution struct {
 	// 1.6× more empty turns). Mirrors the interruptHintMessage pattern.
 	transientTurnMessages []providers.Message
 
+	// elidedToolResults maps the tool calls whose results a context retry
+	// replaced with a note to their original size. Like the nudges above, the
+	// elision rides along on every remaining call of the turn and never touches
+	// exec.messages or the session. (seucaranguejo fork)
+	elidedToolResults map[string]int
+
 	// Turn output
 	finalContent string
 
