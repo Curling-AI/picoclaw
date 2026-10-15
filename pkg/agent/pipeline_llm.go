@@ -673,6 +673,14 @@ func (p *Pipeline) CallLLM(
 				effectiveCW, exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens,
 			); retry > 0 && sent <= effectiveCW {
 				exec.contextWindowCap = sent * 9 / 10
+				logger.WarnCF("agent", "Upstream refused a call the estimate says fits; lowering the turn's window",
+					map[string]any{
+						"session_key":      ts.sessionKey,
+						"model":            exec.llmModelName,
+						"estimated_tokens": sent,
+						"window":           effectiveCW,
+						"lowered_to":       exec.contextWindowCap,
+					})
 				effectiveCW = exec.contextWindowCap
 			}
 			// exec.history is read when the turn starts and lacks what the turn

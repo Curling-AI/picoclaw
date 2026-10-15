@@ -459,6 +459,8 @@ func (p *Pipeline) activateModel(
 	// A vision budget routeMediaTurn pinned on an earlier call belongs to the
 	// vision model, not to the model taking over.
 	exec.effectiveContextWindow = 0
+	// So does a window a refused call taught us (see contextWindowCap).
+	exec.contextWindowCap = 0
 	return true, nil
 }
 

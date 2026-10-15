@@ -45,9 +45,13 @@ const (
 	// start of the output; the rest comes from its end, where commands print
 	// errors and summaries.
 	toolOutputHeadShare = 0.75
-	// maxSavedToolOutputs bounds the directory on the persistent volume: a
-	// cron that snapshots a large page would otherwise add a file per run.
-	maxSavedToolOutputs = 32
+	// The directory sits on the persistent volume and is shared by every
+	// conversation and cron of the assistant: a cron that snapshots a large
+	// page would otherwise add a file per run. Pruning keeps the newest
+	// outputs within both bounds, and drops what an interrupted write left.
+	maxSavedToolOutputs     = 128
+	maxSavedToolOutputBytes = 256 << 20
+	staleToolOutputTempAge  = time.Hour
 	// maxToolOutputNameLen keeps the file name far from the filesystem's
 	// limit; MCP tool names come from the servers.
 	maxToolOutputNameLen = 64
@@ -66,6 +70,10 @@ const (
 	elidedToolResultMarker = "[Tool output elided"
 	// A shorter result costs about as much as the note that would replace it.
 	minElidableToolResultChars = 1024
+	// The newest batch, elided only when nothing else makes the call fit,
+	// keeps this much of each result: with nothing to read, the model would
+	// run the same tools again into the same overflow.
+	newestBatchExcerptChars = 1000
 	// Each later call of the turn adds its tool results: eliding just enough
 	// to fit would have the next call rejected again, at a round trip each.
 	elisionHeadroomDivisor = 10
@@ -120,14 +128,14 @@ func saveToolOutput(workspace, toolName, content string) (string, error) {
 	if err := writeFileAtomically(dir, path, content); err != nil {
 		return "", err
 	}
-	pruneSavedToolOutputs(dir, maxSavedToolOutputs)
+	pruneSavedToolOutputs(dir, maxSavedToolOutputs, maxSavedToolOutputBytes)
 	return path, nil
 }
 
 func toolOutputFileStem(toolName string) string {
 	stem := utils.SanitizeFilename(toolName)
 	if len(stem) > maxToolOutputNameLen {
-		stem = stem[:maxToolOutputNameLen]
+		stem = strings.ToValidUTF8(stem[:maxToolOutputNameLen], "")
 	}
 	return stem
 }
@@ -156,9 +164,10 @@ func writeFileAtomically(dir, path, content string) error {
 	return nil
 }
 
-// pruneSavedToolOutputs keeps the keep most recent outputs. A failure leaves
-// extra files behind and is not worth failing the tool result over.
-func pruneSavedToolOutputs(dir string, keep int) {
+// pruneSavedToolOutputs keeps the most recent outputs within maxFiles and
+// maxBytes (the newest always stays). A failure leaves extra files behind and
+// is not worth failing the tool result over.
+func pruneSavedToolOutputs(dir string, maxFiles int, maxBytes int64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
@@ -166,22 +175,31 @@ func pruneSavedToolOutputs(dir string, keep int) {
 	type saved struct {
 		path    string
 		modTime time.Time
+		size    int64
 	}
 	var files []saved
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
+		info, err := e.Info()
+		if err != nil || e.IsDir() {
 			continue
 		}
-		if info, err := e.Info(); err == nil {
-			files = append(files, saved{filepath.Join(dir, e.Name()), info.ModTime()})
+		path := filepath.Join(dir, e.Name())
+		switch {
+		case strings.HasPrefix(e.Name(), ".tmp-"):
+			if time.Since(info.ModTime()) > staleToolOutputTempAge {
+				_ = os.Remove(path)
+			}
+		case strings.HasSuffix(e.Name(), ".txt"):
+			files = append(files, saved{path, info.ModTime(), info.Size()})
 		}
 	}
-	if len(files) <= keep {
-		return
-	}
 	slices.SortFunc(files, func(a, b saved) int { return b.modTime.Compare(a.modTime) })
-	for _, f := range files[keep:] {
-		_ = os.Remove(f.path)
+	var total int64
+	for i, f := range files {
+		total += f.size
+		if i >= maxFiles || (i > 0 && total > maxBytes) {
+			_ = os.Remove(f.path)
+		}
 	}
 }
 
@@ -196,7 +214,13 @@ func truncateToolResult(content string, total, limit int, savedPath string) stri
 	markerRunes := utf8.RuneCountInString(omittedToolOutputMarker(total))
 	keep := max(limit-utf8.RuneCountInString(notice)-markerRunes, 0)
 	head := int(float64(keep) * toolOutputHeadShare)
-	tail := keep - head
+	start, end := headAndTail(content, head, keep-head)
+	return notice + start + omittedToolOutputMarker(total-keep) + end
+}
+
+// headAndTail returns the first head and the last tail runes of content,
+// which must hold more than head+tail runes.
+func headAndTail(content string, head, tail int) (string, string) {
 	headEnd := 0
 	for range head {
 		_, size := utf8.DecodeRuneInString(content[headEnd:])
@@ -207,7 +231,7 @@ func truncateToolResult(content string, total, limit int, savedPath string) stri
 		_, size := utf8.DecodeLastRuneInString(content[:tailStart])
 		tailStart -= size
 	}
-	return notice + content[:headEnd] + omittedToolOutputMarker(total-keep) + content[tailStart:]
+	return content[:headEnd], content[tailStart:]
 }
 
 func truncatedToolResultNotice(total int, savedPath string) string {
@@ -250,6 +274,7 @@ type elidedToolResult struct {
 	toolCallID string
 	chars      int
 	savedPath  string
+	excerpt    string // start and end of the result, kept for the newest batch
 }
 
 // turnElisions maps offsets from the start of the active turn to the results
@@ -261,8 +286,23 @@ func elidedToolResultNote(e elidedToolResult) string {
 	if e.savedPath != "" {
 		next = "Its full output is saved at " + e.savedPath + ": read it from there instead of running the tool again."
 	}
-	return fmt.Sprintf("%s to keep this turn within the context window (%d characters). %s]",
+	note := fmt.Sprintf("%s to keep this turn within the context window (%d characters). %s]",
 		elidedToolResultMarker, e.chars, next)
+	if e.excerpt != "" {
+		note += "\n\nStart and end of the output:\n\n" + e.excerpt
+	}
+	return note
+}
+
+// toolResultExcerpt is the start and end of content within
+// newestBatchExcerptChars, or all of it when shorter.
+func toolResultExcerpt(content string, chars int) string {
+	if chars <= newestBatchExcerptChars {
+		return content
+	}
+	head := newestBatchExcerptChars * 2 / 3
+	start, end := headAndTail(content, head, newestBatchExcerptChars-head)
+	return start + omittedToolOutputMarker(chars-newestBatchExcerptChars) + end
 }
 
 // withElidedToolResults returns messages, whose active turn starts at
@@ -351,8 +391,11 @@ func elideTurnToolResultsToFit(
 	}
 	newest := newestToolBatchStart(turn)
 	messages, over := measure(next)
-	for _, phase := range []struct{ from, to, headroom int }{{0, newest, headroom}, {newest, len(turn), 0}} {
-		for over+phase.headroom > 0 && pickElisions(turn, phase.from, phase.to, next, over+phase.headroom) {
+	for _, phase := range []elisionPhase{
+		{from: 0, to: newest, headroom: headroom},
+		{from: newest, to: len(turn), excerpt: true},
+	} {
+		for over+phase.headroom > 0 && pickElisions(turn, phase, next, over+phase.headroom) {
 			messages, over = measure(next)
 		}
 	}
@@ -362,11 +405,18 @@ func elideTurnToolResultsToFit(
 	return next, messages, true
 }
 
-// pickElisions adds results of turn[from:to] to next, oldest first, until
+// elisionPhase is a range of the turn whose results may be elided, the spare
+// tokens to aim for and whether each note keeps an excerpt of its result.
+type elisionPhase struct {
+	from, to, headroom int
+	excerpt            bool
+}
+
+// pickElisions adds results of the phase's range to next, oldest first, until
 // their estimated savings reach goal tokens. It reports whether it added any.
-func pickElisions(turn []providers.Message, from, to int, next turnElisions, goal int) bool {
+func pickElisions(turn []providers.Message, phase elisionPhase, next turnElisions, goal int) bool {
 	saved, picked := 0, false
-	for offset := from; offset < to && saved < goal; offset++ {
+	for offset := phase.from; offset < phase.to && saved < goal; offset++ {
 		msg := turn[offset]
 		if !elidableToolResult(msg, offset, next) {
 			continue
@@ -376,10 +426,17 @@ func pickElisions(turn []providers.Message, from, to int, next turnElisions, goa
 			chars:      utf8.RuneCountInString(msg.Content),
 			savedPath:  savedToolOutputPath(msg.Content),
 		}
-		next[offset] = e
+		if phase.excerpt {
+			e.excerpt = toolResultExcerpt(msg.Content, e.chars)
+		}
 		note := msg
 		note.Content = elidedToolResultNote(e)
-		saved += EstimateMessageTokens(msg) - EstimateMessageTokens(note)
+		gain := EstimateMessageTokens(msg) - EstimateMessageTokens(note)
+		if gain <= 0 {
+			continue
+		}
+		next[offset] = e
+		saved += gain
 		picked = true
 	}
 	return picked

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -123,6 +124,13 @@ func TestSaveToolOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("names cut on a character boundary", func(t *testing.T) {
+		stem := toolOutputFileStem(strings.Repeat("a", maxToolOutputNameLen-1) + "ção")
+		if !utf8.ValidString(stem) || len(stem) > maxToolOutputNameLen {
+			t.Fatalf("stem %q is not a valid name within %d bytes", stem, maxToolOutputNameLen)
+		}
+	})
+
 	t.Run("keeps only the most recent outputs", func(t *testing.T) {
 		ws := t.TempDir()
 		paths := make([]string, 0, maxSavedToolOutputs+3)
@@ -148,6 +156,77 @@ func TestSaveToolOutput(t *testing.T) {
 			t.Fatal("the oldest output survived the pruning")
 		}
 	})
+}
+
+func TestPruneSavedToolOutputs(t *testing.T) {
+	write := func(t *testing.T, dir, name string, size int, age time.Duration) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", size)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().Add(-age)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	exists := func(path string) bool { _, err := os.Stat(path); return err == nil }
+
+	t.Run("within the byte budget, newest first", func(t *testing.T) {
+		dir := t.TempDir()
+		newest := write(t, dir, "a_1.txt", 600, time.Minute)
+		middle := write(t, dir, "a_2.txt", 300, 2*time.Minute)
+		oldest := write(t, dir, "a_3.txt", 300, 3*time.Minute)
+		pruneSavedToolOutputs(dir, 10, 1_000)
+		if !exists(newest) || !exists(middle) || exists(oldest) {
+			t.Fatalf("kept newest=%v middle=%v oldest=%v, want the two newest within 1000 bytes",
+				exists(newest), exists(middle), exists(oldest))
+		}
+	})
+
+	t.Run("the newest stays even past the budget", func(t *testing.T) {
+		dir := t.TempDir()
+		big := write(t, dir, "a_1.txt", 5_000, time.Minute)
+		pruneSavedToolOutputs(dir, 10, 1_000)
+		if !exists(big) {
+			t.Fatal("the only, newest output was pruned")
+		}
+	})
+
+	t.Run("drops what an interrupted write left", func(t *testing.T) {
+		dir := t.TempDir()
+		stale := write(t, dir, ".tmp-1", 10, 2*staleToolOutputTempAge)
+		inFlight := write(t, dir, ".tmp-2", 10, time.Second)
+		pruneSavedToolOutputs(dir, 10, 1_000)
+		if exists(stale) || !exists(inFlight) {
+			t.Fatalf(
+				"stale temp kept=%v, in-flight temp kept=%v; want only the in-flight one",
+				exists(stale),
+				exists(inFlight),
+			)
+		}
+	})
+}
+
+// A window lowered by one model's refusals says nothing about the next model.
+func TestModelSwap_ForgetsTheLoweredWindow(t *testing.T) {
+	p, ts, exec := mediaTierFixture(
+		true,
+		&recordingVisionProvider{errAt: map[int]error{1: errVisionRefusedImage}},
+		testImageDataURL,
+	)
+	ts.agent.ImageContextWindow = 128_000
+	exec.contextWindowCap = 100_000
+	if err := p.routeTurnModel(context.Background(), ts, exec); err != nil {
+		t.Fatalf("routeTurnModel: %v", err)
+	}
+	if exec.llmModelName != "gpt-6.1-sol" {
+		t.Fatalf("llmModelName = %q, want the picked tier to take the call", exec.llmModelName)
+	}
+	if exec.contextWindowCap != 0 {
+		t.Fatalf("contextWindowCap = %d after the model changed, want 0", exec.contextWindowCap)
+	}
 }
 
 func TestWithElidedToolResults(t *testing.T) {
@@ -261,9 +340,17 @@ func TestElideTurnToolResultsToFit(t *testing.T) {
 			t.Fatalf("elided = %v (fits %v), want the earlier results and the newest kept", elided, fits)
 		}
 		// Too small even with every earlier result elided: the newest goes too.
-		elided, _, fits = elideTurnToolResultsToFit(turn, nil, 0, measureWithWindow(turn, full-resultTokens*5/2))
+		elided, msgs, fits := elideTurnToolResultsToFit(turn, nil, 0, measureWithWindow(turn, full-resultTokens*5/2))
 		if !fits || elided[6].toolCallID != "d" {
 			t.Fatalf("elided = %v (fits %v), want the newest result elided as a last resort", elided, fits)
+		}
+		// With nothing to read the model would run the tool again into the
+		// same overflow: the newest keep their start and end.
+		if elided[6].excerpt == "" || !strings.Contains(msgs[6].Content, "rrrr") {
+			t.Fatalf("the newest result's note keeps no excerpt:\n%s", msgs[6].Content)
+		}
+		if elided[3].excerpt != "" {
+			t.Fatal("an earlier result's note carries an excerpt; only the newest batch needs one")
 		}
 	})
 
