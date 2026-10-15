@@ -309,6 +309,8 @@ func (p *Pipeline) callVisionDelegate(
 	}
 	resp, err := provider.Chat(ctx, msgs, nil, model, opts)
 	if err != nil {
+		// Keep a failed sub-call observable even when the main turn recovers.
+		notifyBackgroundLLM(ctx, p.al, "vision", model, nil)
 		return "", err
 	}
 	// Out-of-pipeline call: report usage through the hooks so the meter sees

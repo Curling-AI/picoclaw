@@ -67,7 +67,7 @@ func (m *legacyContextManager) Assemble(_ context.Context, req *AssembleRequest)
 	}, nil
 }
 
-func (m *legacyContextManager) Compact(_ context.Context, req *CompactRequest) error {
+func (m *legacyContextManager) Compact(ctx context.Context, req *CompactRequest) error {
 	switch req.Reason {
 	case ContextCompressReasonProactive, ContextCompressReasonRetry:
 		// Sync emergency compression — budget exceeded.
@@ -83,7 +83,7 @@ func (m *legacyContextManager) Compact(_ context.Context, req *CompactRequest) e
 			)
 		}
 	case ContextCompressReasonSummarize:
-		m.maybeSummarize(req.SessionKey)
+		m.maybeSummarize(ctx, req.SessionKey)
 	}
 	return nil
 }
@@ -107,7 +107,7 @@ func (m *legacyContextManager) Clear(_ context.Context, sessionKey string) error
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
 // It runs asynchronously in a goroutine.
-func (m *legacyContextManager) maybeSummarize(sessionKey string) {
+func (m *legacyContextManager) maybeSummarize(ctx context.Context, sessionKey string) {
 	agent := m.al.registry.GetDefaultAgent()
 	if agent == nil {
 		return
@@ -124,6 +124,7 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 		summarizeKey := agent.ID + ":" + sessionKey
 		entry := &compactionEntry{startedAt: time.Now(), messages: len(newHistory)}
 		if _, loading := m.summarizing.LoadOrStore(summarizeKey, entry); !loading {
+			observeAsyncCompaction(ctx, sessionKey)
 			go func() {
 				defer m.summarizing.Delete(summarizeKey)
 				defer func() {

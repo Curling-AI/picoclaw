@@ -42,17 +42,22 @@ func (o *observedProvider) Chat(
 	options map[string]any,
 ) (*providers.LLMResponse, error) {
 	resp, err := o.LLMProvider.Chat(ctx, messages, tools, model, options)
-	if err == nil {
-		o.mu.RLock()
-		al := o.al
-		o.mu.RUnlock()
-		notifyBackgroundLLM(ctx, al, o.source, model, resp)
+	o.mu.RLock()
+	al := o.al
+	o.mu.RUnlock()
+	observed := resp
+	if err != nil {
+		// A recovered secondary failure must remain visible as unmeasured;
+		// reporting its partial response as priced could claim completeness.
+		observed = nil
 	}
+	notifyBackgroundLLM(ctx, al, o.source, model, observed)
 	return resp, err
 }
 
 // notifyBackgroundLLM reports a background (non-turn) LLM call to the
-// AfterLLM hooks, best-effort. The source doubles as the usage-attribution
+// AfterLLM hooks, including absent usage so completeness stays unknown instead
+// of becoming a fabricated zero. The source doubles as the usage-attribution
 // channel ("evolution", "vision", "summarize") — the meter maps it through
 // the "background:" session-key prefix.
 func notifyBackgroundLLM(
@@ -61,7 +66,7 @@ func notifyBackgroundLLM(
 	source, model string,
 	resp *providers.LLMResponse,
 ) {
-	if al == nil || al.hooks == nil || resp == nil || resp.Usage == nil {
+	if al == nil || al.hooks == nil {
 		return
 	}
 	_, _ = al.hooks.AfterLLM(ctx, &LLMHookResponse{
