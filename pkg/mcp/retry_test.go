@@ -263,3 +263,63 @@ func TestRetryPendingServersRetriesTransientRejectionsFast(t *testing.T) {
 		t.Errorf("connect attempts = %d, want 4", got)
 	}
 }
+
+// The pace is per round: a server failing for good is retried on the short
+// interval while another one in the same pod is being turned away, and the
+// schedule takes over once only it is left.
+func TestRetryPendingServersPacesTheRoundByAnyTransientFailure(t *testing.T) {
+	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
+	retryBackoffSchedule = []time.Duration{time.Millisecond, time.Hour}
+	transientRetryInterval = time.Millisecond
+	originalConnectServerFunc := connectServerFunc
+	t.Cleanup(func() {
+		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var gmailAttempts, brokenAttempts atomic.Int32
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		if name == "broken" {
+			brokenAttempts.Add(1)
+			return nil, fmt.Errorf(`failed to connect: calling "initialize": Unauthorized`)
+		}
+		if gmailAttempts.Add(1) <= 3 {
+			return nil, fmt.Errorf(`failed to connect: calling "initialize": %w`,
+				&jsonrpc.Error{Code: codeRejectedByTransport, Message: "rejected by transport"})
+		}
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mcpCfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"gmail":  {Enabled: true, Type: "http", URL: "http://example.test/gmail"},
+		"broken": {Enabled: true, Type: "http", URL: "http://example.test/broken"},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	connected := make(chan string, 2)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		NewManager().RetryPendingServers(ctx, mcpCfg, "/tmp/ws", []string{"gmail", "broken"},
+			func(name string, _ *ServerConnection) { connected <- name })
+	}()
+	// The loop must be gone before the cleanup restores the globals it reads.
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case name := <-connected:
+		if name != "gmail" {
+			t.Fatalf("connected %q, want gmail", name)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("gmail still pending after %d attempts", gmailAttempts.Load())
+	}
+	// broken rode the transient rounds: tried once per round until gmail came
+	// back, then left on the schedule's hour step.
+	time.Sleep(50 * time.Millisecond)
+	if got := brokenAttempts.Load(); got != 4 {
+		t.Errorf("broken attempts = %d, want 4 (the rounds gmail needed)", got)
+	}
+}

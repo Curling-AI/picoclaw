@@ -31,20 +31,22 @@ var retryBackoffSchedule = []time.Duration{
 	5 * time.Minute,
 }
 
-// transientRetryInterval paces the retries of a server the HTTP transport
-// turned away (429 or 5xx: the upstream is saturated or briefly down). That
-// clears by itself once the burst passes, and the schedule above is sized for a
-// credential someone has to fix: stepping a rate-limited server up to minutes
-// kept its tools away long after the upstream had capacity again. A variable so
-// tests can shrink it.
+// transientRetryInterval paces the retries while the HTTP transport turns
+// servers away: 429 or 5xx (the upstream is saturated or briefly down) or a
+// failure to reach it at all. That clears by itself once the burst passes, and
+// the schedule above is sized for a credential someone has to fix: stepping a
+// rate-limited server up to minutes kept its tools away long after the
+// upstream had capacity again. The pace is per round: while any pending server
+// is being turned away, the others are retried on it too. A variable so tests
+// can shrink it.
 var transientRetryInterval = 30 * time.Second
 
-// transientRetryMax caps those fast retries at about ten minutes' worth; a
-// server still turned away after that falls back to the schedule.
+// transientRetryMax caps those fast rounds at about ten minutes' worth; after
+// that the schedule applies whatever the failures are.
 const transientRetryMax = 20
 
 // codeRejectedByTransport is the JSON-RPC code the SDK puts on a request its
-// HTTP transport got 429 or 5xx for.
+// HTTP transport could not get answered: an HTTP 429/5xx, or no response.
 const codeRejectedByTransport = -32005
 
 // RetryPendingServers keeps trying to connect the named servers until each one
@@ -138,8 +140,9 @@ func retryDelay(attempt int, transient bool) time.Duration {
 	return d/2 + rand.N(d)
 }
 
-// rejectedByTransport reports whether err is the HTTP transport turning the
-// request away with 429 or 5xx, as opposed to the server answering it.
+// rejectedByTransport reports whether err is the HTTP transport failing to get
+// the request answered (429/5xx, or no response), as opposed to the server
+// answering it.
 func rejectedByTransport(err error) bool {
 	var rpcErr *jsonrpc.Error
 	return errors.As(err, &rpcErr) && rpcErr.Code == codeRejectedByTransport
