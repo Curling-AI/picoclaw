@@ -143,8 +143,27 @@ type turnExecution struct {
 	// what separates a promise from narration: before the first tool runs, "vou
 	// buscar" is a call the model failed to emit; after it, the same words are
 	// the agent describing work it already did. Iteration count cannot stand in
-	// for this — a retry advances it without any tool having run.
+	// for this — a retry advances it without any tool having run. After it, only
+	// a reply that ends on a colon still counts as a step that never ran (see
+	// endsOnDanglingColon).
 	toolRanThisTurn bool
+
+	// danglingColonRetries counts retries in a row after a reply ended on a
+	// colon with no tool call once tools had run; a real call resets it.
+	// danglingColonNudge is the note that went out, kept so the reset can take
+	// it back out of transientTurnMessages.
+	danglingColonRetries int
+	danglingColonNudge   string
+
+	// wrapUpNudged records that the 85% tool-budget warning went out. From
+	// there the model was told to deliver what it has, and a nudge to carry on
+	// with the next step would contradict it.
+	wrapUpNudged bool
+
+	// interruptedStreamRetries counts retries in a row after a stream was cut
+	// before it finished and left a fragment as the reply; a real call resets
+	// it.
+	interruptedStreamRetries int
 
 	// degenerateResponseRetries counts same-turn retries after the model looped
 	// on one repeated block instead of answering. Capped like its siblings.
@@ -559,6 +578,14 @@ func (ts *turnState) currentIteration() int {
 // precisa de mais passos que uma conversa, e não dá para reconstruir o agente
 // por turno — daí o override por opções. Sem override, é exatamente o valor de
 // antes. (seucaranguejo fork)
+// atIterationCap reports whether iteration is the last one the turn allows. A
+// same-turn retry from there ends the loop with no content, and the tool-limit
+// fallback replaces the reply the retry was meant to fix.
+func (ts *turnState) atIterationCap(iteration int) bool {
+	maxIter := ts.maxIterations()
+	return maxIter > 0 && iteration >= maxIter
+}
+
 func (ts *turnState) maxIterations() int {
 	if ts == nil {
 		return 0

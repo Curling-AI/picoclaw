@@ -52,6 +52,7 @@ func llmCallRecord(requestID string, resp *providers.LLMResponse) *providers.LLM
 		ResolvedProvider:    resp.ResolvedProvider,
 		FinishReason:        resp.FinishReason,
 		FinishReasonMissing: resp.FinishReasonMissing,
+		StreamInterrupted:   resp.StreamInterrupted,
 	}
 	if *call == (providers.LLMCall{}) {
 		return nil

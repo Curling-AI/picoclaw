@@ -50,6 +50,10 @@ type LLMResponse struct {
 	// FinishReasonMissing keeps "never reported" apart from a real stop —
 	// FinishReason still defaults to "stop" for existing readers.
 	FinishReasonMissing bool `json:"finish_reason_missing,omitempty"`
+	// StreamInterrupted marks a stream that was cut before it finished: no
+	// [DONE] and no finish_reason, or an error frame. The gateway counts the
+	// attempt as failed, while the text so far reads like a whole answer.
+	StreamInterrupted bool `json:"stream_interrupted,omitempty"`
 }
 
 type StreamChunk struct {
@@ -202,6 +206,7 @@ type LLMCall struct {
 	ResolvedProvider    string `json:"resolved_provider,omitempty"`
 	FinishReason        string `json:"finish_reason,omitempty"`
 	FinishReasonMissing bool   `json:"finish_reason_missing,omitempty"`
+	StreamInterrupted   bool   `json:"stream_interrupted,omitempty"`
 }
 
 type ToolDefinition struct {
