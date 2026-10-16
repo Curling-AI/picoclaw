@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"math"
 	"path"
 	"path/filepath"
 	"sort"
@@ -536,7 +537,9 @@ func omissionMarker(file memoryPromptFile, fit memoryFit) string {
 // todas as entradas com título no teto de runas, a linha do meio e números
 // grandes. Reservar o pior caso garante o orçamento sem depender do corte.
 func markerReserveTokens(file memoryPromptFile) int {
-	const big = 9_999_999_999
+	// MaxInt32 cabe no int dos alvos de 32 bits do build-all (arm, mipsle), e
+	// os 10 dígitos bastam: offset maior seria um arquivo de memória de 2 GB.
+	const big = math.MaxInt32
 	worst := make([]omittedEntry, maxOmittedHeadingsListed+1)
 	heading := "### " + strings.Repeat("w", maxOmittedHeadingRunes)
 	for i := range worst {
