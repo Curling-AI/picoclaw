@@ -739,6 +739,12 @@ func parseStreamResponse(
 	var upstreamID string
 	var resolvedProvider string
 	finishReasonReported := false
+	// Hulk ends a stream that fails after its first delta with one error frame,
+	// or simply closes it (HULK_STREAM_ERROR_EVENTS_ENABLED off, as in prod), and
+	// never sends [DONE] after either. EOF alone looks like a clean end, so the
+	// terminator is what tells them apart.
+	sawDone := false
+	errorFrame := false
 	frames := newFrameTail()
 
 	// Tool call assembly: OpenAI streams tool calls as incremental deltas
@@ -757,10 +763,12 @@ func parseStreamResponse(
 			return nil
 		}
 		if strings.TrimSpace(data) == "[DONE]" {
+			sawDone = true
 			return io.EOF
 		}
 
 		var chunk struct {
+			Error   json.RawMessage `json:"error"`
 			Choices []struct {
 				Delta struct {
 					Content          string            `json:"content"`
@@ -785,6 +793,26 @@ func parseStreamResponse(
 
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			return fmt.Errorf("failed to decode stream event: %w", err)
+		}
+
+		// The frame carries no choices, so the loop below would skip it and the
+		// cut would pass for a finished answer.
+		if len(chunk.Error) > 0 && !bytes.Equal(chunk.Error, []byte("null")) {
+			errorFrame = true
+			// Code and type only: an upstream message can echo the request.
+			var frameErr struct {
+				Code json.RawMessage `json:"code"`
+				Type string          `json:"type"`
+			}
+			_ = json.Unmarshal(chunk.Error, &frameErr)
+			logger.WarnCF("provider.openai_compat", "stream ended with an error frame",
+				map[string]any{
+					"upstream_id":       upstreamID,
+					"resolved_provider": resolvedProvider,
+					"error_code":        string(frameErr.Code),
+					"error_type":        frameErr.Type,
+				})
+			return io.EOF
 		}
 
 		if chunk.Usage != nil {
@@ -1024,6 +1052,7 @@ func parseStreamResponse(
 		ToolCalls:           toolCalls,
 		FinishReason:        finishReason,
 		FinishReasonMissing: !finishReasonReported,
+		StreamInterrupted:   errorFrame || (!sawDone && !finishReasonReported),
 		Usage:               usage,
 		UpstreamID:          upstreamID,
 		ResolvedProvider:    resolvedProvider,
