@@ -8,9 +8,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"path/filepath"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -26,6 +30,22 @@ var retryBackoffSchedule = []time.Duration{
 	2 * time.Minute,
 	5 * time.Minute,
 }
+
+// transientRetryInterval paces the retries of a server the HTTP transport
+// turned away (429 or 5xx: the upstream is saturated or briefly down). That
+// clears by itself once the burst passes, and the schedule above is sized for a
+// credential someone has to fix: stepping a rate-limited server up to minutes
+// kept its tools away long after the upstream had capacity again. A variable so
+// tests can shrink it.
+var transientRetryInterval = 30 * time.Second
+
+// transientRetryMax caps those fast retries at about ten minutes' worth; a
+// server still turned away after that falls back to the schedule.
+const transientRetryMax = 20
+
+// codeRejectedByTransport is the JSON-RPC code the SDK puts on a request its
+// HTTP transport got 429 or 5xx for.
+const codeRejectedByTransport = -32005
 
 // RetryPendingServers keeps trying to connect the named servers until each one
 // connects, ctx is canceled, or the manager closes. A server that failed at
@@ -47,16 +67,18 @@ func (m *Manager) RetryPendingServers(
 		}
 	}
 
+	transient := false
 	for attempt := 1; len(remaining) > 0; attempt++ {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(retryBackoffAt(attempt)):
+		case <-time.After(retryDelay(attempt, transient)):
 		}
 		if m.closed.Load() {
 			return
 		}
 
+		transient = false
 		still := remaining[:0]
 		for _, name := range remaining {
 			serverCfg, ok := mcpCfg.Servers[name]
@@ -72,6 +94,7 @@ func (m *Manager) RetryPendingServers(
 				if ctx.Err() != nil || m.closed.Load() {
 					return
 				}
+				transient = transient || rejectedByTransport(err)
 				// WARN sparingly: at the backoff cap this loop runs for as long
 				// as a credential stays broken, and one line per attempt would
 				// flood the pod logs.
@@ -99,6 +122,27 @@ func (m *Manager) RetryPendingServers(
 		}
 		remaining = still
 	}
+}
+
+// retryDelay is the wait before attempt. Every delay is spread over [d/2, 3d/2):
+// assistants woken for the same cron minute fail together, and without the
+// spread they retried together into the same exhausted quota.
+func retryDelay(attempt int, transient bool) time.Duration {
+	d := retryBackoffAt(attempt)
+	if transient && attempt <= transientRetryMax {
+		d = transientRetryInterval
+	}
+	if d <= 0 {
+		return d
+	}
+	return d/2 + rand.N(d)
+}
+
+// rejectedByTransport reports whether err is the HTTP transport turning the
+// request away with 429 or 5xx, as opposed to the server answering it.
+func rejectedByTransport(err error) bool {
+	var rpcErr *jsonrpc.Error
+	return errors.As(err, &rpcErr) && rpcErr.Code == codeRejectedByTransport
 }
 
 func retryBackoffAt(attempt int) time.Duration {
