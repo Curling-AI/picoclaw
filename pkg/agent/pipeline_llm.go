@@ -213,6 +213,9 @@ func (p *Pipeline) CallLLM(
 
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefsFor(ts.offeredToolSet())
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
+	// Tools that only some turns can use (seucaranguejo fork): the decision
+	// reads the turn's context, which a hook cannot rewrite tools from.
+	exec.providerToolDefs = ts.agent.Tools.WithoutUnofferedTurnScoped(turnCtx, exec.providerToolDefs)
 	// The turn's set only grows (each search adds up to a page of tools), and
 	// OpenAI-compatible endpoints reject requests with more than 128 tools.
 	if n := len(exec.providerToolDefs); n > largeToolCount {

@@ -59,6 +59,14 @@ type ServerNamedTool interface {
 	ServerToolName() string
 }
 
+// TurnScopedTool is offered to the model only in the turns where OfferedIn
+// says so, e.g. a tool that only one kind of client can run. It stays
+// registered; each LLM call of the turn asks it with the turn's context.
+// (seucaranguejo fork)
+type TurnScopedTool interface {
+	OfferedIn(ctx context.Context) bool
+}
+
 // --- Request-scoped tool context (channel / chatID) ---
 //
 // Carried via context.Value so that concurrent tool calls each receive
