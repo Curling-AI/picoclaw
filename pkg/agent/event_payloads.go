@@ -81,6 +81,7 @@ type LLMResponsePayload struct {
 	HasReasoning        bool
 	FinishReason        string
 	FinishReasonMissing bool
+	StreamInterrupted   bool
 	// CompletionTokens is -1 when the provider reported no usage.
 	CompletionTokens int
 	RequestID        string

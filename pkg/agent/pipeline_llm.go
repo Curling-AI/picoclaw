@@ -138,6 +138,28 @@ const undeliveredAnnouncementNudge = "[System] Your last reply announced an acti
 	"but carried no tool call, so nothing ran and the user is still waiting. Perform the action now by emitting the " +
 	"tool call itself. Do not restate what you are about to do, and do not answer from memory what the tool was for."
 
+// maxInterruptedStreamRetries caps retries IN A ROW after a stream was cut
+// before it finished; a real call resets it, as with
+// maxTruncatedToolCallRetries.
+const maxInterruptedStreamRetries = 1
+
+// maxDanglingColonRetries caps retries IN A ROW after a reply that ended on a
+// colon once tools had run. Like maxTruncatedToolCallRetries, the count starts
+// over when the model emits a real call: a long spec run can stop this way
+// again dozens of iterations later, and that occurrence deserves its own retry.
+const maxDanglingColonRetries = 1
+
+// danglingColonNudge quotes the tail it discarded. The model never sees that
+// reply again, and a bare "carry on" leaves it re-reading the whole turn to
+// guess which step it was about to take.
+func danglingColonNudge(reply string) string {
+	return "[System] Your last reply ended on a colon and nothing followed it: «" + replyTail(reply) + "». " +
+		"It carried no tool call, so the step it introduced never ran and the user is still waiting. " +
+		"Carry on with the task now by emitting the tool call for that step. If the work is finished, write the " +
+		"final answer in full instead of introducing it. If what the colon introduced was already delivered by a " +
+		"tool in this turn (a file, a card, buttons), do not send it again: close with one short sentence."
+}
+
 // maxDegenerateResponseRetries caps same-turn retries after the model looped on
 // one block. Same one-shot budget as its siblings: the reroll either breaks the
 // cycle or the model is not going to answer this turn.
@@ -952,6 +974,7 @@ func (p *Pipeline) CallLLM(
 			HasReasoning:        exec.response.Reasoning != "" || exec.response.ReasoningContent != "",
 			FinishReason:        exec.response.FinishReason,
 			FinishReasonMissing: exec.response.FinishReasonMissing,
+			StreamInterrupted:   exec.response.StreamInterrupted,
 			CompletionTokens:    responseCompletionTokens(exec.response),
 			RequestID:           exec.response.ProviderRequestID,
 			UpstreamID:          exec.response.UpstreamID,
@@ -1027,6 +1050,29 @@ func (p *Pipeline) CallLLM(
 					"steering_count": len(steerMsgs),
 				})
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
+			return ControlContinue, nil
+		}
+
+		// A stream cut before it finished hands over whatever text had arrived,
+		// and without this the fragment ships as the answer: prod, 2026-10-15/16,
+		// ~15 a day, each ending a turn mid-step while the gateway logged the
+		// attempt as failed. Re-roll the call, like the guards below do after
+		// visible output. Nothing is lost: the fragment never entered history,
+		// and the retry goes out with a fresh request id.
+		if exec.response.StreamInterrupted && responseContent != "" && !exec.gracefulTerminal &&
+			!ts.atIterationCap(iteration) &&
+			exec.interruptedStreamRetries < maxInterruptedStreamRetries {
+			exec.interruptedStreamRetries++
+			cancelConfiguredStreamingLLM(turnCtx, exec)
+			logger.WarnCF("agent", "LLM stream was cut before it finished; retrying", map[string]any{
+				"agent_id":          ts.agent.ID,
+				"iteration":         iteration,
+				"retry":             exec.interruptedStreamRetries,
+				"content_chars":     len(responseContent),
+				"request_id":        exec.response.ProviderRequestID,
+				"upstream_id":       exec.response.UpstreamID,
+				"resolved_provider": exec.response.ResolvedProvider,
+			})
 			return ControlContinue, nil
 		}
 
@@ -1163,6 +1209,49 @@ func (p *Pipeline) CallLLM(
 			responseContent = ""
 		}
 
+		// The same failure after the first tool, where the guard above stands
+		// down: the model narrates its next step, ends on a colon and stops.
+		// Prod, 2026-10-16: 32 iterations into a spec run, "Continuando a task 4
+		// — agora as edições cirúrgicas: … no Balcão:" came back with stop and
+		// no call, and the user had to type "Segue". Narration that travels with
+		// a call is fine; without one it is the whole answer, and an answer does
+		// not end on an introduction.
+		//
+		// Out of retries the reply goes through. Unlike the guard above, this
+		// turn already did real work, and swapping its last words for the
+		// empty-response fallback would read as if nothing had happened. It
+		// also stands down once the tool-budget wrap-up went out, which told
+		// the model to deliver instead of starting the next step.
+		if !exec.gracefulTerminal && exec.toolRanThisTurn && !exec.wrapUpNudged &&
+			!ts.atIterationCap(iteration) &&
+			len(exec.providerToolDefs) > 0 &&
+			endsOnDanglingColon(responseContent) {
+			if exec.danglingColonRetries < maxDanglingColonRetries {
+				exec.danglingColonRetries++
+				cancelConfiguredStreamingLLM(turnCtx, exec)
+				p.reviveDiscoveredTools(ts, exec, iteration)
+				exec.danglingColonNudge = danglingColonNudge(responseContent)
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+					Role:    "user",
+					Content: exec.danglingColonNudge,
+				})
+				logger.WarnCF("agent", "LLM ended a reply on a colon without a tool call; retrying",
+					map[string]any{
+						"agent_id":      ts.agent.ID,
+						"iteration":     iteration,
+						"retry":         exec.danglingColonRetries,
+						"content_chars": len(responseContent),
+					})
+				return ControlContinue, nil
+			}
+			logger.WarnCF("agent", "LLM kept ending on a colon without a tool call; delivering the reply",
+				map[string]any{
+					"agent_id":      ts.agent.ID,
+					"iteration":     iteration,
+					"content_chars": len(responseContent),
+				})
+		}
+
 		exec.finalContent = responseContent
 		logger.InfoCF("agent", "LLM response without tool calls (direct answer)",
 			map[string]any{
@@ -1206,6 +1295,18 @@ func (p *Pipeline) CallLLM(
 	if exec.truncatedToolCallRetries > 0 {
 		exec.truncatedToolCallRetries = 0
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, truncatedToolCallNudge)
+	}
+	exec.interruptedStreamRetries = 0
+	if exec.danglingColonRetries > 0 {
+		exec.danglingColonRetries = 0
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, exec.danglingColonNudge)
+		exec.danglingColonNudge = ""
+	}
+	// The announcement nudge asked for the call that just arrived. Left in
+	// place, it tells every later request of the turn to "perform the action
+	// now", the final answer included.
+	if exec.undeliveredAnnouncementRetries > 0 {
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, undeliveredAnnouncementNudge)
 	}
 	logger.InfoCF("agent", "LLM requested tool calls",
 		map[string]any{

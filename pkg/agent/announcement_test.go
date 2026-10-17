@@ -57,6 +57,11 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 			"Fechando — rodando a query de validação agora:",
 			true,
 		},
+		{
+			"colon inside markdown bold after the action",
+			"**Executando agora as duas queries:**",
+			true,
+		},
 		// A colon alone is not a promise: no tool action is named.
 		{
 			"answer that ends on a colon without an action",
@@ -99,6 +104,45 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := looksLikeUndeliveredAnnouncement(tt.text); got != tt.want {
 				t.Errorf("looksLikeUndeliveredAnnouncement = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The "true" cases are verbatim final replies from the prod fleet (2026-10-14
+// to 16): each came back with stop and no tool call after tools had already
+// run in the turn, so the step it introduced never happened.
+func TestEndsOnDanglingColon(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"prod: spec run, step with no action verb", danglingColonReply, true},
+		{"prod: announces the publish", "Agora removo o hook temporário e publico:", true},
+		{"prod: announces the check", "A resposta da IA não chegou — vou checar os logs do backend:", true},
+		{"prod: introduces the report", "Dedup marcado nos dois estados. Relatório pronto:", true},
+		{"prod: introduces a batch", "Lote 1/30 (índices 0–19):", true},
+		{"trailing newline", "Fechando:\n", true},
+		{"colon inside markdown bold", "Rodada fechada.\n\n**Próximos passos:**", true},
+		{"colon inside markdown italics", "Tudo publicado. _Falta só:_", true},
+		{
+			"colon mid-sentence, answer follows",
+			"Pronto: publiquei a versão 0.0.20 em https://teste-pl-a0abe.goskip.app",
+			false,
+		},
+		{"colon introduces content that is there", "Os números batem com o dashboard: 42 pedidos, R$ 3.100.", false},
+		{"ends on a code block", "Use assim:\n\n```ts\nconst a = 1\n```", false},
+		{"emoticon", "Rodou tudo :)", false},
+		{"emoji shortcode", "Tudo publicado :white_check_mark:", false},
+		{"full-width colon", "接下来我修改 App.tsx：", true},
+		{"plain answer", "Feito. A rota /admin voltou a responder 200.", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := endsOnDanglingColon(tt.text); got != tt.want {
+				t.Errorf("endsOnDanglingColon = %v, want %v", got, tt.want)
 			}
 		})
 	}

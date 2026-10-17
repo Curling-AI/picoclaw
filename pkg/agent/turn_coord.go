@@ -111,7 +111,6 @@ func (al *AgentLoop) runTurn(
 	// in prod — none of the 18 max-iteration overruns managed to wrap up in the
 	// final 20% (dev-shell and browser-QA loops burn 2-4 iterations per step).
 	paceNudged := false
-	wrapUpNudged := false
 
 	// Teto DESTE turno: o do agente, salvo override nas opções (Loops). Fixo
 	// durante o turno, então basta resolver uma vez. (seucaranguejo fork)
@@ -142,8 +141,8 @@ func (al *AgentLoop) runTurn(
 		// to 4 of them and degraded into announce-without-acting loops.
 		if budget := maxIter - iteration; maxIter > 0 && budget > 0 {
 			switch {
-			case !wrapUpNudged && iteration*100 >= maxIter*85:
-				wrapUpNudged = true
+			case !exec.wrapUpNudged && iteration*100 >= maxIter*85:
+				exec.wrapUpNudged = true
 				paceNudged = true // estágio suave perdeu o sentido aqui
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role: "user",
