@@ -195,6 +195,44 @@ func (al *AgentLoop) Steer(msg providers.Message) error {
 	return al.enqueueSteeringMessage(scope, agentID, msg)
 }
 
+// SteerSession queues a user message for the turn of sessionKey: the queue a
+// channel message enters when its session is busy (Run). The turn reads it
+// after the tool in flight; one that ends without reading it leaves it pending
+// for Continue. Steer picks any active turn, which on a pod with several
+// conversations running is not necessarily this one. (seucaranguejo fork: the
+// web reaches the loop through ProcessDirect*, never through Run.)
+//
+// Only an explicit key is accepted: any other is routed to a different one
+// when its turn starts, and a message queued under it would never be read.
+func (al *AgentLoop) SteerSession(sessionKey, content string, media []string) error {
+	if !session.IsExplicitSessionKey(sessionKey) {
+		return fmt.Errorf("steering needs the explicit session key the turn runs under, got %q", sessionKey)
+	}
+	return al.enqueueSteeringMessage(sessionKey, "", providers.Message{
+		Role:    "user",
+		Content: content,
+		Media:   append([]string(nil), media...),
+	})
+}
+
+// PendingSteering reports how many messages queued for sessionKey no turn has
+// read yet.
+func (al *AgentLoop) PendingSteering(sessionKey string) int {
+	if strings.TrimSpace(sessionKey) == "" {
+		return 0
+	}
+	return al.pendingSteeringCountForScope(sessionKey)
+}
+
+// ClearSteering drops the messages still queued for sessionKey and reports how
+// many there were.
+func (al *AgentLoop) ClearSteering(sessionKey string) int {
+	if strings.TrimSpace(sessionKey) == "" {
+		return 0
+	}
+	return al.clearSteeringMessagesForScope(sessionKey)
+}
+
 func (al *AgentLoop) enqueueSteeringMessage(scope, agentID string, msg providers.Message) error {
 	if al.steering == nil {
 		return fmt.Errorf("steering queue is not initialized")
