@@ -257,6 +257,47 @@ func TestAgentLoop_ContinueDirect_ReportsWhetherItRan(t *testing.T) {
 	}
 }
 
+// endTurnTool ends its turn with a reply the user already sees, as the
+// connector card does: the turn closes with no text of its own.
+type endTurnTool struct{}
+
+func (*endTurnTool) Name() string        { return "show_card" }
+func (*endTurnTool) Description() string { return "Shows a card that needs the person's answer" }
+func (*endTurnTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+func (*endTurnTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+	result := tools.UserResult("card shown").WithResponseHandled()
+	result.EndTurn = true
+	return result
+}
+
+// A continuation that ends on a handled reply ran even though it has no text:
+// ran says so, where Continue's empty answer reads like "nothing was queued".
+func TestAgentLoop_ContinueDirect_HandledReplyStillRan(t *testing.T) {
+	provider := &queuedReplyProvider{responses: []providers.LLMResponse{
+		{
+			ToolCalls: []providers.ToolCall{
+				{ID: "call_card", Type: "function", Name: "show_card", Arguments: map[string]any{}},
+			},
+		},
+	}}
+	al := newSessionSteeringLoop(t, provider)
+	al.RegisterTool(&endTurnTool{})
+	if err := al.SteerSession(conversationA, "connect the calendar", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+
+	content, ran, err := al.ContinueDirect(
+		context.Background(),
+		DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"},
+	)
+	if err != nil || !ran || content != "" {
+		t.Fatalf("handled reply: got %q ran=%v err=%v, want an empty answer from a turn that ran", content, ran, err)
+	}
+}
+
 // The continuation of a web reply shows on the screen as it happens, like the
 // reply it continues: Continue's turn published nothing until its final text,
 // the silence that made the person resend in the first place.
