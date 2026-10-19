@@ -105,7 +105,10 @@ func TestTranscribeAudioInMessage_TranscribedAudioBecomesVoiceText(t *testing.T)
 	}
 	al := &AgentLoop{cfg: &config.Config{}, mediaStore: store, transcriber: &fixedTranscriber{text: "olá"}}
 
-	msg, _ := al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{Content: "[voice]", Media: []string{ref}})
+	msg, _ := al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{
+		Content: "[voice]",
+		Media:   []string{ref},
+	})
 
 	if msg.Content != "[voice: olá]" || len(msg.Media) != 0 || strings.Contains(msg.Content, "not transcribed") {
 		t.Fatalf("got content %q media %v", msg.Content, msg.Media)
