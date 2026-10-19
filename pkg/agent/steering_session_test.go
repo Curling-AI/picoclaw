@@ -67,12 +67,17 @@ func (p *sessionRecordingProvider) calls() [][]providers.Message {
 }
 
 func sentContains(messages []providers.Message, text string) bool {
+	return occurrences(messages, text) > 0
+}
+
+func occurrences(messages []providers.Message, text string) int {
+	n := 0
 	for _, m := range messages {
 		if strings.Contains(m.Content, text) {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // The web derives opaque keys like these; the loop keeps them as they are.
@@ -152,6 +157,14 @@ func TestAgentLoop_SteerSession_ReadByTheRunningTurn(t *testing.T) {
 	}
 	if n := al.PendingSteering(conversationA); n != 0 {
 		t.Errorf("%d messages still queued after the turn read them", n)
+	}
+	// Read during a reply without tool calls, the follow-up used to enter the
+	// context and the history twice, on every channel.
+	if n := occurrences(calls[1], "carry on"); n != 1 {
+		t.Errorf("the model got the follow-up %d times, want once", n)
+	}
+	if n := occurrences(al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(conversationA), "carry on"); n != 1 {
+		t.Errorf("the history holds the follow-up %d times, want once", n)
 	}
 }
 

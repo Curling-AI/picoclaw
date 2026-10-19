@@ -249,6 +249,7 @@ func (al *AgentLoop) runTurn(
 			// Clear exec.pendingMessages after injection so InitialSteeringMessages
 			// are not re-injected on subsequent iterations (Issue 2 fix).
 			exec.pendingMessages = nil
+			pendingMessages = nil
 		}
 		// Always sync messages into exec.messages so CallLLM sees the updated state
 		exec.messages = messages
@@ -269,7 +270,10 @@ func (al *AgentLoop) runTurn(
 			return turnResult{}, callErr
 		}
 		messages = exec.messages
-		pendingMessages = exec.pendingMessages
+		// Steering CallLLM found stays in exec.pendingMessages, where the next
+		// iteration reads it. Copied here as well, it was read twice: a message
+		// that arrived during a reply without tool calls entered the context and
+		// the history twice. (seucaranguejo fork)
 		finalContent = exec.finalContent
 
 		switch ctrl {
