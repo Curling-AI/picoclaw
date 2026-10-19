@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -22,9 +25,14 @@ type sessionRecordingProvider struct {
 	sent      [][]providers.Message
 	started   chan struct{}
 	release   chan struct{}
+	unblocked sync.Once
 	firstResp string
 	laterResp string
 }
+
+// unblock lets the held call answer. Also registered as cleanup, so a test
+// that fails early does not leave the turn's goroutine waiting.
+func (p *sessionRecordingProvider) unblock() { p.unblocked.Do(func() { close(p.release) }) }
 
 func newSessionRecordingProvider(firstResp, laterResp string) *sessionRecordingProvider {
 	return &sessionRecordingProvider{
@@ -121,6 +129,19 @@ func runDirect(al *AgentLoop, content, sessionKey, chatID string) <-chan directR
 	return done
 }
 
+// waitStarted waits for the turn to reach started, and fails with the turn's
+// own outcome if it ends before getting there instead of hanging the run.
+func waitStarted(t *testing.T, started <-chan struct{}, done <-chan directResult) {
+	t.Helper()
+	select {
+	case <-started:
+	case result := <-done:
+		t.Fatalf("the turn ended before getting there: %q, %v", result.resp, result.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn never got there")
+	}
+}
+
 func waitDirect(t *testing.T, done <-chan directResult) directResult {
 	t.Helper()
 	select {
@@ -141,13 +162,14 @@ func waitDirect(t *testing.T, done <-chan directResult) directResult {
 func TestAgentLoop_SteerSession_ReadByTheRunningTurn(t *testing.T) {
 	provider := newSessionRecordingProvider("stale answer", "answer that read the follow-up")
 	al := newSessionSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
 
 	done := runDirect(al, "build the deck", conversationA, "run-a")
-	<-provider.started
+	waitStarted(t, provider.started, done)
 	if err := al.SteerSession(conversationA, "carry on", nil); err != nil {
 		t.Fatalf("SteerSession: %v", err)
 	}
-	close(provider.release)
+	provider.unblock()
 
 	if result := waitDirect(t, done); result.resp != "answer that read the follow-up" {
 		t.Errorf("turn answered %q, want the answer of the call that read the follow-up", result.resp)
@@ -175,9 +197,10 @@ func TestAgentLoop_SteerSession_ReadByTheRunningTurn(t *testing.T) {
 func TestAgentLoop_SteerSession_StaysWithItsOwnSession(t *testing.T) {
 	provider := newSessionRecordingProvider("b answered", "a answered")
 	al := newSessionSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
 
 	done := runDirect(al, "question of b", conversationB, "run-b")
-	<-provider.started
+	waitStarted(t, provider.started, done)
 	if err := al.SteerSession(conversationA, "message of a", nil); err != nil {
 		t.Fatalf("SteerSession: %v", err)
 	}
@@ -187,7 +210,7 @@ func TestAgentLoop_SteerSession_StaysWithItsOwnSession(t *testing.T) {
 	if got := al.PendingSteering(conversationB); got != 0 {
 		t.Fatalf("conversation b holds %d messages, want 0", got)
 	}
-	close(provider.release)
+	provider.unblock()
 
 	if result := waitDirect(t, done); result.resp != "b answered" {
 		t.Errorf("turn of b answered %q", result.resp)
@@ -350,9 +373,12 @@ func TestAgentLoop_ContinueDirect_StreamsToTheChat(t *testing.T) {
 // blockingTool holds its call until released and ignores the turn's context,
 // as a tool in the middle of a long command does.
 type blockingTool struct {
-	started chan struct{}
-	release chan struct{}
+	started   chan struct{}
+	release   chan struct{}
+	unblocked sync.Once
 }
+
+func (b *blockingTool) unblock() { b.unblocked.Do(func() { close(b.release) }) }
 
 func (*blockingTool) Name() string        { return "slow_command" }
 func (*blockingTool) Description() string { return "A command that takes a while" }
@@ -381,6 +407,7 @@ func TestAgentLoop_StoppedTurnLeavesTheQueueToTheNextTurn(t *testing.T) {
 	al := newSessionSteeringLoop(t, provider)
 	tool := &blockingTool{started: make(chan struct{}), release: make(chan struct{})}
 	al.RegisterTool(tool)
+	t.Cleanup(tool.unblock)
 
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -388,12 +415,18 @@ func TestAgentLoop_StoppedTurnLeavesTheQueueToTheNextTurn(t *testing.T) {
 		_, err := al.ProcessDirectWithChannel(ctx, "run the build", conversationA, "grpc", "run-a")
 		done <- err
 	}()
-	<-tool.started
+	select {
+	case <-tool.started:
+	case err := <-done:
+		t.Fatalf("the turn ended before its tool ran: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tool never ran")
+	}
 	stop()
 	if err := al.SteerSession(conversationA, "now do something else", nil); err != nil {
 		t.Fatalf("SteerSession: %v", err)
 	}
-	close(tool.release)
+	tool.unblock()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -446,5 +479,127 @@ func TestAgentLoop_ClearSteering_DropsOnlyThatSession(t *testing.T) {
 	}
 	if al.ClearSteering("") != 0 || al.PendingSteering("") != 0 {
 		t.Error("an empty key reached the shared fallback queue")
+	}
+}
+
+// The web tells a full queue apart from any other refusal: only the first
+// means "wait for the reply in progress".
+func TestAgentLoop_SteerSession_FullQueueIsItsOwnError(t *testing.T) {
+	al := newSessionSteeringLoop(t, &mockProvider{})
+	for i := range MaxQueueSize {
+		if err := al.SteerSession(conversationA, fmt.Sprintf("message %d", i), nil); err != nil {
+			t.Fatalf("message %d: %v", i, err)
+		}
+	}
+	if err := al.SteerSession(conversationA, "one too many", nil); !errors.Is(err, ErrSteeringQueueFull) {
+		t.Errorf("full queue answered %v, want ErrSteeringQueueFull", err)
+	}
+	if err := al.SteerSession("web:conversation-a", "lost", nil); errors.Is(err, ErrSteeringQueueFull) {
+		t.Error("a key no turn runs under was reported as a full queue")
+	}
+}
+
+// A session that a turn holds is busy, not failed: that turn reads the queue,
+// and the message stays for it.
+func TestAgentLoop_ContinueDirect_BusySessionIsItsOwnError(t *testing.T) {
+	provider := newSessionRecordingProvider("answer that read the follow-up", "later answer")
+	al := newSessionSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
+	done := runDirect(al, "build the deck", conversationA, "run-a")
+	waitStarted(t, provider.started, done)
+	if err := al.SteerSession(conversationA, "carry on", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+
+	_, ran, err := al.ContinueDirect(
+		context.Background(),
+		DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"},
+	)
+	if !errors.Is(err, ErrSessionBusy) || ran {
+		t.Fatalf("got ran=%v err=%v, want ErrSessionBusy without running", ran, err)
+	}
+	if n := al.PendingSteering(conversationA); n != 1 {
+		t.Errorf("%d messages queued, want the one left for the turn holding the session", n)
+	}
+	provider.unblock()
+	waitDirect(t, done)
+}
+
+// abortableProvider holds its call until the turn is aborted.
+type abortableProvider struct{ started chan struct{} }
+
+func (p abortableProvider) Chat(
+	ctx context.Context, _ []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any,
+) (*providers.LLMResponse, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (abortableProvider) GetDefaultModel() string { return "abortable-mock" }
+
+// An aborted continuation is not a handled reply: both end without text, and
+// only the error tells the caller the turn did not finish.
+func TestAgentLoop_ContinueDirect_AbortedContinuationIsItsOwnError(t *testing.T) {
+	provider := abortableProvider{started: make(chan struct{})}
+	al := newSessionSteeringLoop(t, provider)
+	if err := al.SteerSession(conversationA, "carry on", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+	type outcome struct {
+		ran bool
+		err error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		_, ran, err := al.ContinueDirect(
+			context.Background(),
+			DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"},
+		)
+		finished <- outcome{ran, err}
+	}()
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the continuation never called the model")
+	}
+	if err := al.HardAbort(conversationA); err != nil {
+		t.Fatalf("HardAbort: %v", err)
+	}
+
+	select {
+	case got := <-finished:
+		if !got.ran || !errors.Is(got.err, ErrTurnAborted) {
+			t.Errorf("got ran=%v err=%v, want ErrTurnAborted from a turn that ran", got.ran, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the aborted continuation never returned")
+	}
+}
+
+// The interrupt event names the turn of the session the message went to. With
+// another conversation running, Steer's "any active turn" credited it to that
+// conversation's turn.
+func TestAgentLoop_SteerSession_InterruptNamesItsOwnSession(t *testing.T) {
+	provider := newSessionRecordingProvider("b answered", "a answered")
+	al := newSessionSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
+	events, closeEvents := subscribeRuntimeEventsForTest(t, al, 8, runtimeevents.KindAgentInterruptReceived)
+	defer closeEvents()
+	done := runDirect(al, "question of b", conversationB, "run-b")
+	waitStarted(t, provider.started, done)
+
+	if err := al.SteerSession(conversationA, "message of a", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+	provider.unblock()
+	waitDirect(t, done)
+
+	evt, ok := findRuntimeEvent(collectRuntimeEventStream(events), runtimeevents.KindAgentInterruptReceived)
+	if !ok {
+		t.Fatal("no interrupt event")
+	}
+	if evt.Scope.SessionKey != conversationA {
+		t.Errorf("interrupt credited to session %q, want the one the message went to", evt.Scope.SessionKey)
 	}
 }
