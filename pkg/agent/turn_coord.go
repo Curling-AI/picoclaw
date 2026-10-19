@@ -176,7 +176,7 @@ func (al *AgentLoop) runTurn(
 				pendingMessages = append(pendingMessages, exec.pendingMessages...)
 				exec.pendingMessages = nil
 			}
-		} else if !ts.opts.SkipInitialSteeringPoll {
+		} else if !ts.opts.SkipInitialSteeringPoll && turnCtx.Err() == nil {
 			if steerMsgs := al.dequeueSteeringMessagesForScopeWithFallback(ts.sessionKey); len(steerMsgs) > 0 {
 				pendingMessages = append(pendingMessages, steerMsgs...)
 			}

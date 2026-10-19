@@ -1038,7 +1038,7 @@ func (p *Pipeline) CallLLM(
 	// No-tool-call path: steering check and direct response
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
 		responseContent := exec.response.Content
-		if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
+		if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 			cancelConfiguredStreamingLLM(turnCtx, exec)
 			logger.InfoCF("agent", "Steering arrived after direct LLM response; continuing turn",
 				map[string]any{

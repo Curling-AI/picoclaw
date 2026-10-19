@@ -366,7 +366,7 @@ toolLoop:
 						return finishToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:])
 					}
 
-					if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
+					if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 						exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 					}
 
@@ -815,7 +815,7 @@ toolLoop:
 			}
 		}
 
-		if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
+		if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 		}
 
@@ -878,7 +878,7 @@ toolLoop:
 	}
 
 	// Poll for newly arrived steering
-	if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
+	if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 		logger.InfoCF("agent", "Steering arrived after tool delivery; continuing turn",
 			map[string]any{
 				"agent_id":       ts.agent.ID,

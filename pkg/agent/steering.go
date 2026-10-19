@@ -347,13 +347,19 @@ func (al *AgentLoop) clearSteeringMessagesForScope(scope string) int {
 	return al.steering.clearScope(scope)
 }
 
-func (al *AgentLoop) continueWithSteeringMessages(
-	ctx context.Context,
-	agent *AgentInstance,
-	sessionKey, channel, chatID string,
-	scope *session.SessionScope,
-	steeringMsgs []providers.Message,
-) (string, error) {
+// steeringForLiveTurn reads the session's queue for a turn still going. A turn
+// whose context is done (stopped, cut by a shutdown) leaves the queue alone:
+// the queue belongs to the session, and what the person sends after stopping a
+// reply is for the turn that comes next, not for the one unwinding (a tool in
+// flight can keep it reading for a while). (seucaranguejo fork)
+func (al *AgentLoop) steeringForLiveTurn(turnCtx context.Context, sessionKey string) []providers.Message {
+	if turnCtx.Err() != nil {
+		return nil
+	}
+	return al.dequeueSteeringMessagesForScope(sessionKey)
+}
+
+func continuationOptions(sessionKey, channel, chatID string, scope *session.SessionScope) processOptions {
 	dispatch := DispatchRequest{
 		SessionKey:   sessionKey,
 		SessionScope: session.CloneScope(scope),
@@ -365,14 +371,42 @@ func (al *AgentLoop) continueWithSteeringMessages(
 			ChatType: inferChatTypeFromSessionScope(scope),
 		}
 	}
-	return al.runAgentLoop(ctx, agent, processOptions{
+	return processOptions{
 		Dispatch:                dispatch,
 		DefaultResponse:         defaultResponse,
 		EnableSummary:           true,
 		SendResponse:            false,
-		InitialSteeringMessages: steeringMsgs,
 		SkipInitialSteeringPoll: true,
-	})
+	}
+}
+
+// DirectContinuation is a session whose direct turn (ProcessDirect*) ended
+// with messages still queued for it: the chat its reply goes to, and the
+// choices of the run the continuation belongs to (the tier and the forced
+// skills), which a continuation would otherwise lose. (seucaranguejo fork)
+type DirectContinuation struct {
+	SessionKey string
+	Channel    string
+	ChatID     string
+	ModelTier  string
+	Skills     []string
+}
+
+// ContinueDirect is Continue for a direct turn's session. The turn it runs gets
+// what a direct turn gets: live output on the chat, the turn profile, the
+// run's tier and skills. Continue's goes out silent, on the main model.
+//
+// ran tells "read nothing" (no message queued, or another turn holds the
+// session) apart from a turn that ran and ended without text, as a handled
+// reply (a connector card, the message tool) does. (seucaranguejo fork)
+func (al *AgentLoop) ContinueDirect(ctx context.Context, req DirectContinuation) (string, bool, error) {
+	asDirect := func(opts processOptions) (processOptions, error) {
+		opts.AllowInterimPicoPublish = true
+		opts.ModelTier = req.ModelTier
+		opts.ForcedSkills = append(opts.ForcedSkills, req.Skills...)
+		return resolveTurnProfileOptions(al.GetConfig(), opts)
+	}
+	return al.continueSession(ctx, req.SessionKey, req.Channel, req.ChatID, asDirect)
 }
 
 func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
@@ -407,6 +441,18 @@ func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
 //
 // If no steering messages are pending, it returns an empty string.
 func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID string) (string, error) {
+	content, _, err := al.continueSession(ctx, sessionKey, channel, chatID, nil)
+	return content, err
+}
+
+// continueSession runs Continue's turn with shape applied to its options, and
+// reports whether it ran one. shape runs before the queue is read, so a
+// failure there leaves the messages queued.
+func (al *AgentLoop) continueSession(
+	ctx context.Context,
+	sessionKey, channel, chatID string,
+	shape func(processOptions) (processOptions, error),
+) (string, bool, error) {
 	// Claim the session with a unique placeholder to prevent a TOCTOU race where two
 	// concurrent Continue calls for the same session both pass the active-turn
 	// check and create parallel turns. The placeholder is replaced by the real
@@ -420,31 +466,44 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 	}
 	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
 		if active := al.GetActiveTurnBySession(sessionKey); active != nil {
-			return "", fmt.Errorf("turn %s is still active for session %q", active.TurnID, sessionKey)
+			return "", false, fmt.Errorf("turn %s is still active for session %q", active.TurnID, sessionKey)
 		}
 		// Another Continue just claimed the slot; let it handle the steering.
-		return "", nil
+		return "", false, nil
 	}
 
 	if err := al.ensureHooksInitialized(ctx); err != nil {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", err
+		return "", false, err
 	}
 	if err := al.ensureMCPInitialized(ctx); err != nil {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", err
-	}
-
-	steeringMsgs := al.dequeueSteeringMessagesForScopeWithFallback(sessionKey)
-	if len(steeringMsgs) == 0 {
-		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", nil
+		return "", false, err
 	}
 
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", fmt.Errorf("no agent available for session %q", sessionKey)
+		return "", false, fmt.Errorf("no agent available for session %q", sessionKey)
+	}
+
+	var scope *session.SessionScope
+	if metaStore, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok {
+		scope = metaStore.GetSessionScope(sessionKey)
+	}
+	opts := continuationOptions(sessionKey, channel, chatID, scope)
+	if shape != nil {
+		var err error
+		if opts, err = shape(opts); err != nil {
+			al.releaseSessionTurnState(sessionKey, placeholder)
+			return "", false, err
+		}
+	}
+
+	opts.InitialSteeringMessages = al.dequeueSteeringMessagesForScopeWithFallback(sessionKey)
+	if len(opts.InitialSteeringMessages) == 0 {
+		al.releaseSessionTurnState(sessionKey, placeholder)
+		return "", false, nil
 	}
 
 	if tool, ok := agent.Tools.Get("message"); ok {
@@ -453,12 +512,8 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 		}
 	}
 
-	var scope *session.SessionScope
-	if metaStore, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok {
-		scope = metaStore.GetSessionScope(sessionKey)
-	}
-
-	return al.continueWithSteeringMessages(ctx, agent, sessionKey, channel, chatID, scope, steeringMsgs)
+	content, err := al.runAgentLoop(ctx, agent, opts)
+	return content, true, err
 }
 
 func (al *AgentLoop) InterruptGraceful(hint string) error {

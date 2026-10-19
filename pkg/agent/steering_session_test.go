@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // sessionRecordingProvider holds its first call open until released and keeps
@@ -204,6 +205,168 @@ func TestAgentLoop_SteerSession_StaysWithItsOwnSession(t *testing.T) {
 	}
 	if calls := provider.calls(); len(calls) != 2 || !sentContains(calls[1], "message of a") {
 		t.Fatal("Continue did not run the message of a")
+	}
+}
+
+// queuedReplyProvider answers each call with the next scripted response (the last
+// one repeats) and keeps what each call was sent.
+type queuedReplyProvider struct {
+	mu        sync.Mutex
+	sent      [][]providers.Message
+	responses []providers.LLMResponse
+}
+
+func (p *queuedReplyProvider) Chat(
+	_ context.Context, messages []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent = append(p.sent, append([]providers.Message(nil), messages...))
+	resp := p.responses[min(len(p.sent), len(p.responses))-1]
+	return &resp, nil
+}
+
+func (*queuedReplyProvider) GetDefaultModel() string { return "queued-reply-mock" }
+
+func toolThenAnswer() *queuedReplyProvider {
+	return &queuedReplyProvider{responses: []providers.LLMResponse{
+		{Content: "Checking.", ToolCalls: []providers.ToolCall{{
+			ID: "call_custom", Type: "function", Name: "mock_custom", Arguments: map[string]any{},
+		}}},
+		{Content: "continued answer"},
+	}}
+}
+
+// A caller draining a direct turn's queue must tell "nothing was read" from a
+// turn that ran: a handled reply ends without text, and taking that for "nothing
+// to do" left the next queued message unanswered.
+func TestAgentLoop_ContinueDirect_ReportsWhetherItRan(t *testing.T) {
+	provider := &queuedReplyProvider{responses: []providers.LLMResponse{{Content: "continued answer"}}}
+	al := newSessionSteeringLoop(t, provider)
+	req := DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"}
+
+	if content, ran, err := al.ContinueDirect(context.Background(), req); err != nil || ran || content != "" {
+		t.Fatalf("empty queue: got %q ran=%v err=%v, want nothing run", content, ran, err)
+	}
+	if err := al.SteerSession(conversationA, "one more thing", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+	content, ran, err := al.ContinueDirect(context.Background(), req)
+	if err != nil || !ran || content != "continued answer" {
+		t.Fatalf("queued message: got %q ran=%v err=%v", content, ran, err)
+	}
+}
+
+// The continuation of a web reply shows on the screen as it happens, like the
+// reply it continues: Continue's turn published nothing until its final text,
+// the silence that made the person resend in the first place.
+func TestAgentLoop_ContinueDirect_StreamsToTheChat(t *testing.T) {
+	interims := func(t *testing.T, continueTurn func(*AgentLoop) error) int {
+		t.Helper()
+		tmpDir := t.TempDir()
+		cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: tmpDir, ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 10,
+		}}}
+		msgBus := bus.NewMessageBus()
+		al := NewAgentLoop(cfg, msgBus, toolThenAnswer())
+		al.RegisterTool(&mockCustomTool{})
+		if err := al.SteerSession(conversationA, "check the deck", nil); err != nil {
+			t.Fatalf("SteerSession: %v", err)
+		}
+		if err := continueTurn(al); err != nil {
+			t.Fatalf("continuation: %v", err)
+		}
+		published := 0
+		for {
+			select {
+			case out := <-msgBus.OutboundChan():
+				if out.ChatID == "run-a" {
+					published++
+				}
+			default:
+				return published
+			}
+		}
+	}
+
+	direct := interims(t, func(al *AgentLoop) error {
+		req := DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"}
+		_, _, err := al.ContinueDirect(context.Background(), req)
+		return err
+	})
+	if direct == 0 {
+		t.Error("ContinueDirect published nothing to the chat before its final text")
+	}
+	silent := interims(t, func(al *AgentLoop) error {
+		_, err := al.Continue(context.Background(), conversationA, "grpc", "run-a")
+		return err
+	})
+	if silent != 0 {
+		t.Errorf("Continue published %d messages; this test assumes it streams nothing", silent)
+	}
+}
+
+// blockingTool holds its call until released and ignores the turn's context,
+// as a tool in the middle of a long command does.
+type blockingTool struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (*blockingTool) Name() string        { return "slow_command" }
+func (*blockingTool) Description() string { return "A command that takes a while" }
+func (*blockingTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+func (b *blockingTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+	close(b.started)
+	<-b.release
+	return tools.SilentResult("done")
+}
+
+// After the person stops a reply, the turn keeps unwinding until its tool
+// returns. What they send meanwhile is for the next turn: the stopped one used
+// to read it after the tool, write it in the history, and never answer it.
+func TestAgentLoop_StoppedTurnLeavesTheQueueToTheNextTurn(t *testing.T) {
+	provider := &queuedReplyProvider{responses: []providers.LLMResponse{
+		{
+			ToolCalls: []providers.ToolCall{
+				{ID: "call_slow", Type: "function", Name: "slow_command", Arguments: map[string]any{}},
+			},
+		},
+		{Content: "should not be reached"},
+	}}
+	al := newSessionSteeringLoop(t, provider)
+	tool := &blockingTool{started: make(chan struct{}), release: make(chan struct{})}
+	al.RegisterTool(tool)
+
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := al.ProcessDirectWithChannel(ctx, "run the build", conversationA, "grpc", "run-a")
+		done <- err
+	}()
+	<-tool.started
+	stop()
+	if err := al.SteerSession(conversationA, "now do something else", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+	close(tool.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stopped turn never ended")
+	}
+
+	if n := al.PendingSteering(conversationA); n != 1 {
+		t.Errorf("%d messages queued after the stopped turn ended, want the one sent after the stop", n)
+	}
+	if n := occurrences(
+		al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(conversationA),
+		"now do something else",
+	); n != 0 {
+		t.Errorf("the stopped turn wrote the next turn's message in the history %d times", n)
 	}
 }
 
