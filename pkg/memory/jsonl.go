@@ -89,9 +89,13 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 // Keys are mapped to a fixed pool of shards via FNV hash, so
 // memory usage is O(1) regardless of total session count.
 func (s *JSONLStore) sessionLock(key string) *sync.Mutex {
+	return &s.locks[lockShard(key)]
+}
+
+func lockShard(key string) uint32 {
 	h := fnv.New32a()
 	h.Write([]byte(key))
-	return &s.locks[h.Sum32()%numLockShards]
+	return h.Sum32() % numLockShards
 }
 
 func (s *JSONLStore) jsonlPath(key string) string {
@@ -389,26 +393,25 @@ func shouldShortCircuitSessionResolve(sessionKey string) bool {
 	return !strings.ContainsAny(sessionKey, ":/\\")
 }
 
+// lockSessionPair trava as faixas das duas chaves sempre na ordem do índice da
+// faixa. A ordem pela chave não serve: dois pares diferentes podem cair nas
+// mesmas duas faixas em ordem trocada, e cada um ficava com uma esperando a
+// outra (deadlock do agent loop inteiro, com dois crons no mesmo segundo).
+// (seucaranguejo fork)
 func (s *JSONLStore) lockSessionPair(keyA, keyB string) func() {
-	lockA := s.sessionLock(keyA)
-	lockB := s.sessionLock(keyB)
-	if lockA == lockB {
-		lockA.Lock()
-		return func() { lockA.Unlock() }
+	first, second := lockShard(keyA), lockShard(keyB)
+	if first == second {
+		s.locks[first].Lock()
+		return s.locks[first].Unlock
 	}
-	if keyA <= keyB {
-		lockA.Lock()
-		lockB.Lock()
-		return func() {
-			lockB.Unlock()
-			lockA.Unlock()
-		}
+	if first > second {
+		first, second = second, first
 	}
-	lockB.Lock()
-	lockA.Lock()
+	s.locks[first].Lock()
+	s.locks[second].Lock()
 	return func() {
-		lockA.Unlock()
-		lockB.Unlock()
+		s.locks[second].Unlock()
+		s.locks[first].Unlock()
 	}
 }
 
