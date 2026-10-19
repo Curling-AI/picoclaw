@@ -27,6 +27,7 @@ type (
 	RepeatSafety           = toolshared.RepeatSafety
 	SideEffectHinter       = toolshared.SideEffectHinter
 	ServerNamedTool        = toolshared.ServerNamedTool
+	TurnScopedTool         = toolshared.TurnScopedTool
 	ToolResult             = toolshared.ToolResult
 )
 
