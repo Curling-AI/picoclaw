@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/turnresult"
 )
 
 // SteeringMode controls how queued steering messages are dequeued.
@@ -28,6 +30,18 @@ const (
 	// manualSteeringScope is the legacy fallback queue used when no active
 	// turn/session scope is available.
 	manualSteeringScope = "__manual__"
+)
+
+// Errors a caller of the session-addressed API tells apart. (seucaranguejo fork)
+var (
+	// ErrSteeringQueueFull: the session already holds MaxQueueSize messages.
+	ErrSteeringQueueFull = errors.New("steering queue is full")
+	// ErrSessionBusy: another turn holds the session, and that turn reads its
+	// queue.
+	ErrSessionBusy = errors.New("session busy")
+	// ErrTurnAborted: the turn a continuation ran was aborted (a /stop, a hard
+	// abort) before it finished.
+	ErrTurnAborted = errors.New("turn aborted")
 )
 
 // parseSteeringMode normalizes a config string into a SteeringMode.
@@ -76,7 +90,7 @@ func (sq *steeringQueue) pushScope(scope string, msg providers.Message) error {
 	scope = normalizeSteeringScope(scope)
 	queue := sq.queues[scope]
 	if len(queue) >= MaxQueueSize {
-		return fmt.Errorf("steering queue is full")
+		return ErrSteeringQueueFull
 	}
 	sq.queues[scope] = append(queue, msg)
 	return nil
@@ -261,13 +275,24 @@ func (al *AgentLoop) enqueueSteeringMessage(scope, agentID string, msg providers
 		Source:    "Steer",
 		TracePath: "turn.interrupt.received",
 	}
-	if ts := al.getAnyActiveTurnState(); ts != nil {
-		meta = ts.eventMeta("Steer", "turn.interrupt.received")
+	// The interrupt belongs to the turn of its own session. Any active turn is
+	// only the fallback of the manual scope, which names none; for a session
+	// queue it would credit one conversation's message to another's turn.
+	// (seucaranguejo fork)
+	normalizedScope := normalizeSteeringScope(scope)
+	owner := al.getActiveTurnState(normalizedScope)
+	if owner != nil && owner.agentID == "" {
+		owner = nil // a placeholder, claimed but not started: no turn to name yet
+	}
+	if owner == nil && normalizedScope == manualSteeringScope {
+		owner = al.getAnyActiveTurnState()
+	}
+	if owner != nil {
+		meta = owner.eventMeta("Steer", "turn.interrupt.received")
 	} else {
 		if strings.TrimSpace(agentID) != "" {
 			meta.AgentID = agentID
 		}
-		normalizedScope := normalizeSteeringScope(scope)
 		if normalizedScope != manualSteeringScope {
 			meta.SessionKey = normalizedScope
 		}
@@ -396,9 +421,16 @@ type DirectContinuation struct {
 // what a direct turn gets: live output on the chat, the turn profile, the
 // run's tier and skills. Continue's goes out silent, on the main model.
 //
-// ran tells "read nothing" (no message queued, or another turn holds the
-// session) apart from a turn that ran and ended without text, as a handled
-// reply (a connector card, the message tool) does. (seucaranguejo fork)
+// ran tells "read nothing" apart from a turn that ran and ended without text,
+// as a handled reply (a connector card, the message tool) does:
+//   - ("", false, nil): no message queued, or another continuation of the
+//     session is already reading them;
+//   - ErrSessionBusy (ran false): a turn holds the session, and it reads the
+//     queue;
+//   - ErrTurnAborted (ran true): the continuation was aborted (a /stop, a hard
+//     abort) before it finished.
+//
+// (seucaranguejo fork)
 func (al *AgentLoop) ContinueDirect(ctx context.Context, req DirectContinuation) (string, bool, error) {
 	asDirect := func(opts processOptions) (processOptions, error) {
 		opts.AllowInterimPicoPublish = true
@@ -406,7 +438,11 @@ func (al *AgentLoop) ContinueDirect(ctx context.Context, req DirectContinuation)
 		opts.ForcedSkills = append(opts.ForcedSkills, req.Skills...)
 		return resolveTurnProfileOptions(al.GetConfig(), opts)
 	}
-	return al.continueSession(ctx, req.SessionKey, req.Channel, req.ChatID, asDirect)
+	result, ran, err := al.continueSession(ctx, req.SessionKey, req.Channel, req.ChatID, asDirect)
+	if err == nil && ran && result.Status == turnresult.Canceled {
+		return "", true, ErrTurnAborted
+	}
+	return result.Content, ran, err
 }
 
 func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
@@ -441,8 +477,8 @@ func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
 //
 // If no steering messages are pending, it returns an empty string.
 func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID string) (string, error) {
-	content, _, err := al.continueSession(ctx, sessionKey, channel, chatID, nil)
-	return content, err
+	result, _, err := al.continueSession(ctx, sessionKey, channel, chatID, nil)
+	return result.Content, err
 }
 
 // continueSession runs Continue's turn with shape applied to its options, and
@@ -452,11 +488,11 @@ func (al *AgentLoop) continueSession(
 	ctx context.Context,
 	sessionKey, channel, chatID string,
 	shape func(processOptions) (processOptions, error),
-) (string, bool, error) {
+) (turnresult.Result, bool, error) {
 	// Claim the session with a unique placeholder to prevent a TOCTOU race where two
 	// concurrent Continue calls for the same session both pass the active-turn
 	// check and create parallel turns. The placeholder is replaced by the real
-	// turnState inside continueWithSteeringMessages → runAgentLoop → registerActiveTurn.
+	// turnState inside runAgentLoop → registerActiveTurn.
 	// The early exits release it through releaseSessionTurnState so a delivery
 	// mirrored while it was held still reaches the chat session. (seucaranguejo
 	// fork — ver delivery_mirror.go)
@@ -466,25 +502,26 @@ func (al *AgentLoop) continueSession(
 	}
 	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
 		if active := al.GetActiveTurnBySession(sessionKey); active != nil {
-			return "", false, fmt.Errorf("turn %s is still active for session %q", active.TurnID, sessionKey)
+			return turnresult.Result{}, false, fmt.Errorf("%w: turn %s is still active for session %q",
+				ErrSessionBusy, active.TurnID, sessionKey)
 		}
 		// Another Continue just claimed the slot; let it handle the steering.
-		return "", false, nil
+		return turnresult.Result{}, false, nil
 	}
 
 	if err := al.ensureHooksInitialized(ctx); err != nil {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", false, err
+		return turnresult.Result{}, false, err
 	}
 	if err := al.ensureMCPInitialized(ctx); err != nil {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", false, err
+		return turnresult.Result{}, false, err
 	}
 
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", false, fmt.Errorf("no agent available for session %q", sessionKey)
+		return turnresult.Result{}, false, fmt.Errorf("no agent available for session %q", sessionKey)
 	}
 
 	var scope *session.SessionScope
@@ -496,14 +533,14 @@ func (al *AgentLoop) continueSession(
 		var err error
 		if opts, err = shape(opts); err != nil {
 			al.releaseSessionTurnState(sessionKey, placeholder)
-			return "", false, err
+			return turnresult.Result{}, false, err
 		}
 	}
 
 	opts.InitialSteeringMessages = al.dequeueSteeringMessagesForScopeWithFallback(sessionKey)
 	if len(opts.InitialSteeringMessages) == 0 {
 		al.releaseSessionTurnState(sessionKey, placeholder)
-		return "", false, nil
+		return turnresult.Result{}, false, nil
 	}
 
 	if tool, ok := agent.Tools.Get("message"); ok {
@@ -512,8 +549,8 @@ func (al *AgentLoop) continueSession(
 		}
 	}
 
-	content, err := al.runAgentLoop(ctx, agent, opts)
-	return content, true, err
+	result, err := al.runAgentLoopResult(ctx, agent, opts)
+	return result, true, err
 }
 
 func (al *AgentLoop) InterruptGraceful(hint string) error {

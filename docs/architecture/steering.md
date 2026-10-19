@@ -72,6 +72,31 @@ if err != nil {
 
 The message is enqueued in a thread-safe manner. Returns an error if the queue is full or not initialized. It will be picked up at the next polling point (after the current tool finishes).
 
+### SteerSession, PendingSteering, ClearSteering — a session's own queue
+
+`Steer` writes to the queue of *any* active turn, which on a pod with several
+conversations running is not necessarily the right one. A caller that knows
+the session addresses it directly:
+
+```go
+err := agentLoop.SteerSession(sessionKey, content, mediaPaths)
+switch {
+case errors.Is(err, agent.ErrSteeringQueueFull):
+    // MaxQueueSize messages already wait for this session
+case err != nil:
+    // sessionKey is not explicit (sk_v1_… / agent:…): a turn would run under
+    // another key and never read this queue
+}
+
+n := agentLoop.PendingSteering(sessionKey)    // messages no turn has read yet
+dropped := agentLoop.ClearSteering(sessionKey) // drop them (a stopped reply)
+```
+
+The web's `ChatSend` (seucaranguejo `ethos/internal/picoclaw`) uses these: it
+reaches the loop through `ProcessDirect*`, never through `Run`, so it does what
+`Run` does for channels itself: a message sent while its conversation has a
+run going joins that run's turn instead of opening a second one.
+
 ### SteeringMode / SetSteeringMode
 
 ```go
@@ -102,9 +127,36 @@ if response == "" {
 agent-scoped sessions continue on the correct agent instead of always using
 the default one.
 
+### ContinueDirect — continue a direct turn's session
+
+`ContinueDirect` is `Continue` for the session of a turn that ran through
+`ProcessDirect*` and ended with messages still queued (one sent after the
+turn's last polling point). The turn it runs gets what a direct turn gets:
+live output on the chat (`AllowInterimPicoPublish`), the turn profile, and the
+run's tier and forced skills, passed explicitly so nothing is left armed for
+the next turn. `Continue`'s turn goes out silent, on the main model.
+
+```go
+content, ran, err := agentLoop.ContinueDirect(ctx, agent.DirectContinuation{
+    SessionKey: sessionKey, Channel: "grpc", ChatID: runID,
+    ModelTier: tier, Skills: skills,
+})
+switch {
+case errors.Is(err, agent.ErrSessionBusy): // ran == false: a turn holds the session and reads the queue
+case errors.Is(err, agent.ErrTurnAborted): // ran == true: the continuation was aborted
+case err != nil:                           // the continuation failed
+case !ran:                                 // nothing was queued
+default:                                   // content may be "" for a handled reply (connector card, message tool)
+}
+```
+
 ## Polling points in the loop
 
-Steering is checked at the following points in the agent cycle:
+Steering is checked at the following points in the agent cycle. A turn whose
+context is done (stopped, cut by a shutdown) skips all of them and leaves the
+queue to the next turn: the queue belongs to the session, and what the person
+sends after stopping a reply is for the turn that comes after, not for the one
+still unwinding a tool.
 
 1. **At loop start** — before the first LLM call, to catch messages enqueued during setup
 2. **After every tool completes** — including the first and the last. If steering is found and there are remaining tools, they are all skipped immediately
