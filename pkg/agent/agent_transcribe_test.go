@@ -112,7 +112,7 @@ func TestTranscribeAudioInMessage_PlainAudioAttachmentGetsNoteAppended(t *testin
 // The web channel (gRPC) and the pod /message route hand the agent an absolute
 // workspace path, not a media:// ref. The incident behind the note was a web upload.
 // Extensions outside utils.IsAudioFile's list (a WhatsApp .opus export) are
-// recognised by content.
+// recognized by content.
 func TestTranscribeAudioInMessage_AbsolutePathAudioGetsNote(t *testing.T) {
 	oggOpus := append(append([]byte("OggS\x00\x02"), make([]byte, 22)...), []byte("\x13OpusHead\x01\x01")...)
 	cases := map[string][]byte{
