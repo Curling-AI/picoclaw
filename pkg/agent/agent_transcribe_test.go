@@ -147,6 +147,34 @@ func TestTranscribeAudioInMessage_AbsolutePathAudioGetsNote(t *testing.T) {
 	}
 }
 
+// A Telegram document is stored without a content type; an .opus export is
+// recognized by content.
+func TestTranscribeAudioInMessage_StoredOpusDocumentGetsNote(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "PTT-20261020-WA0001.opus")
+	oggOpus := append(append([]byte("OggS\x00\x02"), make([]byte, 22)...), []byte("\x13OpusHead\x01\x01")...)
+	if err := os.WriteFile(abs, oggOpus, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := media.NewFileMediaStore()
+	ref, err := store.Store(abs, media.MediaMeta{
+		Filename:      "PTT-20261020-WA0001.opus",
+		CleanupPolicy: media.CleanupPolicyForgetOnly,
+	}, "scope-doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	al := &AgentLoop{cfg: &config.Config{}, mediaStore: store}
+
+	msg := al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{
+		Content: "transcreva\n[file]",
+		Media:   []string{ref},
+	})
+
+	if !strings.HasSuffix(msg.Content, "\n"+noTranscriberAudioNote) {
+		t.Fatalf("no note for stored .opus document; content = %q", msg.Content)
+	}
+}
+
 // The agent sends the placeholder only when the channel deferred it, i.e. when
 // the content carries an audio annotation (pkg/channels/base.go).
 func TestPrepareInboundMessage_SendsPlaceholderOnlyWhenChannelDeferredIt(t *testing.T) {
