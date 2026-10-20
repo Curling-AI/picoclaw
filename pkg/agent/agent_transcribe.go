@@ -95,11 +95,15 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 }
 
 // resolveAudioRef also accepts a plain workspace path: the web channel (gRPC)
-// and the pod /webhook route attach uploads that way, not as media:// refs —
-// the same case resolveMediaRefs handles. (seucaranguejo fork)
+// and the pod /message route attach uploads that way, not as media:// refs.
+// Like resolveMediaRefs, it sniffs the content type so .opus/.oga count as audio.
+// (seucaranguejo fork)
 func (al *AgentLoop) resolveAudioRef(ref string) (string, media.MediaMeta, error) {
 	if isLocalMediaPath(ref) {
-		return ref, media.MediaMeta{Filename: filepath.Base(ref)}, nil
+		return ref, media.MediaMeta{
+			Filename:    filepath.Base(ref),
+			ContentType: detectMIME(ref, media.MediaMeta{}),
+		}, nil
 	}
 	return al.mediaStore.ResolveWithMeta(ref)
 }

@@ -109,29 +109,41 @@ func TestTranscribeAudioInMessage_PlainAudioAttachmentGetsNoteAppended(t *testin
 	}
 }
 
-// The web channel (gRPC) and the pod /webhook route hand the agent an absolute
+// The web channel (gRPC) and the pod /message route hand the agent an absolute
 // workspace path, not a media:// ref. The incident behind the note was a web upload.
+// Extensions outside utils.IsAudioFile's list (a WhatsApp .opus export) are
+// recognised by content.
 func TestTranscribeAudioInMessage_AbsolutePathAudioGetsNote(t *testing.T) {
-	abs := filepath.Join(t.TempDir(), "uploads", "a071539d-e2e-audio-teste.ogg")
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		t.Fatal(err)
+	oggOpus := append(append([]byte("OggS\x00\x02"), make([]byte, 22)...), []byte("\x13OpusHead\x01\x01")...)
+	cases := map[string][]byte{
+		"a071539d-e2e-audio-teste.ogg": []byte("fake audio"),
+		"PTT-20261020-WA0001.opus":     oggOpus,
+		"gravacao.oga":                 oggOpus,
 	}
-	if err := os.WriteFile(abs, []byte("fake audio"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore()}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			abs := filepath.Join(t.TempDir(), "uploads", name)
+			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(abs, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore()}
 
-	msg := al.prepareInboundMessageForAgent(context.Background(), bus.InboundMessage{
-		Context: bus.InboundContext{Channel: "grpc", ChatID: "run-1", ChatType: "direct", SenderID: "web"},
-		Content: "transcreva na íntegra o áudio anexado\n[ANEXOS]\n- uploads/a071539d-e2e-audio-teste.ogg",
-		Media:   []string{abs},
-	})
+			msg := al.prepareInboundMessageForAgent(context.Background(), bus.InboundMessage{
+				Context: bus.InboundContext{Channel: "grpc", ChatID: "run-1", ChatType: "direct", SenderID: "web"},
+				Content: "transcreva na íntegra o áudio anexado\n[ANEXOS]\n- uploads/" + name,
+				Media:   []string{abs},
+			})
 
-	if !strings.HasSuffix(msg.Content, "\n"+noTranscriberAudioNote) {
-		t.Fatalf("no note for absolute-path audio; content = %q", msg.Content)
-	}
-	if len(msg.Media) != 1 || msg.Media[0] != abs {
-		t.Fatalf("media = %v, want the upload kept", msg.Media)
+			if !strings.HasSuffix(msg.Content, "\n"+noTranscriberAudioNote) {
+				t.Fatalf("no note for absolute-path audio; content = %q", msg.Content)
+			}
+			if len(msg.Media) != 1 || msg.Media[0] != abs {
+				t.Fatalf("media = %v, want the upload kept", msg.Media)
+			}
+		})
 	}
 }
 
