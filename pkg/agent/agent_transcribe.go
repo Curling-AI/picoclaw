@@ -4,27 +4,40 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-// untranscribedAudioNote replaces an audio the agent could not turn into text.
-// Without it the model sees only a file path and improvises — it once shipped a
-// user's audio to Google's public speech endpoint and to Hugging Face Spaces
-// (MST-329). The tag must not match audioPlaceholderRegex, or injectPathTags
-// overwrites it with the path tag, and must not contain "]". It only restricts
-// getting at the audio's content: IsAudioFile also matches plain .mp3/.ogg
-// attachments, which the user may want saved to Drive or emailed as-is.
-const untranscribedAudioNote = "[audio not transcribed: this assistant has no way to turn this audio into text. " +
-	"If the user needs what it says, tell them you can't listen to it and ask for the content as text. " +
-	"Do not transcribe it yourself or send it to any service to transcribe it.]"
+// Notes that replace an audio the agent could not turn into text. Without one
+// the model sees only a file path and improvises — it once shipped a user's
+// audio to Google's public speech endpoint and to Hugging Face Spaces. A note
+// must not match audioPlaceholderRegex, or injectPathTags overwrites it with the
+// path tag, and must not contain "]". They only restrict getting at the audio's
+// content: IsAudioFile also matches plain .mp3/.ogg attachments, which the user
+// may want saved to Drive or emailed as-is. The last sentence follows the
+// AGENTS.md rule ethos generates. (seucaranguejo fork)
+const (
+	untranscribedAudioRule = "Do not transcribe it yourself or send it to a service to transcribe it, " +
+		"unless the user asked for that service or it is one of your configured connectors.]"
+	noTranscriberAudioNote = "[audio not transcribed: this assistant has no speech-to-text. " +
+		"If the user needs what it says, tell them you can't listen to it and ask for the content as text. " +
+		untranscribedAudioRule
+	failedTranscriptionAudioNote = "[audio not transcribed: transcription failed this time. " +
+		"If the user needs what it says, ask them to resend it or send the content as text. " +
+		untranscribedAudioRule
+	noSpeechAudioNote = "[audio not transcribed: no speech was detected in it. " +
+		"If the user expected words in it, tell them none were detected. " +
+		untranscribedAudioRule
+)
 
-func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.InboundMessage) (bus.InboundMessage, bool) {
+func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.InboundMessage) bus.InboundMessage {
 	if al.mediaStore == nil || len(msg.Media) == 0 {
-		return msg, false
+		return msg
 	}
 
 	// Transcribe each audio media ref in order.
@@ -32,7 +45,7 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 	var replacements []string
 	var keptMedia []string
 	for _, ref := range msg.Media {
-		path, meta, err := al.mediaStore.ResolveWithMeta(ref)
+		path, meta, err := al.resolveAudioRef(ref)
 		if err != nil {
 			logger.WarnCF("voice", "Failed to resolve media ref", map[string]any{"ref": ref, "error": err})
 			keptMedia = append(keptMedia, ref)
@@ -42,10 +55,10 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 			keptMedia = append(keptMedia, ref)
 			continue
 		}
-		text := al.transcribeAudio(ctx, ref, path)
+		text, note := al.transcribeAudio(ctx, ref, path)
 		transcriptions = append(transcriptions, text)
-		if text == "" {
-			replacements = append(replacements, untranscribedAudioNote)
+		if note != "" {
+			replacements = append(replacements, note)
 			keptMedia = append(keptMedia, ref)
 			continue
 		}
@@ -53,7 +66,7 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 	}
 
 	if len(transcriptions) == 0 {
-		return msg, false
+		return msg
 	}
 
 	if al.transcriber != nil {
@@ -78,21 +91,34 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 
 	msg.Content = newContent
 	msg.Media = keptMedia
-	return msg, true
+	return msg
 }
 
-// transcribeAudio returns "" when there is no transcriber, it fails, or the
-// audio has no speech — all cases the agent must not try to work around.
-func (al *AgentLoop) transcribeAudio(ctx context.Context, ref, path string) string {
+// resolveAudioRef also accepts a plain workspace path: the web channel (gRPC)
+// and the pod /webhook route attach uploads that way, not as media:// refs —
+// the same case resolveMediaRefs handles. (seucaranguejo fork)
+func (al *AgentLoop) resolveAudioRef(ref string) (string, media.MediaMeta, error) {
+	if isLocalMediaPath(ref) {
+		return ref, media.MediaMeta{Filename: filepath.Base(ref)}, nil
+	}
+	return al.mediaStore.ResolveWithMeta(ref)
+}
+
+// transcribeAudio returns the text, or the note that replaces the audio when
+// there is none: no transcriber, a failed call, or no speech in the audio.
+func (al *AgentLoop) transcribeAudio(ctx context.Context, ref, path string) (text, note string) {
 	if al.transcriber == nil {
-		return ""
+		return "", noTranscriberAudioNote
 	}
 	result, err := al.transcriber.Transcribe(ctx, path)
 	if err != nil {
 		logger.WarnCF("voice", "Transcription failed", map[string]any{"ref": ref, "error": err})
-		return ""
+		return "", failedTranscriptionAudioNote
 	}
-	return result.Text
+	if result.Text == "" {
+		return "", noSpeechAudioNote
+	}
+	return result.Text, ""
 }
 
 func (al *AgentLoop) sendTranscriptionFeedback(

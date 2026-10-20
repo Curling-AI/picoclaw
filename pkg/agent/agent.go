@@ -573,7 +573,7 @@ var audioAnnotationRe = regexp.MustCompile(`\[(voice|audio)(?::[^\]]*)?\]`)
 
 // transcribeAudioInMessage resolves audio media refs, transcribes them, and
 // replaces audio annotations in msg.Content with the transcribed text.
-// Returns the (possibly modified) message and true if audio was transcribed.
+// Audio it cannot turn into text gets a note instead (see agent_transcribe.go).
 
 // sendTranscriptionFeedback sends feedback to the user with the result of
 // audio transcription if the option is enabled. It uses Manager.SendMessage
