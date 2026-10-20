@@ -602,6 +602,27 @@ func (r *ToolRegistry) ToProviderDefsFor(offered map[string]struct{}) []provider
 	})
 }
 
+// WithoutUnofferedTurnScoped drops from defs the TurnScopedTool definitions
+// that this turn does not offer. Other definitions pass untouched.
+// (seucaranguejo fork)
+func (r *ToolRegistry) WithoutUnofferedTurnScoped(
+	ctx context.Context,
+	defs []providers.ToolDefinition,
+) []providers.ToolDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]providers.ToolDefinition, 0, len(defs))
+	for _, def := range defs {
+		if entry, ok := r.tools[def.Function.Name]; ok {
+			if scoped, ok := entry.Tool.(TurnScopedTool); ok && !scoped.OfferedIn(ctx) {
+				continue
+			}
+		}
+		out = append(out, def)
+	}
+	return out
+}
+
 func (r *ToolRegistry) providerDefs(include func(name string, entry *ToolEntry) bool) []providers.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
