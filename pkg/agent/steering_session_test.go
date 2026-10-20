@@ -16,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/turnresult"
 )
 
 // sessionRecordingProvider holds its first call open until released and keeps
@@ -268,15 +269,15 @@ func TestAgentLoop_ContinueDirect_ReportsWhetherItRan(t *testing.T) {
 	al := newSessionSteeringLoop(t, provider)
 	req := DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"}
 
-	if content, ran, err := al.ContinueDirect(context.Background(), req); err != nil || ran || content != "" {
-		t.Fatalf("empty queue: got %q ran=%v err=%v, want nothing run", content, ran, err)
+	if result, ran, err := al.ContinueDirect(context.Background(), req); err != nil || ran || result.Content != "" {
+		t.Fatalf("empty queue: got %q ran=%v err=%v, want nothing run", result.Content, ran, err)
 	}
 	if err := al.SteerSession(conversationA, "one more thing", nil); err != nil {
 		t.Fatalf("SteerSession: %v", err)
 	}
-	content, ran, err := al.ContinueDirect(context.Background(), req)
-	if err != nil || !ran || content != "continued answer" {
-		t.Fatalf("queued message: got %q ran=%v err=%v", content, ran, err)
+	result, ran, err := al.ContinueDirect(context.Background(), req)
+	if err != nil || !ran || result.Content != "continued answer" || result.Status != turnresult.Completed {
+		t.Fatalf("queued message: got %q (%s) ran=%v err=%v", result.Content, result.Status, ran, err)
 	}
 }
 
@@ -312,12 +313,31 @@ func TestAgentLoop_ContinueDirect_HandledReplyStillRan(t *testing.T) {
 		t.Fatalf("SteerSession: %v", err)
 	}
 
-	content, ran, err := al.ContinueDirect(
+	result, ran, err := al.ContinueDirect(
 		context.Background(),
 		DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"},
 	)
-	if err != nil || !ran || content != "" {
-		t.Fatalf("handled reply: got %q ran=%v err=%v, want an empty answer from a turn that ran", content, ran, err)
+	if err != nil || !ran || result.Content != "" {
+		t.Fatalf("handled reply: got %q ran=%v err=%v, want an empty answer from a turn that ran", result.Content, ran, err)
+	}
+}
+
+// A continuation that runs out of answers ends on its fallback text with no
+// error, as a direct turn does. Only the status tells the caller it failed: a
+// nil error read as success reported the run completed.
+func TestAgentLoop_ContinueDirect_FailedContinuationReportsItsStatus(t *testing.T) {
+	al := newSessionSteeringLoop(t, new(alwaysEmptyProvider))
+	if err := al.SteerSession(conversationA, "one more thing", nil); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+
+	result, ran, err := al.ContinueDirect(
+		context.Background(),
+		DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"},
+	)
+	if err != nil || !ran || result.Status != turnresult.Failed || result.Content != defaultResponse {
+		t.Fatalf("got %q (%s) ran=%v err=%v, want the fallback text with Status Failed",
+			result.Content, result.Status, ran, err)
 	}
 }
 
