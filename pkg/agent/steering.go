@@ -423,15 +423,20 @@ type DirectContinuation struct {
 //
 // ran tells "read nothing" apart from a turn that ran and ended without text,
 // as a handled reply (a connector card, the message tool) does:
-//   - ("", false, nil): no message queued, or another continuation of the
-//     session is already reading them;
+//   - (zero Result, false, nil): no message queued, or another continuation of
+//     the session is already reading them;
 //   - ErrSessionBusy (ran false): a turn holds the session, and it reads the
 //     queue;
 //   - ErrTurnAborted (ran true): the continuation was aborted (a /stop, a hard
 //     abort) before it finished.
 //
+// The Result is the turn's terminal one, as ProcessDirectWithResult reports
+// it: a turn that ran out of answers or of tool rounds ends on its fallback
+// text with Status Failed and no error, so the caller cannot take a nil error
+// for a completed turn.
+//
 // (seucaranguejo fork)
-func (al *AgentLoop) ContinueDirect(ctx context.Context, req DirectContinuation) (string, bool, error) {
+func (al *AgentLoop) ContinueDirect(ctx context.Context, req DirectContinuation) (turnresult.Result, bool, error) {
 	asDirect := func(opts processOptions) (processOptions, error) {
 		opts.AllowInterimPicoPublish = true
 		opts.ModelTier = req.ModelTier
@@ -440,9 +445,9 @@ func (al *AgentLoop) ContinueDirect(ctx context.Context, req DirectContinuation)
 	}
 	result, ran, err := al.continueSession(ctx, req.SessionKey, req.Channel, req.ChatID, asDirect)
 	if err == nil && ran && result.Status == turnresult.Canceled {
-		return "", true, ErrTurnAborted
+		return turnresult.Result{Status: turnresult.Canceled}, true, ErrTurnAborted
 	}
-	return result.Content, ran, err
+	return result, ran, err
 }
 
 func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {

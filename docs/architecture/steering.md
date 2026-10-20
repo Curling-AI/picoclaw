@@ -137,18 +137,22 @@ run's tier and forced skills, passed explicitly so nothing is left armed for
 the next turn. `Continue`'s turn goes out silent, on the main model.
 
 ```go
-content, ran, err := agentLoop.ContinueDirect(ctx, agent.DirectContinuation{
+result, ran, err := agentLoop.ContinueDirect(ctx, agent.DirectContinuation{
     SessionKey: sessionKey, Channel: "grpc", ChatID: runID,
     ModelTier: tier, Skills: skills,
 })
 switch {
 case errors.Is(err, agent.ErrSessionBusy): // ran == false: a turn holds the session and reads the queue
 case errors.Is(err, agent.ErrTurnAborted): // ran == true: the continuation was aborted
-case err != nil:                           // the continuation failed
+case err != nil:                           // the continuation failed with an error
 case !ran:                                 // nothing was queued
-default:                                   // content may be "" for a handled reply (connector card, message tool)
+case result.Status == turnresult.Failed:   // ran out of answers or tool rounds: result.Content is the fallback text
+default:                                   // result.Content may be "" for a handled reply (connector card, message tool)
 }
 ```
+
+A turn that fails this way returns no error, as `ProcessDirectWithResult`
+reports it, so the status is what tells it from a completed one.
 
 ## Polling points in the loop
 
