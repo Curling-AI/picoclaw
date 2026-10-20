@@ -318,7 +318,8 @@ func TestAgentLoop_ContinueDirect_HandledReplyStillRan(t *testing.T) {
 		DirectContinuation{SessionKey: conversationA, Channel: "grpc", ChatID: "run-a"},
 	)
 	if err != nil || !ran || result.Content != "" {
-		t.Fatalf("handled reply: got %q ran=%v err=%v, want an empty answer from a turn that ran", result.Content, ran, err)
+		t.Fatalf("handled reply: got %q ran=%v err=%v, want an empty answer from a turn that ran",
+			result.Content, ran, err)
 	}
 }
 
