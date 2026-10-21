@@ -124,9 +124,9 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 	al.mirror.resolve = fn
 }
 
-// MirrorDelivery registra uma entrega feita fora do agent loop: a saída de um
-// cron de comando, ou o que um script mandou pela API do chat e um proxy do pod
-// viu passar. origin é a sessão do turno que rodou o comando.
+// MirrorDelivery records a delivery made outside the agent loop: the output a
+// command cron job published, or what a script sent through the chat's API and
+// a proxy in the pod saw go by. origin is the session of the run behind it.
 func (al *AgentLoop) MirrorDelivery(origin, channel, chatID, text string) {
 	al.mirrorDelivery(origin, channel, chatID, text)
 }
