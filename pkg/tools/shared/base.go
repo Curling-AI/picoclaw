@@ -85,7 +85,7 @@ var (
 	ctxKeyAgentID          = &toolCtxKey{"agentID"}
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
 	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
-	ctxKeyTurnID           = &toolCtxKey{"turnID"}
+	ctxKeyExecOrigin       = &toolCtxKey{"execOrigin"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -178,17 +178,24 @@ func ToolSessionKey(ctx context.Context) string {
 	return v
 }
 
-// WithToolTurnID returns a child context carrying the id of the turn that runs
-// the tool. (seucaranguejo fork — the turn writes what its scripts send to the
-// chat after the tool round they came from; see agent/self_delivery.go)
-func WithToolTurnID(ctx context.Context, turnID string) context.Context {
-	return context.WithValue(ctx, ctxKeyTurnID, turnID)
+type execOrigin struct{ sessionKey, turnID string }
+
+// WithExecOrigin returns a child context carrying the conversation and the turn
+// the processes this tool starts belong to: the root turn's, also for a
+// subagent, whose own session is a sub-turn key that restarts at each boot.
+// (seucaranguejo fork — the turn writes what its scripts send to the chat after
+// the tool round they came from; see agent/self_delivery.go)
+func WithExecOrigin(ctx context.Context, sessionKey, turnID string) context.Context {
+	return context.WithValue(ctx, ctxKeyExecOrigin, execOrigin{sessionKey: sessionKey, turnID: turnID})
 }
 
-// ToolTurnID extracts the id of the turn running the tool, or "" if unset.
-func ToolTurnID(ctx context.Context) string {
-	v, _ := ctx.Value(ctxKeyTurnID).(string)
-	return v
+// ExecOrigin is what WithExecOrigin set, or the tool's own session and no turn
+// when it was not set (a command cron job).
+func ExecOrigin(ctx context.Context) (sessionKey, turnID string) {
+	if v, ok := ctx.Value(ctxKeyExecOrigin).(execOrigin); ok {
+		return v.sessionKey, v.turnID
+	}
+	return ToolSessionKey(ctx), ""
 }
 
 // ToolSessionScope extracts the active turn's structured session scope from ctx.

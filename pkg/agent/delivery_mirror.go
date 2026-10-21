@@ -185,7 +185,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 	msg := providers.Message{
 		Role:     "assistant",
 		Content:  text,
-		Delivery: &providers.Delivery{Origin: origin, At: time.Now(), Self: self},
+		Delivery: &providers.Delivery{Origin: origin, At: time.Now().Round(0), Self: self},
 	}
 	heldByTurn := self && al.holdForOwnTurn(target, d.TurnID, msg)
 	deferred := heldByTurn

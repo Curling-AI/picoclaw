@@ -582,7 +582,8 @@ toolLoop:
 			ts.sessionKey,
 			ts.opts.Dispatch.SessionScope,
 		)
-		execCtx = tools.WithToolTurnID(execCtx, ts.turnID)
+		root := ts.rootTurn()
+		execCtx = tools.WithExecOrigin(execCtx, root.sessionKey, root.turnID)
 		// The model can still name a deferred tool whose promotion expired;
 		// honor the call instead of answering "tool not found".
 		if revived := ts.agent.Tools.EnsureVisible([]string{toolName}, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {

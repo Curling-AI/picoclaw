@@ -973,8 +973,14 @@ func messagesEquivalent(a, b providers.Message) bool {
 
 func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	// The session stamps CreatedAt on what it stores, and the JSONL round trip
-	// drops the monotonic clock; neither is part of the message.
+	// drops the monotonic clock; neither is part of the message. A mirrored
+	// delivery's time comes back without the clock and in a fixed zone.
 	msg.CreatedAt = nil
+	if msg.Delivery != nil {
+		delivery := *msg.Delivery
+		delivery.At = delivery.At.UTC().Round(0)
+		msg.Delivery = &delivery
+	}
 	msg.PromptLayer = ""
 	msg.PromptSlot = ""
 	msg.PromptSource = ""
@@ -1084,11 +1090,17 @@ func (ts *turnState) Finished() chan struct{} {
 // throwaway session ("subturn-N"); what it launches belongs to the conversation
 // that started the chain.
 func (ts *turnState) originSessionKey() string {
+	return ts.rootTurn().sessionKey
+}
+
+// rootTurn is the turn this one was delegated from, through every level, or ts
+// itself.
+func (ts *turnState) rootTurn() *turnState {
 	root := ts
 	for root.parentTurnState != nil {
 		root = root.parentTurnState
 	}
-	return root.sessionKey
+	return root
 }
 
 // IsParentEnded checks if the parent turn has ended

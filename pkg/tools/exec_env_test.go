@@ -69,20 +69,29 @@ func TestApplyExecEnv_HostValueWins(t *testing.T) {
 	}
 }
 
-// The turn's id reaches the host with the session, so a send the script makes
-// can go back to the turn that started it.
-func TestExecEnvProvider_SeesTheTurn(t *testing.T) {
-	var turn string
+// The conversation and turn a process belongs to reach the host, so a send the
+// script makes can go back to the turn that started it.
+func TestExecEnvProvider_SeesTheExecOrigin(t *testing.T) {
+	var origin, turn string
 	SetExecEnvProvider(func(ctx context.Context) []string {
-		turn = ToolTurnID(ctx)
+		origin, turn = ExecOrigin(ctx)
 		return nil
 	})
 	t.Cleanup(func() { SetExecEnvProvider(nil) })
 
-	ctx := WithToolTurnID(WithToolSessionContext(context.Background(), "main", "sk_v1_chat", nil), "turn-7")
-	runExec(t, ctx, "true")
+	ctx := WithToolSessionContext(context.Background(), "main", "subturn-3", nil)
+	runExec(t, WithExecOrigin(ctx, "sk_v1_chat", "turn-7"), "true")
 
-	if turn != "turn-7" {
-		t.Fatalf("provider saw turn %q, want turn-7", turn)
+	if origin != "sk_v1_chat" || turn != "turn-7" {
+		t.Fatalf("provider saw %q/%q, want the root conversation sk_v1_chat and turn-7", origin, turn)
+	}
+}
+
+// Without an origin (a command cron job), the process belongs to the tool's own
+// session and to no turn.
+func TestExecOrigin_FallsBackToTheToolSession(t *testing.T) {
+	ctx := WithToolSessionContext(context.Background(), "main", "agent:cron-job-run", nil)
+	if origin, turn := ExecOrigin(ctx); origin != "agent:cron-job-run" || turn != "" {
+		t.Fatalf("ExecOrigin = %q/%q, want the cron run's session and no turn", origin, turn)
 	}
 }
