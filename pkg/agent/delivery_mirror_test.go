@@ -319,8 +319,8 @@ func TestMirrorDelivery_ExternalSendFromTheChatsOwnSessionAfterItsTurn(t *testin
 }
 
 // A background script ("sleep 20; curl …") fires while the turn that started it
-// is still working. That turn's tool result is only the pid, so the send waits
-// for the turn and is written when it ends, labeled as the chat's own.
+// is still working, and the turn ends without another tool round to write it
+// after: the send it held is written when it ends, labeled as the chat's own.
 func TestMirrorDelivery_ExternalSendDuringItsOwnTurnIsWrittenAfterIt(t *testing.T) {
 	al, sessions := newMirrorTestLoop(t)
 	running := &turnState{turnID: "turn-1", sessionKey: mirrorChatSession}
