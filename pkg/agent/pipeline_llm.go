@@ -186,20 +186,11 @@ func announcesUndeliveredCall(exec *turnExecution, content string) bool {
 // again without knowing it had. (seucaranguejo fork: the web joins what it
 // sends during a reply into the running turn)
 func (p *Pipeline) keepWatchedReply(turnCtx context.Context, ts *turnState, exec *turnExecution, content string) {
-	msg := providers.Message{
-		Role:             "assistant",
-		Content:          content,
-		ModelName:        exec.llmModelName,
-		ReasoningContent: responseReasoningContent(exec.response),
-		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
-	}
+	msg := assistantReply(exec, content)
 	exec.messages = append(exec.messages, msg)
-	if ts.opts.NoHistory {
-		return
+	if !ts.opts.NoHistory {
+		p.persistAssistantReply(turnCtx, ts, msg)
 	}
-	ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
-	ts.recordPersistedMessage(msg)
-	ts.ingestMessage(turnCtx, p.al, msg)
 }
 
 func (p *Pipeline) CallLLM(

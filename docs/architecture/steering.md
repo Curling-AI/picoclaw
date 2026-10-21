@@ -132,9 +132,11 @@ the default one.
 `ContinueDirect` is `Continue` for the session of a turn that ran through
 `ProcessDirect*` and ended with messages still queued (one sent after the
 turn's last polling point). The turn it runs gets what a direct turn gets:
-live output on the chat (`AllowInterimPicoPublish`), the turn profile, and the
-run's tier and forced skills, passed explicitly so nothing is left armed for
-the next turn. `Continue`'s turn goes out silent, on the main model.
+live output on the chat (`AllowInterimPicoPublish`), and the run's tier and
+forced skills, passed explicitly so nothing is left armed for the next turn.
+`Continue`'s turn goes out silent, on the main model. The loop resolves the
+turn profile of every turn; `ContinueDirect` resolves it before reading the
+queue too, so a bad one fails with the messages still queued.
 
 ```go
 result, ran, err := agentLoop.ContinueDirect(ctx, agent.DirectContinuation{
@@ -142,7 +144,7 @@ result, ran, err := agentLoop.ContinueDirect(ctx, agent.DirectContinuation{
     ModelTier: tier, Skills: skills,
 })
 switch {
-case errors.Is(err, agent.ErrSessionBusy): // ran == false: a turn holds the session and reads the queue
+case errors.Is(err, agent.ErrSessionBusy): // ran == false: a turn holds the session; the messages stay queued
 case errors.Is(err, agent.ErrTurnAborted): // ran == true: the continuation was aborted
 case err != nil:                           // the continuation failed with an error
 case !ran:                                 // nothing was queued
@@ -153,6 +155,13 @@ default:                                   // result.Content may be "" for a han
 
 A turn that fails this way returns no error, as `ProcessDirectWithResult`
 reports it, so the status is what tells it from a completed one.
+
+On `ErrSessionBusy` the turn holding the session reads the messages only if it
+still polls: one past its last polling point leaves them to whoever drains the
+queue once it ends. `Run` does that for the turns it starts. A caller that
+queues messages for a `ProcessDirect*` turn has to look at the queue after
+every one of them (`PendingSteering`) and run what it finds through
+`ContinueDirect`, not only after the turns it knows something joined.
 
 ## Polling points in the loop
 
