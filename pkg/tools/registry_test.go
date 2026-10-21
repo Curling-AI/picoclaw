@@ -904,3 +904,49 @@ func TestToolRegistry_ExecuteWithContext_SanitizesInlineMediaWithoutStore(t *tes
 		t.Fatalf("expected inline media omission note, got %q", result.ForLLM)
 	}
 }
+
+type mockTurnScopedTool struct {
+	mockRegistryTool
+}
+
+type offerKey struct{}
+
+func (m *mockTurnScopedTool) OfferedIn(ctx context.Context) bool {
+	offered, _ := ctx.Value(offerKey{}).(bool)
+	return offered
+}
+
+func TestWithoutUnofferedTurnScoped(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(&mockRegistryTool{name: "read_file", desc: "core", params: map[string]any{}, result: nil})
+	r.Register(&mockTurnScopedTool{
+		mockRegistryTool{name: "computer_read_file", desc: "scoped", params: map[string]any{}, result: nil},
+	})
+	defs := r.ToProviderDefs()
+
+	names := func(defs []providers.ToolDefinition) []string {
+		out := make([]string, 0, len(defs))
+		for _, d := range defs {
+			out = append(out, d.Function.Name)
+		}
+		return out
+	}
+	if got := names(r.WithoutUnofferedTurnScoped(context.Background(), defs)); strings.Join(got, ",") != "read_file" {
+		t.Fatalf("turn without the offer kept %v", got)
+	}
+	offered := context.WithValue(context.Background(), offerKey{}, true)
+	got := names(r.WithoutUnofferedTurnScoped(offered, defs))
+	if strings.Join(got, ",") != "computer_read_file,read_file" {
+		t.Fatalf("turn with the offer got %v", got)
+	}
+	unknown := []providers.ToolDefinition{{
+		Type:         "function",
+		Function:     providers.ToolFunctionDefinition{Name: "mcp_not_registered", Description: "", Parameters: nil},
+		PromptLayer:  "",
+		PromptSlot:   "",
+		PromptSource: "",
+	}}
+	if got := names(r.WithoutUnofferedTurnScoped(context.Background(), unknown)); len(got) != 1 {
+		t.Fatalf("a definition the registry does not know was dropped: %v", got)
+	}
+}
