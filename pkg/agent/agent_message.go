@@ -151,12 +151,15 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 ) bus.InboundMessage {
 	msg = bus.NormalizeInboundMessage(msg)
 
-	var hadAudio bool
-	msg, hadAudio = al.transcribeAudioInMessage(ctx, msg)
+	// The channel deferred the placeholder only when the content carries an
+	// audio annotation (pkg/channels/base.go); otherwise it already sent one,
+	// e.g. Telegram labels an audio sent as a document "[file]". Deciding by
+	// what was transcribed would send a second, orphaned one. (seucaranguejo fork)
+	placeholderDeferred := audioAnnotationRe.MatchString(msg.Content)
+	msg = al.transcribeAudioInMessage(ctx, msg)
 
-	// For audio messages the placeholder was deferred by the channel.
 	// Now that transcription (and optional feedback) is done, send it.
-	if hadAudio && al.channelManager != nil {
+	if placeholderDeferred && al.channelManager != nil {
 		al.channelManager.SendPlaceholder(ctx, msg.Channel, msg.ChatID)
 	}
 
