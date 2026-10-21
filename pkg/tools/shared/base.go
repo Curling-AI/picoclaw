@@ -179,8 +179,8 @@ func ToolSessionKey(ctx context.Context) string {
 }
 
 // WithToolTurnID returns a child context carrying the id of the turn that runs
-// the tool. (seucaranguejo fork — the delivery mirror tells a script's own turn
-// from another one in the same session; see agent/delivery_mirror.go)
+// the tool. (seucaranguejo fork — a delivery a script made is logged with the
+// turn that started it; see agent/delivery_mirror.go)
 func WithToolTurnID(ctx context.Context, turnID string) context.Context {
 	return context.WithValue(ctx, ctxKeyTurnID, turnID)
 }

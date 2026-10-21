@@ -36,7 +36,8 @@ type resultJobExecutor interface {
 type ExternalDelivery struct {
 	// Origin is the session of the run behind it.
 	Origin string
-	// TurnID is the turn whose exec ran the script, when there is one.
+	// TurnID is the turn whose exec ran the script, when there is one; it only
+	// goes to the logs, to tie the delivery to that turn.
 	TurnID  string
 	Channel string
 	ChatID  string

@@ -318,9 +318,10 @@ func TestMirrorDelivery_ExternalSendFromTheChatsOwnSessionAfterItsTurn(t *testin
 	}
 }
 
-// While the turn that ran the script is live, the send is part of that turn
-// (its tool results carry it): not written, and not queued for later either.
-func TestMirrorDelivery_ExternalSendDuringItsOwnTurnIsLeftToTheTurn(t *testing.T) {
+// A background script ("sleep 20; curl …") fires while the turn that started it
+// is still working. That turn's tool result is only the pid, so the send waits
+// for the turn and is written when it ends, labeled as the chat's own.
+func TestMirrorDelivery_ExternalSendDuringItsOwnTurnIsWrittenAfterIt(t *testing.T) {
 	al, sessions := newMirrorTestLoop(t)
 	running := &turnState{turnID: "turn-1", sessionKey: mirrorChatSession}
 	al.registerActiveTurn(running)
@@ -328,12 +329,16 @@ func TestMirrorDelivery_ExternalSendDuringItsOwnTurnIsLeftToTheTurn(t *testing.T
 
 	al.MirrorDelivery(tools.ExternalDelivery{
 		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
-		Text: "enviado pelo script do turno",
+		Text: "Lembrete: reunião em 5 min.",
 	})
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("mirror wrote into a running turn (history %d → %d)", before, after)
+	}
 	al.clearActiveTurn(running)
 
-	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
-		t.Fatalf("history grew from %d to %d", before, after)
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "Lembrete: reunião em 5 min." || got.Delivery == nil || !got.Delivery.Self {
+		t.Fatalf("last chat message after the turn = %+v, want the send marked as the chat's own", got)
 	}
 }
 

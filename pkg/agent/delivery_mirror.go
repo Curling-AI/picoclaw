@@ -129,12 +129,12 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 // command cron job published, or what a script sent through the chat's API and
 // a proxy in the pod saw go by.
 //
-// Unlike a turn's own sends, it is recorded in the chat's own session too: a
-// script a chat turn left running in the background ("remind me in 30 min")
-// posts after that turn ended, maybe while another turn is live, and nothing
-// else would write it down. It is skipped only while the turn that ran the
-// script is still live, since that turn's tool results carry the send; with
-// another turn live it waits in the queue like any delivery.
+// Unlike a turn's own sends, it is recorded in the chat's own session too, even
+// while the turn that ran the script is live: that turn's tool result carries
+// the send only when a synchronous exec echoed it. A background script returns
+// its pid, an aborted turn loses the result, a script may print just "ok".
+// When the output did echo it, the conversation has the send twice. With a turn
+// live in the session it waits in the queue like any delivery.
 func (al *AgentLoop) MirrorDelivery(d tools.ExternalDelivery) {
 	al.mirrorDeliveryFrom(d, true)
 }
@@ -171,7 +171,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 	// resolver alias aqui custaria varrer os metadados de todas as sessões a
 	// cada entrega (a origem de um cron é uma chave nova por rodada).
 	self := target == origin
-	if self && (!external || al.turnIsLive(target, d.TurnID)) {
+	if self && !external {
 		return
 	}
 	// Resolvidos fora do lock: tocam o disco (EFS em produção).
@@ -192,19 +192,11 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 		"channel":        channel,
 		"chat_id":        chatID,
 		"origin_session": origin,
+		"origin_turn_id": d.TurnID,
 		"session_key":    target,
 		"content_len":    len(text),
 		"deferred":       deferred,
 	})
-}
-
-// turnIsLive: turnID is the turn now live in the session.
-func (al *AgentLoop) turnIsLive(sessionKey, turnID string) bool {
-	if turnID == "" {
-		return false
-	}
-	ts := al.getActiveTurnState(sessionKey)
-	return ts != nil && ts.turnID == turnID
 }
 
 // flushMirroredDeliveries grava o que esperava o turno da sessão terminar.
