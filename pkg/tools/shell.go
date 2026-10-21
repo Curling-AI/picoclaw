@@ -433,6 +433,7 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	applyExecEnv(ctx, cmd)
 
 	prepareCommandForTermination(cmd)
 
@@ -556,6 +557,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+	applyExecEnv(ctx, cmd)
 
 	prepareCommandForTermination(cmd)
 

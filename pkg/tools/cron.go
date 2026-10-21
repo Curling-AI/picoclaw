@@ -30,6 +30,13 @@ type resultJobExecutor interface {
 	ProcessDirectWithResult(ctx context.Context, request turnresult.Request) (turnresult.Result, error)
 }
 
+// deliveryMirrorer is the executor's delivery mirror (agent.AgentLoop), for
+// output a command job publishes without going through a turn.
+// (seucaranguejo fork — see agent/delivery_mirror.go)
+type deliveryMirrorer interface {
+	MirrorDelivery(origin, channel, chatID, text string)
+}
+
 // JobAccessPolicy lets a remote turn reach a job created in another chat.
 //
 // The built-in rule pairs a job with the channel/chat_id that created it, which
@@ -696,6 +703,15 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		chatID = "direct"
 	}
 
+	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, execution.RunID)
+	// A job with a fixed Model runs on agents.defaults.cron_model. The pipeline
+	// reads the intent off the session-key prefix (the only per-turn signal it
+	// already has), so encode it here. Keep "agent:cronmodel-" in sync with
+	// agent.CronModelSessionPrefix.
+	if strings.TrimSpace(job.Payload.Model) != "" {
+		sessionKey = fmt.Sprintf("agent:cronmodel-%s-%s", job.ID, execution.RunID)
+	}
+
 	// Execute command if present
 	if job.Payload.Command != "" {
 		if !t.execEnabled || t.execTool == nil {
@@ -717,7 +733,10 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 			"__chat_id": chatID,
 		}
 
-		result := t.execTool.Execute(ctx, args)
+		// The run's session key reaches the command like a turn's reaches its
+		// exec calls, so what the command delivers on its own (a script posting
+		// to the chat's API) is traced back to this run.
+		result := t.execTool.Execute(WithToolSessionContext(ctx, "", sessionKey, nil), args)
 		var output string
 		if result.IsError {
 			output = fmt.Sprintf("Error executing scheduled command: %s", result.ForLLM)
@@ -727,10 +746,16 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 
 		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer pubCancel()
-		t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+		err := t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
 			Context: bus.NewOutboundContext(channel, chatID, ""),
 			Content: output,
 		})
+		// The output reached the chat, so the chat's conversation keeps it, as
+		// it keeps a turn's final response. An error notice does not: it would
+		// poison the conversation the way an error response would.
+		if mirrorer, ok := t.executor.(deliveryMirrorer); ok && err == nil && !result.IsError {
+			mirrorer.MirrorDelivery(sessionKey, channel, chatID, output)
+		}
 		if ctx.Err() != nil {
 			return turnresult.Failure(ctx.Err()), ctx.Err()
 		}
@@ -739,15 +764,6 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 			return turnresult.Failure(err), err
 		}
 		return turnresult.Result{Status: turnresult.Completed, Content: ""}, nil
-	}
-
-	sessionKey := fmt.Sprintf("agent:cron-%s-%s", job.ID, execution.RunID)
-	// A job with a fixed Model runs on agents.defaults.cron_model. The pipeline
-	// reads the intent off the session-key prefix (the only per-turn signal it
-	// already has), so encode it here. Keep "agent:cronmodel-" in sync with
-	// agent.CronModelSessionPrefix.
-	if strings.TrimSpace(job.Payload.Model) != "" {
-		sessionKey = fmt.Sprintf("agent:cronmodel-%s-%s", job.ID, execution.RunID)
 	}
 
 	// System note prepended to EVERY scheduled run. Two purposes:
