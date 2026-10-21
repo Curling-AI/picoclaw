@@ -68,12 +68,46 @@ func replyThenFollowUp(messages []providers.Message, reply, followUp string) boo
 // wrote it again without knowing it had.
 func TestConfiguredStreaming_MessageAfterAWatchedReplyKeepsTheReply(t *testing.T) {
 	const reply, followUp = "Vou montar os slides agora.", "prossiga"
+	al, provider, streamer, opts := steeredWhileStreaming(t, reply, followUp)
+
+	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
+	if err != nil {
+		t.Fatalf("runAgentLoop: %v", err)
+	}
+
+	// Miguel-MCM on picoclaw#125: canceled, the throttled stream may never
+	// have pushed the tail the person was reading. The tool-call path
+	// flushes before it moves on for the same reason.
+	if len(streamer.finalized) == 0 || streamer.finalized[0] != reply {
+		t.Errorf("stream finals %q, want the kept reply flushed first", streamer.finalized)
+	}
+	if got != "Pronto!" {
+		t.Errorf("answer %q, want the reply to the follow-up", got)
+	}
+	if len(provider.seen) != 2 || !replyThenFollowUp(provider.seen[1], reply, followUp) {
+		t.Fatal("the call that read the follow-up did not see the reply the person had watched")
+	}
+	history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(opts.SessionKey)
+	if !replyThenFollowUp(history, reply, followUp) {
+		t.Error("the history lost the watched reply, or keeps it after the follow-up")
+	}
+}
+
+// steeredWhileStreaming runs a turn whose first call streams reply and,
+// as it ends, gets followUp queued; the second call answers "Pronto!".
+func steeredWhileStreaming(
+	t *testing.T,
+	reply, followUp string,
+) (*AgentLoop, *steerWhileStreaming, *recordingStreamer, processOptions) {
+	t.Helper()
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	msgBus := bus.NewMessageBus()
-	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
+	streamer := &recordingStreamer{}
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	half := string([]rune(reply)[:len([]rune(reply))/2])
 	provider := &steerWhileStreaming{configuredStreamingProvider: configuredStreamingProvider{
 		streamPlan: []configuredStreamingCall{
-			{chunks: []string{"Vou montar", reply}, response: &providers.LLMResponse{Content: reply}},
+			{chunks: []string{half, reply}, response: &providers.LLMResponse{Content: reply}},
 			{response: &providers.LLMResponse{Content: "Pronto!"}},
 		},
 	}}
@@ -85,21 +119,36 @@ func TestConfiguredStreaming_MessageAfterAWatchedReplyKeepsTheReply(t *testing.T
 	}
 	opts := configuredStreamingProcessOptions("pico")
 	opts.NoHistory = false
+	return al, provider, streamer, opts
+}
 
-	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
-	if err != nil {
-		t.Fatalf("runAgentLoop: %v", err)
-	}
+// Miguel-MCM on picoclaw#125. The guards below the steering check keep two
+// direct answers out of the session, a tool call written out as markup and
+// a promise of one before any tool ran: persisted, either teaches the model
+// to write its calls as prose. Watched or not, a message arriving as one of
+// them ends does not let it in.
+func TestConfiguredStreaming_MessageAfterAWatchedStalledCallDropsTheReply(t *testing.T) {
+	for name, reply := range map[string]string{
+		"call written as markup": "O resumo do artigo ficou assim.\n<parameter=path>resumo.md</parameter>",
+		"call only announced":    announcedToolCall,
+	} {
+		t.Run(name, func(t *testing.T) {
+			al, _, _, opts := steeredWhileStreaming(t, reply, "prossiga")
 
-	if got != "Pronto!" {
-		t.Errorf("answer %q, want the reply to the follow-up", got)
-	}
-	if len(provider.seen) != 2 || !replyThenFollowUp(provider.seen[1], reply, followUp) {
-		t.Fatal("the call that read the follow-up did not see the reply the person had watched")
-	}
-	history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(opts.SessionKey)
-	if !replyThenFollowUp(history, reply, followUp) {
-		t.Error("the history lost the watched reply, or keeps it after the follow-up")
+			if _, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts); err != nil {
+				t.Fatalf("runAgentLoop: %v", err)
+			}
+
+			history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(opts.SessionKey)
+			if len(history) == 0 {
+				t.Fatal("session history is empty: the check below would be vacuous")
+			}
+			for _, m := range history {
+				if m.Role == "assistant" && m.Content == reply {
+					t.Fatal("a stalled call went into the history")
+				}
+			}
+		})
 	}
 }
 

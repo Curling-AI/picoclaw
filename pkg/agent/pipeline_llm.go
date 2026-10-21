@@ -170,6 +170,15 @@ const maxDegenerateResponseRetries = 1
 const degenerateResponseNudge = "[System] Your last reply got stuck repeating the same phrase over and over " +
 	"instead of answering, and was discarded. Answer the question once, in your own words, and stop."
 
+// announcesUndeliveredCall is the condition of the guard that keeps a promise
+// of a tool call out of the answer: only before the first tool of the turn,
+// with tools offered and no interruption. (seucaranguejo fork)
+func announcesUndeliveredCall(exec *turnExecution, content string) bool {
+	return !exec.gracefulTerminal && !exec.toolRanThisTurn &&
+		len(exec.providerToolDefs) > 0 &&
+		looksLikeUndeliveredAnnouncement(content)
+}
+
 // keepWatchedReply puts a direct reply the person already watched being
 // streamed into the turn's context and the session history, before the message
 // they sent meanwhile. Dropped as a stale answer, as a reply nobody saw yet is,
@@ -1062,8 +1071,25 @@ func (p *Pipeline) CallLLM(
 	if len(exec.response.ToolCalls) == 0 || exec.gracefulTerminal {
 		responseContent := exec.response.Content
 		if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
+			// What the guards below keep out of the session stays out of it,
+			// watched or not.
+			kept := exec.streamingPublishedContent && responseContent != "" &&
+				!exec.response.StreamInterrupted &&
+				!protocoltypes.LooksLikeTruncatedToolCall(responseContent) &&
+				!announcesUndeliveredCall(exec, responseContent)
+			if kept {
+				// Flush, not just cancel, as the tool-call path does below: the
+				// throttled stream may not have pushed the tail being read.
+				if err := finalizeConfiguredStreamingLLM(turnCtx, ts, exec, responseContent, nil); err != nil {
+					logger.WarnCF("agent", "Failed to flush the watched reply before the steering message",
+						map[string]any{
+							"agent_id": ts.agent.ID,
+							"channel":  ts.channel,
+							"error":    err.Error(),
+						})
+				}
+			}
 			cancelConfiguredStreamingLLM(turnCtx, exec)
-			kept := exec.streamingPublishedContent && responseContent != "" && !exec.response.StreamInterrupted
 			if kept {
 				p.keepWatchedReply(turnCtx, ts, exec, responseContent)
 			}
@@ -1201,9 +1227,7 @@ func (p *Pipeline) CallLLM(
 		// gracefulTerminal is left alone: the user interrupted, the tool defs
 		// are already out of the request and the model was told to wrap up, so a
 		// closing "deixa eu ver" is not this bug.
-		if !exec.gracefulTerminal && !exec.toolRanThisTurn &&
-			len(exec.providerToolDefs) > 0 &&
-			looksLikeUndeliveredAnnouncement(responseContent) {
+		if announcesUndeliveredCall(exec, responseContent) {
 			if exec.undeliveredAnnouncementRetries < maxUndeliveredAnnouncementRetries {
 				exec.undeliveredAnnouncementRetries++
 				cancelConfiguredStreamingLLM(turnCtx, exec)
