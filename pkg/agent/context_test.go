@@ -110,13 +110,30 @@ func TestHistoryContent_DeliveryTime(t *testing.T) {
 		{"plain message", msg("assistant", "oi"), "oi"},
 		{
 			"delivery without its own time uses the write time",
-			providers.Message{Role: "assistant", Content: "oi", CreatedAt: &written, Delivery: &providers.Delivery{}},
+			providers.Message{
+				Role: "assistant", Content: "oi", CreatedAt: &written,
+				Delivery: &providers.Delivery{Origin: "agent:cron-job-1"},
+			},
 			"[Sent to this chat by an automation at " + written.Local().Format("2006-01-02 15:04 (Monday)") + "]\noi",
 		},
 		{
 			"delivery with no time at all",
-			providers.Message{Role: "assistant", Content: "oi", Delivery: &providers.Delivery{}},
+			providers.Message{
+				Role:     "assistant",
+				Content:  "oi",
+				Delivery: &providers.Delivery{Origin: "agent:cronmodel-job-1"},
+			},
 			"[Sent to this chat by an automation]\noi",
+		},
+		{
+			"delivery from a web conversation is not an automation",
+			providers.Message{
+				Role: "assistant", Content: "oi",
+				Delivery: &providers.Delivery{Origin: "sk_v1_webconversation", At: written},
+			},
+			"[Sent to this chat from another conversation at " + written.Local().
+				Format("2006-01-02 15:04 (Monday)") +
+				"]\noi",
 		},
 	}
 	for _, tc := range cases {

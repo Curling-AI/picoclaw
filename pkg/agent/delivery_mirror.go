@@ -418,11 +418,17 @@ func historyContent(msg providers.Message) string {
 	if at.IsZero() && msg.CreatedAt != nil {
 		at = *msg.CreatedAt
 	}
-	line := "[Sent to this chat by an automation]"
-	if !at.IsZero() {
-		line = "[Sent to this chat by an automation at " + at.Local().Format("2006-01-02 15:04 (Monday)") + "]"
+	// Um cron é "uma automação"; o resto (conversa da web, subagente) é outra
+	// conversa deste assistente, e o modelo não deve chamá-la de automação.
+	line := "[Sent to this chat from another conversation"
+	if origin := msg.Delivery.Origin; strings.HasPrefix(origin, CronSessionPrefix) ||
+		strings.HasPrefix(origin, CronModelSessionPrefix) {
+		line = "[Sent to this chat by an automation"
 	}
-	return line + "\n" + strings.TrimSpace(msg.Content)
+	if !at.IsZero() {
+		line += " at " + at.Local().Format("2006-01-02 15:04 (Monday)")
+	}
+	return line + "]\n" + strings.TrimSpace(msg.Content)
 }
 
 func joinAssistantText(first, second string) string {

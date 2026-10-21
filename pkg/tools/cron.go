@@ -37,6 +37,19 @@ type deliveryMirrorer interface {
 	MirrorDelivery(origin, channel, chatID, text string)
 }
 
+// maxMirroredCommandOutput bounds what a command job's run adds to the chat's
+// conversation: a job every few minutes with a long stdout would otherwise grow
+// the history by that much on every run. It is one Telegram message.
+const maxMirroredCommandOutput = 4096
+
+func mirroredCommandOutput(output string) string {
+	runes := []rune(output)
+	if len(runes) <= maxMirroredCommandOutput {
+		return output
+	}
+	return string(runes[:maxMirroredCommandOutput]) + "\n[output truncated in this conversation]"
+}
+
 // JobAccessPolicy lets a remote turn reach a job created in another chat.
 //
 // The built-in rule pairs a job with the channel/chat_id that created it, which
@@ -754,7 +767,7 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		// it keeps a turn's final response. An error notice does not: it would
 		// poison the conversation the way an error response would.
 		if mirrorer, ok := t.executor.(deliveryMirrorer); ok && err == nil && !result.IsError {
-			mirrorer.MirrorDelivery(sessionKey, channel, chatID, output)
+			mirrorer.MirrorDelivery(sessionKey, channel, chatID, mirroredCommandOutput(output))
 		}
 		if ctx.Err() != nil {
 			return turnresult.Failure(ctx.Err()), ctx.Err()

@@ -60,6 +60,26 @@ func TestCronCommandOutputIsMirroredToTheChat(t *testing.T) {
 	}
 }
 
+func TestCronCommandMirrorIsBounded(t *testing.T) {
+	var executor mirroringJobExecutor
+
+	runCommandJob(t, &executor, "head -c 9000 /dev/zero | tr '\\0' 'x'")
+
+	if len(executor.mirrored) != 1 {
+		t.Fatalf("mirrored %d deliveries, want 1", len(executor.mirrored))
+	}
+	got := executor.mirrored[0].text
+	if !strings.HasSuffix(got, "[output truncated in this conversation]") ||
+		len([]rune(got)) > maxMirroredCommandOutput+len("\n[output truncated in this conversation]") {
+		t.Fatalf(
+			"mirrored %d runes ending %q, want the output cut at %d",
+			len([]rune(got)),
+			got[len(got)-50:],
+			maxMirroredCommandOutput,
+		)
+	}
+}
+
 func TestCronFailedCommandIsNotMirrored(t *testing.T) {
 	var executor mirroringJobExecutor
 
