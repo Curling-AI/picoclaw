@@ -70,7 +70,7 @@ func TestApplyExecEnv_HostValueWins(t *testing.T) {
 }
 
 // The turn's id reaches the host with the session, so a send the script makes
-// can be logged with the turn that started it.
+// can go back to the turn that started it.
 func TestExecEnvProvider_SeesTheTurn(t *testing.T) {
 	var turn string
 	SetExecEnvProvider(func(ctx context.Context) []string {

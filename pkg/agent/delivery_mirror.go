@@ -133,8 +133,10 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 // while the turn that ran the script is live: that turn's tool result carries
 // the send only when a synchronous exec echoed it. A background script returns
 // its pid, an aborted turn loses the result, a script may print just "ok".
-// When the output did echo it, the conversation has the send twice. With a turn
-// live in the session it waits in the queue like any delivery.
+// When the output did echo it, the conversation has the send twice. The turn
+// that ran the script writes it after the tool round it came from
+// (self_delivery.go); with another turn live it waits in the queue like any
+// delivery.
 func (al *AgentLoop) MirrorDelivery(d tools.ExternalDelivery) {
 	al.mirrorDeliveryFrom(d, true)
 }
@@ -180,13 +182,18 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 		return
 	}
 
-	deferred, err := al.deliverToConversation(agent, target, providers.Message{
+	msg := providers.Message{
 		Role:     "assistant",
 		Content:  text,
 		Delivery: &providers.Delivery{Origin: origin, At: time.Now(), Self: self},
-	})
-	if err != nil {
-		return // writeMirrored logged it
+	}
+	heldByTurn := self && al.holdForOwnTurn(target, d.TurnID, msg)
+	deferred := heldByTurn
+	if !heldByTurn {
+		var err error
+		if deferred, err = al.deliverToConversation(agent, target, msg); err != nil {
+			return // writeMirrored logged it
+		}
 	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
@@ -196,6 +203,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 		"session_key":    target,
 		"content_len":    len(text),
 		"deferred":       deferred,
+		"held_by_turn":   heldByTurn,
 	})
 }
 

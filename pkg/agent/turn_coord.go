@@ -302,6 +302,9 @@ func (al *AgentLoop) runTurn(
 			ts.reportExecutionStage("tool")
 			toolCtrl := pipeline.ExecuteTools(ctx, turnCtx, ts, exec, iteration)
 			exec.toolRanThisTurn = true
+			// What the round's scripts sent to the chat goes after its results.
+			// (seucaranguejo fork — see self_delivery.go)
+			al.writeSelfDeliveries(ts)
 			switch toolCtrl {
 			case ToolControlContinue:
 				// Re-read exec.messages since ExecuteTools may have updated it
@@ -391,6 +394,9 @@ func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
 			)
 			return turnResult{}, err
 		}
+		// The restore took what the turn's scripts sent; the turn's end queues
+		// them again. (seucaranguejo fork — see self_delivery.go)
+		al.forgetWrittenSelfDeliveries(ts)
 	}
 	return turnResult{status: TurnEndStatusAborted}, nil
 }

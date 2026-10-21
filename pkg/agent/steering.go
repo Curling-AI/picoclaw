@@ -567,6 +567,9 @@ func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
 	if ts.initialHistoryLength < len(history) {
 		ts.session.SetHistory(sessionKey, history[:ts.initialHistoryLength])
 	}
+	// The cut takes what the turn's scripts sent; the turn's end queues them
+	// again. (seucaranguejo fork — see self_delivery.go)
+	ts.selfWritten = 0
 }
 
 // ====================== Follow-Up Injection ======================

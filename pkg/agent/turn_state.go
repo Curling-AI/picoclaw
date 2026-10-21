@@ -371,6 +371,13 @@ type turnState struct {
 	// savedToolOutputs are the full outputs this turn saved; see
 	// recordSavedToolOutput. (seucaranguejo fork)
 	savedToolOutputs map[string]bool
+	// selfDeliveries are what this turn's own scripts sent to its chat;
+	// selfWritten counts those in the history and selfClosed marks the turn's
+	// end. Guarded by the session's mirror stripe; see self_delivery.go.
+	// (seucaranguejo fork)
+	selfDeliveries []providers.Message
+	selfWritten    int
+	selfClosed     bool
 
 	// SubTurn support (from HEAD)
 	depth                int                    // SubTurn depth (0 for root turn)
@@ -456,6 +463,7 @@ func (al *AgentLoop) registerActiveTurn(ts *turnState) {
 }
 
 func (al *AgentLoop) clearActiveTurn(ts *turnState) {
+	al.closeSelfDeliveries(ts)
 	al.mirror.endTurn(ts.sessionKey)
 	al.releaseSessionTurnState(ts.sessionKey, ts)
 	// When a concurrent turn of the same session overwrote this one's entry, the
