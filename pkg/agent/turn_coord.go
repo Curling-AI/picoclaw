@@ -304,7 +304,7 @@ func (al *AgentLoop) runTurn(
 			exec.toolRanThisTurn = true
 			// What the round's scripts sent to the chat goes after its results.
 			// (seucaranguejo fork — see self_delivery.go)
-			al.writeSelfDeliveries(ts)
+			al.writeSelfDeliveries(ts, exec)
 			switch toolCtrl {
 			case ToolControlContinue:
 				// Re-read exec.messages since ExecuteTools may have updated it

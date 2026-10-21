@@ -35,9 +35,11 @@ func (al *AgentLoop) holdForOwnTurn(sessionKey, turnID string, msg providers.Mes
 }
 
 // writeSelfDeliveries writes what the turn's scripts sent since the last call,
-// after the tool results already in the history. Not once an abort was
-// requested: the cut would take them; the turn's end queues them instead.
-func (al *AgentLoop) writeSelfDeliveries(ts *turnState) {
+// after the tool results already in the history, and joins it to the last of
+// those results in exec's messages: the turn's next call to the model is built
+// from them, not from the history. Not once an abort was requested: the cut
+// would take them; the turn's end queues them instead.
+func (al *AgentLoop) writeSelfDeliveries(ts *turnState, exec *turnExecution) {
 	if ts.hardAbortRequested() {
 		return
 	}
@@ -47,8 +49,22 @@ func (al *AgentLoop) writeSelfDeliveries(ts *turnState) {
 	for _, msg := range ts.selfDeliveries[ts.selfWritten:] {
 		ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
 		ts.recordPersistedMessage(msg)
+		exec.messages = joinToLastToolResult(exec.messages, msg)
 	}
 	ts.selfWritten = len(ts.selfDeliveries)
+}
+
+// joinToLastToolResult adds msg, with its dated line, to the last message when
+// it is a tool result, as sanitizeHistoryForProvider does with the history. It
+// returns a new slice: the old one may be shared.
+func joinToLastToolResult(messages []providers.Message, msg providers.Message) []providers.Message {
+	n := len(messages)
+	if n == 0 || messages[n-1].Role != "tool" {
+		return messages
+	}
+	last := messages[n-1]
+	last.Content = joinAssistantText(last.Content, historyContent(msg))
+	return append(messages[:n-1:n-1], last)
 }
 
 // forgetWrittenSelfDeliveries: the session's history was cut back to before

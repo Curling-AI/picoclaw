@@ -28,20 +28,23 @@ type reportProvider struct {
 	mu    sync.Mutex
 	steps []string
 	calls int
+	// inputs are the messages each call got, in order.
+	inputs [][]providers.Message
 }
 
 func (p *reportProvider) GetDefaultModel() string { return "test-model" }
 
 func (p *reportProvider) Chat(
-	context.Context,
-	[]providers.Message,
-	[]providers.ToolDefinition,
-	string,
-	map[string]any,
+	_ context.Context,
+	messages []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
 ) (*providers.LLMResponse, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.inputs = append(p.inputs, append([]providers.Message(nil), messages...))
 	if p.calls > len(p.steps) {
 		return &providers.LLMResponse{Content: reportReply}, nil
 	}
@@ -100,10 +103,15 @@ func (s *reportScript) Execute(ctx context.Context, _ map[string]any) *tools.Too
 // chat's history afterwards.
 func runReportTurn(t *testing.T, steps ...string) []providers.Message {
 	t.Helper()
+	return runReportTurnOn(t, &reportProvider{steps: steps})
+}
+
+func runReportTurnOn(t *testing.T, provider *reportProvider) []providers.Message {
+	t.Helper()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Agents.Defaults.ModelName = "test-model"
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &reportProvider{steps: steps})
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 	t.Cleanup(al.Close)
 	sessions := session.NewSessionManager(filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"))
 	al.registry.GetDefaultAgent().Sessions = sessions
@@ -219,5 +227,29 @@ func TestSelfDelivery_SubagentScriptSendIsTheChats(t *testing.T) {
 	}
 	if prev := history[report-1]; prev.Role != "tool" {
 		t.Fatalf("message before the report = %s %q, want the subagent's result", prev.Role, prev.Content)
+	}
+}
+
+// The script printed only "ok": the model's next call in the same turn, the one
+// that writes the reply, must already have the report it sent, with the result
+// of the script that sent it.
+func TestSelfDelivery_NextCallSeesTheSend(t *testing.T) {
+	provider := &reportProvider{steps: []string{"tool:run_report"}}
+	runReportTurnOn(t, provider)
+
+	if len(provider.inputs) != 2 {
+		t.Fatalf("model was called %d times, want the script round and the reply", len(provider.inputs))
+	}
+	var result *providers.Message
+	for i, msg := range provider.inputs[1] {
+		if msg.Role == "tool" {
+			result = &provider.inputs[1][i]
+		}
+	}
+	if result == nil {
+		t.Fatal("the reply's call has no tool result")
+	}
+	if !strings.HasPrefix(result.Content, "ok\n\n"+scriptLabel) || !strings.Contains(result.Content, reportText) {
+		t.Fatalf("script result in the reply's call = %q, want its output and then the dated report", result.Content)
 	}
 }
