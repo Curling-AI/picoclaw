@@ -356,7 +356,7 @@ func withElidedToolResults(messages []providers.Message, turnStart int, elided t
 		if out == nil {
 			out = append([]providers.Message(nil), messages...)
 		}
-		out[i].Content = elidedToolResultNote(e)
+		out[i].Content = elidedToolResultNote(e) + joinedSelfDeliveries(messages[i].Content)
 	}
 	if out == nil {
 		return messages

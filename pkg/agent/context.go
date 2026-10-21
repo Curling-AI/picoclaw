@@ -1285,9 +1285,8 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			// would break the tool-call chain that follows, or be joined with
 			// the turn's reply under the script's label.
 			// (seucaranguejo fork — ver self_delivery.go)
-			if n := len(sanitized); n > 0 && sanitized[n-1].Role == "tool" &&
-				msg.Delivery != nil && msg.Delivery.Self {
-				sanitized[n-1].Content = joinAssistantText(sanitized[n-1].Content, historyContent(msg))
+			if joinsLastToolResult(sanitized, msg) {
+				sanitized = joinToLastToolResult(sanitized, msg)
 				continue
 			}
 			if len(msg.ToolCalls) > 0 {

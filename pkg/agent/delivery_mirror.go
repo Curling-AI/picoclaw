@@ -449,7 +449,7 @@ func historyContent(msg providers.Message) string {
 	line := "[Sent to this chat from another conversation"
 	switch {
 	case msg.Delivery.Self:
-		line = "[Sent to this chat by a script this conversation started"
+		line = selfDeliveryLine
 	case isAutomationOrigin(msg.Delivery.Origin):
 		line = "[Sent to this chat by an automation"
 	}
@@ -458,6 +458,10 @@ func historyContent(msg providers.Message) string {
 	}
 	return line + "]\n" + strings.TrimSpace(msg.Content)
 }
+
+// selfDeliveryLine opens the history line of a send of the conversation's own
+// script; joinedSelfDeliveries looks for it.
+const selfDeliveryLine = "[Sent to this chat by a script this conversation started"
 
 // heartbeatSessionKey is the session heartbeat turns run in (agent_message.go).
 const heartbeatSessionKey = "heartbeat"

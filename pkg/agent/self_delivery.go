@@ -1,6 +1,10 @@
 package agent
 
-import "github.com/sipeed/picoclaw/pkg/providers"
+import (
+	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
+)
 
 // What a turn's own scripts send to its chat while the turn runs.
 // (seucaranguejo fork — see delivery_mirror.go)
@@ -52,6 +56,51 @@ func (al *AgentLoop) writeSelfDeliveries(ts *turnState, exec *turnExecution) {
 		exec.messages = joinToLastToolResult(exec.messages, msg)
 	}
 	ts.selfWritten = len(ts.selfDeliveries)
+}
+
+// foldSelfDeliveries is messages as a call carries them: each send of the
+// turn's own script joined to the tool result before it, as
+// sanitizeHistoryForProvider does. Offsets into the active turn of a call
+// (its start, its elisions) count these messages, not the stored ones.
+func foldSelfDeliveries(messages []providers.Message) []providers.Message {
+	var out []providers.Message // nil until the first join: messages is returned as is
+	for i, msg := range messages {
+		done := messages[:i]
+		if out != nil {
+			done = out
+		}
+		if !joinsLastToolResult(done, msg) {
+			if out != nil {
+				out = append(out, msg)
+			}
+			continue
+		}
+		out = joinToLastToolResult(done, msg)
+	}
+	if out == nil {
+		return messages
+	}
+	return out
+}
+
+// joinsLastToolResult reports whether msg, a send of the turn's own script,
+// joins the tool result that ends messages.
+func joinsLastToolResult(messages []providers.Message, msg providers.Message) bool {
+	n := len(messages)
+	return msg.Delivery != nil && msg.Delivery.Self && n > 0 && messages[n-1].Role == "tool"
+}
+
+// joinedSelfDeliveries is what joinToLastToolResult added to a tool result's
+// content: the sends of the turn's own script, which an elision of the result
+// keeps (the user saw them; only the output may go).
+func joinedSelfDeliveries(content string) string {
+	if strings.HasPrefix(content, selfDeliveryLine) {
+		return "\n\n" + content
+	}
+	if i := strings.Index(content, "\n\n"+selfDeliveryLine); i >= 0 {
+		return content[i:]
+	}
+	return ""
 }
 
 // joinToLastToolResult adds msg, with its dated line, to the last message when

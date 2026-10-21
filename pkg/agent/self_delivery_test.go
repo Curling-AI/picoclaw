@@ -253,3 +253,55 @@ func TestSelfDelivery_NextCallSeesTheSend(t *testing.T) {
 		t.Fatalf("script result in the reply's call = %q, want its output and then the dated report", result.Content)
 	}
 }
+
+func TestFoldSelfDeliveries(t *testing.T) {
+	self := func(text string) providers.Message {
+		return providers.Message{Role: "assistant", Content: text, Delivery: &providers.Delivery{Self: true}}
+	}
+	tool := providers.Message{Role: "tool", ToolCallID: "c1", Content: "ok"}
+	call := providers.Message{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "c1"}}}
+
+	plain := []providers.Message{{Role: "user", Content: "oi"}, call, tool}
+	if got := foldSelfDeliveries(plain); &got[0] != &plain[0] {
+		t.Fatal("without sends to join, the slice should come back as is")
+	}
+
+	stored := []providers.Message{
+		{Role: "user", Content: "oi"}, call, tool, self("relatório"), self("anexo"), call, tool,
+	}
+	got := foldSelfDeliveries(stored)
+	if len(got) != 5 || got[2].Role != "tool" || got[3].ToolCalls == nil {
+		t.Fatalf("folded = %+v, want both sends joined to the first result", got)
+	}
+	if !strings.Contains(got[2].Content, "relatório") || !strings.Contains(got[2].Content, "anexo") {
+		t.Fatalf("first result = %q, want both sends in it", got[2].Content)
+	}
+	if stored[2].Content != "ok" || len(stored) != 7 {
+		t.Fatal("the stored messages were changed")
+	}
+
+	afterUser := []providers.Message{{Role: "user", Content: "oi"}, self("relatório")}
+	if got := foldSelfDeliveries(afterUser); len(got) != 2 {
+		t.Fatalf("a send with no tool result before it stays a message: %+v", got)
+	}
+}
+
+// An elision drops the tool's output, not the report its script sent: the user
+// saw that one.
+func TestWithElidedToolResults_KeepsJoinedSelfSends(t *testing.T) {
+	sent := providers.Message{Role: "assistant", Content: reportText, Delivery: &providers.Delivery{Self: true}}
+	messages := joinToLastToolResult([]providers.Message{
+		{Role: "user", Content: "oi"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "c1"}}},
+		{Role: "tool", ToolCallID: "c1", Content: bigOutput(5_000, 1)},
+	}, sent)
+
+	got := withElidedToolResults(messages, 1, turnElisions{1: {toolCallID: "c1", chars: 5_000}})[2].Content
+
+	if strings.Contains(got, "HEAD-OF-OUTPUT-001") || !strings.Contains(got, elidedToolResultMarker) {
+		t.Fatalf("elided result = %.200q, want the note in place of the output", got)
+	}
+	if !strings.Contains(got, "\n\n"+selfDeliveryLine) || !strings.HasSuffix(got, reportText) {
+		t.Fatalf("elided result = %.400q, want the dated report kept after the note", got)
+	}
+}
