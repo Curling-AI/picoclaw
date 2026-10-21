@@ -212,6 +212,9 @@ type Delivery struct {
 	// At is when it reached the chat. CreatedAt is when it was written to the
 	// history, which for a delivery that waited for a turn to end comes later.
 	At time.Time `json:"at,omitzero"`
+	// Self marks a send from this chat's own session that its turn did not
+	// record: a script the conversation left running, which posted later.
+	Self bool `json:"self,omitempty"`
 }
 
 type LLMCall struct {

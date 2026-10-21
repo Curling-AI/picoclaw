@@ -136,6 +136,14 @@ func TestHistoryContent_DeliveryTime(t *testing.T) {
 				"]\noi",
 		},
 		{
+			"the chat's own background script",
+			providers.Message{
+				Role: "assistant", Content: "oi",
+				Delivery: &providers.Delivery{Origin: "sk_v1_chat", Self: true},
+			},
+			"[Sent to this chat by a script this conversation started]\noi",
+		},
+		{
 			"heartbeat is an automation",
 			providers.Message{Role: "assistant", Content: "oi", Delivery: &providers.Delivery{Origin: "heartbeat"}},
 			"[Sent to this chat by an automation]\noi",

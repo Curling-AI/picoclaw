@@ -97,6 +97,14 @@ func ToolSessionScope(ctx context.Context) *session.SessionScope {
 	return toolshared.ToolSessionScope(ctx)
 }
 
+func WithToolTurnID(ctx context.Context, turnID string) context.Context {
+	return toolshared.WithToolTurnID(ctx, turnID)
+}
+
+func ToolTurnID(ctx context.Context) string {
+	return toolshared.ToolTurnID(ctx)
+}
+
 func ToolToSchema(tool Tool) map[string]any {
 	return toolshared.ToolToSchema(tool)
 }

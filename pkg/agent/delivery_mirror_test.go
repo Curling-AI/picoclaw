@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,7 +94,9 @@ func TestMirrorDelivery_RecordsOriginAndTime(t *testing.T) {
 func TestMirrorDelivery_ExternalDeliveryEntersTheChatConversation(t *testing.T) {
 	al, sessions := newMirrorTestLoop(t)
 
-	al.MirrorDelivery(mirrorCronSession, "telegram", "123", "O convite expira hoje.")
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorCronSession, Channel: "telegram", ChatID: "123", Text: "O convite expira hoje.",
+	})
 
 	got := lastMessage(t, sessions, mirrorChatSession)
 	if got.Content != "O convite expira hoje." || got.Delivery == nil || got.Delivery.Origin != mirrorCronSession {
@@ -295,31 +298,64 @@ func TestMirrorDelivery_MessageToolInTheChatsOwnTurnIsNotMirrored(t *testing.T) 
 
 // A script a chat turn left in the background ("remind me in 30 min") posts to
 // the chat after that turn ended; nothing else records it, so the external
-// entry point writes it into the chat's own session.
+// entry point writes it into the chat's own session, labeled as its own.
 func TestMirrorDelivery_ExternalSendFromTheChatsOwnSessionAfterItsTurn(t *testing.T) {
 	al, sessions := newMirrorTestLoop(t)
 
-	al.MirrorDelivery(mirrorChatSession, "telegram", "123", "Lembrete: reunião em 5 min.")
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
+		Text: "Lembrete: reunião em 5 min.",
+	})
 
 	got := lastMessage(t, sessions, mirrorChatSession)
-	if got.Content != "Lembrete: reunião em 5 min." || got.Delivery == nil || got.Delivery.Origin != mirrorChatSession {
-		t.Fatalf("last chat message = %+v, want the background send", got)
+	if got.Content != "Lembrete: reunião em 5 min." || got.Delivery == nil ||
+		got.Delivery.Origin != mirrorChatSession || !got.Delivery.Self {
+		t.Fatalf("last chat message = %+v, want the background send marked as the chat's own", got)
+	}
+	const wantLine = "[Sent to this chat by a script this conversation started at "
+	if line := historyContent(got); !strings.HasPrefix(line, wantLine) {
+		t.Fatalf("history line = %q, want the chat's own script", line)
 	}
 }
 
-// While the chat's own turn is live, the script's send is part of that turn
+// While the turn that ran the script is live, the send is part of that turn
 // (its tool results carry it): not written, and not queued for later either.
-func TestMirrorDelivery_ExternalSendDuringTheChatsOwnTurnIsLeftToTheTurn(t *testing.T) {
+func TestMirrorDelivery_ExternalSendDuringItsOwnTurnIsLeftToTheTurn(t *testing.T) {
 	al, sessions := newMirrorTestLoop(t)
 	running := &turnState{turnID: "turn-1", sessionKey: mirrorChatSession}
 	al.registerActiveTurn(running)
 	before := len(sessions.GetHistory(mirrorChatSession))
 
-	al.MirrorDelivery(mirrorChatSession, "telegram", "123", "enviado pelo script do turno")
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
+		Text: "enviado pelo script do turno",
+	})
 	al.clearActiveTurn(running)
 
 	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
 		t.Fatalf("history grew from %d to %d", before, after)
+	}
+}
+
+// The background script fires while the user is in another turn of the same
+// chat: the send waits for that turn and is written when it ends.
+func TestMirrorDelivery_ExternalSendDuringAnotherTurnWaitsForIt(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	running := &turnState{turnID: "turn-2", sessionKey: mirrorChatSession}
+	al.registerActiveTurn(running)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
+		Text: "Lembrete: reunião em 5 min.",
+	})
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("mirror wrote into a running turn (history %d → %d)", before, after)
+	}
+	al.clearActiveTurn(running)
+
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "Lembrete: reunião em 5 min." {
+		t.Fatalf("last chat message after the turn = %q, want the queued send", got.Content)
 	}
 }
 

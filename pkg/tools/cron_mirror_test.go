@@ -20,8 +20,8 @@ type mirroringJobExecutor struct {
 	mirrored []mirroredDelivery
 }
 
-func (m *mirroringJobExecutor) MirrorDelivery(origin, channel, chatID, text string) {
-	m.mirrored = append(m.mirrored, mirroredDelivery{origin, channel, chatID, text})
+func (m *mirroringJobExecutor) MirrorDelivery(d ExternalDelivery) {
+	m.mirrored = append(m.mirrored, mirroredDelivery{d.Origin, d.Channel, d.ChatID, d.Text})
 }
 
 func runCommandJob(t *testing.T, executor JobExecutor, command string) string {

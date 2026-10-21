@@ -30,11 +30,23 @@ type resultJobExecutor interface {
 	ProcessDirectWithResult(ctx context.Context, request turnresult.Request) (turnresult.Result, error)
 }
 
+// ExternalDelivery is something delivered to a chat outside a turn's own
+// sends: the output a command job published, or what a script sent through the
+// chat's API. (seucaranguejo fork — see agent/delivery_mirror.go)
+type ExternalDelivery struct {
+	// Origin is the session of the run behind it.
+	Origin string
+	// TurnID is the turn whose exec ran the script, when there is one.
+	TurnID  string
+	Channel string
+	ChatID  string
+	Text    string
+}
+
 // deliveryMirrorer is the executor's delivery mirror (agent.AgentLoop), for
 // output a command job publishes without going through a turn.
-// (seucaranguejo fork — see agent/delivery_mirror.go)
 type deliveryMirrorer interface {
-	MirrorDelivery(origin, channel, chatID, text string)
+	MirrorDelivery(delivery ExternalDelivery)
 }
 
 // maxMirroredCommandOutput bounds what a command job's run adds to the chat's
@@ -767,7 +779,12 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		// it keeps a turn's final response. An error notice does not: it would
 		// poison the conversation the way an error response would.
 		if mirrorer, ok := t.executor.(deliveryMirrorer); ok && err == nil && !result.IsError {
-			mirrorer.MirrorDelivery(sessionKey, channel, chatID, mirroredCommandOutput(output))
+			mirrorer.MirrorDelivery(ExternalDelivery{
+				Origin:  sessionKey,
+				Channel: channel,
+				ChatID:  chatID,
+				Text:    mirroredCommandOutput(output),
+			})
 		}
 		if ctx.Err() != nil {
 			return turnresult.Failure(ctx.Err()), ctx.Err()

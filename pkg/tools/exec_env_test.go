@@ -68,3 +68,21 @@ func TestApplyExecEnv_HostValueWins(t *testing.T) {
 		t.Fatal("the inherited variable should still be listed before the host's")
 	}
 }
+
+// The turn's id reaches the host with the session, for the mirror to tell the
+// script's own turn from another live one.
+func TestExecEnvProvider_SeesTheTurn(t *testing.T) {
+	var turn string
+	SetExecEnvProvider(func(ctx context.Context) []string {
+		turn = ToolTurnID(ctx)
+		return nil
+	})
+	t.Cleanup(func() { SetExecEnvProvider(nil) })
+
+	ctx := WithToolTurnID(WithToolSessionContext(context.Background(), "main", "sk_v1_chat", nil), "turn-7")
+	runExec(t, ctx, "true")
+
+	if turn != "turn-7" {
+		t.Fatalf("provider saw turn %q, want turn-7", turn)
+	}
+}

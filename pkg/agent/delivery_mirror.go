@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // Espelho de entregas (fork seucaranguejo): o que o agente entrega num chat
@@ -126,24 +127,26 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 
 // MirrorDelivery records a delivery made outside the agent loop: the output a
 // command cron job published, or what a script sent through the chat's API and
-// a proxy in the pod saw go by. origin is the session of the run behind it.
+// a proxy in the pod saw go by.
 //
-// Unlike a turn's own sends, it is recorded in the chat's own session too once
-// no turn is live there: a script a chat turn left running in the background
-// ("remind me in 30 min") posts after that turn ended, and nothing else would
-// write it down. While a turn is live, its own tool results carry the send.
-func (al *AgentLoop) MirrorDelivery(origin, channel, chatID, text string) {
-	al.mirrorDeliveryFrom(origin, channel, chatID, text, true)
+// Unlike a turn's own sends, it is recorded in the chat's own session too: a
+// script a chat turn left running in the background ("remind me in 30 min")
+// posts after that turn ended, maybe while another turn is live, and nothing
+// else would write it down. It is skipped only while the turn that ran the
+// script is still live, since that turn's tool results carry the send; with
+// another turn live it waits in the queue like any delivery.
+func (al *AgentLoop) MirrorDelivery(d tools.ExternalDelivery) {
+	al.mirrorDeliveryFrom(d, true)
 }
 
 // mirrorDelivery registra, na sessão do chat channel/chatID, o texto que acabou
 // de ser entregue nele por um turno da sessão origin.
 func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
-	al.mirrorDeliveryFrom(origin, channel, chatID, text, false)
+	al.mirrorDeliveryFrom(tools.ExternalDelivery{Origin: origin, Channel: channel, ChatID: chatID, Text: text}, false)
 }
 
-func (al *AgentLoop) mirrorDeliveryFrom(origin, channel, chatID, text string, external bool) {
-	text = strings.TrimSpace(text)
+func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool) {
+	origin, text := d.Origin, strings.TrimSpace(d.Text)
 	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
 	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
 	// chave de sessão.
@@ -158,25 +161,18 @@ func (al *AgentLoop) mirrorDeliveryFrom(origin, channel, chatID, text string, ex
 	}
 	// O mesmo endereço que a entrega usou: o canal recebe channel e chat id
 	// depois do TrimSpace do bus.NormalizeOutboundMessage.
-	channel, chatID = strings.TrimSpace(channel), strings.TrimSpace(chatID)
+	channel, chatID := strings.TrimSpace(d.Channel), strings.TrimSpace(d.ChatID)
 	target := resolve(channel, chatID)
+	if target == "" {
+		return
+	}
 	// Na própria sessão do chat o turno já grava o que disse: a resposta final
 	// ou a chamada da ferramenta message, que leva o texto. A comparação é crua:
 	// resolver alias aqui custaria varrer os metadados de todas as sessões a
 	// cada entrega (a origem de um cron é uma chave nova por rodada).
-	if target == "" {
+	self := target == origin
+	if self && (!external || al.turnIsLive(target, d.TurnID)) {
 		return
-	}
-	if target == origin {
-		if !external {
-			return
-		}
-		al.mirror.mu.Lock()
-		live := al.mirrorBusyLocked(target)
-		al.mirror.mu.Unlock()
-		if live {
-			return
-		}
 	}
 	// Resolvidos fora do lock: tocam o disco (EFS em produção).
 	agent := al.agentForSession(target)
@@ -187,7 +183,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(origin, channel, chatID, text string, ex
 	deferred, err := al.deliverToConversation(agent, target, providers.Message{
 		Role:     "assistant",
 		Content:  text,
-		Delivery: &providers.Delivery{Origin: origin, At: time.Now()},
+		Delivery: &providers.Delivery{Origin: origin, At: time.Now(), Self: self},
 	})
 	if err != nil {
 		return // writeMirrored logged it
@@ -200,6 +196,15 @@ func (al *AgentLoop) mirrorDeliveryFrom(origin, channel, chatID, text string, ex
 		"content_len":    len(text),
 		"deferred":       deferred,
 	})
+}
+
+// turnIsLive: turnID is the turn now live in the session.
+func (al *AgentLoop) turnIsLive(sessionKey, turnID string) bool {
+	if turnID == "" {
+		return false
+	}
+	ts := al.getActiveTurnState(sessionKey)
+	return ts != nil && ts.turnID == turnID
 }
 
 // flushMirroredDeliveries grava o que esperava o turno da sessão terminar.
@@ -438,11 +443,14 @@ func historyContent(msg providers.Message) string {
 	if at.IsZero() && msg.CreatedAt != nil {
 		at = *msg.CreatedAt
 	}
-	// Um cron ou o heartbeat é "uma automação"; o resto (conversa da web,
-	// subagente) é outra conversa deste assistente, e o modelo não deve
-	// chamá-la de automação.
+	// Um cron ou o heartbeat é "uma automação"; um script que a própria
+	// conversa deixou rodando é dela; o resto (conversa da web, subagente) é
+	// outra conversa deste assistente.
 	line := "[Sent to this chat from another conversation"
-	if isAutomationOrigin(msg.Delivery.Origin) {
+	switch {
+	case msg.Delivery.Self:
+		line = "[Sent to this chat by a script this conversation started"
+	case isAutomationOrigin(msg.Delivery.Origin):
 		line = "[Sent to this chat by an automation"
 	}
 	if !at.IsZero() {

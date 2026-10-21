@@ -85,6 +85,7 @@ var (
 	ctxKeyAgentID          = &toolCtxKey{"agentID"}
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
 	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
+	ctxKeyTurnID           = &toolCtxKey{"turnID"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -174,6 +175,19 @@ func ToolSessionKey(ctx context.Context) string {
 	if !ok {
 		return ""
 	}
+	return v
+}
+
+// WithToolTurnID returns a child context carrying the id of the turn that runs
+// the tool. (seucaranguejo fork — the delivery mirror tells a script's own turn
+// from another one in the same session; see agent/delivery_mirror.go)
+func WithToolTurnID(ctx context.Context, turnID string) context.Context {
+	return context.WithValue(ctx, ctxKeyTurnID, turnID)
+}
+
+// ToolTurnID extracts the id of the turn running the tool, or "" if unset.
+func ToolTurnID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyTurnID).(string)
 	return v
 }
 
