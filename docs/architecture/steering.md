@@ -164,7 +164,7 @@ still unwinding a tool.
 
 1. **At loop start** — before the first LLM call, to catch messages enqueued during setup
 2. **After every tool completes** — including the first and the last. If steering is found and there are remaining tools, they are all skipped immediately
-3. **After a direct LLM response** — if a new steering message arrived while the model was generating a non-tool response, the loop continues instead of returning a stale answer
+3. **After a direct LLM response** — if a new steering message arrived while the model was generating a non-tool response, the loop continues instead of returning a stale answer. A reply the person already watched being streamed is not stale: it goes into the context and the history before the message, which answers it (seucaranguejo fork; the web streams replies live and joins what it sends during one into the running turn). A reply nobody saw yet is dropped, and the next call answers both
 4. **Right before the turn is finalized** — if steering arrived at the very end of the turn, the agent immediately starts a continuation turn instead of leaving the message orphaned in the queue
 
 ## Why remaining tools are skipped
