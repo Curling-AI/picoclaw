@@ -41,10 +41,16 @@ func (al *AgentLoop) holdForOwnTurn(sessionKey, turnID string, msg providers.Mes
 // writeSelfDeliveries writes what the turn's scripts sent since the last call,
 // after the tool results already in the history, and joins it to the last of
 // those results in exec's messages: the turn's next call to the model is built
-// from them, not from the history. Not once an abort was requested: the cut
-// would take them; the turn's end queues them instead.
+// from them, not from the history. The sends stay held while the turn's last
+// message is not a tool result (a sub-turn's result can follow one): written
+// there they could not join a result, and would break the next round's call.
+// Not once an abort was requested either: the cut would take them. What is
+// still held when the turn ends is queued.
 func (al *AgentLoop) writeSelfDeliveries(ts *turnState, exec *turnExecution) {
 	if ts.hardAbortRequested() {
+		return
+	}
+	if n := len(exec.messages); n == 0 || exec.messages[n-1].Role != "tool" {
 		return
 	}
 	stripe := al.mirror.stripe(ts.sessionKey)

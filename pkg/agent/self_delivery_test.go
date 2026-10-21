@@ -82,6 +82,18 @@ func (s *reportScript) Execute(ctx context.Context, _ map[string]any) *tools.Too
 			Origin: origin, TurnID: turnID, Channel: "telegram", ChatID: "123", Text: reportText,
 		})
 		return tools.NewToolResult("ok")
+	case "report_with_subturn":
+		// A sub-turn's result arrives with this round: the turn adds it after
+		// the tool results (the poll in ExecuteTools).
+		*s.chat = origin
+		s.loop.MirrorDelivery(tools.ExternalDelivery{
+			Origin: origin, TurnID: turnID, Channel: "telegram", ChatID: "123", Text: reportText,
+		})
+		if ts := turnStateFromContext(ctx); ts != nil {
+			ts.pendingResults = make(chan *tools.ToolResult, 1)
+			ts.pendingResults <- &tools.ToolResult{ForLLM: "subagent finished"}
+		}
+		return tools.NewToolResult("ok")
 	case "stop_now":
 		_ = s.loop.HardAbort(origin)
 		return tools.NewToolResult("stopping")
@@ -116,7 +128,7 @@ func runReportTurnOn(t *testing.T, provider *reportProvider) []providers.Message
 	sessions := session.NewSessionManager(filepath.Join(cfg.Agents.Defaults.Workspace, "sessions"))
 	al.registry.GetDefaultAgent().Sessions = sessions
 	var chat string
-	for _, name := range []string{"run_report", "stop_now", "delegate", "list_files"} {
+	for _, name := range []string{"run_report", "report_with_subturn", "stop_now", "delegate", "list_files"} {
 		al.RegisterTool(&reportScript{name: name, loop: al, chat: &chat})
 	}
 	al.SetDeliverySessionResolver(func(string, string) string { return chat })
@@ -303,5 +315,36 @@ func TestWithElidedToolResults_KeepsJoinedSelfSends(t *testing.T) {
 	}
 	if !strings.Contains(got, "\n\n"+selfDeliveryLine) || !strings.HasSuffix(got, reportText) {
 		t.Fatalf("elided result = %.400q, want the dated report kept after the note", got)
+	}
+}
+
+// A sub-turn's result follows round 1's tool result, so the report round 1's
+// script sent cannot join a result there. Written after the sub-turn's result,
+// it would make the model's next call drop round 2 as having an invalid
+// predecessor; it waits for round 2's result and joins that one.
+func TestSelfDelivery_SubTurnResultBetweenRoundsKeepsTheChain(t *testing.T) {
+	sent := sanitizeHistoryForProvider(runReportTurn(t, "tool:report_with_subturn", "tool:list_files"))
+
+	var calls []string
+	var results []providers.Message
+	for _, msg := range sent {
+		for _, call := range msg.ToolCalls {
+			calls = append(calls, call.Name)
+		}
+		if msg.Role == "tool" {
+			results = append(results, msg)
+		}
+		if msg.Role == "assistant" && strings.Contains(msg.Content, reportText) {
+			t.Fatalf("the report reached the model as a message of its own: %q", msg.Content)
+		}
+	}
+	if strings.Join(calls, ",") != "report_with_subturn,list_files" || len(results) != 2 {
+		t.Fatalf("model got calls %v and %d results, want both rounds", calls, len(results))
+	}
+	if !strings.Contains(results[1].Content, reportText) {
+		t.Fatalf("round 2's result = %q, want the held report joined to it", results[1].Content)
+	}
+	if last := sent[len(sent)-1]; last.Role != "assistant" || last.Content != reportReply {
+		t.Fatalf("model's last message = %s %q, want the reply on its own", last.Role, last.Content)
 	}
 }
