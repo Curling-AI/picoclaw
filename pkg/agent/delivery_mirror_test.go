@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -64,6 +65,39 @@ func TestMirrorDelivery_CronReplyEntersTheChatConversation(t *testing.T) {
 	got := lastMessage(t, sessions, mirrorChatSession)
 	if got.Role != "assistant" || got.Content != "Daniel abriu o PR #2045. Quer que eu resuma as 3 decisões?" {
 		t.Fatalf("last chat message = %s %q, want the delivered suggestion", got.Role, got.Content)
+	}
+}
+
+// The delivery keeps its origin and time out of the text, for the history sent
+// to the model to date it (historyContent).
+func TestMirrorDelivery_RecordsOriginAndTime(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	before := time.Now()
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "Lembrete das 16h.")
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "Lembrete das 16h." {
+		t.Fatalf("content = %q, want the text as delivered", got.Content)
+	}
+	if got.Delivery == nil || got.Delivery.Origin != mirrorCronSession {
+		t.Fatalf("delivery = %+v, want origin %s", got.Delivery, mirrorCronSession)
+	}
+	if got.Delivery.At.Before(before) || got.Delivery.At.After(time.Now()) {
+		t.Fatalf("delivery time %v outside the call", got.Delivery.At)
+	}
+}
+
+// A delivery made outside the agent loop — a script posting to the chat's API,
+// seen by the pod's proxy — enters through the exported entry point.
+func TestMirrorDelivery_ExternalDeliveryEntersTheChatConversation(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+
+	al.MirrorDelivery(mirrorCronSession, "telegram", "123", "O convite expira hoje.")
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "O convite expira hoje." || got.Delivery == nil || got.Delivery.Origin != mirrorCronSession {
+		t.Fatalf("last chat message = %+v, want the external delivery", got)
 	}
 }
 
@@ -379,8 +413,12 @@ func TestMirrorDelivery_SurvivesARestartOnTheJSONStore(t *testing.T) {
 	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
 
 	reloaded := session.NewSessionManager(dir)
-	if got := lastMessage(t, reloaded, mirrorChatSession); got.Content != "lembrete" {
+	got := lastMessage(t, reloaded, mirrorChatSession)
+	if got.Content != "lembrete" {
 		t.Fatalf("last message after reload = %q, want the mirrored delivery", got.Content)
+	}
+	if got.Delivery == nil || got.Delivery.Origin != mirrorCronSession || got.Delivery.At.IsZero() {
+		t.Fatalf("delivery after reload = %+v, want origin and time kept", got.Delivery)
 	}
 }
 

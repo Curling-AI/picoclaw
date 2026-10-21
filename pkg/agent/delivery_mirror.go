@@ -25,10 +25,14 @@ import (
 // control-plane (as chaves do webhook não saem do alocador de rotas daqui), então
 // a tradução chat → sessão vem de fora, como o LoopResolver.
 //
-// O texto entra como mensagem do assistente, sem marca de origem: é o que o
+// O texto entra como mensagem do assistente, sem marca no conteúdo: é o que o
 // usuário viu no chat, e o histórico do chat passa a ser a mesma conversa que ele
-// tem na tela. Uma entrega publicada no bus conta como entregue; a ferramenta
-// message só espelha depois do envio confirmado pelo canal.
+// tem na tela. A origem e a hora vão no campo Delivery, que só o histórico
+// enviado ao modelo mostra, como uma linha datada antes do texto (ver
+// historyContent). Sem ela, entregas seguidas viravam um bloco só na junção do
+// sanitizador, e "me lembre disso" apontava para qualquer parte dele. Uma
+// entrega publicada no bus conta como entregue; a ferramenta message só espelha
+// depois do envio confirmado pelo canal.
 
 // DeliverySessionResolver traduz o endereço de saída de um chat (canal + chat
 // id, como o bus o carrega) na sessão em que as mensagens desse chat são
@@ -120,6 +124,13 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 	al.mirror.resolve = fn
 }
 
+// MirrorDelivery registra uma entrega feita fora do agent loop: a saída de um
+// cron de comando, ou o que um script mandou pela API do chat e um proxy do pod
+// viu passar. origin é a sessão do turno que rodou o comando.
+func (al *AgentLoop) MirrorDelivery(origin, channel, chatID, text string) {
+	al.mirrorDelivery(origin, channel, chatID, text)
+}
+
 // mirrorDelivery registra, na sessão do chat channel/chatID, o texto que acabou
 // de ser entregue nele por um turno da sessão origin.
 func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
@@ -153,7 +164,11 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 		return
 	}
 
-	deferred, err := al.deliverToConversation(agent, target, providers.Message{Role: "assistant", Content: text})
+	deferred, err := al.deliverToConversation(agent, target, providers.Message{
+		Role:     "assistant",
+		Content:  text,
+		Delivery: &providers.Delivery{Origin: origin, At: time.Now()},
+	})
 	if err != nil {
 		return // writeMirrored logged it
 	}
@@ -387,6 +402,27 @@ func hasConversation(store session.SessionStore, key string) bool {
 func isPlainAssistant(msg providers.Message) bool {
 	return msg.Role == "assistant" && len(msg.ToolCalls) == 0 &&
 		len(msg.Media) == 0 && len(msg.Attachments) == 0
+}
+
+// historyContent é o texto de msg no histórico enviado ao modelo. Uma entrega
+// espelhada ganha uma linha com a hora antes do texto: sem ela, a resposta do
+// turno anterior e as entregas que vieram depois chegam ao modelo como uma fala
+// só, e ele não tem como saber qual é a mais recente. A hora é a da entrega, no
+// fuso do pod, o mesmo do [Current time] da mensagem do usuário; é fixa, então o
+// prefixo do prompt continua o mesmo de um turno para o outro (cache).
+func historyContent(msg providers.Message) string {
+	if msg.Delivery == nil {
+		return msg.Content
+	}
+	at := msg.Delivery.At
+	if at.IsZero() && msg.CreatedAt != nil {
+		at = *msg.CreatedAt
+	}
+	line := "[Sent to this chat by an automation]"
+	if !at.IsZero() {
+		line = "[Sent to this chat by an automation at " + at.Local().Format("2006-01-02 15:04 (Monday)") + "]"
+	}
+	return line + "\n" + strings.TrimSpace(msg.Content)
 }
 
 func joinAssistantText(first, second string) string {

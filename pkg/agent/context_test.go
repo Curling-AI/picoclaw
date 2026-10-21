@@ -2,6 +2,7 @@ package agent
 
 import (
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -59,6 +60,71 @@ func TestSanitizeHistoryForProvider_JoinsConsecutiveAssistantText(t *testing.T) 
 	}
 	if history[1].Content != "Oi!" {
 		t.Fatal("sanitizing mutated the stored history")
+	}
+}
+
+// The reported case: deliveries that piled up since the user's last message
+// reached the model as one block, and "remind me of that" picked the wrong
+// part. Each delivery keeps its own dated line inside the joined message.
+func TestSanitizeHistoryForProvider_DatesEachMirroredDelivery(t *testing.T) {
+	summaryAt := time.Date(2026, 10, 19, 7, 10, 0, 0, time.UTC)
+	inviteAt := time.Date(2026, 10, 19, 8, 9, 0, 0, time.UTC)
+	stored := time.Date(2026, 10, 19, 8, 30, 0, 0, time.UTC)
+	history := []providers.Message{
+		msg("user", "oi"),
+		msg("assistant", "Oi!"),
+		{
+			Role: "assistant", Content: "Resumo do dia.",
+			Delivery: &providers.Delivery{Origin: "agent:cron-a-1", At: summaryAt},
+		},
+		{
+			Role: "assistant", Content: "O convite expira hoje.", CreatedAt: &stored,
+			Delivery: &providers.Delivery{Origin: "agent:cron-b-2", At: inviteAt},
+		},
+		msg("user", "me lembre disso às 17h"),
+	}
+
+	result := sanitizeHistoryForProvider(history)
+
+	assertRoles(t, result, "user", "assistant", "user")
+	want := "Oi!\n\n" +
+		"[Sent to this chat by an automation at " + summaryAt.Local().Format("2006-01-02 15:04 (Monday)") + "]\n" +
+		"Resumo do dia.\n\n" +
+		"[Sent to this chat by an automation at " + inviteAt.Local().Format("2006-01-02 15:04 (Monday)") + "]\n" +
+		"O convite expira hoje."
+	if result[1].Content != want {
+		t.Fatalf("joined content = %q\nwant %q", result[1].Content, want)
+	}
+	if history[3].Content != "O convite expira hoje." {
+		t.Fatal("sanitizing mutated the stored history")
+	}
+}
+
+func TestHistoryContent_DeliveryTime(t *testing.T) {
+	written := time.Date(2026, 10, 19, 8, 9, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		msg  providers.Message
+		want string
+	}{
+		{"plain message", msg("assistant", "oi"), "oi"},
+		{
+			"delivery without its own time uses the write time",
+			providers.Message{Role: "assistant", Content: "oi", CreatedAt: &written, Delivery: &providers.Delivery{}},
+			"[Sent to this chat by an automation at " + written.Local().Format("2006-01-02 15:04 (Monday)") + "]\noi",
+		},
+		{
+			"delivery with no time at all",
+			providers.Message{Role: "assistant", Content: "oi", Delivery: &providers.Delivery{}},
+			"[Sent to this chat by an automation]\noi",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := historyContent(tc.msg); got != tc.want {
+				t.Fatalf("historyContent = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

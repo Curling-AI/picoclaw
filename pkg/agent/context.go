@@ -1304,8 +1304,10 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			// provedor que recusa papéis repetidos (deepseek-reasoner), e a
 			// conversa do chat não pode travar por isso. A primeira fica com o que
 			// tiver (anexos, raciocínio); a segunda só entra se for texto, para nada
-			// dela se perder além do raciocínio. (seucaranguejo fork — ver
-			// delivery_mirror.go)
+			// dela se perder além do raciocínio. A linha datada de cada entrega
+			// entra antes da junção, para cada parte continuar distinguível.
+			// (seucaranguejo fork — ver delivery_mirror.go)
+			msg.Content = historyContent(msg)
 			if n := len(sanitized); n > 0 && sanitized[n-1].Role == "assistant" &&
 				len(sanitized[n-1].ToolCalls) == 0 && isPlainAssistant(msg) {
 				sanitized[n-1].Content = joinAssistantText(sanitized[n-1].Content, msg.Content)
