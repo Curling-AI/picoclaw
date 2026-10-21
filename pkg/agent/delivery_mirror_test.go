@@ -293,6 +293,36 @@ func TestMirrorDelivery_MessageToolInTheChatsOwnTurnIsNotMirrored(t *testing.T) 
 	}
 }
 
+// A script a chat turn left in the background ("remind me in 30 min") posts to
+// the chat after that turn ended; nothing else records it, so the external
+// entry point writes it into the chat's own session.
+func TestMirrorDelivery_ExternalSendFromTheChatsOwnSessionAfterItsTurn(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+
+	al.MirrorDelivery(mirrorChatSession, "telegram", "123", "Lembrete: reunião em 5 min.")
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "Lembrete: reunião em 5 min." || got.Delivery == nil || got.Delivery.Origin != mirrorChatSession {
+		t.Fatalf("last chat message = %+v, want the background send", got)
+	}
+}
+
+// While the chat's own turn is live, the script's send is part of that turn
+// (its tool results carry it): not written, and not queued for later either.
+func TestMirrorDelivery_ExternalSendDuringTheChatsOwnTurnIsLeftToTheTurn(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	running := &turnState{turnID: "turn-1", sessionKey: mirrorChatSession}
+	al.registerActiveTurn(running)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	al.MirrorDelivery(mirrorChatSession, "telegram", "123", "enviado pelo script do turno")
+	al.clearActiveTurn(running)
+
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("history grew from %d to %d", before, after)
+	}
+}
+
 // A subagent's result reaches the origin chat through a turn of the main
 // session (processSystemMessage), not through PublishResponseIfNeeded.
 func TestMirrorDelivery_SubagentResultEntersTheChatConversation(t *testing.T) {

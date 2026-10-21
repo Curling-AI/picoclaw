@@ -135,6 +135,11 @@ func TestHistoryContent_DeliveryTime(t *testing.T) {
 				Format("2006-01-02 15:04 (Monday)") +
 				"]\noi",
 		},
+		{
+			"heartbeat is an automation",
+			providers.Message{Role: "assistant", Content: "oi", Delivery: &providers.Delivery{Origin: "heartbeat"}},
+			"[Sent to this chat by an automation]\noi",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

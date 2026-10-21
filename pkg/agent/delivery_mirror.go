@@ -127,13 +127,22 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 // MirrorDelivery records a delivery made outside the agent loop: the output a
 // command cron job published, or what a script sent through the chat's API and
 // a proxy in the pod saw go by. origin is the session of the run behind it.
+//
+// Unlike a turn's own sends, it is recorded in the chat's own session too once
+// no turn is live there: a script a chat turn left running in the background
+// ("remind me in 30 min") posts after that turn ended, and nothing else would
+// write it down. While a turn is live, its own tool results carry the send.
 func (al *AgentLoop) MirrorDelivery(origin, channel, chatID, text string) {
-	al.mirrorDelivery(origin, channel, chatID, text)
+	al.mirrorDeliveryFrom(origin, channel, chatID, text, true)
 }
 
 // mirrorDelivery registra, na sessão do chat channel/chatID, o texto que acabou
 // de ser entregue nele por um turno da sessão origin.
 func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
+	al.mirrorDeliveryFrom(origin, channel, chatID, text, false)
+}
+
+func (al *AgentLoop) mirrorDeliveryFrom(origin, channel, chatID, text string, external bool) {
 	text = strings.TrimSpace(text)
 	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
 	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
@@ -155,8 +164,19 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	// ou a chamada da ferramenta message, que leva o texto. A comparação é crua:
 	// resolver alias aqui custaria varrer os metadados de todas as sessões a
 	// cada entrega (a origem de um cron é uma chave nova por rodada).
-	if target == "" || target == origin {
+	if target == "" {
 		return
+	}
+	if target == origin {
+		if !external {
+			return
+		}
+		al.mirror.mu.Lock()
+		live := al.mirrorBusyLocked(target)
+		al.mirror.mu.Unlock()
+		if live {
+			return
+		}
 	}
 	// Resolvidos fora do lock: tocam o disco (EFS em produção).
 	agent := al.agentForSession(target)
@@ -418,17 +438,28 @@ func historyContent(msg providers.Message) string {
 	if at.IsZero() && msg.CreatedAt != nil {
 		at = *msg.CreatedAt
 	}
-	// Um cron é "uma automação"; o resto (conversa da web, subagente) é outra
-	// conversa deste assistente, e o modelo não deve chamá-la de automação.
+	// Um cron ou o heartbeat é "uma automação"; o resto (conversa da web,
+	// subagente) é outra conversa deste assistente, e o modelo não deve
+	// chamá-la de automação.
 	line := "[Sent to this chat from another conversation"
-	if origin := msg.Delivery.Origin; strings.HasPrefix(origin, CronSessionPrefix) ||
-		strings.HasPrefix(origin, CronModelSessionPrefix) {
+	if isAutomationOrigin(msg.Delivery.Origin) {
 		line = "[Sent to this chat by an automation"
 	}
 	if !at.IsZero() {
 		line += " at " + at.Local().Format("2006-01-02 15:04 (Monday)")
 	}
 	return line + "]\n" + strings.TrimSpace(msg.Content)
+}
+
+// heartbeatSessionKey is the session heartbeat turns run in (agent_message.go).
+const heartbeatSessionKey = "heartbeat"
+
+// isAutomationOrigin: a scheduled run (cron) or the heartbeat, not a person's
+// conversation.
+func isAutomationOrigin(origin string) bool {
+	return strings.HasPrefix(origin, CronSessionPrefix) ||
+		strings.HasPrefix(origin, CronModelSessionPrefix) ||
+		origin == heartbeatSessionKey
 }
 
 func joinAssistantText(first, second string) string {
