@@ -460,7 +460,7 @@ func historyContent(msg providers.Message) string {
 }
 
 // selfDeliveryLine opens the history line of a send of the conversation's own
-// script; joinedSelfDeliveries looks for it.
+// script.
 const selfDeliveryLine = "[Sent to this chat by a script this conversation started"
 
 // heartbeatSessionKey is the session heartbeat turns run in (agent_message.go).

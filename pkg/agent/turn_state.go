@@ -976,6 +976,7 @@ func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	// drops the monotonic clock; neither is part of the message. A mirrored
 	// delivery's time comes back without the clock and in a fixed zone.
 	msg.CreatedAt = nil
+	msg.JoinedSends = ""
 	if msg.Delivery != nil {
 		delivery := *msg.Delivery
 		delivery.At = delivery.At.UTC().Round(0)

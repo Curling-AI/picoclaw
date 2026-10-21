@@ -1280,13 +1280,13 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			sanitized = append(sanitized, msg)
 
 		case "assistant":
-			// What the turn's own script sent, written after that round's tool
-			// results, joins the round's last result: as a turn of its own it
-			// would break the tool-call chain that follows, or be joined with
-			// the turn's reply under the script's label.
+			// What the turn's own script sent joins the message before it, the
+			// round's last result or the user's: as a turn of its own it would
+			// break the tool-call chain that follows, or be joined with the
+			// turn's reply under the script's label.
 			// (seucaranguejo fork — ver self_delivery.go)
-			if joinsLastToolResult(sanitized, msg) {
-				sanitized = joinToLastToolResult(sanitized, msg)
+			if joinsLastMessage(sanitized, msg) {
+				sanitized = joinToLastMessage(sanitized, msg)
 				continue
 			}
 			if len(msg.ToolCalls) > 0 {

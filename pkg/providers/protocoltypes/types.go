@@ -203,6 +203,12 @@ type Message struct {
 	PromptLayer  string `json:"-"`
 	PromptSlot   string `json:"-"`
 	PromptSource string `json:"-"`
+
+	// JoinedSends is what a call joined to Content: the dated sends of the
+	// conversation's own script (separator included), recorded where they are
+	// joined so an elision keeps them without searching the content. Internal
+	// to the agent runtime. (seucaranguejo fork — see agent/self_delivery.go)
+	JoinedSends string `json:"-"`
 }
 
 // Delivery describes where and when a mirrored delivery happened.

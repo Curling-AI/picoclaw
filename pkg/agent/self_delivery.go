@@ -38,19 +38,33 @@ func (al *AgentLoop) holdForOwnTurn(sessionKey, turnID string, msg providers.Mes
 	return true
 }
 
-// writeSelfDeliveries writes what the turn's scripts sent since the last call,
-// after the tool results already in the history, and joins it to the last of
-// those results in exec's messages: the turn's next call to the model is built
-// from them, not from the history. The sends stay held while the turn's last
-// message is not a tool result (a sub-turn's result can follow one): written
-// there they could not join a result, and would break the next round's call.
-// Not once an abort was requested either: the cut would take them. What is
-// still held when the turn ends is queued.
+// writeSelfDeliveries writes, between two rounds of tools, what the turn's
+// scripts sent since the last call: after the round's results in the history,
+// and joined to the last of them in exec's messages, since the turn's next
+// call to the model is built from those, not from the history. The sends stay
+// held while the round does not end on a tool result (a sub-turn's result can
+// follow one), where they would join a message of the user's instead of the
+// round's.
 func (al *AgentLoop) writeSelfDeliveries(ts *turnState, exec *turnExecution) {
-	if ts.hardAbortRequested() {
+	if n := len(exec.messages); n == 0 || exec.messages[n-1].Role != "tool" {
 		return
 	}
-	if n := len(exec.messages); n == 0 || exec.messages[n-1].Role != "tool" {
+	al.writeHeldSelfDeliveries(ts, exec)
+}
+
+// writeSelfDeliveriesBeforeReply writes what the turn still holds right before
+// its reply, whatever the turn's last message is: after the reply would be the
+// reverse of what the user saw. The history joins each to the message before
+// it, a tool result or the user's (steering, a sub-turn's result), never to the
+// reply.
+func (al *AgentLoop) writeSelfDeliveriesBeforeReply(ts *turnState, exec *turnExecution) {
+	al.writeHeldSelfDeliveries(ts, exec)
+}
+
+// writeHeldSelfDeliveries writes the held sends. Not once an abort was
+// requested: the cut would take them; the turn's end queues them instead.
+func (al *AgentLoop) writeHeldSelfDeliveries(ts *turnState, exec *turnExecution) {
+	if ts.hardAbortRequested() {
 		return
 	}
 	stripe := al.mirror.stripe(ts.sessionKey)
@@ -59,13 +73,15 @@ func (al *AgentLoop) writeSelfDeliveries(ts *turnState, exec *turnExecution) {
 	for _, msg := range ts.selfDeliveries[ts.selfWritten:] {
 		ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
 		ts.recordPersistedMessage(msg)
-		exec.messages = joinToLastToolResult(exec.messages, msg)
+		if joinsLastMessage(exec.messages, msg) {
+			exec.messages = joinToLastMessage(exec.messages, msg)
+		}
 	}
 	ts.selfWritten = len(ts.selfDeliveries)
 }
 
 // foldSelfDeliveries is messages as a call carries them: each send of the
-// turn's own script joined to the tool result before it, as
+// turn's own script joined to the message before it, as
 // sanitizeHistoryForProvider does. Offsets into the active turn of a call
 // (its start, its elisions) count these messages, not the stored ones.
 func foldSelfDeliveries(messages []providers.Message) []providers.Message {
@@ -75,13 +91,13 @@ func foldSelfDeliveries(messages []providers.Message) []providers.Message {
 		if out != nil {
 			done = out
 		}
-		if !joinsLastToolResult(done, msg) {
+		if !joinsLastMessage(done, msg) {
 			if out != nil {
 				out = append(out, msg)
 			}
 			continue
 		}
-		out = joinToLastToolResult(done, msg)
+		out = joinToLastMessage(done, msg)
 	}
 	if out == nil {
 		return messages
@@ -89,36 +105,31 @@ func foldSelfDeliveries(messages []providers.Message) []providers.Message {
 	return out
 }
 
-// joinsLastToolResult reports whether msg, a send of the turn's own script,
-// joins the tool result that ends messages.
-func joinsLastToolResult(messages []providers.Message, msg providers.Message) bool {
+// joinsLastMessage reports whether msg, a send of the turn's own script, joins
+// the message that ends messages: a tool result, or a message of the user's.
+// Alone it would break the next round's tool call (whose predecessor must be
+// a tool result or the user), or swallow the turn's reply under the script's
+// dated line.
+func joinsLastMessage(messages []providers.Message, msg providers.Message) bool {
 	n := len(messages)
-	return msg.Delivery != nil && msg.Delivery.Self && n > 0 && messages[n-1].Role == "tool"
+	if msg.Delivery == nil || !msg.Delivery.Self || n == 0 {
+		return false
+	}
+	role := messages[n-1].Role
+	return role == "tool" || role == "user"
 }
 
-// joinedSelfDeliveries is what joinToLastToolResult added to a tool result's
-// content: the sends of the turn's own script, which an elision of the result
-// keeps (the user saw them; only the output may go).
-func joinedSelfDeliveries(content string) string {
-	if strings.HasPrefix(content, selfDeliveryLine) {
-		return "\n\n" + content
-	}
-	if i := strings.Index(content, "\n\n"+selfDeliveryLine); i >= 0 {
-		return content[i:]
-	}
-	return ""
-}
-
-// joinToLastToolResult adds msg, with its dated line, to the last message when
-// it is a tool result, as sanitizeHistoryForProvider does with the history. It
-// returns a new slice: the old one may be shared.
-func joinToLastToolResult(messages []providers.Message, msg providers.Message) []providers.Message {
+// joinToLastMessage adds msg, with its dated line, to the last message, and
+// records what it added in JoinedSends: an elision of a tool result keeps the
+// sends (the user saw them; only the output may go), and the output is no
+// one's to trust, so they are never looked for in it. It returns a new slice:
+// the old one may be shared.
+func joinToLastMessage(messages []providers.Message, msg providers.Message) []providers.Message {
 	n := len(messages)
-	if n == 0 || messages[n-1].Role != "tool" {
-		return messages
-	}
 	last := messages[n-1]
-	last.Content = joinAssistantText(last.Content, historyContent(msg))
+	before := strings.TrimSpace(last.Content)
+	last.Content = joinAssistantText(before, historyContent(msg))
+	last.JoinedSends += last.Content[len(before):]
 	return append(messages[:n-1:n-1], last)
 }
 

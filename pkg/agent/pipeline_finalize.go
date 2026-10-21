@@ -45,7 +45,7 @@ func (p *Pipeline) Finalize(
 	if !ts.opts.NoHistory {
 		// Sent while the reply was being written: before the reply, as the user
 		// got them. (seucaranguejo fork — see self_delivery.go)
-		al.writeSelfDeliveries(ts, exec)
+		al.writeSelfDeliveriesBeforeReply(ts, exec)
 		// Coordinator-synthesized fallback text (empty-response/tool-limit
 		// boilerplate) is shown to the user but kept OUT of session history:
 		// persisted fallbacks read as the model's own prior replies and make
