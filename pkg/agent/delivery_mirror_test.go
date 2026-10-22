@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -64,6 +66,41 @@ func TestMirrorDelivery_CronReplyEntersTheChatConversation(t *testing.T) {
 	got := lastMessage(t, sessions, mirrorChatSession)
 	if got.Role != "assistant" || got.Content != "Daniel abriu o PR #2045. Quer que eu resuma as 3 decisões?" {
 		t.Fatalf("last chat message = %s %q, want the delivered suggestion", got.Role, got.Content)
+	}
+}
+
+// The delivery keeps its origin and time out of the text, for the history sent
+// to the model to date it (historyContent).
+func TestMirrorDelivery_RecordsOriginAndTime(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	before := time.Now()
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "Lembrete das 16h.")
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "Lembrete das 16h." {
+		t.Fatalf("content = %q, want the text as delivered", got.Content)
+	}
+	if got.Delivery == nil || got.Delivery.Origin != mirrorCronSession {
+		t.Fatalf("delivery = %+v, want origin %s", got.Delivery, mirrorCronSession)
+	}
+	if got.Delivery.At.Before(before) || got.Delivery.At.After(time.Now()) {
+		t.Fatalf("delivery time %v outside the call", got.Delivery.At)
+	}
+}
+
+// A delivery made outside the agent loop — a script posting to the chat's API,
+// seen by the pod's proxy — enters through the exported entry point.
+func TestMirrorDelivery_ExternalDeliveryEntersTheChatConversation(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorCronSession, Channel: "telegram", ChatID: "123", Text: "O convite expira hoje.",
+	})
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "O convite expira hoje." || got.Delivery == nil || got.Delivery.Origin != mirrorCronSession {
+		t.Fatalf("last chat message = %+v, want the external delivery", got)
 	}
 }
 
@@ -259,6 +296,74 @@ func TestMirrorDelivery_MessageToolInTheChatsOwnTurnIsNotMirrored(t *testing.T) 
 	}
 }
 
+// A script a chat turn left in the background ("remind me in 30 min") posts to
+// the chat after that turn ended; nothing else records it, so the external
+// entry point writes it into the chat's own session, labeled as its own.
+func TestMirrorDelivery_ExternalSendFromTheChatsOwnSessionAfterItsTurn(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
+		Text: "Lembrete: reunião em 5 min.",
+	})
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "Lembrete: reunião em 5 min." || got.Delivery == nil ||
+		got.Delivery.Origin != mirrorChatSession || !got.Delivery.Self {
+		t.Fatalf("last chat message = %+v, want the background send marked as the chat's own", got)
+	}
+	const wantLine = "[Sent to this chat by a script this conversation started at "
+	if line := historyContent(got); !strings.HasPrefix(line, wantLine) {
+		t.Fatalf("history line = %q, want the chat's own script", line)
+	}
+}
+
+// A background script ("sleep 20; curl …") fires while the turn that started it
+// is still working, and the turn ends without another tool round to write it
+// after: the send it held is written when it ends, labeled as the chat's own.
+func TestMirrorDelivery_ExternalSendDuringItsOwnTurnIsWrittenAfterIt(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	running := &turnState{turnID: "turn-1", sessionKey: mirrorChatSession}
+	al.registerActiveTurn(running)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
+		Text: "Lembrete: reunião em 5 min.",
+	})
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("mirror wrote into a running turn (history %d → %d)", before, after)
+	}
+	al.clearActiveTurn(running)
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Content != "Lembrete: reunião em 5 min." || got.Delivery == nil || !got.Delivery.Self {
+		t.Fatalf("last chat message after the turn = %+v, want the send marked as the chat's own", got)
+	}
+}
+
+// The background script fires while the user is in another turn of the same
+// chat: the send waits for that turn and is written when it ends.
+func TestMirrorDelivery_ExternalSendDuringAnotherTurnWaitsForIt(t *testing.T) {
+	al, sessions := newMirrorTestLoop(t)
+	running := &turnState{turnID: "turn-2", sessionKey: mirrorChatSession}
+	al.registerActiveTurn(running)
+	before := len(sessions.GetHistory(mirrorChatSession))
+
+	al.MirrorDelivery(tools.ExternalDelivery{
+		Origin: mirrorChatSession, TurnID: "turn-1", Channel: "telegram", ChatID: "123",
+		Text: "Lembrete: reunião em 5 min.",
+	})
+	if after := len(sessions.GetHistory(mirrorChatSession)); after != before {
+		t.Fatalf("mirror wrote into a running turn (history %d → %d)", before, after)
+	}
+	al.clearActiveTurn(running)
+
+	if got := lastMessage(t, sessions, mirrorChatSession); got.Content != "Lembrete: reunião em 5 min." {
+		t.Fatalf("last chat message after the turn = %q, want the queued send", got.Content)
+	}
+}
+
 // A subagent's result reaches the origin chat through a turn of the main
 // session (processSystemMessage), not through PublishResponseIfNeeded.
 func TestMirrorDelivery_SubagentResultEntersTheChatConversation(t *testing.T) {
@@ -379,8 +484,12 @@ func TestMirrorDelivery_SurvivesARestartOnTheJSONStore(t *testing.T) {
 	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "lembrete")
 
 	reloaded := session.NewSessionManager(dir)
-	if got := lastMessage(t, reloaded, mirrorChatSession); got.Content != "lembrete" {
+	got := lastMessage(t, reloaded, mirrorChatSession)
+	if got.Content != "lembrete" {
 		t.Fatalf("last message after reload = %q, want the mirrored delivery", got.Content)
+	}
+	if got.Delivery == nil || got.Delivery.Origin != mirrorCronSession || got.Delivery.At.IsZero() {
+		t.Fatalf("delivery after reload = %+v, want origin and time kept", got.Delivery)
 	}
 }
 

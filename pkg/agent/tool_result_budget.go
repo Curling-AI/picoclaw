@@ -357,6 +357,9 @@ func withElidedToolResults(messages []providers.Message, turnStart int, elided t
 			out = append([]providers.Message(nil), messages...)
 		}
 		out[i].Content = elidedToolResultNote(e)
+		if sends := strings.TrimLeft(messages[i].JoinedSends, "\n"); sends != "" {
+			out[i].Content += "\n\n" + sends
+		}
 	}
 	if out == nil {
 		return messages

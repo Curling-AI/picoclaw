@@ -746,13 +746,14 @@ func (p *Pipeline) CallLLM(
 			persisted := ts.persistedMessagesSnapshot()
 			guardStable, guardTail := splitHistoryForActiveTurn(exec.history, persisted)
 			guardElisions := exec.elisionsAt(len(persisted) - len(guardTail))
+			guardTurnLen := len(foldSelfDeliveries(guardTail))
 			guardBuild := func(trimmedHistory []providers.Message) []providers.Message {
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), guardTail...)
 				req := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				req.ActiveSkills = append([]string(nil), guardSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(req)
-				rebuilt = callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-len(guardTail)))
-				return withElidedToolResults(rebuilt, len(rebuilt)-len(guardTail), guardElisions)
+				rebuilt = callView(resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, len(rebuilt)-guardTurnLen))
+				return withElidedToolResults(rebuilt, len(rebuilt)-guardTurnLen, guardElisions)
 			}
 			budget := callBudget{window: effectiveCW, toolDefs: exec.providerToolDefs, maxTokens: ts.agent.MaxTokens}
 			compacted := false
@@ -800,6 +801,11 @@ func (p *Pipeline) CallLLM(
 			persisted = ts.persistedMessagesSnapshot()
 			stableHistory, protectedTurnTail := splitHistoryForActiveTurn(exec.history, persisted)
 			tailStart := len(persisted) - len(protectedTurnTail)
+			// The built call joins each send of the turn's own script to the
+			// result before it: the turn's start and its elisions count in
+			// callTail, not in the stored tail. (seucaranguejo fork — see
+			// self_delivery.go)
+			callTail := foldSelfDeliveries(protectedTurnTail)
 			exec.elidedToolResults, exec.elisionsTailStart = exec.elisionsAt(tailStart), tailStart
 			buildMessages := func(trimmedHistory []providers.Message) []providers.Message {
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), protectedTurnTail...)
@@ -810,7 +816,7 @@ func (p *Pipeline) CallLLM(
 					rebuilt,
 					p.MediaStore,
 					maxMediaSize,
-					len(rebuilt)-len(protectedTurnTail),
+					len(rebuilt)-len(callTail),
 				)
 			}
 			originalHistoryCount := len(exec.history)
@@ -818,7 +824,7 @@ func (p *Pipeline) CallLLM(
 			// CallLLM: elisions, then the turn's nudges, then the wrap-up hint.
 			buildCall := func(trimmedHistory []providers.Message, elided turnElisions) []providers.Message {
 				rebuilt := callView(buildMessages(trimmedHistory))
-				rebuilt = withElidedToolResults(rebuilt, len(rebuilt)-len(protectedTurnTail), elided)
+				rebuilt = withElidedToolResults(rebuilt, len(rebuilt)-len(callTail), elided)
 				rebuilt = append(append([]providers.Message(nil), rebuilt...), exec.transientTurnMessages...)
 				if exec.gracefulTerminal {
 					rebuilt = append(rebuilt, ts.interruptHintMessage())
@@ -842,7 +848,7 @@ func (p *Pipeline) CallLLM(
 				// (seucaranguejo fork)
 				history, call, elided, ok := fitTurnByElision(activeTurn{
 					stable:       stableHistory,
-					messages:     protectedTurnTail,
+					messages:     callTail,
 					elided:       exec.elidedToolResults,
 					savedOutputs: ts.savedToolOutputsSnapshot(),
 				}, budget, buildCall)
@@ -861,7 +867,7 @@ func (p *Pipeline) CallLLM(
 			}
 			exec.history = append(trimmedStableHistory, protectedTurnTail...)
 			exec.messages = buildMessages(trimmedStableHistory)
-			exec.currentTurnStart = len(exec.messages) - len(protectedTurnTail)
+			exec.currentTurnStart = len(exec.messages) - len(callTail)
 			if dropped := originalHistoryCount - len(exec.history); dropped > 0 {
 				logger.WarnCF("agent", "Trimmed rebuilt history after context retry compaction", map[string]any{
 					"session_key":     ts.sessionKey,

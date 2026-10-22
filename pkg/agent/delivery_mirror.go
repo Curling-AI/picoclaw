@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // Espelho de entregas (fork seucaranguejo): o que o agente entrega num chat
@@ -25,10 +26,14 @@ import (
 // control-plane (as chaves do webhook não saem do alocador de rotas daqui), então
 // a tradução chat → sessão vem de fora, como o LoopResolver.
 //
-// O texto entra como mensagem do assistente, sem marca de origem: é o que o
+// O texto entra como mensagem do assistente, sem marca no conteúdo: é o que o
 // usuário viu no chat, e o histórico do chat passa a ser a mesma conversa que ele
-// tem na tela. Uma entrega publicada no bus conta como entregue; a ferramenta
-// message só espelha depois do envio confirmado pelo canal.
+// tem na tela. A origem e a hora vão no campo Delivery, que só o histórico
+// enviado ao modelo mostra, como uma linha datada antes do texto (ver
+// historyContent). Sem ela, entregas seguidas viravam um bloco só na junção do
+// sanitizador, e "me lembre disso" apontava para qualquer parte dele. Uma
+// entrega publicada no bus conta como entregue; a ferramenta message só espelha
+// depois do envio confirmado pelo canal.
 
 // DeliverySessionResolver traduz o endereço de saída de um chat (canal + chat
 // id, como o bus o carrega) na sessão em que as mensagens desse chat são
@@ -120,10 +125,30 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 	al.mirror.resolve = fn
 }
 
+// MirrorDelivery records a delivery made outside the agent loop: the output a
+// command cron job published, or what a script sent through the chat's API and
+// a proxy in the pod saw go by.
+//
+// Unlike a turn's own sends, it is recorded in the chat's own session too, even
+// while the turn that ran the script is live: that turn's tool result carries
+// the send only when a synchronous exec echoed it. A background script returns
+// its pid, an aborted turn loses the result, a script may print just "ok".
+// When the output did echo it, the conversation has the send twice. The turn
+// that ran the script writes it after the tool round it came from
+// (self_delivery.go); with another turn live it waits in the queue like any
+// delivery.
+func (al *AgentLoop) MirrorDelivery(d tools.ExternalDelivery) {
+	al.mirrorDeliveryFrom(d, true)
+}
+
 // mirrorDelivery registra, na sessão do chat channel/chatID, o texto que acabou
 // de ser entregue nele por um turno da sessão origin.
 func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
-	text = strings.TrimSpace(text)
+	al.mirrorDeliveryFrom(tools.ExternalDelivery{Origin: origin, Channel: channel, ChatID: chatID, Text: text}, false)
+}
+
+func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool) {
+	origin, text := d.Origin, strings.TrimSpace(d.Text)
 	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
 	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
 	// chave de sessão.
@@ -138,13 +163,17 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 	}
 	// O mesmo endereço que a entrega usou: o canal recebe channel e chat id
 	// depois do TrimSpace do bus.NormalizeOutboundMessage.
-	channel, chatID = strings.TrimSpace(channel), strings.TrimSpace(chatID)
+	channel, chatID := strings.TrimSpace(d.Channel), strings.TrimSpace(d.ChatID)
 	target := resolve(channel, chatID)
+	if target == "" {
+		return
+	}
 	// Na própria sessão do chat o turno já grava o que disse: a resposta final
 	// ou a chamada da ferramenta message, que leva o texto. A comparação é crua:
 	// resolver alias aqui custaria varrer os metadados de todas as sessões a
 	// cada entrega (a origem de um cron é uma chave nova por rodada).
-	if target == "" || target == origin {
+	self := target == origin
+	if self && !external {
 		return
 	}
 	// Resolvidos fora do lock: tocam o disco (EFS em produção).
@@ -153,17 +182,28 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 		return
 	}
 
-	deferred, err := al.deliverToConversation(agent, target, providers.Message{Role: "assistant", Content: text})
-	if err != nil {
-		return // writeMirrored logged it
+	msg := providers.Message{
+		Role:     "assistant",
+		Content:  text,
+		Delivery: &providers.Delivery{Origin: origin, At: time.Now().Round(0), Self: self},
+	}
+	heldByTurn := self && al.holdForOwnTurn(target, d.TurnID, msg)
+	deferred := heldByTurn
+	if !heldByTurn {
+		var err error
+		if deferred, err = al.deliverToConversation(agent, target, msg); err != nil {
+			return // writeMirrored logged it
+		}
 	}
 	logger.InfoCF("agent", "Mirrored delivery into chat session", map[string]any{
 		"channel":        channel,
 		"chat_id":        chatID,
 		"origin_session": origin,
+		"origin_turn_id": d.TurnID,
 		"session_key":    target,
 		"content_len":    len(text),
 		"deferred":       deferred,
+		"held_by_turn":   heldByTurn,
 	})
 }
 
@@ -387,6 +427,51 @@ func hasConversation(store session.SessionStore, key string) bool {
 func isPlainAssistant(msg providers.Message) bool {
 	return msg.Role == "assistant" && len(msg.ToolCalls) == 0 &&
 		len(msg.Media) == 0 && len(msg.Attachments) == 0
+}
+
+// historyContent é o texto de msg no histórico enviado ao modelo. Uma entrega
+// espelhada ganha uma linha com a hora antes do texto: sem ela, a resposta do
+// turno anterior e as entregas que vieram depois chegam ao modelo como uma fala
+// só, e ele não tem como saber qual é a mais recente. A hora é a da entrega, no
+// fuso do pod, o mesmo do [Current time] da mensagem do usuário; é fixa, então o
+// prefixo do prompt continua o mesmo de um turno para o outro (cache).
+func historyContent(msg providers.Message) string {
+	if msg.Delivery == nil {
+		return msg.Content
+	}
+	at := msg.Delivery.At
+	if at.IsZero() && msg.CreatedAt != nil {
+		at = *msg.CreatedAt
+	}
+	// Um cron ou o heartbeat é "uma automação"; um script que a própria
+	// conversa deixou rodando é dela; o resto (conversa da web, subagente) é
+	// outra conversa deste assistente.
+	line := "[Sent to this chat from another conversation"
+	switch {
+	case msg.Delivery.Self:
+		line = selfDeliveryLine
+	case isAutomationOrigin(msg.Delivery.Origin):
+		line = "[Sent to this chat by an automation"
+	}
+	if !at.IsZero() {
+		line += " at " + at.Local().Format("2006-01-02 15:04 (Monday)")
+	}
+	return line + "]\n" + strings.TrimSpace(msg.Content)
+}
+
+// selfDeliveryLine opens the history line of a send of the conversation's own
+// script.
+const selfDeliveryLine = "[Sent to this chat by a script this conversation started"
+
+// heartbeatSessionKey is the session heartbeat turns run in (agent_message.go).
+const heartbeatSessionKey = "heartbeat"
+
+// isAutomationOrigin: a scheduled run (cron) or the heartbeat, not a person's
+// conversation.
+func isAutomationOrigin(origin string) bool {
+	return strings.HasPrefix(origin, CronSessionPrefix) ||
+		strings.HasPrefix(origin, CronModelSessionPrefix) ||
+		origin == heartbeatSessionKey
 }
 
 func joinAssistantText(first, second string) string {

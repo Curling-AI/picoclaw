@@ -1280,6 +1280,15 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			sanitized = append(sanitized, msg)
 
 		case "assistant":
+			// What the turn's own script sent joins the message before it, the
+			// round's last result or the user's: as a turn of its own it would
+			// break the tool-call chain that follows, or be joined with the
+			// turn's reply under the script's label.
+			// (seucaranguejo fork — ver self_delivery.go)
+			if joinsLastMessage(sanitized, msg) {
+				sanitized = joinToLastMessage(sanitized, msg)
+				continue
+			}
 			if len(msg.ToolCalls) > 0 {
 				if len(sanitized) == 0 {
 					logger.DebugCF(
@@ -1304,8 +1313,10 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			// provedor que recusa papéis repetidos (deepseek-reasoner), e a
 			// conversa do chat não pode travar por isso. A primeira fica com o que
 			// tiver (anexos, raciocínio); a segunda só entra se for texto, para nada
-			// dela se perder além do raciocínio. (seucaranguejo fork — ver
-			// delivery_mirror.go)
+			// dela se perder além do raciocínio. A linha datada de cada entrega
+			// entra antes da junção, para cada parte continuar distinguível.
+			// (seucaranguejo fork — ver delivery_mirror.go)
+			msg.Content = historyContent(msg)
 			if n := len(sanitized); n > 0 && sanitized[n-1].Role == "assistant" &&
 				len(sanitized[n-1].ToolCalls) == 0 && isPlainAssistant(msg) {
 				sanitized[n-1].Content = joinAssistantText(sanitized[n-1].Content, msg.Content)
