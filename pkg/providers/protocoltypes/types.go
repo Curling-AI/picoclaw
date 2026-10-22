@@ -192,11 +192,35 @@ type Message struct {
 
 	LLMCall *LLMCall `json:"llm_call,omitempty"`
 
+	// Delivery marks an assistant message that another session delivered to
+	// this chat: a cron run, a web conversation, a script calling the chat's
+	// API. Providers never receive it; the history sent to the model carries it
+	// as a dated line instead. (seucaranguejo fork — see agent/delivery_mirror.go)
+	Delivery *Delivery `json:"delivery,omitempty"`
+
 	// Prompt metadata is internal to the agent runtime. It records where a
 	// message or system part came from without changing provider/session JSON.
 	PromptLayer  string `json:"-"`
 	PromptSlot   string `json:"-"`
 	PromptSource string `json:"-"`
+
+	// JoinedSends is what a call joined to Content: the dated sends of the
+	// conversation's own script (separator included), recorded where they are
+	// joined so an elision keeps them without searching the content. Internal
+	// to the agent runtime. (seucaranguejo fork — see agent/self_delivery.go)
+	JoinedSends string `json:"-"`
+}
+
+// Delivery describes where and when a mirrored delivery happened.
+type Delivery struct {
+	// Origin is the session key of the turn that delivered the message.
+	Origin string `json:"origin,omitempty"`
+	// At is when it reached the chat. CreatedAt is when it was written to the
+	// history, which for a delivery that waited for a turn to end comes later.
+	At time.Time `json:"at,omitzero"`
+	// Self marks a send from this chat's own session that its turn did not
+	// record: a script the conversation left running, which posted later.
+	Self bool `json:"self,omitempty"`
 }
 
 type LLMCall struct {

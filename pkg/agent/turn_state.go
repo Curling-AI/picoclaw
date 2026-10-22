@@ -371,6 +371,13 @@ type turnState struct {
 	// savedToolOutputs are the full outputs this turn saved; see
 	// recordSavedToolOutput. (seucaranguejo fork)
 	savedToolOutputs map[string]bool
+	// selfDeliveries are what this turn's own scripts sent to its chat;
+	// selfWritten counts those in the history and selfClosed marks the turn's
+	// end. Guarded by the session's mirror stripe; see self_delivery.go.
+	// (seucaranguejo fork)
+	selfDeliveries []providers.Message
+	selfWritten    int
+	selfClosed     bool
 
 	// SubTurn support (from HEAD)
 	depth                int                    // SubTurn depth (0 for root turn)
@@ -456,6 +463,7 @@ func (al *AgentLoop) registerActiveTurn(ts *turnState) {
 }
 
 func (al *AgentLoop) clearActiveTurn(ts *turnState) {
+	al.closeSelfDeliveries(ts)
 	al.mirror.endTurn(ts.sessionKey)
 	al.releaseSessionTurnState(ts.sessionKey, ts)
 	// When a concurrent turn of the same session overwrote this one's entry, the
@@ -965,8 +973,15 @@ func messagesEquivalent(a, b providers.Message) bool {
 
 func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	// The session stamps CreatedAt on what it stores, and the JSONL round trip
-	// drops the monotonic clock; neither is part of the message.
+	// drops the monotonic clock; neither is part of the message. A mirrored
+	// delivery's time comes back without the clock and in a fixed zone.
 	msg.CreatedAt = nil
+	msg.JoinedSends = ""
+	if msg.Delivery != nil {
+		delivery := *msg.Delivery
+		delivery.At = delivery.At.UTC().Round(0)
+		msg.Delivery = &delivery
+	}
 	msg.PromptLayer = ""
 	msg.PromptSlot = ""
 	msg.PromptSource = ""
@@ -1076,11 +1091,17 @@ func (ts *turnState) Finished() chan struct{} {
 // throwaway session ("subturn-N"); what it launches belongs to the conversation
 // that started the chain.
 func (ts *turnState) originSessionKey() string {
+	return ts.rootTurn().sessionKey
+}
+
+// rootTurn is the turn this one was delegated from, through every level, or ts
+// itself.
+func (ts *turnState) rootTurn() *turnState {
 	root := ts
 	for root.parentTurnState != nil {
 		root = root.parentTurnState
 	}
-	return root.sessionKey
+	return root
 }
 
 // IsParentEnded checks if the parent turn has ended

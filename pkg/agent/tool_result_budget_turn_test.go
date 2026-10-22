@@ -38,10 +38,12 @@ func bigOutput(size, n int) string {
 	return head + body + tail
 }
 
-// bigOutputTool answers its n-th call with bigOutput(size, n).
+// bigOutputTool answers its n-th call with bigOutput(size, n), after onCall
+// when set.
 type bigOutputTool struct {
-	size  int
-	calls atomic.Int32
+	size   int
+	calls  atomic.Int32
+	onCall func(ctx context.Context, n int)
 }
 
 func (t *bigOutputTool) Name() string        { return "big_output" }
@@ -50,8 +52,12 @@ func (t *bigOutputTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
 
-func (t *bigOutputTool) Execute(context.Context, map[string]any) *tools.ToolResult {
-	return tools.NewToolResult(bigOutput(t.size, int(t.calls.Add(1))))
+func (t *bigOutputTool) Execute(ctx context.Context, _ map[string]any) *tools.ToolResult {
+	n := int(t.calls.Add(1))
+	if t.onCall != nil {
+		t.onCall(ctx, n)
+	}
+	return tools.NewToolResult(bigOutput(t.size, n))
 }
 
 // windowedToolProvider asks for big_output toolRounds times, then answers.
@@ -306,6 +312,48 @@ func TestAccumulatedToolResults_EarliestAreElidedAndTheTurnGoesOn(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+// Round 1's script also posted a report to the chat: the history has it after
+// round 1's result, and every call has it inside that result. Counting it as a
+// message of the turn moved the turn's start one message early, so the retry's
+// elision of round 1 hit nothing, and with nothing else to elide the turn
+// failed with "context window still exceeded". (seucaranguejo fork)
+func TestContextRetry_ElidesTheRoundBeforeASelfSend(t *testing.T) {
+	const resultSize, rounds = 2_600, 32
+	perRound := EstimateMessageTokens(
+		providers.Message{Role: "tool", ToolCallID: "call-10", Content: bigOutput(resultSize, 1)},
+	) + 40
+	tool := &bigOutputTool{size: resultSize}
+	turn := newWindowedTurn(t, windowedConfig(t), tool, 25*perRound)
+	turn.provider.toolRounds = rounds
+	var chat string
+	turn.al.SetDeliverySessionResolver(func(string, string) string { return chat })
+	tool.onCall = func(ctx context.Context, n int) {
+		if n != 1 {
+			return
+		}
+		origin, turnID := tools.ExecOrigin(ctx)
+		chat = origin
+		turn.al.MirrorDelivery(tools.ExternalDelivery{
+			Origin: origin, TurnID: turnID, Channel: "test", ChatID: "report", Text: "Relatório da rodada 1.",
+		})
+	}
+
+	turn.run(t, "sk_v1_selfsend", "search a lot")
+
+	calls := turn.provider.turnCalls()
+	last := calls[len(calls)-1]
+	if strings.Contains(last.content, "HEAD-OF-OUTPUT-001") {
+		t.Fatal("the final call still carries round 1's result: its elision missed")
+	}
+	if !strings.Contains(last.content, "Relatório da rodada 1.") {
+		t.Fatal("the final call lost the report round 1's script sent")
+	}
+	history := turn.agent.Sessions.GetHistory("sk_v1_selfsend")
+	if len(toolMessages(history)) != rounds {
+		t.Fatalf("tool results in history = %d, want %d", len(toolMessages(history)), rounds)
 	}
 }
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,29 @@ func TestMatchingTurnMessageTail_IgnoresCreatedAt(t *testing.T) {
 		{Role: "user", Content: "question", Media: []string{"media://abc"}},
 	}
 	if got := matchingTurnMessageTail(history, persisted); got != 1 {
+		t.Fatalf("matchingTurnMessageTail() = %d, want 1", got)
+	}
+}
+
+// A mirrored delivery's time comes back from the JSONL without the monotonic
+// clock; the turn's own copy must still match it, or the tail before it is
+// taken for history and written again. (seucaranguejo fork)
+func TestMatchingTurnMessageTail_IgnoresTheDeliveryClock(t *testing.T) {
+	held := providers.Message{
+		Role:     "assistant",
+		Content:  "Relatório semanal: 12 PRs mesclados.",
+		Delivery: &providers.Delivery{Origin: "sk_v1_chat", At: time.Now(), Self: true},
+	}
+	data, err := json.Marshal(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored providers.Message
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	history := []providers.Message{{Role: "user", Content: "older"}, stored}
+	if got := matchingTurnMessageTail(history, []providers.Message{held}); got != 1 {
 		t.Fatalf("matchingTurnMessageTail() = %d, want 1", got)
 	}
 }
