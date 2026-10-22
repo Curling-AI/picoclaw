@@ -72,6 +72,31 @@ if err != nil {
 
 The message is enqueued in a thread-safe manner. Returns an error if the queue is full or not initialized. It will be picked up at the next polling point (after the current tool finishes).
 
+### SteerSession, PendingSteering, ClearSteering — a session's own queue
+
+`Steer` writes to the queue of *any* active turn, which on a pod with several
+conversations running is not necessarily the right one. A caller that knows
+the session addresses it directly:
+
+```go
+err := agentLoop.SteerSession(sessionKey, content, mediaPaths)
+switch {
+case errors.Is(err, agent.ErrSteeringQueueFull):
+    // MaxQueueSize messages already wait for this session
+case err != nil:
+    // sessionKey is not explicit (sk_v1_… / agent:…): a turn would run under
+    // another key and never read this queue
+}
+
+n := agentLoop.PendingSteering(sessionKey)    // messages no turn has read yet
+dropped := agentLoop.ClearSteering(sessionKey) // drop them (a stopped reply)
+```
+
+The web's `ChatSend` (seucaranguejo `ethos/internal/picoclaw`) uses these: it
+reaches the loop through `ProcessDirect*`, never through `Run`, so it does what
+`Run` does for channels itself: a message sent while its conversation has a
+run going joins that run's turn instead of opening a second one.
+
 ### SteeringMode / SetSteeringMode
 
 ```go
@@ -102,13 +127,53 @@ if response == "" {
 agent-scoped sessions continue on the correct agent instead of always using
 the default one.
 
+### ContinueDirect — continue a direct turn's session
+
+`ContinueDirect` is `Continue` for the session of a turn that ran through
+`ProcessDirect*` and ended with messages still queued (one sent after the
+turn's last polling point). The turn it runs gets what a direct turn gets:
+live output on the chat (`AllowInterimPicoPublish`), and the run's tier and
+forced skills, passed explicitly so nothing is left armed for the next turn.
+`Continue`'s turn goes out silent, on the main model. The loop resolves the
+turn profile of every turn; `ContinueDirect` resolves it before reading the
+queue too, so a bad one fails with the messages still queued.
+
+```go
+result, ran, err := agentLoop.ContinueDirect(ctx, agent.DirectContinuation{
+    SessionKey: sessionKey, Channel: "grpc", ChatID: runID,
+    ModelTier: tier, Skills: skills,
+})
+switch {
+case errors.Is(err, agent.ErrSessionBusy): // ran == false: a turn holds the session; the messages stay queued
+case errors.Is(err, agent.ErrTurnAborted): // ran == true: the continuation was aborted
+case err != nil:                           // the continuation failed with an error
+case !ran:                                 // nothing was queued
+case result.Status == turnresult.Failed:   // ran out of answers or tool rounds: result.Content is the fallback text
+default:                                   // result.Content may be "" for a handled reply (connector card, message tool)
+}
+```
+
+A turn that fails this way returns no error, as `ProcessDirectWithResult`
+reports it, so the status is what tells it from a completed one.
+
+On `ErrSessionBusy` the turn holding the session reads the messages only if it
+still polls: one past its last polling point leaves them to whoever drains the
+queue once it ends. `Run` does that for the turns it starts. A caller that
+queues messages for a `ProcessDirect*` turn has to look at the queue after
+every one of them (`PendingSteering`) and run what it finds through
+`ContinueDirect`, not only after the turns it knows something joined.
+
 ## Polling points in the loop
 
-Steering is checked at the following points in the agent cycle:
+Steering is checked at the following points in the agent cycle. A turn whose
+context is done (stopped, cut by a shutdown) skips all of them and leaves the
+queue to the next turn: the queue belongs to the session, and what the person
+sends after stopping a reply is for the turn that comes after, not for the one
+still unwinding a tool.
 
 1. **At loop start** — before the first LLM call, to catch messages enqueued during setup
 2. **After every tool completes** — including the first and the last. If steering is found and there are remaining tools, they are all skipped immediately
-3. **After a direct LLM response** — if a new steering message arrived while the model was generating a non-tool response, the loop continues instead of returning a stale answer
+3. **After a direct LLM response** — if a new steering message arrived while the model was generating a non-tool response, the loop continues instead of returning a stale answer. A reply the person already watched being streamed is not stale: its stream is flushed, so the screen has its full text, and it goes into the context and the history before the message, which answers it (seucaranguejo fork; the web streams replies live and joins what it sends during one into the running turn). A reply nobody saw yet is dropped, and the next call answers both. So is a watched one that the guards keep out of the session: a tool call written out as markup, or a promise of one before any tool ran
 4. **Right before the turn is finalized** — if steering arrived at the very end of the turn, the agent immediately starts a continuation turn instead of leaving the message orphaned in the queue
 
 ## Why remaining tools are skipped

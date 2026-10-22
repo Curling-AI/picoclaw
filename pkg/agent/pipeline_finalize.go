@@ -48,16 +48,7 @@ func (p *Pipeline) Finalize(
 		// persisted fallbacks read as the model's own prior replies and make
 		// it reproduce the failure on every following turn of the session.
 		if !exec.finalIsFallback {
-			finalMsg := providers.Message{
-				Role:             "assistant",
-				Content:          finalContent,
-				ModelName:        exec.llmModelName,
-				ReasoningContent: responseReasoningContent(exec.response),
-				LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
-			}
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, finalMsg)
-			ts.recordPersistedMessage(finalMsg)
-			ts.ingestMessage(turnCtx, al, finalMsg)
+			p.persistAssistantReply(turnCtx, ts, assistantReply(exec, finalContent))
 		}
 		if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
 			al.emitEvent(
@@ -112,4 +103,24 @@ func (p *Pipeline) Finalize(
 		status:       turnStatus,
 		followUps:    append([]bus.InboundMessage(nil), ts.followUps...),
 	}, nil
+}
+
+// assistantReply is the model's reply of this call, as the session keeps it.
+func assistantReply(exec *turnExecution, content string) providers.Message {
+	return providers.Message{
+		Role:             "assistant",
+		Content:          content,
+		ModelName:        exec.llmModelName,
+		ReasoningContent: responseReasoningContent(exec.response),
+		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
+	}
+}
+
+// persistAssistantReply writes a reply into the session history: the turn's
+// answer, or a reply the person watched being streamed before the message
+// they sent meanwhile (keepWatchedReply). (seucaranguejo fork)
+func (p *Pipeline) persistAssistantReply(turnCtx context.Context, ts *turnState, msg providers.Message) {
+	ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+	ts.recordPersistedMessage(msg)
+	ts.ingestMessage(turnCtx, p.al, msg)
 }
