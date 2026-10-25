@@ -966,7 +966,9 @@ func (p *Pipeline) CallLLM(
 	// The web gRPC gateway ("grpc") consumes the same structured interim
 	// publishing as the native pico web channel so it can show reasoning and
 	// tool calls live (seucaranguejo fork).
-	structuredInterimChannel := ts.channel == "pico" || ts.channel == "grpc"
+	// Um turno silencioso não mostra o raciocínio no chat: o pensamento sai
+	// antes do gate AllowInterimPicoPublish. (seucaranguejo fork)
+	structuredInterimChannel := (ts.channel == "pico" || ts.channel == "grpc") && !ts.opts.Silent
 	shouldPublishPicoToolCallInterim := structuredInterimChannel && len(exec.response.ToolCalls) > 0
 	if shouldPublishPicoToolCallInterim {
 		// Pico tool-call turns publish their reasoning/content/tool summary as a
@@ -1134,7 +1136,12 @@ func (p *Pipeline) CallLLM(
 		// Never retry after streaming already delivered visible text (same
 		// rule as the stream-error fallback): the user saw output, and a
 		// retry would produce a duplicated answer.
+		// Num turno silencioso a resposta vazia depois de uma ferramenta é o fim
+		// pedido, não o glitch: sem retry. Antes de qualquer ferramenta a run
+		// ainda não fez nada (a nota do cron manda começar pelo run.sh), então o
+		// retry continua valendo. (seucaranguejo fork)
 		if responseContent == "" && !exec.gracefulTerminal &&
+			!(ts.opts.Silent && exec.toolRanThisTurn) &&
 			!exec.streamingPublishedContent &&
 			exec.emptyResponseRetries < maxEmptyResponseRetries {
 			exec.emptyResponseRetries++
@@ -1159,7 +1166,8 @@ func (p *Pipeline) CallLLM(
 		// the synthetic error message, salvage the thinking as the reply.
 		// Providers surface it either as reasoning_content (DeepSeek-style)
 		// or reasoning (OpenRouter/AI-Gateway-style); check both.
-		if responseContent == "" && ts.channel != "pico" {
+		// Nem o raciocínio vira resposta num turno silencioso. (seucaranguejo fork)
+		if responseContent == "" && ts.channel != "pico" && !ts.opts.Silent {
 			if exec.response.ReasoningContent != "" {
 				responseContent = exec.response.ReasoningContent
 			} else if exec.response.Reasoning != "" {

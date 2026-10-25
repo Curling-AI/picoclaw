@@ -126,14 +126,18 @@ type processOptions struct {
 	// isso é o orçamento do ciclo, no control-plane. (seucaranguejo fork)
 	MaxToolIterations       int
 	TurnProfile             config.EffectiveTurnProfile
-	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
-	Media                   []string               // media:// refs from inbound message
-	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
-	DefaultResponse         string                 // Response when LLM returns empty
-	EnableSummary           bool                   // Whether to trigger summarization
-	SendResponse            bool                   // Whether to send response via bus
-	AllowInterimPicoPublish bool                   // Whether pico tool-call interim text can be published when SendResponse is false
-	SuppressToolFeedback    bool                   // Whether to suppress inline tool feedback messages
+	SystemPromptOverride    string              // Override the default system prompt (Used by SubTurns)
+	Media                   []string            // media:// refs from inbound message
+	InitialSteeringMessages []providers.Message // Steering messages from refactor/agent
+	DefaultResponse         string              // Response when LLM returns empty
+	EnableSummary           bool                // Whether to trigger summarization
+	SendResponse            bool                // Whether to send response via bus
+	AllowInterimPicoPublish bool                // Whether pico tool-call interim text can be published when SendResponse is false
+	SuppressToolFeedback    bool                // Whether to suppress inline tool feedback messages
+	// Silent: turno de cron job silencioso. Uma resposta vazia é o fim esperado
+	// — sem retry, sem salvar o raciocínio como resposta, sem DefaultResponse e
+	// sem marcar o turno como incompleto. (seucaranguejo fork)
+	Silent                  bool
 	NoHistory               bool                   // If true, don't load session history (for heartbeat)
 	SkipInitialSteeringPoll bool                   // If true, skip the steering poll at loop start (used by Continue)
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks

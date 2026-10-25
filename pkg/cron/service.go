@@ -37,6 +37,12 @@ type CronPayload struct {
 	// (e.g. the seeded memory-refresh job); the agent-facing cron tool leaves
 	// it empty.
 	Model string `json:"model,omitempty"`
+	// Silent: a run não entrega nada ao chat por conta própria — nem a
+	// resposta final, nem feedback de ferramenta, nem a saída de um command
+	// que deu certo (a falha ainda vai). O que for para o usuário sai pela
+	// ferramenta message. Para jobs que na maioria das runs não têm novidade.
+	// (seucaranguejo fork)
+	Silent bool `json:"silent,omitempty"`
 	// Execution origin is assigned by the platform, never by the agent tool.
 	LoopSlug  string `json:"loop_slug,omitempty"`
 	RoundKind string `json:"round_kind,omitempty"`
@@ -597,6 +603,7 @@ func (cs *CronService) AddJobWithModel(
 			Channel:   channel,
 			To:        to,
 			Model:     model,
+			Silent:    false,
 			Command:   "",
 			LoopSlug:  "",
 			RoundKind: "",

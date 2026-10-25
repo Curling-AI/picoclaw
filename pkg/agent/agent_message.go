@@ -75,7 +75,7 @@ func (al *AgentLoop) ProcessDirectWithResult(
 	message.Content = request.Content
 	message.SessionKey = request.SessionKey
 	message.Media = append([]string(nil), request.Media...)
-	return al.processMessageResult(ctx, message, request.Progress)
+	return al.processMessageResult(ctx, message, request.Progress, request.Silent)
 }
 
 // ProcessDirectWithMedia is ProcessDirectWithChannel plus media attachments:
@@ -167,7 +167,7 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 }
 
 func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
-	result, err := al.processMessageResult(ctx, msg, nil)
+	result, err := al.processMessageResult(ctx, msg, nil, false)
 	return result.Content, err
 }
 
@@ -175,6 +175,7 @@ func (al *AgentLoop) processMessageResult(
 	ctx context.Context,
 	msg bus.InboundMessage,
 	progress func(string),
+	silent bool,
 ) (turnresult.Result, error) {
 	msg = al.prepareInboundMessageForAgent(ctx, msg)
 
@@ -257,6 +258,16 @@ func (al *AgentLoop) processMessageResult(
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
 		return turnresult.Failure(err), err
+	}
+	if silent {
+		// Fecha todos os caminhos que levam texto ao chat sem passar pela
+		// ferramenta message: o fallback de resposta vazia, o feedback de
+		// ferramenta e o stream/interim do web (pico/grpc), que entrega o texto
+		// final antes de o cron decidir publicar. (seucaranguejo fork)
+		opts.Silent = true
+		opts.DefaultResponse = ""
+		opts.SuppressToolFeedback = true
+		opts.AllowInterimPicoPublish = false
 	}
 
 	// context-dependent commands check their own Runtime fields and report
