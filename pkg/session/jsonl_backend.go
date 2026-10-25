@@ -147,6 +147,10 @@ func (b *JSONLBackend) GetHistory(key string) []providers.Message {
 		log.Printf("session: get history: %v", err)
 		return []providers.Message{}
 	}
+	for index := range msgs {
+		msgs[index].HistoryID = ""
+		msgs[index].HistoryRunID = ""
+	}
 	return msgs
 }
 

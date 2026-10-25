@@ -179,6 +179,9 @@ type Attachment struct {
 }
 
 type Message struct {
+	// HistoryID belongs to persistence; provider request encoders never receive it.
+	HistoryID        string         `json:"-"`
+	HistoryRunID     string         `json:"-"`
 	Role             string         `json:"role"`
 	Content          string         `json:"content"`
 	ModelName        string         `json:"model_name,omitempty"`

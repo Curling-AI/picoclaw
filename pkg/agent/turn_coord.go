@@ -25,6 +25,7 @@ func (al *AgentLoop) runTurn(
 		modelMu.RLock()
 		defer modelMu.RUnlock()
 	}
+	ts.historyRunID = providers.HistoryRun(ctx)
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
@@ -226,7 +227,7 @@ func (al *AgentLoop) runTurn(
 					ts.repeats.reset()
 				}
 				if !ts.opts.NoHistory {
-					ts.agent.Sessions.AddFullMessage(ts.sessionKey, pm)
+					ts.appendHistoryMessage(pm)
 					ts.recordPersistedMessage(pm)
 					ts.ingestMessage(turnCtx, al, pm)
 				}

@@ -41,14 +41,24 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
-	Key       string          `json:"key"`
-	Summary   string          `json:"summary"`
-	Skip      int             `json:"skip"`
-	Count     int             `json:"count"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Scope     json.RawMessage `json:"scope,omitempty"`
-	Aliases   []string        `json:"aliases,omitempty"`
+	HistoryEpoch            int64           `json:"history_epoch,omitempty"`
+	HistoryFileEpoch        int64           `json:"history_file_epoch,omitempty"`
+	HistoryGeneration       string          `json:"history_generation,omitempty"`
+	HistoryFileGeneration   string          `json:"history_file_generation,omitempty"`
+	HistoryPrefix           int64           `json:"history_prefix,omitempty"`
+	HistoryParentGeneration string          `json:"history_parent_generation,omitempty"`
+	HistoryRetainedUntil    int64           `json:"history_retained_until,omitempty"`
+	HistoryMutationRunID    string          `json:"history_mutation_run_id,omitempty"`
+	HistoryDigest           string          `json:"history_digest,omitempty"`
+	HistoryTip              string          `json:"history_tip,omitempty"`
+	Key                     string          `json:"key"`
+	Summary                 string          `json:"summary"`
+	Skip                    int             `json:"skip"`
+	Count                   int             `json:"count"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+	Scope                   json.RawMessage `json:"scope,omitempty"`
+	Aliases                 []string        `json:"aliases,omitempty"`
 }
 
 // JSONLStore implements Store using append-only JSONL files.
@@ -458,13 +468,15 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	canonicalMeta.Scope = cloneRawJSON(scope)
 	canonicalMeta.Aliases = normalizeAliases(sessionKey, aliases)
 	canonicalMeta.Skip = 0
+	canonicalMeta.HistoryPrefix = 0
+	resetHistoryGeneration(&canonicalMeta)
 	canonicalMeta.Count = len(aliasHistory)
 	canonicalMeta.UpdatedAt = now
 	if aliasSummary != "" {
 		canonicalMeta.Summary = aliasSummary
 	}
 
-	if err := s.rewriteJSONL(sessionKey, aliasHistory); err != nil {
+	if err := s.rewriteJSONL(sessionKey, aliasHistory, canonicalMeta); err != nil {
 		return false, err
 	}
 	if err := s.writeMeta(sessionKey, canonicalMeta); err != nil {
@@ -554,6 +566,8 @@ func readMessages(path string, skip int) ([]providers.Message, error) {
 		if messageutil.IsTransientAssistantThoughtMessage(msg) {
 			continue
 		}
+		msg.HistoryID = decodedHistoryID(line, filepath.Base(path), int64(lineNum-1))
+		msg.HistoryRunID = decodedHistoryRunID(line)
 		msgs = append(msgs, msg)
 	}
 	if scanner.Err() != nil {
@@ -607,22 +621,22 @@ func scanRetainedMessageLines(path string) (int, []int, error) {
 }
 
 func (s *JSONLStore) AddMessage(
-	_ context.Context, sessionKey, role, content string,
+	ctx context.Context, sessionKey, role, content string,
 ) error {
-	return s.addMsg(sessionKey, providers.Message{
+	return s.addMsg(ctx, sessionKey, providers.Message{
 		Role:    role,
 		Content: content,
 	})
 }
 
 func (s *JSONLStore) AddFullMessage(
-	_ context.Context, sessionKey string, msg providers.Message,
+	ctx context.Context, sessionKey string, msg providers.Message,
 ) error {
-	return s.addMsg(sessionKey, msg)
+	return s.addMsg(ctx, sessionKey, msg)
 }
 
 // addMsg is the shared implementation for AddMessage and AddFullMessage.
-func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
+func (s *JSONLStore) addMsg(ctx context.Context, sessionKey string, msg providers.Message) error {
 	if messageutil.IsTransientAssistantThoughtMessage(msg) {
 		return nil
 	}
@@ -633,12 +647,15 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 
 	now := time.Now()
 
-	if msg.CreatedAt == nil {
-		msg.CreatedAt = &now
+	message := prepareHistoryMessage(msg, now, providers.HistoryRun(ctx))
+	meta, err := s.readMeta(sessionKey)
+	if err != nil {
+		return err
 	}
+	ensureHistoryGeneration(&meta, sessionKey)
 
 	// Append the message as a single JSON line.
-	line, err := json.Marshal(msg)
+	line, err := marshalHistoryMessage(message, meta)
 	if err != nil {
 		return fmt.Errorf("memory: marshal message: %w", err)
 	}
@@ -651,6 +668,11 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	)
 	if err != nil {
 		return fmt.Errorf("memory: open jsonl for append: %w", err)
+	}
+	before, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return err
 	}
 	_, writeErr := f.Write(line)
 	if writeErr != nil {
@@ -670,15 +692,23 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	}
 
 	// Update metadata.
-	meta, err := s.readMeta(sessionKey)
-	if err != nil {
-		return err
-	}
 	if meta.Count == 0 && meta.CreatedAt.IsZero() {
 		meta.CreatedAt = now
 	}
+	if validHistoryDigest(meta.HistoryDigest) || (meta.Count == 0 && before.Size() == 0) {
+		digest := meta.HistoryDigest
+		if digest == "" {
+			digest = emptyHistoryDigest
+		}
+		meta.HistoryDigest, err = appendHistoryDigest(digest, message)
+		if err != nil {
+			return err
+		}
+	}
+	meta.HistoryTip = message.HistoryID
 	meta.Count++
 	meta.UpdatedAt = now
+	ensureHistoryGeneration(&meta, sessionKey)
 
 	return s.writeMeta(sessionKey, meta)
 }
@@ -778,17 +808,11 @@ func (s *JSONLStore) TruncateHistory(
 	return s.writeMeta(sessionKey, meta)
 }
 
-func (s *JSONLStore) SetHistory(
-	_ context.Context,
-	sessionKey string,
-	history []providers.Message,
-) error {
-	history = messageutil.FilterInvalidHistoryMessages(history)
-
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
-
+func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history []providers.Message) error {
+	filtered := messageutil.FilterInvalidHistoryMessages(history)
+	lock := s.sessionLock(sessionKey)
+	lock.Lock()
+	defer lock.Unlock()
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
@@ -797,26 +821,16 @@ func (s *JSONLStore) SetHistory(
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = now
 	}
-	meta.Skip = 0
-	meta.Count = len(history)
 	meta.UpdatedAt = now
-
-	for i := range history {
-		if history[i].CreatedAt == nil {
-			history[i].CreatedAt = &now
-		}
+	ensureHistoryGeneration(&meta, sessionKey)
+	prepared := make([]providers.Message, len(filtered))
+	for index, message := range filtered {
+		prepared[index] = prepareHistoryMessage(message, now, providers.HistoryRun(ctx))
 	}
-
-	// Write meta BEFORE rewriting the JSONL file. If we crash between
-	// the two writes, meta has Skip=0 and the old file is still intact,
-	// so GetHistory reads from line 1 — returning "too many" messages
-	// rather than losing data. The next SetHistory call corrects this.
-	err = s.writeMeta(sessionKey, meta)
-	if err != nil {
+	if appended, err := s.appendHistorySuffix(sessionKey, prepared, meta); appended || err != nil {
 		return err
 	}
-
-	return s.rewriteJSONL(sessionKey, history)
+	return s.replaceHistory(ctx, sessionKey, filtered, meta)
 }
 
 // Compact physically rewrites the JSONL file, dropping all logically
@@ -852,6 +866,10 @@ func (s *JSONLStore) Compact(
 	// (uncompacted) file is still intact, so GetHistory reads from
 	// line 1 — returning previously-truncated messages rather than
 	// losing data. The next Compact or TruncateHistory corrects this.
+	ensureHistoryGeneration(&meta, sessionKey)
+	meta.HistoryPrefix += int64(meta.Skip)
+	meta.HistoryFileGeneration = newHistoryID()
+	meta.HistoryFileEpoch++
 	meta.Skip = 0
 	meta.Count = len(active)
 	meta.UpdatedAt = time.Now()
@@ -861,19 +879,19 @@ func (s *JSONLStore) Compact(
 		return err
 	}
 
-	return s.rewriteJSONL(sessionKey, active)
+	return s.rewriteJSONL(sessionKey, active, meta)
 }
 
 // rewriteJSONL atomically replaces the JSONL file with the given messages
 // using the project's standard WriteFileAtomic (temp + fsync + rename).
 func (s *JSONLStore) rewriteJSONL(
-	sessionKey string, msgs []providers.Message,
+	sessionKey string, msgs []providers.Message, meta SessionMeta,
 ) error {
 	msgs = messageutil.FilterInvalidHistoryMessages(msgs)
 
 	var buf bytes.Buffer
 	for i, msg := range msgs {
-		line, err := json.Marshal(msg)
+		line, err := marshalHistoryMessage(msg, meta)
 		if err != nil {
 			return fmt.Errorf("memory: marshal message %d: %w", i, err)
 		}

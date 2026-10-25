@@ -71,7 +71,7 @@ func (al *AgentLoop) writeHeldSelfDeliveries(ts *turnState, exec *turnExecution)
 	stripe.Lock()
 	defer stripe.Unlock()
 	for _, msg := range ts.selfDeliveries[ts.selfWritten:] {
-		ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+		ts.appendHistoryMessage(msg)
 		ts.recordPersistedMessage(msg)
 		if joinsLastMessage(exec.messages, msg) {
 			exec.messages = joinToLastMessage(exec.messages, msg)
