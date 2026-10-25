@@ -1316,6 +1316,12 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			// dela se perder além do raciocínio. A linha datada de cada entrega
 			// entra antes da junção, para cada parte continuar distinguível.
 			// (seucaranguejo fork — ver delivery_mirror.go)
+			// A conversation a delivery opened starts with the assistant, which
+			// some providers refuse: a user turn saying so goes before it, in the
+			// request only. (seucaranguejo fork — see delivery_mirror.go)
+			if len(sanitized) == 0 && msg.Delivery != nil {
+				sanitized = append(sanitized, providers.Message{Role: "user", Content: deliveryOpening})
+			}
 			msg.Content = historyContent(msg)
 			if n := len(sanitized); n > 0 && sanitized[n-1].Role == "assistant" &&
 				len(sanitized[n-1].ToolCalls) == 0 && isPlainAssistant(msg) {
