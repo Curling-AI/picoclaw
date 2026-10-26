@@ -72,7 +72,7 @@ Product doesn't use it, but kept in the fork. Needs re-wiring onto upstream's ev
 3. guardrails/loop_detection — product config/UI contract; re-wire onto pipeline.
 4. S3 Mountpoint vs upstream `fileutil.WriteFileAtomic` (temp+rename+0600).
 
-## Preserved history capture overrides (MAPP-249)
+## Preserved history capture overrides (MAPP-289)
 
 - `pkg/memory/jsonl.go`, `history_*.go`, `migration.go`, and `prune.go`: private occurrence/run IDs, generation lineage, bounded cursor pages, and the committed `HistoryBytes` boundary. Append journals retain OLD metadata/offset; rewrites also retain the previous raw JSONL because `WriteFileAtomic` can partially fail through its direct-write fallback. Recovery records an OLD/NEW decision before rollback; unknown metadata and cleanup failures fence only the affected key. Startup, metadata caching, alias promotion, listing and pruning must preserve that isolation and use the same sanitized-key lock. Deletion removes both recovery files and evicts owned caches; this is not a cross-process deletion transaction.
 - `pkg/providers/protocoltypes/types.go`, `pkg/session/jsonl_backend.go`, and agent history-write call sites: preserve private history provenance through internal reads/writes without adding it to the public provider DTO. Epoch and byte-count fields remain part of the existing capture consumer contract.
