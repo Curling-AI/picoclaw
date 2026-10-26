@@ -161,6 +161,38 @@ func TestMirrorDelivery_SkipsChatsWithoutConversation(t *testing.T) {
 	}
 }
 
+// The light mode's main conversation exists in the control plane before its
+// first message, and what automations deliver to it cannot wait for one.
+func TestMirrorDelivery_OpensAConversationTheControlPlaneKeeps(t *testing.T) {
+	al, sessions := newMirrorLoop(t)
+	al.SetDeliverySessionResolver(func(channel, chatID string) string {
+		switch chatID {
+		case "123":
+			return mirrorChatSession
+		case "999":
+			return "sk_v1_never_talked"
+		}
+		return ""
+	})
+	al.SetDeliveryConversationKept(func(key string) bool { return key == mirrorChatSession })
+
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "123", mirrorCronSession, "Lembrete: reunião às 14h.")
+	al.PublishResponseIfNeeded(context.Background(), "telegram", "999", mirrorCronSession, "chat novo")
+
+	got := lastMessage(t, sessions, mirrorChatSession)
+	if got.Role != "assistant" || got.Content != "Lembrete: reunião às 14h." || got.Delivery == nil {
+		t.Fatalf(
+			"kept conversation got %s %q (delivery %v), want the delivered reminder",
+			got.Role,
+			got.Content,
+			got.Delivery,
+		)
+	}
+	if history := sessions.GetHistory("sk_v1_never_talked"); len(history) != 0 {
+		t.Fatalf("mirror opened a conversation nobody keeps: %+v", history)
+	}
+}
+
 func TestMirrorDelivery_DisabledWithoutResolver(t *testing.T) {
 	al, sessions := newMirrorTestLoop(t)
 	al.SetDeliverySessionResolver(nil)
