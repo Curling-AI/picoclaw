@@ -79,7 +79,7 @@ func (s *JSONLStore) appendHistoryMessages(key string, messages []providers.Mess
 	if err != nil {
 		return errors.Join(err, s.recoverHistoryWrite(key))
 	}
-	_ = os.Remove(s.historyRecoveryPath(key))
+	s.finishHistoryWrite(key)
 	return nil
 }
 
@@ -199,7 +199,23 @@ func (s *JSONLStore) beginHistoryWrite(key string, recovery historyWriteRecovery
 		_ = os.Remove(s.historyRecoveryPath(key))
 		return err
 	}
+	s.markHistoryPending(key)
 	return nil
+}
+
+func (s *JSONLStore) markHistoryPending(key string) {
+	sanitized := sanitizeKey(key)
+	s.metaMu.Lock()
+	s.historyPending[sanitized] = true
+	delete(s.metaCache, sanitized)
+	s.metaMu.Unlock()
+}
+
+func (s *JSONLStore) finishHistoryWrite(key string) {
+	_ = os.Remove(s.historyRecoveryPath(key))
+	s.metaMu.Lock()
+	delete(s.historyPending, sanitizeKey(key))
+	s.metaMu.Unlock()
 }
 
 func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Message, meta SessionMeta) error {
@@ -230,15 +246,23 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 		return errors.Join(err, s.recoverHistoryWrite(key))
 	}
 	// If cleanup is interrupted, recovery recognizes the committed generation.
-	_ = os.Remove(s.historyRecoveryPath(key))
+	s.finishHistoryWrite(key)
 	return nil
 }
 
 func (s *JSONLStore) recoverHistoryWrite(key string) error {
 	data, err := os.ReadFile(s.historyRecoveryPath(key))
 	if errors.Is(err, os.ErrNotExist) {
+		sanitized := sanitizeKey(key)
+		s.metaMu.Lock()
+		if s.historyPending[sanitized] {
+			delete(s.metaCache, sanitized)
+			delete(s.historyPending, sanitized)
+		}
+		s.metaMu.Unlock()
 		return nil
 	}
+	s.markHistoryPending(key)
 	if err != nil {
 		return fmt.Errorf("memory: read history recovery: %w", err)
 	}
@@ -250,9 +274,6 @@ func (s *JSONLStore) recoverHistoryWrite(key string) error {
 		recovery.Next.HistoryFileGeneration == "" || recovery.Next.Count < 0 {
 		return errors.New("invalid history recovery checkpoint")
 	}
-	s.metaMu.Lock()
-	delete(s.metaCache, sanitizeKey(key))
-	s.metaMu.Unlock()
 	committedMeta, readErr := os.ReadFile(s.metaPath(key))
 	var current SessionMeta
 	if readErr == nil && json.Unmarshal(committedMeta, &current) == nil &&
@@ -275,6 +296,6 @@ func (s *JSONLStore) recoverHistoryWrite(key string) error {
 			return err
 		}
 	}
-	_ = os.Remove(s.historyRecoveryPath(key))
+	s.finishHistoryWrite(key)
 	return nil
 }

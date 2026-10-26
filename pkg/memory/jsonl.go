@@ -86,6 +86,9 @@ type JSONLStore struct {
 	// seconds; with the cache it costs one ReadDir.
 	metaMu    sync.RWMutex
 	metaCache map[string]SessionMeta
+	// A failed rollback can outlive cache eviction. Fence every cache read
+	// until the pending journal has published either the OLD or NEW state.
+	historyPending map[string]bool
 }
 
 // NewJSONLStore creates a new JSONL-backed store rooted at dir.
@@ -94,7 +97,9 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory: create directory: %w", err)
 	}
-	store := &JSONLStore{dir: dir, metaCache: make(map[string]SessionMeta)}
+	store := &JSONLStore{
+		dir: dir, metaCache: make(map[string]SessionMeta), historyPending: make(map[string]bool),
+	}
 	if err := store.recoverPendingHistoryWrites(); err != nil {
 		return nil, fmt.Errorf("memory: recover interrupted history: %w", err)
 	}
@@ -110,7 +115,9 @@ func (s *JSONLStore) sessionLock(key string) *sync.Mutex {
 
 func lockShard(key string) uint32 {
 	h := fnv.New32a()
-	h.Write([]byte(key))
+	// Listings address a session by filename; all names for that physical
+	// file must share the writer's shard, including the unsanitized key.
+	h.Write([]byte(sanitizeKey(key)))
 	return h.Sum32() % numLockShards
 }
 
@@ -152,8 +159,9 @@ func copyMeta(m SessionMeta) SessionMeta {
 func (s *JSONLStore) cachedMeta(sanitized string) (SessionMeta, bool) {
 	s.metaMu.RLock()
 	meta, ok := s.metaCache[sanitized]
+	pending := s.historyPending[sanitized]
 	s.metaMu.RUnlock()
-	if !ok {
+	if !ok || pending {
 		return SessionMeta{}, false
 	}
 	return copyMeta(meta), true
@@ -894,22 +902,11 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 			continue
 		}
 		sanitized := strings.TrimSuffix(entry.Name(), ".meta.json")
-		if meta, ok := s.cachedMeta(sanitized); ok {
-			if meta.Key != "" {
-				metas = append(metas, meta)
-			}
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		var meta SessionMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
-			continue
-		}
-		if meta.Key != "" {
-			s.storeCachedMeta(sanitized, meta)
+		lock := s.sessionLock(sanitized)
+		lock.Lock()
+		meta, readErr := s.readMeta(sanitized)
+		lock.Unlock()
+		if readErr == nil && meta.Key != "" {
 			metas = append(metas, meta)
 		}
 	}
