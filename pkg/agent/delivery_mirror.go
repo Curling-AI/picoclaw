@@ -41,6 +41,11 @@ import (
 // processadas. "" = chat sem conversa para espelhar.
 type DeliverySessionResolver func(channel, chatID string) string
 
+// DeliveryConversationKept tells whether sessionKey is a conversation the
+// control plane keeps before its first message (the light mode's main one),
+// which a delivery may open. Any other target needs a conversation in course.
+type DeliveryConversationKept func(sessionKey string) bool
+
 // mirrorStripes é o número de faixas de lock do espelho. Uma faixa segura, para
 // as sessões que caem nela, a checagem "a sessão está num turno?" junto com a
 // escrita, e o registro de turno. São faixas, e não um lock por chave, porque
@@ -56,6 +61,7 @@ type deliveryMirror struct {
 	// antes do mu.
 	mu      sync.Mutex
 	resolve DeliverySessionResolver
+	kept    DeliveryConversationKept
 	// pending segura o que chegou com um turno ativo na sessão de destino. O
 	// turno grava o histórico aos pedaços (tool_calls, depois cada resultado) e
 	// restaura o snapshot inicial quando é abortado: escrever no meio dele pode
@@ -126,6 +132,16 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 	al.mirror.resolve = fn
 }
 
+// SetDeliveryConversationKept names the conversations a delivery may open.
+func (al *AgentLoop) SetDeliveryConversationKept(fn DeliveryConversationKept) {
+	if al == nil {
+		return
+	}
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	al.mirror.kept = fn
+}
+
 // MirrorDelivery records a delivery made outside the agent loop: the output a
 // command cron job published, or what a script sent through the chat's API and
 // a proxy in the pod saw go by.
@@ -157,7 +173,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 		return
 	}
 	al.mirror.mu.Lock()
-	resolve := al.mirror.resolve
+	resolve, kept := al.mirror.resolve, al.mirror.kept
 	al.mirror.mu.Unlock()
 	if resolve == nil {
 		return
@@ -179,7 +195,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 	}
 	// Resolvidos fora do lock: tocam o disco (EFS em produção).
 	agent := al.agentForSession(target)
-	if agent == nil || !hasConversation(agent.Sessions, target) {
+	if agent == nil || !(hasConversation(agent.Sessions, target) || kept != nil && kept(target)) {
 		return
 	}
 
@@ -502,6 +518,10 @@ func historyContent(msg providers.Message) string {
 // selfDeliveryLine opens the history line of a send of the conversation's own
 // script.
 const selfDeliveryLine = "[Sent to this chat by a script this conversation started"
+
+// deliveryOpening is the user turn the provider gets before a conversation a
+// delivery opened.
+const deliveryOpening = "[The conversation starts with a message sent to this chat]"
 
 // heartbeatSessionKey is the session heartbeat turns run in (agent_message.go).
 const heartbeatSessionKey = "heartbeat"
