@@ -20,7 +20,11 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 			t.Run(operation+"/"+change, func(t *testing.T) {
 				store := newTestStore(t)
 				canonical, alias := "aaa_receipt_owner", "agent:main:receipt-owner"
-				if _, appendErr := store.AppendHistoryReceipt(t.Context(), canonical, providers.Message{Role: "user", Content: "owned history"}); appendErr != nil {
+				if _, appendErr := store.AppendHistoryReceipt(
+					t.Context(),
+					canonical,
+					providers.Message{Role: "user", Content: "owned history"},
+				); appendErr != nil {
 					t.Fatal(appendErr)
 				}
 				if metaErr := store.UpsertSessionMeta(t.Context(), canonical, nil, []string{alias}); metaErr != nil {
@@ -34,7 +38,7 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				barrier := ""
+				var barrier string
 				for index := 0; ; index++ {
 					barrier = fmt.Sprintf("zzz_receipt_barrier_%d", index)
 					if store.sessionLock(barrier) != store.sessionLock(canonical) {
@@ -60,7 +64,11 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				done := make(chan result, 1)
 				go func() {
 					if operation == "append" {
-						receipt, appendErr := store.AppendHistoryReceipt(t.Context(), alias, providers.Message{Role: "assistant", Content: "must not persist"})
+						receipt, appendErr := store.AppendHistoryReceipt(
+							t.Context(),
+							alias,
+							providers.Message{Role: "assistant", Content: "must not persist"},
+						)
 						done <- result{receipt: receipt, err: appendErr}
 					} else {
 						history, readErr := store.ReadHistoryWithReceipts(t.Context(), alias)
@@ -101,7 +109,10 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				case <-time.After(5 * time.Second):
 					t.Fatal("owner check did not finish")
 				}
-				if !errors.Is(actual.err, ErrHistoryOrderUnavailable) || errors.Is(actual.err, ErrHistoryOwnershipUnavailable) || actual.receipt.Order.Valid() || len(actual.history) != 0 {
+				if !errors.Is(actual.err, ErrHistoryOrderUnavailable) ||
+					errors.Is(actual.err, ErrHistoryOwnershipUnavailable) ||
+					actual.receipt.Order.Valid() ||
+					len(actual.history) != 0 {
 					t.Fatal("stale owner resolution authorized receipt or fallback", actual)
 				}
 				after, readErr := os.ReadFile(store.jsonlPath(canonical))
@@ -109,7 +120,8 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 					t.Fatal("revoked ownership changed transcript bytes", readErr)
 				}
 				finalMeta, metaErr := store.GetSessionMeta(t.Context(), canonical)
-				if metaErr != nil || finalMeta.Count != original.Count || finalMeta.HistorySequence != original.HistorySequence {
+				if metaErr != nil || finalMeta.Count != original.Count ||
+					finalMeta.HistorySequence != original.HistorySequence {
 					t.Fatal("revoked ownership advanced the producer checkpoint", finalMeta, metaErr)
 				}
 			})
@@ -170,7 +182,11 @@ func TestHistoryReceiptRejectsDuplicateSequenceOnDistinctOccurrences(t *testing.
 func TestHistoryReceiptRejectsDurableNewDecisionWithChangedCheckpoint(t *testing.T) {
 	store := newTestStore(t)
 	key := "sk_v1_new_mismatch"
-	if _, appendErr := store.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "first"}); appendErr != nil {
+	if _, appendErr := store.AppendHistoryReceipt(
+		t.Context(),
+		key,
+		providers.Message{Role: "assistant", Content: "first"},
+	); appendErr != nil {
 		t.Fatal(appendErr)
 	}
 	var expected []byte
@@ -201,7 +217,11 @@ func TestHistoryReceiptRejectsDurableNewDecisionWithChangedCheckpoint(t *testing
 		}
 		return errors.Join(fault, fileutil.WriteFileAtomic(path, broken, mode))
 	}
-	receipt, err := store.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "uncertain"})
+	receipt, err := store.AppendHistoryReceipt(
+		t.Context(),
+		key,
+		providers.Message{Role: "assistant", Content: "uncertain"},
+	)
 	if err == nil || receipt.Order.Valid() {
 		t.Fatal("NEW enum hid a mismatched checkpoint", receipt, err)
 	}

@@ -27,7 +27,11 @@ func TestProviderHistoryIgnoresInvalidPrivateOrderWhileReceiptsAndRewritesReject
 			}
 			key := "sk_v1_private_order_provider"
 			for _, content := range []string{"earlier content", "visible content"} {
-				if _, appendErr := store.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: content}); appendErr != nil {
+				if _, appendErr := store.AppendHistoryReceipt(
+					t.Context(),
+					key,
+					providers.Message{Role: "assistant", Content: content},
+				); appendErr != nil {
 					t.Fatal(appendErr)
 				}
 			}
@@ -84,11 +88,24 @@ func TestProviderHistoryIgnoresInvalidPrivateOrderWhileReceiptsAndRewritesReject
 					t.Fatal("provider retained private ordering metadata", message)
 				}
 			}
-			if _, readErr := backend.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(readErr, memory.ErrHistoryOrderUnavailable) {
+			if _, readErr := backend.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				readErr,
+				memory.ErrHistoryOrderUnavailable,
+			) {
 				t.Fatal("receipt reader accepted invalid private proof", readErr)
 			}
 			history[1].Content = "attempted rewrite"
-			if rewriteErr := store.SetHistory(t.Context(), key, history); !errors.Is(rewriteErr, memory.ErrHistoryOrderUnavailable) {
+			if rewriteErr := store.SetHistory(
+				t.Context(),
+				key,
+				history,
+			); !errors.Is(
+				rewriteErr,
+				memory.ErrHistoryOrderUnavailable,
+			) {
 				t.Fatal("rewrite washed invalid private proof", rewriteErr)
 			}
 			after, err := os.ReadFile(dataPath)

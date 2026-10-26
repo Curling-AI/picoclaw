@@ -217,7 +217,7 @@ func TestHistoryOrderLegacyCorruptRowsRemainFilteredAfterRollout(t *testing.T) {
 	}
 }
 
-func TestHistoryOrderImportBeyondCheckpointGetsANewProof(t *testing.T) {
+func TestHistoryOrderImportBeyondCheckpointRequiresExplicitNewSession(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:uncommitted-import-order"
 	first, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "committed"})
@@ -239,19 +239,28 @@ func TestHistoryOrderImportBeyondCheckpointGetsANewProof(t *testing.T) {
 	if closeErr := file.Close(); closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	// The legacy provider reader can see a complete external tail. Explicitly
-	// importing it may commit new content, but cannot attest it as old legacy.
+	// The content reader can see a complete external tail. Its source stays
+	// fenced; deliberate recovery into a fresh canonical session creates its
+	// own proofs without guessing continuity with the old stream.
 	history, err := s.GetHistory(t.Context(), key)
 	if err != nil || len(history) != 2 {
 		t.Fatal(history, err)
 	}
-	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
+	if operationErr := s.SetHistory(t.Context(), key, history); !errors.Is(operationErr, ErrHistoryRecoveryRequired) {
 		t.Fatal(operationErr)
 	}
-	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 2 || read[0].Order != first.Order || read[1].Order.Sequence != 2 ||
-		read[1].Order.StreamID != first.Order.StreamID || read[1].LegacyBeforeStreamID != "" {
-		t.Fatal("an uncommitted import was laundered into an attested legacy occurrence", read, err)
+	recoveredKey := "sk_v1_recovered_external_tail"
+	if operationErr := s.SetHistory(t.Context(), recoveredKey, history); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), recoveredKey)
+	if err != nil || len(read) != 2 || !read[0].Order.Valid() || read[0].Order.Sequence != 1 ||
+		read[1].Order.Sequence != 2 || read[0].Order.StreamID != read[1].Order.StreamID ||
+		read[0].Order.StreamID == first.Order.StreamID || read[1].LegacyBeforeStreamID != "" {
+		t.Fatal("explicit recovery guessed old-stream continuity", read, err)
+	}
+	if _, readErr := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(readErr, ErrHistoryReceiptUnavailable) {
+		t.Fatal("new-session recovery cleared the old source's fence", readErr)
 	}
 }
 
@@ -275,20 +284,24 @@ func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
 	if err != nil || !bytes.Equal(stored, raw) {
 		t.Fatal("failed upgrade changed legacy data", err)
 	}
-	// Importing the same full transcript explicitly is allowed, but only the
-	// original committed prefix can retain zero-proof legacy provenance.
+	// The rejected append latches recovery. Content stays readable; deliberate
+	// import into a new session creates its own proofs for the trusted content.
 	history, err := s.GetHistory(t.Context(), key)
 	if err != nil || len(history) != 2 {
 		t.Fatal(history, err)
 	}
-	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
+	if operationErr := s.SetHistory(t.Context(), key, history); !errors.Is(operationErr, ErrHistoryRecoveryRequired) {
 		t.Fatal(operationErr)
 	}
-	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 2 || read[0].Order != (HistoryOrderProof{}) ||
-		read[0].LegacyBeforeStreamID == "" || !read[1].Order.Valid() || read[1].Order.Sequence != 1 ||
-		read[0].LegacyBeforeStreamID != read[1].Order.StreamID || read[1].LegacyBeforeStreamID != "" {
-		t.Fatal("explicit import laundered the tail into genuine legacy", read, err)
+	recoveredKey := "sk_v1_recovered_legacy_tail"
+	if operationErr := s.SetHistory(t.Context(), recoveredKey, history); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), recoveredKey)
+	if err != nil || len(read) != 2 || !read[0].Order.Valid() || read[0].Order.Sequence != 1 ||
+		read[1].Order.Sequence != 2 || read[0].Order.StreamID != read[1].Order.StreamID ||
+		read[0].LegacyBeforeStreamID != "" || read[1].LegacyBeforeStreamID != "" {
+		t.Fatal("explicit recovery laundered the tail into genuine legacy", read, err)
 	}
 }
 
@@ -366,7 +379,7 @@ func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compactErr := s.Compact(t.Context(), key); !errors.Is(compactErr, ErrHistoryOrderUnavailable) {
+	if compactErr := s.Compact(t.Context(), key); !errors.Is(compactErr, ErrHistoryRecoveryRequired) {
 		t.Fatal("compaction confirmed an external tail as old legacy", compactErr)
 	}
 	after, err := os.ReadFile(s.jsonlPath(key))
@@ -374,8 +387,12 @@ func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
 		t.Fatal("rejected compaction changed the raw transcript", err)
 	}
 	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 1 || read[0].Order.Sequence != 2 || read[0].Message.Content != "keep" {
-		t.Fatal("rejected compaction changed confirmed history", read, err)
+	if !errors.Is(err, ErrHistoryReceiptUnavailable) || len(read) != 0 {
+		t.Fatal("rejected compaction forgot its recovery fence", read, err)
+	}
+	visible, err := s.GetHistory(t.Context(), key)
+	if err != nil || len(visible) != 2 || visible[0].Content != "keep" || visible[1].Content != "uncommitted tail" {
+		t.Fatal("rejected compaction hid durable content", visible, err)
 	}
 }
 

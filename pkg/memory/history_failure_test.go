@@ -55,7 +55,7 @@ func TestHistoryPagePreservesContextErrors(t *testing.T) {
 	}
 }
 
-func TestHistoryPageExcludesTailUntilRuntimePreservesItWithoutOrder(t *testing.T) {
+func TestHistoryPagePreservesAppendWithoutAnOwnJournal(t *testing.T) {
 	s, key := pagedStore(t, 1)
 	before, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
 	if err != nil {
@@ -79,8 +79,8 @@ func TestHistoryPageExcludesTailUntilRuntimePreservesItWithoutOrder(t *testing.T
 		t.Fatal(err)
 	}
 	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-	if err != nil || !page.Complete || !reflect.DeepEqual(page.Entries, before.Entries) {
-		t.Fatal("an append without metadata commit broke the source", page, err)
+	if !errors.Is(err, ErrHistoryRecoveryRequired) || page.Complete {
+		t.Fatal("an unowned append was incorrectly proved complete", page, err)
 	}
 	if operationErr := s.AddMessage(t.Context(), key, "assistant", "committed next"); operationErr != nil {
 		t.Fatal(operationErr)
@@ -93,8 +93,19 @@ func TestHistoryPageExcludesTailUntilRuntimePreservesItWithoutOrder(t *testing.T
 	if err != nil || !bytes.HasPrefix(retained, durablePrefix) {
 		t.Fatal("content append rewrote an unknown complete prefix", err)
 	}
-	if _, receiptErr := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(receiptErr, ErrHistoryReceiptUnavailable) {
+	if _, receiptErr := s.ReadHistoryWithReceipts(
+		t.Context(),
+		key,
+	); !errors.Is(
+		receiptErr,
+		ErrHistoryReceiptUnavailable,
+	) {
 		t.Fatal("preserving unknown content manufactured an order receipt", receiptErr)
+	}
+	history, err := s.GetHistory(t.Context(), key)
+	if err != nil || len(history) != 3 || history[1].Content != "uncommitted" ||
+		history[2].Content != "committed next" {
+		t.Fatal("a later append lost an unowned durable row", history, err)
 	}
 }
 

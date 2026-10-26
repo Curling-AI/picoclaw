@@ -152,14 +152,24 @@ func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
 			if operationErr := s.AddMessage(t.Context(), key, "user", "cron history"); operationErr != nil {
 				t.Fatal(operationErr)
 			}
-			journal, err := json.Marshal(historyWriteRecovery{Meta: SessionMeta{Key: key}})
+			meta, err := s.readMeta(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := json.Marshal(historyWriteRecovery{Meta: meta, Next: meta})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if operationErr := os.WriteFile(s.historyRecoveryPath(key), journal, 0o600); operationErr != nil {
 				t.Fatal(operationErr)
 			}
-			if operationErr := os.WriteFile(s.historyDecisionPath(key), []byte("pending"), 0o600); operationErr != nil {
+			decision, err := json.Marshal(
+				historyDecisionRecord{Journal: journalDigest(journal), Decision: historyWriteNew},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operationErr := os.WriteFile(s.historyDecisionPath(key), decision, 0o600); operationErr != nil {
 				t.Fatal(operationErr)
 			}
 			s.markHistoryPending(key)

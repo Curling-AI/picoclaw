@@ -14,8 +14,8 @@ import (
 )
 
 // appendHistoryMessages commits the byte checkpoint only after the appended
-// data is synced. Failed writes roll back; after a process interruption the
-// persisted checkpoint still excludes any abandoned tail from capture.
+// data is synced. Only our own journal authorizes rollback of complete rows;
+// an external tail is preserved without claiming capture provenance for it.
 func (s *JSONLStore) appendHistoryMessages(key string, messages []providers.Message, meta SessionMeta) error {
 	_, err := s.appendHistoryMessagesFor(key, messages, meta, false)
 	return err
@@ -47,8 +47,10 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 		if err == nil {
 			if _, statErr := os.Stat(s.metaPath(key)); errors.Is(statErr, os.ErrNotExist) {
 				now := time.Now()
-				original = SessionMeta{Key: key}
-				meta = SessionMeta{Key: key, CreatedAt: now, UpdatedAt: now}
+				original = SessionMeta{Key: key, HistoryRecoveryRequired: meta.HistoryRecoveryRequired}
+				meta = SessionMeta{
+					Key: key, CreatedAt: now, UpdatedAt: now, HistoryRecoveryRequired: meta.HistoryRecoveryRequired,
+				}
 				resetHistoryGeneration(&meta)
 				s.metaMu.Lock()
 				delete(s.metaCache, sanitizeKey(key))
@@ -67,7 +69,6 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	if err != nil {
 		return nil, err
 	}
-	appendMeta := meta
 	legacyCount := meta.Count
 	offset, err := historyAppendOffset(file, &meta, info.Size())
 	if err != nil && !errors.Is(err, ErrHistoryCursor) {
@@ -77,17 +78,7 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	if proofErr == nil && meta.HistoryOrderVersion == 0 && meta.Count != legacyCount {
 		proofErr = ErrHistoryOrderUnavailable
 	}
-	completeTail := false
-	if proofErr == nil {
-		var tailErr error
-		completeTail, tailErr = hasCompleteHistoryTail(file, offset, info.Size())
-		if tailErr != nil {
-			return nil, tailErr
-		}
-		if completeTail {
-			proofErr = ErrHistoryOrderUnavailable
-		}
-	}
+	appendMeta := meta
 	ordered := make([]providers.Message, len(messages))
 	if proofErr == nil {
 		for index, message := range messages {
@@ -102,30 +93,45 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	}
 	if proofErr != nil {
 		if requireReceipt {
-			return nil, fmt.Errorf("%w: %w", ErrHistoryReceiptUnavailable, proofErr)
+			return nil, errors.Join(
+				fmt.Errorf("%w: %w", ErrHistoryReceiptUnavailable, proofErr),
+				s.markHistoryRecoveryRequired(key, &meta),
+			)
 		}
-		// Content persistence remains available, but no old stream/counter is
-		// reconstructed or attested. Latch the unavailable state in metadata
-		// and each new record until an explicit recovery chooses new evidence.
+		// Keep content and physical bookkeeping without reconstructing a lost
+		// stream/counter or calling a new zero-proof row genuine legacy.
 		meta = appendMeta
 		meta.HistoryRecoveryRequired = true
-		meta.HistoryDigest = ""
-		if !appendMeta.HistoryRecoveryRequired || appendMeta.HistoryBytes == nil || err != nil || completeTail {
+		if err != nil {
 			meta.HistoryBytes = nil
-			if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
-				return nil, seekErr
-			}
 			offset, err = historyAppendOffset(file, &meta, info.Size())
 			if err != nil {
 				return nil, err
 			}
-			meta.Skip = max(0, min(meta.Skip, meta.Count))
 		}
 		for index, message := range messages {
 			ordered[index] = messageWithHistoryOrder(message, HistoryOrderProof{})
 		}
 	}
 	messages = ordered
+	if meta.HistoryRecoveryRequired {
+		if operationErr := s.markHistoryRecoveryRequired(key, &meta); operationErr != nil {
+			return nil, operationErr
+		}
+		// The durable marker overlays readMeta, but OLD/NEW fingerprints must
+		// describe the actual metadata that preceded this append.
+		original, err = s.readRecoveryMeta(key)
+		if errors.Is(err, os.ErrNotExist) {
+			original, err = SessionMeta{Key: key}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if original.Key == "" {
+			original.Key = key
+		}
+		meta.HistoryDigest, meta.HistoryTip = "", ""
+	}
 	data, err := marshalHistoryJSONL(messages, meta)
 	if err != nil {
 		return nil, err
@@ -137,7 +143,7 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 			return nil, err
 		}
 	}
-	if meta.Count == 0 && offset == 0 {
+	if meta.Count == 0 && offset == 0 && !meta.HistoryRecoveryRequired {
 		meta.HistoryDigest = emptyHistoryDigest
 	}
 	for _, message := range messages {
@@ -148,7 +154,9 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 			}
 		}
 		meta.Count++
-		meta.HistoryTip = message.HistoryID
+		if !meta.HistoryRecoveryRequired {
+			meta.HistoryTip = message.HistoryID
+		}
 	}
 	end := offset + int64(len(data))
 	meta.HistoryBytes = &end
@@ -157,7 +165,8 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	}); commitErr != nil {
 		return nil, commitErr
 	}
-	// This also removes bytes left by a prior append that never committed meta.
+	// Discard only an incomplete suffix. Complete external rows are before
+	// offset, so even a failure of this append rolls back to their preserved EOF.
 	if truncateErr := file.Truncate(offset); truncateErr != nil {
 		return nil, errors.Join(truncateErr, s.recoverFailedHistoryWrite(key))
 	}
@@ -191,23 +200,6 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	return receipts, nil
 }
 
-// Complete rows beyond a checkpoint can be durable output from an older
-// writer whose metadata failed. They must not be truncated or called legacy.
-func hasCompleteHistoryTail(file *os.File, offset, physicalBytes int64) (bool, error) {
-	if offset == physicalBytes {
-		return false, nil
-	}
-	scanner := bufio.NewScanner(io.NewSectionReader(file, offset, physicalBytes-offset))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
-	scanner.Split(scanCommittedHistoryLine)
-	for scanner.Scan() {
-		if len(bytes.TrimRight(scanner.Bytes(), "\r\n")) != 0 {
-			return true, nil
-		}
-	}
-	return false, scanner.Err()
-}
-
 func (s *JSONLStore) rollbackHistoryAppend(key string, size int64) error {
 	file, err := os.OpenFile(s.jsonlPath(key), os.O_WRONLY, 0o644)
 	if err != nil {
@@ -228,10 +220,20 @@ func historyAppendOffset(file *os.File, meta *SessionMeta, physicalBytes int64) 
 		if *meta.HistoryBytes < 0 || *meta.HistoryBytes > physicalBytes {
 			return 0, ErrHistoryCursor
 		}
-		return *meta.HistoryBytes, nil
+		complete, err := hasCompleteHistoryTail(file, *meta.HistoryBytes, physicalBytes)
+		if err != nil && !errors.Is(err, ErrHistoryCapacity) {
+			return 0, err
+		}
+		if err == nil && !complete {
+			return *meta.HistoryBytes, nil
+		}
 	}
-	// One-time legacy upgrade: preserve complete raw rows and their positions.
-	// Subsequent ordinary writes use the byte checkpoint without rescanning.
+	// An unowned complete tail cannot be rolled back to an older checkpoint.
+	// Count physical rows for writer bookkeeping, without attesting origin or
+	// order. Ordinary appends at an unchanged checkpoint do not rescan prefixes.
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	scanner.Split(scanCommittedHistoryLine)
@@ -243,6 +245,9 @@ func historyAppendOffset(file *os.File, meta *SessionMeta, physicalBytes int64) 
 		if len(bytes.TrimRight(line, "\r\n")) > 0 {
 			count++
 		}
+		if errors.Is(historyRecordRecoveryRequired(line), ErrHistoryRecoveryRequired) {
+			meta.HistoryRecoveryRequired = true
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, err
@@ -250,8 +255,78 @@ func historyAppendOffset(file *os.File, meta *SessionMeta, physicalBytes int64) 
 	if count != meta.Count {
 		meta.HistoryDigest, meta.HistoryTip = "", ""
 	}
+	if (meta.HistoryBytes != nil && offset > *meta.HistoryBytes) || count > meta.Count {
+		meta.HistoryRecoveryRequired = true
+	}
 	meta.Count = count
+	if meta.Skip > count {
+		meta.Skip = count
+	}
 	return offset, nil
+}
+
+// Page/guard probes have a bounded budget. Append can fall back to the normal
+// full committed-row scan when a large partial tail makes this inconclusive.
+func hasCompleteHistoryTail(file *os.File, offset, physicalBytes int64) (bool, error) {
+	if offset < 0 || offset > physicalBytes {
+		return false, ErrHistoryCursor
+	}
+	if offset == physicalBytes {
+		return false, nil
+	}
+	var last [1]byte
+	if _, err := file.ReadAt(last[:], physicalBytes-1); err != nil {
+		return false, err
+	}
+	if last[0] == '\n' {
+		return true, nil
+	}
+	limit := min(physicalBytes-offset, int64(HistoryPageBytes))
+	reader := io.NewSectionReader(file, offset, limit)
+	buffer := make([]byte, historyReadBufferBytes)
+	for {
+		n, err := reader.Read(buffer)
+		if bytes.IndexByte(buffer[:n], '\n') >= 0 {
+			return true, nil
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	if physicalBytes-offset > limit {
+		return false, ErrHistoryCapacity
+	}
+	return false, nil
+}
+
+// Destructive operations cannot adopt, hide, or rewrite an unowned tail. The
+// caller holds the session lock; our own journal has already been resolved.
+func (s *JSONLStore) guardHistoryMutation(key string, meta SessionMeta) error {
+	if meta.HistoryRecoveryRequired {
+		return ErrHistoryRecoveryRequired
+	}
+	file, err := os.Open(s.jsonlPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if _, err := historyAppendOffset(file, &meta, info.Size()); err != nil {
+		return err
+	}
+	if meta.HistoryRecoveryRequired {
+		return errors.Join(ErrHistoryRecoveryRequired, s.markHistoryRecoveryRequired(key, &meta))
+	}
+	return nil
 }
 
 // Only a newline commits a physical row, including for legacy truncation scans.
@@ -272,6 +347,9 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 	original, err := s.readMeta(key)
 	if err != nil {
 		return err
+	}
+	if operationErr := s.guardHistoryMutation(key, original); operationErr != nil {
+		return operationErr
 	}
 	previous, existed, err := s.readRawJSONL(key)
 	if err != nil {

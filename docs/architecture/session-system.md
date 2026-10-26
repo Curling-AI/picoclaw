@@ -156,13 +156,14 @@ Both dispatch matching and session allocation use that mapping so that the same 
 
 The default runtime backend is `pkg/memory.JSONLStore`, wrapped by `session.JSONLBackend`.
 
-Each session has two persistent files and temporary recovery files:
+Each session has a transcript, metadata, temporary write recovery files, and an optional persistent recovery latch:
 
 ```text
 {sanitized_key}.jsonl
 {sanitized_key}.meta.json
 {sanitized_key}.jsonl.commit.json      # pending write journal
 {sanitized_key}.jsonl.commit.decision  # recovery decision, when needed
+{sanitized_key}.jsonl.recovery-required # persistent latch for an unproven source
 ```
 
 The files store:
@@ -182,10 +183,15 @@ The files store:
 - `Aliases`
 - `HistoryGeneration`, `HistoryFileGeneration`, lineage, digest and tip fields
 - `HistoryBytes`: the committed JSONL byte boundary
+- `HistoryRecoveryRequired`: history remains readable and appendable, but cannot provide capture proofs
 
 ## Write And Crash Semantics
 
-`AddMessage` and `AddFullMessage` write an immutable journal of the previous metadata and append offset, append and sync the JSONL, then publish metadata with `HistoryBytes`. The next append removes any abandoned bytes after that checkpoint. `SetHistory` can use the same path for a proven suffix; replacements and `Compact` journal the previous raw transcript, write JSONL first, and publish metadata last. The journal remains necessary because the shared file writer can fall back to a direct, partially failing metadata write.
+`AddMessage` and `AddFullMessage` write an immutable journal of the previous metadata and append offset, append and sync the JSONL, then publish metadata with `HistoryBytes`. A pending journal resolves to OLD or NEW before interpreting a tail. Only that journal authorizes rolling back complete rows. Without a journal, complete rows beyond the metadata checkpoint are preserved, and new messages append at their complete EOF. A failed new append rolls back only to that preserved offset. An unterminated suffix is never promoted. `SetHistory` can use the same path for a proven suffix; replacements and `Compact` journal the previous raw transcript, write JSONL first, and publish metadata last. The journal remains necessary because the shared file writer can fall back to a direct, partially failing metadata write.
+
+An unowned complete tail latches `HistoryRecoveryRequired` and creates `.jsonl.recovery-required` with mode `0600`, syncing both the marker and directory before appending. New rows also carry `history_recovery_required`. The marker is checked before cached metadata, and its existence remains a fence even if its contents are torn. `GetHistory` and ordinary append remain available; `ReadHistoryPage`, including existing cursors, returns `ErrHistoryRecoveryRequired`. `SetHistory` (including suffix/no-op paths), logical truncation, `Compact`/`Save`, alias promotion, deletion and cron pruning cannot erase or hide that history. Launcher DELETE returns HTTP 409 for this state. Summary and scope updates preserve the latch. Counting complete physical rows for writer bookkeeping does not attest their origin or ordering. No automatic import, new stream, or explicit recovery procedure is implemented here.
+
+Older binaries such as `6c89ca2a` and `b523ddb0` do not understand this fence. They can drop unknown JSON fields, and their own capture or destructive operations do not enforce it. The sidecar survives their ordinary appends and transcript/metadata rewrites so that a later compatible binary still refuses proofs, including cursors positioned after a marked row. It cannot prevent data deletion performed by an unaware binary or an external filesystem operation. Keep the marker with the transcript during backups and rollback; removing it is not a supported recovery procedure.
 
 Recovery compares the persisted metadata with the journal's next checkpoint. It records a small OLD/NEW decision bound to the exact journal before restoring OLD data. A failed metadata read leaves the decision unknown and the session fenced; it never authorizes destructive rollback. A failed journal cleanup also keeps the session fenced until cleanup succeeds. This preserves confirmed NEW data when a write reports an error after publishing metadata, and prevents a retried recovery from relabeling already restored OLD data as NEW.
 
@@ -202,9 +208,9 @@ In other words, `Save` is no longer "flush dirty memory to disk"; it is now "rec
 
 `pkg/memory.JSONLStore` uses a fixed 64-shard mutex array keyed by session hash.
 That gives per-session serialization without keeping an unbounded mutex map in memory.
-Listings and cron pruning use the same sanitized-key lock as writers. Pruning rechecks file ages under that lock and removes transcript, metadata, journal and decision together, then evicts the cached state.
+Listings and cron pruning use the same sanitized-key lock as writers. Pruning rechecks file ages and recovery state under that lock. A healthy deletion removes transcript, metadata, journal and decision together, then evicts the cached state; a recovery-required session and its persistent latch remain intact.
 
-This is a single-writer process model, not an interprocess deletion transaction. Launcher DELETE removes the same owned files; an append that exclusively recreates a missing transcript after confirmed metadata deletion starts a fresh generation. Ambiguous recreation fails closed. Callers must separately prevent late events from recreating a globally deleted conversation; the file protocol does not provide that product-level guarantee.
+This is a single-writer process model, not an interprocess deletion transaction. Launcher DELETE performs the same recovery preflight before removing healthy owned files. An append that exclusively recreates a missing transcript after confirmed metadata deletion starts a fresh generation; a surviving recovery latch still prevents proofs. Ambiguous recreation fails closed. Callers must separately prevent late events from recreating a globally deleted conversation; the file protocol does not provide that product-level guarantee.
 
 The legacy `SessionManager` uses a single in-memory map guarded by an RW mutex.
 

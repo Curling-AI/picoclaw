@@ -27,10 +27,10 @@ const (
 var (
 	ErrHistoryOrderUnavailable = errors.New("history order proof unavailable or invalid")
 	ErrHistoryOrderExhausted   = errors.New("history order sequence exhausted")
-	// This error is returned before a receipt append writes the message.
+	// ErrHistoryReceiptUnavailable rejects a receipt append before writing its input.
 	// Content-only runtime writers can persist it without claiming order.
 	ErrHistoryReceiptUnavailable = fmt.Errorf("%w: %w", ErrHistoryOrderUnavailable, ErrHistoryRecoveryRequired)
-	// Resolution failed before this append started. Runtime callers may use
+	// ErrHistoryOwnershipUnavailable reports resolution failure before this append starts. Runtime callers may use
 	// their legacy persistence path without claiming a canonical receipt.
 	ErrHistoryOwnershipUnavailable = fmt.Errorf("%w: canonical ownership unavailable", ErrHistoryOrderUnavailable)
 )

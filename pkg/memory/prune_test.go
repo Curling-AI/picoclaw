@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +13,15 @@ func writeSession(t *testing.T, dir, sanitized string, age time.Duration) {
 	t.Helper()
 	for _, suffix := range []string{".jsonl", ".meta.json"} {
 		path := filepath.Join(dir, sanitized+suffix)
-		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		data := []byte("{}\n")
+		if suffix == ".meta.json" {
+			var err error
+			data, err = json.Marshal(SessionMeta{Key: sanitized, Count: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
 			t.Fatalf("write %s: %v", path, err)
 		}
 		stamp := time.Now().Add(-age)

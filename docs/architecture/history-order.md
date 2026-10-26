@@ -33,7 +33,7 @@ A missing proof is represented by a completely zero `Order`. It is never convert
 
 The first version 1 commit records a fence for the existing unproven prefix, using its file generation and committed byte boundary under the same lock and journal. Rewrites of unchanged legacy occurrences preserve an explicit private origin marker in their records. A zero-proof record is attested as preceding the stream's first version 1 commit only when that fence or marker proves its origin.
 
-Corrupt rows proven to belong to the original legacy prefix remain filtered. An implicit legacy offset upgrade fails if its physical row count disagrees with the committed metadata; it cannot attest an uncommitted tail. Replacements reuse origin evidence only from the committed checkpoint; explicitly importing content from an external tail allocates a new proof. Compaction rejects active rows outside that checkpoint without changing their bytes.
+Corrupt rows proven to belong to the original legacy prefix remain filtered. An implicit legacy offset upgrade fails if its physical row count disagrees with the committed metadata; it cannot attest an uncommitted tail. Replacements reuse origin evidence only from the committed checkpoint. An external complete tail requires explicit recovery into a fresh canonical session to allocate new proofs. Compaction rejects active rows outside that checkpoint without changing their bytes.
 
 `CommittedHistoryMessage.LegacyBeforeStreamID` carries this atomic origin attestation. It is private, is not a sequence or a version 1 proof, and stays available even if the active transcript contains only legacy entries after all active version 1 messages have been removed. An edited version 1 entry physically before a retained legacy suffix does not change the suffix's origin.
 
@@ -43,7 +43,9 @@ JSONL files that predate metadata remain readable with zero proofs and no origin
 
 ## Recovery-required content
 
-An older writer can leave a complete, durable row beyond its metadata checkpoint or discard a modern stream's counter. If the producer cannot prove the prefix or stream highwater, ordinary runtime appends preserve the complete content and continue without assigning proofs. They never infer the counter from the largest retained sequence, renumber existing entries, or attest the extra rows as legacy origin. `AppendHistoryReceipt` rejects that state before writing its input; `ReadHistoryWithReceipts` remains unavailable.
+An older writer can leave a complete, durable row beyond its metadata checkpoint or discard a modern stream's counter. If the producer cannot prove the prefix or stream highwater, ordinary runtime appends preserve the complete content and continue without assigning proofs. They never infer the counter from the largest retained sequence, renumber existing entries, or attest the extra rows as legacy origin. `AppendHistoryReceipt` records the recovery requirement and rejects that state before writing its input; `ReadHistoryWithReceipts` remains unavailable.
+
+On an append, `ErrHistoryReceiptUnavailable` and `ErrHistoryOwnershipUnavailable` identify rejection before that input was written. They allow a checked content-only fallback. Other write errors can describe an uncertain commit and do not authorize that retry.
 
 The private `history_recovery_required` flag in metadata and new records marks this state. A durable per-session `.jsonl.recovery-required` sidecar preserves it even if an older writer later removes those JSON fields. Aware readers check this fence before using cached metadata. Ordinary lifecycle operations do not clear it. Provider and legacy content reads remain available; bounded cursor pages and transcript mutations reject the recovery-required source. A valid legacy session without order metadata does not require recovery merely because its proof is absent.
 

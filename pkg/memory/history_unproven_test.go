@@ -3,6 +3,7 @@ package memory
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -11,6 +12,130 @@ import (
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+func TestReceiptRejectionLatchesRecoveryBeforeRuntimeFallback(t *testing.T) {
+	store := newTestStore(t)
+	key := "sk_v1_receipt_rejection_latch"
+	before := prepareUnprovenRuntimeFixture(t, store, key, "legacy count")
+	receipt, err := store.AppendHistoryReceipt(
+		t.Context(),
+		key,
+		providers.Message{Role: "assistant", Content: "must not commit"},
+	)
+	if !errors.Is(err, ErrHistoryReceiptUnavailable) || receipt.Order.Valid() {
+		t.Fatal("unproven append did not reject its receipt before writing", receipt, err)
+	}
+	after, err := os.ReadFile(store.jsonlPath(key))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("rejected receipt changed durable content", err)
+	}
+	store, err = NewJSONLStore(store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, readErr := store.ReadHistoryWithReceipts(
+		t.Context(),
+		key,
+	); !errors.Is(
+		readErr,
+		ErrHistoryReceiptUnavailable,
+	) {
+		t.Fatal("rejected proof was forgotten before runtime fallback", readErr)
+	}
+}
+
+func TestHistoryReceiptsStayUnavailableAfterLegacyReplacementOrRecreation(t *testing.T) {
+	for _, operation := range []string{"replace", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			store := newTestStore(t)
+			key := "sk_v1_persistent_order_recovery"
+			prepareUnprovenRuntimeFixture(t, store, key, "legacy count")
+			if err := store.AddMessage(t.Context(), key, "assistant", "content without proof"); err != nil {
+				t.Fatal(err)
+			}
+			priorCount := 0
+			if operation == "replace" {
+				// An older SetHistory erases unknown private metadata and row fields.
+				if err := os.WriteFile(
+					store.jsonlPath(key),
+					[]byte("{\"role\":\"user\",\"content\":\"old rewrite\"}\n"),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(
+					store.metaPath(key),
+					[]byte("{\"key\":\""+key+"\",\"count\":1}"),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+				priorCount = 1
+			} else {
+				for _, path := range []string{store.jsonlPath(key), store.metaPath(key)} {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			var err error
+			store, err = NewJSONLStore(store.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, readErr := store.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				readErr,
+				ErrHistoryReceiptUnavailable,
+			) {
+				t.Fatal("old writer removal of JSON fields re-enabled receipts", readErr)
+			}
+			if appendErr := store.AddFullMessage(t.Context(), key, providers.Message{
+				Role:                "assistant",
+				Content:             "aware runtime",
+				HistoryOrderVersion: 1,
+				HistoryStreamID:     newHistoryID(),
+				HistorySequence:     777,
+			}); appendErr != nil {
+				t.Fatal(appendErr)
+			}
+			history, readErr := store.GetHistory(t.Context(), key)
+			if readErr != nil || len(history) != priorCount+1 || history[len(history)-1].Content != "aware runtime" {
+				t.Fatal("recovery fence froze runtime content", history, readErr)
+			}
+			if messageHistoryOrder(history[len(history)-1]) != (HistoryOrderProof{}) {
+				t.Fatal("recovery-required append retained an input proof", history)
+			}
+			if _, pageErr := store.ReadHistoryPage(
+				t.Context(),
+				HistoryPageRequest{Key: key},
+			); !errors.Is(
+				pageErr,
+				ErrHistoryRecoveryRequired,
+			) {
+				t.Fatal("old writer removal of JSON fields re-enabled cursor pages", pageErr)
+			}
+			before, err := os.ReadFile(store.jsonlPath(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, appendErr := store.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "must not commit"},
+			)
+			if !errors.Is(appendErr, ErrHistoryReceiptUnavailable) || receipt.Order.Valid() {
+				t.Fatal("persistent fence minted a new stream", receipt, appendErr)
+			}
+			after, err := os.ReadFile(store.jsonlPath(key))
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("rejected receipt created a duplicate occurrence", err)
+			}
+		})
+	}
+}
 
 func TestUnprovenRuntimeAppendPreservesContentUntilExplicitRecovery(t *testing.T) {
 	for _, state := range []string{"legacy count", "stale checkpoint", "lost stream", "retired lineage"} {
@@ -29,7 +154,9 @@ func TestUnprovenRuntimeAppendPreservesContentUntilExplicitRecovery(t *testing.T
 					if openErr != nil {
 						t.Fatal(openErr)
 					}
-					if _, writeErr := file.WriteString("{\"role\":\"assistant\",\"content\":\"durable while unavailable\"}\n"); writeErr != nil {
+					if _, writeErr := file.WriteString(
+						"{\"role\":\"assistant\",\"content\":\"durable while unavailable\"}\n",
+					); writeErr != nil {
 						t.Fatal(writeErr)
 					}
 					if syncErr := file.Sync(); syncErr != nil {
@@ -50,11 +177,16 @@ func TestUnprovenRuntimeAppendPreservesContentUntilExplicitRecovery(t *testing.T
 						t.Fatal(err)
 					}
 				}
-				if appendErr := store.AddFullMessage(t.Context(), key, providers.Message{Role: "assistant", Content: fmt.Sprintf("runtime_%d", attempt)}); appendErr != nil {
+				if appendErr := store.AddFullMessage(
+					t.Context(),
+					key,
+					providers.Message{Role: "assistant", Content: fmt.Sprintf("runtime_%d", attempt)},
+				); appendErr != nil {
 					t.Fatal("unprovable prefix froze runtime persistence", attempt, appendErr)
 				}
 				visible, readErr := store.GetHistory(t.Context(), key)
-				if readErr != nil || len(visible) != len(before)+attempt+1+extra || visible[len(visible)-1].Content != fmt.Sprintf("runtime_%d", attempt) {
+				if readErr != nil || len(visible) != len(before)+attempt+1+extra ||
+					visible[len(visible)-1].Content != fmt.Sprintf("runtime_%d", attempt) {
 					t.Fatal("runtime lost durable content", visible, readErr)
 				}
 				raw, rawErr := os.ReadFile(store.jsonlPath(key))
@@ -86,14 +218,22 @@ func TestUnprovenRuntimeAppendPreservesContentUntilExplicitRecovery(t *testing.T
 			if _, receiptErr := store.ReadHistoryWithReceipts(t.Context(), key); receiptErr == nil {
 				t.Fatal("lost metadata turned marked records into genuine legacy")
 			}
-			if appendErr := store.AddFullMessage(t.Context(), key, providers.Message{Role: "assistant", Content: "after older metadata"}); appendErr != nil {
+			if appendErr := store.AddFullMessage(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "after older metadata"},
+			); appendErr != nil {
 				t.Fatal(appendErr)
 			}
 			raw, err := os.ReadFile(store.jsonlPath(key))
 			if err != nil {
 				t.Fatal(err)
 			}
-			receipt, receiptErr := store.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "cannot claim proof"})
+			receipt, receiptErr := store.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "cannot claim proof"},
+			)
 			if receiptErr == nil || receipt.Order.Valid() {
 				t.Fatal("unavailable receipt path claimed order", receipt, receiptErr)
 			}
@@ -127,7 +267,8 @@ func TestUnprovenRuntimeAppendPreservesContentUntilExplicitRecovery(t *testing.T
 				t.Fatal("explicit recovery could not import content", recovered, err)
 			}
 			for index, item := range recovered {
-				if !item.Order.Valid() || item.Order.Sequence != uint64(index+1) || item.Message.Content != visible[index].Content {
+				if !item.Order.Valid() || item.Order.Sequence != uint64(index+1) ||
+					item.Message.Content != visible[index].Content {
 					t.Fatal("explicit recovery did not create its own exact proofs", item)
 				}
 				if old := messageHistoryOrder(visible[index]); old.Valid() && old.StreamID == item.Order.StreamID {
@@ -152,14 +293,20 @@ func prepareUnprovenRuntimeFixture(t *testing.T, store *JSONLStore, key, state s
 	switch state {
 	case "legacy count", "stale checkpoint":
 		prefix := []byte("{\"role\":\"user\",\"content\":\"old1\"}\n{\"role\":\"assistant\",\"content\":\"old2\"}\n")
-		raw = append(append([]byte(nil), prefix...), []byte("{\"role\":\"assistant\",\"content\":\"durable fsynced tail\"}\n")...)
+		raw = append(
+			append([]byte(nil), prefix...),
+			[]byte("{\"role\":\"assistant\",\"content\":\"durable fsynced tail\"}\n")...)
 		if state == "stale checkpoint" {
 			size := int64(len(prefix))
 			meta.HistoryBytes = &size
 		}
 	case "lost stream":
 		for index := 0; index < 5; index++ {
-			if _, appendErr := store.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: fmt.Sprint(index)}); appendErr != nil {
+			if _, appendErr := store.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: fmt.Sprint(index)},
+			); appendErr != nil {
 				t.Fatal(appendErr)
 			}
 		}
@@ -187,7 +334,14 @@ func prepareUnprovenRuntimeFixture(t *testing.T, store *JSONLStore, key, state s
 		}
 	case "retired lineage":
 		prior := SessionMeta{Key: key, HistoryGeneration: newHistoryID(), HistoryFileGeneration: newHistoryID()}
-		row, encodeErr := marshalHistoryMessage(prepareHistoryMessage(providers.Message{Role: "assistant", Content: "bounded old record"}, time.Unix(1, 0), ""), prior)
+		row, encodeErr := marshalHistoryMessage(
+			prepareHistoryMessage(
+				providers.Message{Role: "assistant", Content: "bounded old record"},
+				time.Unix(1, 0),
+				"",
+			),
+			prior,
+		)
 		if encodeErr != nil {
 			t.Fatal(encodeErr)
 		}

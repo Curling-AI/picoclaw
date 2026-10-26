@@ -19,7 +19,11 @@ type uncertainReceiptBackend struct {
 	fallbackCalls int
 }
 
-func (backend *uncertainReceiptBackend) AppendHistoryReceipt(ctx context.Context, key string, message providers.Message) (memory.CommittedHistoryMessage, error) {
+func (backend *uncertainReceiptBackend) AppendHistoryReceipt(
+	ctx context.Context,
+	key string,
+	message providers.Message,
+) (memory.CommittedHistoryMessage, error) {
 	if _, err := backend.JSONLBackend.AppendHistoryReceipt(ctx, key, message); err != nil {
 		return memory.CommittedHistoryMessage{}, err
 	}
@@ -46,11 +50,20 @@ func TestSessionHistoryReceiptOwnershipFailurePreservesMirroredDelivery(t *testi
 				t.Fatal(err)
 			}
 			if item.requested != item.canonical {
-				if operationErr := store.UpsertSessionMeta(t.Context(), item.canonical, nil, []string{item.requested}); operationErr != nil {
+				if operationErr := store.UpsertSessionMeta(
+					t.Context(),
+					item.canonical,
+					nil,
+					[]string{item.requested},
+				); operationErr != nil {
 					t.Fatal(operationErr)
 				}
 			}
-			if writeErr := os.WriteFile(filepath.Join(dir, "000broken.meta.json"), []byte(`{"key":"sk_v1_rev`), 0o600); writeErr != nil {
+			if writeErr := os.WriteFile(
+				filepath.Join(dir, "000broken.meta.json"),
+				[]byte(`{"key":"sk_v1_rev`),
+				0o600,
+			); writeErr != nil {
 				t.Fatal(writeErr)
 			}
 			agent.Sessions = session.NewJSONLBackend(store)
@@ -62,7 +75,11 @@ func TestSessionHistoryReceiptOwnershipFailurePreservesMirroredDelivery(t *testi
 				}
 			})
 			al.SetSessionHistoryObserver(func(string) { legacyCallbacks++ })
-			writeErr := al.writeMirrored(agent, item.requested, []providers.Message{{Role: "assistant", Content: "delivered"}})
+			writeErr := al.writeMirrored(
+				agent,
+				item.requested,
+				[]providers.Message{{Role: "assistant", Content: "delivered"}},
+			)
 			history, readErr := store.GetHistory(t.Context(), item.canonical)
 			if writeErr != nil || readErr != nil || len(history) != 1 || history[0].Content != "delivered" {
 				t.Fatal("unrelated broken metadata lost the mirrored delivery", writeErr, readErr, history)
@@ -89,10 +106,23 @@ func TestSessionHistoryReceiptPanicReleasesParkedResultStripe(t *testing.T) {
 	}
 	agent.Sessions = session.NewJSONLBackend(store)
 	key := "agent:main:receipt-panic"
-	if operationErr := agent.Sessions.(session.CheckedAppender).AppendMessage(key, providers.Message{Role: "user", Content: "conversation"}); operationErr != nil {
+	if operationErr := agent.Sessions.(session.CheckedAppender).AppendMessage(
+		key,
+		providers.Message{Role: "user", Content: "conversation"},
+	); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	al.mirror.parked = map[string][]bus.InboundMessage{key: {{Channel: "system", ChatID: "telegram:chat", SessionKey: key, SenderID: "background", Content: "finished result"}}}
+	al.mirror.parked = map[string][]bus.InboundMessage{
+		key: {
+			{
+				Channel:    "system",
+				ChatID:     "telegram:chat",
+				SessionKey: key,
+				SenderID:   "background",
+				Content:    "finished result",
+			},
+		},
+	}
 	al.mirror.quiet = map[string]bool{key: true}
 	const sentinel = "receipt observer panic"
 	al.SetSessionHistoryReceiptObserver(func(string, []memory.CommittedHistoryMessage) { panic(sentinel) })
@@ -111,7 +141,11 @@ func TestSessionHistoryReceiptPanicReleasesParkedResultStripe(t *testing.T) {
 	}
 	stripe.Unlock()
 	al.SetSessionHistoryReceiptObserver(nil)
-	deferred, operationErr := al.deliverToConversation(agent, key, providers.Message{Role: "assistant", Content: "later delivery"})
+	deferred, operationErr := al.deliverToConversation(
+		agent,
+		key,
+		providers.Message{Role: "assistant", Content: "later delivery"},
+	)
 	if operationErr != nil || deferred {
 		t.Fatal("later delivery could not enter the conversation", deferred, operationErr)
 	}
@@ -151,12 +185,18 @@ func TestSessionHistoryUnprovenPrefixPersistsWithOnlyLegacyNotifications(t *test
 	})
 	al.SetSessionHistoryObserver(func(string) { legacyCallbacks++ })
 	for _, content := range []string{"first delivery", "second delivery"} {
-		if writeErr := al.writeMirrored(agent, key, []providers.Message{{Role: "assistant", Content: content}}); writeErr != nil {
+		if writeErr := al.writeMirrored(
+			agent,
+			key,
+			[]providers.Message{{Role: "assistant", Content: content}},
+		); writeErr != nil {
 			t.Fatal(writeErr)
 		}
 	}
 	history := agent.Sessions.GetHistory(key)
-	if len(history) != 4 || history[1].Content != "durable tail" || history[3].Content != "second delivery" || callbacks != 2 || legacyCallbacks != 2 {
+	if len(history) != 4 || history[1].Content != "durable tail" || history[3].Content != "second delivery" ||
+		callbacks != 2 ||
+		legacyCallbacks != 2 {
 		t.Fatal("content-only fallback lost data or notification", history, callbacks, legacyCallbacks)
 	}
 	if _, readErr := store.ReadHistoryWithReceipts(t.Context(), key); readErr == nil {
@@ -179,8 +219,17 @@ func TestSessionHistoryUncertainCommitDoesNotRetryThroughLegacyFallback(t *testi
 	key := "sk_v1_uncertain_mirror"
 	writeErr := al.writeMirrored(agent, key, []providers.Message{{Role: "assistant", Content: "already durable"}})
 	history, readErr := store.GetHistory(t.Context(), key)
-	if !errors.Is(writeErr, memory.ErrHistoryOrderUnavailable) || readErr != nil || len(history) != 1 || backend.fallbackCalls != 0 || callbacks != 0 {
-		t.Fatal("uncertain commit was retried or announced", writeErr, history, readErr, backend.fallbackCalls, callbacks)
+	if !errors.Is(writeErr, memory.ErrHistoryOrderUnavailable) || readErr != nil || len(history) != 1 ||
+		backend.fallbackCalls != 0 ||
+		callbacks != 0 {
+		t.Fatal(
+			"uncertain commit was retried or announced",
+			writeErr,
+			history,
+			readErr,
+			backend.fallbackCalls,
+			callbacks,
+		)
 	}
 	reconciled, readErr := store.ReadHistoryWithReceipts(t.Context(), key)
 	if readErr != nil || len(reconciled) != 1 || !reconciled[0].Order.Valid() {

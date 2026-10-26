@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1589,18 +1591,32 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 	}
 
 	sessionKey := legacyPicoSessionPrefix + "delete-jsonl"
-	if err := store.AddFullMessage(nil, sessionKey, providers.Message{
+	if operationErr := store.AddFullMessage(nil, sessionKey, providers.Message{
 		Role:    "user",
 		Content: "delete me",
-	}); err != nil {
-		t.Fatalf("AddFullMessage() error = %v", err)
+	}); operationErr != nil {
+		t.Fatalf("AddFullMessage() error = %v", operationErr)
 	}
-	if err := store.SetSummary(nil, sessionKey, "delete summary"); err != nil {
-		t.Fatalf("SetSummary() error = %v", err)
+	if operationErr := store.SetSummary(nil, sessionKey, "delete summary"); operationErr != nil {
+		t.Fatalf("SetSummary() error = %v", operationErr)
 	}
 	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
-	for _, suffix := range []string{".jsonl.commit.json", ".jsonl.commit.decision"} {
-		if err := os.WriteFile(base+suffix, []byte("interrupted recovery"), 0o600); err != nil {
+	meta, err := os.ReadFile(base + ".meta.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(map[string]json.RawMessage{"meta": meta, "next": meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := json.Marshal(
+		map[string]string{"journal": fmt.Sprintf("%x", sha256.Sum256(journal)), "decision": "new"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for suffix, data := range map[string][]byte{".jsonl.commit.json": journal, ".jsonl.commit.decision": decision} {
+		if err := os.WriteFile(base+suffix, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1628,6 +1644,58 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 	history, historyErr := store.GetHistory(t.Context(), sessionKey)
 	if historyErr != nil || len(history) != 1 || history[0].Content != "fresh session" {
 		t.Fatal("confirmed deletion resurrected previous history", history, historyErr)
+	}
+}
+
+func TestHandleDeleteSession_PreservesHistoryRequiringRecovery(t *testing.T) {
+	for _, marked := range []bool{false, true} {
+		t.Run(fmt.Sprint(marked), func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+			dir := sessionsTestDir(t, configPath)
+			store, err := memory.NewJSONLStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := legacyPicoSessionPrefix + "unproven-delete"
+			if operationErr := store.AddMessage(t.Context(), key, "user", "owned message"); operationErr != nil {
+				t.Fatal(operationErr)
+			}
+			base := filepath.Join(dir, sanitizeSessionKey(key))
+			file, err := os.OpenFile(base+".jsonl", os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, operationErr := file.WriteString(
+				"{\"role\":\"user\",\"content\":\"durable external message\"}\n",
+			); operationErr != nil {
+				file.Close()
+				t.Fatal(operationErr)
+			}
+			if operationErr := file.Close(); operationErr != nil {
+				t.Fatal(operationErr)
+			}
+			if marked {
+				if operationErr := os.WriteFile(base+".jsonl.recovery-required", nil, 0o600); operationErr != nil {
+					t.Fatal(operationErr)
+				}
+			}
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/sessions/unproven-delete", nil))
+			if rec.Code != http.StatusConflict {
+				t.Fatal("delete accepted unproven history", rec.Code, rec.Body.String())
+			}
+			history, err := store.GetHistory(t.Context(), key)
+			if err != nil || len(history) != 2 || history[1].Content != "durable external message" {
+				t.Fatal("delete lost durable external history", history, err)
+			}
+			if _, err := os.Stat(base + ".jsonl.recovery-required"); err != nil {
+				t.Fatal("delete discarded the persistent fence", err)
+			}
+		})
 	}
 }
 
