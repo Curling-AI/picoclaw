@@ -234,6 +234,41 @@ func TestHistoryOrderImportBeyondCheckpointGetsANewProof(t *testing.T) {
 	}
 }
 
+func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
+	s := newTestStore(t)
+	key := "agent:main:legacy-uncommitted-order"
+	raw := []byte("{\"role\":\"assistant\",\"content\":\"committed legacy\"}\n{\"role\":\"assistant\",\"content\":\"uncommitted tail\"}\n")
+	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "next"})
+	if !errors.Is(err, ErrHistoryOrderUnavailable) || receipt.Order != (HistoryOrderProof{}) {
+		t.Fatal("implicit legacy upgrade confirmed a tail outside its checkpoint", receipt, err)
+	}
+	stored, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil || !bytes.Equal(stored, raw) {
+		t.Fatal("failed upgrade changed legacy data", err)
+	}
+	// Importing the same full transcript explicitly is allowed, but only the
+	// original committed prefix can retain zero-proof legacy provenance.
+	history, err := s.GetHistory(t.Context(), key)
+	if err != nil || len(history) != 2 {
+		t.Fatal(history, err)
+	}
+	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
+	if err != nil || len(read) != 2 || read[0].Order != (HistoryOrderProof{}) ||
+		read[0].LegacyBeforeStreamID == "" || !read[1].Order.Valid() || read[1].Order.Sequence != 1 ||
+		read[0].LegacyBeforeStreamID != read[1].Order.StreamID || read[1].LegacyBeforeStreamID != "" {
+		t.Fatal("explicit import laundered the tail into genuine legacy", read, err)
+	}
+}
+
 func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:legacy-origin"

@@ -47,9 +47,17 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(key string, messages []pr
 		return nil, fmt.Errorf("memory: open jsonl for append: %w", err)
 	}
 	defer file.Close()
+	legacyCount := meta.Count
 	offset, err := historyAppendOffset(file, &meta)
 	if err != nil {
 		return nil, err
+	}
+	if meta.HistoryOrderVersion == 0 && meta.Count != legacyCount {
+		// A legacy offset upgrade may discover complete rows beyond Count.
+		// They have no committed-origin evidence and cannot be silently
+		// included in the first stream's legacy fence. SetHistory can import
+		// them explicitly and allocate fresh content proofs instead.
+		return nil, ErrHistoryOrderUnavailable
 	}
 	ordered := make([]providers.Message, len(messages))
 	for index, message := range messages {
