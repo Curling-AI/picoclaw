@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -52,6 +53,7 @@ type SessionMeta struct {
 	HistoryDigest           string          `json:"history_digest,omitempty"`
 	HistoryTip              string          `json:"history_tip,omitempty"`
 	HistoryBytes            *int64          `json:"history_bytes,omitempty"`
+	HistoryRecoveryRequired bool            `json:"history_recovery_required,omitempty"`
 	Key                     string          `json:"key"`
 	Summary                 string          `json:"summary"`
 	Skip                    int             `json:"skip"`
@@ -177,9 +179,6 @@ func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
 // Returns a zero-value sessionMeta if the file does not exist.
 func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	sanitized := sanitizeKey(key)
-	if meta, ok := s.cachedMeta(sanitized); ok {
-		return meta, nil
-	}
 	s.metaMu.RLock()
 	pending := s.historyPending[sanitized]
 	s.metaMu.RUnlock()
@@ -188,12 +187,24 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 			return SessionMeta{}, err
 		}
 	}
+	// Resolve our own OLD/NEW journal before interpreting external divergence.
+	// Check the latch before the cache: old binaries can erase unknown fields.
+	marked, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return SessionMeta{}, err
+	}
 	if meta, ok := s.cachedMeta(sanitized); ok {
+		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
+			return SessionMeta{}, operationErr
+		}
 		return meta, nil
 	}
 	data, err := os.ReadFile(s.metaPath(key))
 	if os.IsNotExist(err) {
 		meta := SessionMeta{Key: key}
+		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
+			return SessionMeta{}, operationErr
+		}
 		s.storeCachedMeta(sanitized, meta)
 		return meta, nil
 	}
@@ -208,6 +219,12 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	if meta.Key == "" {
 		meta.Key = key
 	}
+	if errors.Is(historyRecordRecoveryRequired(data), ErrHistoryRecoveryRequired) {
+		meta.HistoryRecoveryRequired = true
+	}
+	if err := s.applyHistoryRecoveryMarker(key, &meta, marked); err != nil {
+		return SessionMeta{}, err
+	}
 	s.storeCachedMeta(sanitized, meta)
 	return meta, nil
 }
@@ -217,6 +234,13 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 	if strings.TrimSpace(meta.Key) == "" {
 		meta.Key = key
+	}
+	marked, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return err
+	}
+	if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
+		return operationErr
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -471,6 +495,9 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if err != nil {
 		return false, err
 	}
+	if operationErr := s.guardHistoryMutation(sessionKey, canonicalMeta); operationErr != nil {
+		return false, operationErr
+	}
 	canonicalHasContent, err := s.sessionHasVisibleContentLocked(sessionKey, canonicalMeta)
 	if err != nil {
 		return false, err
@@ -482,6 +509,9 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	aliasMeta, err := s.readMeta(alias)
 	if err != nil {
 		return false, err
+	}
+	if operationErr := s.guardHistoryMutation(alias, aliasMeta); operationErr != nil {
+		return false, operationErr
 	}
 	aliasHistory, err := readMessages(s.jsonlPath(alias), aliasMeta.Skip)
 	if err != nil {
@@ -756,14 +786,16 @@ func (s *JSONLStore) TruncateHistory(
 	if err != nil {
 		return err
 	}
+	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
+		return operationErr
+	}
 
 	rawCount, retainedRawLines, scanErr := scanRetainedMessageLines(s.jsonlPath(sessionKey))
 	if scanErr != nil {
 		return scanErr
 	}
 	meta.Count = rawCount
-	// The scan also adopts any complete legacy rows left beyond old metadata.
-	// A later append reestablishes its byte checkpoint once for this window.
+	// A later append reestablishes the byte checkpoint for this retained window.
 	meta.HistoryBytes = nil
 	if meta.Skip > meta.Count {
 		meta.Skip = meta.Count
@@ -794,6 +826,9 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
+	}
+	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
+		return operationErr
 	}
 	now := time.Now()
 	if meta.CreatedAt.IsZero() {
@@ -827,6 +862,9 @@ func (s *JSONLStore) Compact(
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
+	}
+	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
+		return operationErr
 	}
 	if meta.Skip == 0 {
 		return nil

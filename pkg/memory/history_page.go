@@ -91,6 +91,9 @@ func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageReq
 	if err != nil {
 		return HistoryPage{}, err
 	}
+	if meta.HistoryRecoveryRequired {
+		return HistoryPage{}, ErrHistoryRecoveryRequired
+	}
 	ensureHistoryGeneration(&meta, request.Key)
 	file, err := os.Open(s.jsonlPath(request.Key))
 	if errors.Is(err, os.ErrNotExist) && meta.Count == 0 && meta.HistoryFileEpoch == 0 {
@@ -104,14 +107,32 @@ func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageReq
 	if err != nil {
 		return HistoryPage{}, fmt.Errorf("stat bounded history source: %w", err)
 	}
+	if meta.HistoryBytes != nil {
+		complete, tailErr := hasCompleteHistoryTail(file, *meta.HistoryBytes, info.Size())
+		if tailErr != nil {
+			return HistoryPage{}, tailErr
+		}
+		if complete {
+			return HistoryPage{}, errors.Join(
+				ErrHistoryRecoveryRequired,
+				s.markHistoryRecoveryRequired(request.Key, &meta),
+			)
+		}
+	}
 	cursor, err := readPageCursor(request, meta, info.Size())
 	if err != nil {
 		return HistoryPage{}, err
 	}
-	if _, err := file.Seek(cursor.Byte, io.SeekStart); err != nil {
-		return HistoryPage{}, fmt.Errorf("seek bounded history source: %w", err)
+	if _, seekErr := file.Seek(cursor.Byte, io.SeekStart); seekErr != nil {
+		return HistoryPage{}, fmt.Errorf("seek bounded history source: %w", seekErr)
 	}
-	return readSourcePage(ctx, file, sourcePageState{meta: meta, cursor: cursor, key: request.Key})
+	page, err := readSourcePage(ctx, file, sourcePageState{
+		meta: meta, cursor: cursor, key: request.Key, physicalBytes: info.Size(),
+	})
+	if errors.Is(err, ErrHistoryRecoveryRequired) {
+		err = errors.Join(err, s.markHistoryRecoveryRequired(request.Key, &meta))
+	}
+	return page, err
 }
 
 func readPageCursor(request HistoryPageRequest, meta SessionMeta, size int64) (historyPageCursor, error) {
@@ -167,9 +188,10 @@ func (r *historyReadCounter) Read(data []byte) (int, error) {
 }
 
 type sourcePageState struct {
-	meta   SessionMeta
-	cursor historyPageCursor
-	key    string
+	meta          SessionMeta
+	cursor        historyPageCursor
+	key           string
+	physicalBytes int64
 }
 
 func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (HistoryPage, error) {
@@ -218,6 +240,9 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 			cursor.Byte++
 			continue
 		}
+		if errors.Is(historyRecordRecoveryRequired(line), ErrHistoryRecoveryRequired) {
+			return HistoryPage{}, ErrHistoryRecoveryRequired
+		}
 		var message providers.Message
 		if json.Unmarshal(line, &message) != nil || messageutil.IsTransientAssistantThoughtMessage(message) {
 			// Match GetHistory's legacy filtering while retaining physical cursor positions.
@@ -250,8 +275,16 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 	page.BytesRead = counter.bytes
 	page.Complete = page.EndPosition == cursor.Total
 	if page.Complete {
-		// Count is the metadata commit point for pre-checkpoint legacy files.
-		// Do not expose complete or torn appends beyond that committed prefix.
+		if meta.HistoryBytes == nil && cursor.Total == meta.HistoryPrefix+int64(meta.Count) {
+			complete, err := hasCompleteHistoryTail(file, cursor.Byte, state.physicalBytes)
+			if err != nil {
+				return HistoryPage{}, err
+			}
+			if complete {
+				return HistoryPage{}, ErrHistoryRecoveryRequired
+			}
+		}
+		// A torn suffix has no committed row and does not extend the cursor.
 		cursor.Ceiling = cursor.Byte
 	}
 	if page.EndPosition > cursor.Total || (!page.Complete && cursor.Byte == state.cursor.Byte) {

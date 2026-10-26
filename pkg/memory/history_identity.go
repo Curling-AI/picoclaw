@@ -13,10 +13,11 @@ import (
 
 type historyRecord struct {
 	providers.Message
-	ID             string `json:"history_id"`
-	RunID          string `json:"history_run_id,omitempty"`
-	Generation     string `json:"history_generation"`
-	FileGeneration string `json:"history_file_generation"`
+	ID               string `json:"history_id"`
+	RunID            string `json:"history_run_id,omitempty"`
+	Generation       string `json:"history_generation"`
+	FileGeneration   string `json:"history_file_generation"`
+	RecoveryRequired bool   `json:"history_recovery_required,omitempty"`
 }
 
 func newHistoryID() string { return uuid.NewString() }
@@ -48,11 +49,12 @@ func marshalHistoryMessage(message providers.Message, meta SessionMeta) ([]byte,
 	}
 	return json.Marshal(
 		historyRecord{
-			Message:        message,
-			ID:             id,
-			RunID:          message.HistoryRunID,
-			Generation:     meta.HistoryGeneration,
-			FileGeneration: meta.HistoryFileGeneration,
+			Message:          message,
+			ID:               id,
+			RunID:            message.HistoryRunID,
+			Generation:       meta.HistoryGeneration,
+			FileGeneration:   meta.HistoryFileGeneration,
+			RecoveryRequired: meta.HistoryRecoveryRequired,
 		},
 	)
 }

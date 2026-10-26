@@ -52,11 +52,10 @@ func isCronRunFile(name string) bool {
 // shown under Automações (Execuções), which becomes a retention window rather
 // than an unbounded log.
 //
-// Files are selected by modification time rather than by the meta's UpdatedAt
-// so that a corrupt or unreadable meta cannot pin a husk on disk forever. An
-// in-flight run is never at risk: its files were just written, so they fall
-// far inside the retention window. A retention of zero or less disables
-// pruning entirely.
+// Candidates are selected by modification time rather than the meta's UpdatedAt.
+// Recovery guards can retain a candidate whose history cannot safely be removed.
+// An in-flight run is never at risk: its files were just written, so they fall
+// far inside the retention window. A retention of zero or less disables pruning.
 func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int, error) {
 	if retention <= 0 {
 		return 0, nil
@@ -133,6 +132,13 @@ func (s *JSONLStore) removeSessionFiles(sanitized string) error {
 }
 
 func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
+	meta, err := s.readMeta(sanitized)
+	if err != nil {
+		return err
+	}
+	if err := s.guardHistoryMutation(sanitized, meta); err != nil {
+		return err
+	}
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
 	jsonlPath := filepath.Join(s.dir, sanitized+".jsonl")
 	s.markHistoryPending(sanitized)

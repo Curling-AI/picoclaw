@@ -55,7 +55,7 @@ func TestHistoryPagePreservesContextErrors(t *testing.T) {
 	}
 }
 
-func TestHistoryPageIgnoresAppendBeforeMetaCommit(t *testing.T) {
+func TestHistoryPagePreservesAppendWithoutAnOwnJournal(t *testing.T) {
 	s, key := pagedStore(t, 1)
 	before, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
 	if err != nil {
@@ -75,15 +75,20 @@ func TestHistoryPageIgnoresAppendBeforeMetaCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-	if err != nil || !page.Complete || !reflect.DeepEqual(page.Entries, before.Entries) {
-		t.Fatal("an append without metadata commit broke the source", page, err)
+	if !errors.Is(err, ErrHistoryRecoveryRequired) || page.Complete {
+		t.Fatal("an unowned append was incorrectly proved complete", page, err)
 	}
 	if operationErr := s.AddMessage(t.Context(), key, "assistant", "committed next"); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	page, err = s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key, Cursor: before.ResumeCursor, Refresh: true})
-	if err != nil || len(page.Entries) != 1 || page.Entries[0].Message.Content != "committed next" {
-		t.Fatal("the next append committed an abandoned record", page, err)
+	if !errors.Is(err, ErrHistoryRecoveryRequired) || page.Complete {
+		t.Fatal("a later append cleared the recovery fence", page, err)
+	}
+	history, err := s.GetHistory(t.Context(), key)
+	if err != nil || len(history) != 3 || history[1].Content != "uncommitted" ||
+		history[2].Content != "committed next" {
+		t.Fatal("a later append lost an unowned durable row", history, err)
 	}
 }
 

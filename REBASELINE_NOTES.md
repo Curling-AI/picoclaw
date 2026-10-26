@@ -78,6 +78,7 @@ Product doesn't use it, but kept in the fork. Needs re-wiring onto upstream's ev
 - `pkg/providers/protocoltypes/types.go`, `pkg/session/jsonl_backend.go`, and agent history-write call sites: preserve private history provenance through internal reads/writes without adding it to the public provider DTO. Epoch and byte-count fields remain part of the existing capture consumer contract.
 - `pkg/agent/context_legacy.go`: forced compression uses `TruncateHistory` only at a safe turn boundary. With a single protected turn and no safe boundary it returns without mutating persisted history; prompt fitting can trim model context in memory. Preserve this override when reconciling upstream compression changes.
 - `web/backend/api/session.go` and the English/Chinese session architecture docs describe the same transcript, metadata, journal and decision lifecycle. Preserve the published `SetDeliveryConversationKept` API and main ancestry when updating this fork's consumer pin.
+- An unowned complete tail must survive append and its rollback. `HistoryRecoveryRequired` and the durable `.jsonl.recovery-required` marker keep pages/cursors and destructive lifecycle operations fenced while provider reads and ordinary append remain usable. Keep this marker across metadata/row rewrites and rollback; legacy binaries do not enforce it while running. Only an own OLD/NEW journal authorizes discarding complete rows, and no implicit recovery or order attestation is permitted.
 
 ## Progress (branch rebaseline/upstream-sync)
 DONE (each builds + tests green, CGO off):

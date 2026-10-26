@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -772,10 +773,9 @@ func TestCompact_ThenAppend(t *testing.T) {
 	}
 }
 
-func TestTruncateHistory_StaleMetaCount(t *testing.T) {
-	// Simulates a crash between JSONL append and meta update in addMsg:
-	// file has N+1 lines but meta.Count is still N. TruncateHistory must
-	// reconcile with the real line count so that keepLast is accurate.
+func TestTruncateHistory_UnownedCompleteTailRequiresRecovery(t *testing.T) {
+	// Without a journal, metadata cannot authorize discarding or adopting the
+	// complete row left by a legacy writer after its metadata update failed.
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -800,26 +800,23 @@ func TestTruncateHistory_StaleMetaCount(t *testing.T) {
 	}
 	f.Close()
 
-	// TruncateHistory(keepLast=4) should keep the last 4 of 11 lines,
-	// not the last 4 of 10.
 	err = store.TruncateHistory(ctx, "stale", 4)
-	if err != nil {
-		t.Fatalf("TruncateHistory: %v", err)
+	if !errors.Is(err, ErrHistoryRecoveryRequired) {
+		t.Fatalf("TruncateHistory must preserve the unowned tail: %v", err)
 	}
 
 	history, err := store.GetHistory(ctx, "stale")
 	if err != nil {
 		t.Fatalf("GetHistory: %v", err)
 	}
-	if len(history) != 4 {
-		t.Fatalf("expected 4, got %d", len(history))
+	if len(history) != 11 {
+		t.Fatalf("expected all 11 durable rows, got %d", len(history))
 	}
-	// Last 4 of [a,b,c,d,e,f,g,h,i,j,orphan] = [h,i,j,orphan]
-	if history[0].Content != "h" {
-		t.Errorf("first kept = %q, want 'h'", history[0].Content)
+	if history[0].Content != "a" {
+		t.Errorf("first kept = %q, want 'a'", history[0].Content)
 	}
-	if history[3].Content != "orphan" {
-		t.Errorf("last kept = %q, want 'orphan'", history[3].Content)
+	if history[10].Content != "orphan" {
+		t.Errorf("last kept = %q, want 'orphan'", history[10].Content)
 	}
 }
 

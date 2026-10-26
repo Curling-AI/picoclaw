@@ -157,13 +157,14 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 
 默认运行时后端是 `pkg/memory.JSONLStore`，外面包了一层 `session.JSONLBackend`。
 
-每个 session 使用两个持久文件和临时恢复文件：
+每个 session 使用 transcript、metadata、临时写入恢复文件，以及可选的持久恢复标记：
 
 ```text
 {sanitized_key}.jsonl
 {sanitized_key}.meta.json
 {sanitized_key}.jsonl.commit.json      # 未完成写入的日志
 {sanitized_key}.jsonl.commit.decision  # 恢复时使用的决策
+{sanitized_key}.jsonl.recovery-required # 来源无法证明时的持久隔离标记
 ```
 
 各自保存：
@@ -183,10 +184,15 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 - `Aliases`
 - `HistoryGeneration`、`HistoryFileGeneration`、lineage、digest 和 tip
 - `HistoryBytes`：已提交 JSONL 的字节边界
+- `HistoryRecoveryRequired`：历史仍可读取和追加，但不能提供捕获证明
 
 ## 写入与崩溃语义
 
-`AddMessage` / `AddFullMessage` 先写不可变日志，保存旧 metadata 和追加偏移，再追加并同步 JSONL，最后发布含 `HistoryBytes` 的 metadata。下一次追加会移除 checkpoint 之后未提交的字节。`SetHistory` 在证明前缀未变化时使用相同的追加路径；替换和 `Compact` 在日志中备份旧原始文件，先写 JSONL，最后写 metadata。共享文件写入器可能退回直接写入，造成 metadata 部分写入失败，因此不能只靠 checkpoint 取消日志。
+`AddMessage` / `AddFullMessage` 先写不可变日志，保存旧 metadata 和追加偏移，再追加并同步 JSONL，最后发布含 `HistoryBytes` 的 metadata。检查额外尾部之前，先将本进程的日志恢复为 OLD 或 NEW；只有该日志才能授权回滚完整行。没有日志时，保留 metadata checkpoint 之后的完整行，并从这些行的完整 EOF 继续追加；新追加失败也只回滚到该 EOF。没有末尾换行的尾部不会被提升为已提交行。`SetHistory` 在证明前缀未变化时使用相同的追加路径；替换和 `Compact` 在日志中备份旧原始文件，先写 JSONL，最后写 metadata。共享文件写入器可能退回直接写入，造成 metadata 部分写入失败，因此不能只靠 checkpoint 取消日志。
+
+无法归属的完整尾部会设置 `HistoryRecoveryRequired`，并在追加前创建权限为 `0600` 的 `.jsonl.recovery-required`，同步标记及目录。新行也携带 `history_recovery_required`。读取缓存 metadata 前先检查标记；即使内容损坏，文件存在仍表示隔离。`GetHistory` 和普通追加继续可用；`ReadHistoryPage`（包括已有 cursor）返回 `ErrHistoryRecoveryRequired`。`SetHistory` 的全部路径、逻辑截断、`Compact`/`Save`、别名提升、删除及 cron 清理都不能擦除或隐藏这些历史；launcher DELETE 返回 HTTP 409。摘要和 scope 更新保留标记。为写入计数完整物理行并不证明来源或顺序。这里没有自动导入、新建 stream 或显式恢复流程。
+
+`6c89ca2a`、`b523ddb0` 等旧版本不理解这一隔离状态。它们可能丢弃未知 JSON 字段，其捕获和破坏性操作也不会执行该隔离。独立标记在旧版普通追加及 transcript/metadata 重写后仍保留，使之后的兼容版本继续拒绝证明，包括已越过带标记行的 cursor。标记无法阻止旧版本或外部文件操作实际删除数据。备份和回滚必须同时保留该标记；删除标记不是受支持的恢复流程。
 
 恢复会将磁盘上的 metadata 与日志中的 next checkpoint 对比。在恢复 OLD 数据前，先写入绑定该日志内容的独立 OLD/NEW 决策。metadata 读取失败时，决策保持 unknown，该 session 被隔离，不执行破坏性回滚。日志清理失败也会维持隔离，直到清理成功。这样，即使 metadata 已提交而写入返回错误，也不会丢失 NEW 数据；已经恢复 OLD 数据的重试也不会改判为 NEW。
 
@@ -203,9 +209,9 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 
 `pkg/memory.JSONLStore` 使用固定 64 分片 mutex，按 session key 的 hash 做串行化。
 这样既能做到“按 session 串行”，又不会因为 session 数量增长而把 mutex map 做成无界结构。
-列表读取和 cron 清理使用与写入相同的 sanitized-key 锁。清理在锁内重新检查文件时间，删除 transcript、metadata、日志和决策文件，再清除缓存。
+列表读取和 cron 清理使用与写入相同的 sanitized-key 锁。清理在锁内重新检查文件时间及恢复状态。健康会话删除 transcript、metadata、日志和决策文件后清除缓存；需要恢复的会话及持久标记保持不变。
 
-这里采用单写入进程模型，不提供跨进程删除事务。launcher DELETE 删除相同的文件；追加操作在独占重建 transcript 并确认 metadata 已删除后，会使用全新 generation。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
+这里采用单写入进程模型，不提供跨进程删除事务。launcher DELETE 删除健康会话文件前执行相同的恢复检查；追加操作在独占重建 transcript 并确认 metadata 已删除后，会使用全新 generation，但遗留恢复标记仍阻止证明。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
 
 旧的 `SessionManager` 则是一个内存 map 加 RW mutex。
 

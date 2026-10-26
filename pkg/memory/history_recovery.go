@@ -12,6 +12,74 @@ import (
 	"strings"
 )
 
+var ErrHistoryRecoveryRequired = errors.New("history source requires explicit recovery")
+
+func historyRecoveryMarkerError(marker json.RawMessage) error {
+	if len(marker) == 0 {
+		return nil
+	}
+	var required *bool
+	if json.Unmarshal(marker, &required) != nil || required == nil || *required {
+		return ErrHistoryRecoveryRequired
+	}
+	return nil
+}
+
+func historyRecordRecoveryRequired(data []byte) error {
+	var record struct {
+		RecoveryRequired json.RawMessage `json:"history_recovery_required"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	return historyRecoveryMarkerError(record.RecoveryRequired)
+}
+
+func (s *JSONLStore) historyRecoveryRequiredPath(key string) string {
+	return s.jsonlPath(key) + ".recovery-required"
+}
+
+func (s *JSONLStore) hasHistoryRecoveryMarker(key string) (bool, error) {
+	_, err := os.Stat(s.historyRecoveryRequiredPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// This latch has no automatic reset. Legacy binaries can erase unknown JSON
+// fields while rewriting metadata or rows; a separate durable marker survives
+// those rewrites. Its existence is sufficient, even if its contents are torn.
+func (s *JSONLStore) markHistoryRecoveryRequired(key string, meta *SessionMeta) error {
+	exists, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if err := s.writeSessionFile(
+			s.historyRecoveryRequiredPath(key), []byte("{\"history_recovery_required\":true}\n"), 0o600,
+		); err != nil {
+			return err
+		}
+	}
+	if err := s.syncHistoryFile(s.historyRecoveryRequiredPath(key)); err != nil {
+		return err
+	}
+	meta.HistoryRecoveryRequired = true
+	return nil
+}
+
+func (s *JSONLStore) applyHistoryRecoveryMarker(key string, meta *SessionMeta, marked bool) error {
+	if marked {
+		meta.HistoryRecoveryRequired = true
+		return nil
+	}
+	if meta.HistoryRecoveryRequired {
+		return s.markHistoryRecoveryRequired(key, meta)
+	}
+	return nil
+}
+
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
@@ -256,7 +324,8 @@ func historyCheckpointMatches(current, expected SessionMeta) bool {
 	return current.HistoryGeneration == expected.HistoryGeneration &&
 		current.HistoryFileGeneration == expected.HistoryFileGeneration &&
 		current.HistoryTip == expected.HistoryTip && current.Count == expected.Count &&
-		current.HistoryPrefix == expected.HistoryPrefix
+		current.HistoryPrefix == expected.HistoryPrefix &&
+		current.HistoryRecoveryRequired == expected.HistoryRecoveryRequired
 }
 
 func journalDigest(data []byte) string {
@@ -300,7 +369,11 @@ func (s *JSONLStore) recordHistoryDecision(key string, journal []byte, decision 
 func (s *JSONLStore) syncHistoryDecision(key string) error {
 	// WriteFileAtomic may use a direct-write fallback. Sync the decision
 	// and its directory before rollback or receipt-aware confirmation of NEW.
-	file, err := os.OpenFile(s.historyDecisionPath(key), os.O_RDWR, 0o600)
+	return s.syncHistoryFile(s.historyDecisionPath(key))
+}
+
+func (s *JSONLStore) syncHistoryFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
