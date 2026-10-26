@@ -71,13 +71,15 @@ func (s *JSONLStore) replaceHistory(
 	common := 0
 	prepared := append([]providers.Message(nil), input...)
 	for index, message := range prepared {
-		if index < len(old) && common == index && sameHistoryCore(old[index], message) &&
+		if index < len(old) && sameHistoryCore(old[index], message) &&
 			(message.HistoryID == "" || message.HistoryID == old[index].HistoryID) {
 			message.HistoryID, message.HistoryRunID = old[index].HistoryID, old[index].HistoryRunID
 			if message.CreatedAt == nil {
 				message.CreatedAt = old[index].CreatedAt
 			}
-			common++
+			if common == index {
+				common++
+			}
 		} else if index < len(old) && message.HistoryID == old[index].HistoryID &&
 			!sameHistoryCore(old[index], message) {
 			message.HistoryRunID = providers.HistoryRun(ctx)
@@ -96,6 +98,9 @@ func (s *JSONLStore) replaceHistory(
 		if appended, appendErr := s.appendHistorySuffix(key, prepared, meta); appended || appendErr != nil {
 			return appendErr
 		}
+	}
+	if err := s.prepareReplacementHistoryOrder(key, old, prepared, &meta); err != nil {
+		return err
 	}
 	ensureHistoryGeneration(&meta, key)
 	meta.HistoryPrefix += int64(meta.Skip)

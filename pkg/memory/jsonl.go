@@ -60,6 +60,12 @@ type SessionMeta struct {
 	UpdatedAt               time.Time       `json:"updated_at"`
 	Scope                   json.RawMessage `json:"scope,omitempty"`
 	Aliases                 []string        `json:"aliases,omitempty"`
+
+	HistoryOrderVersion         uint8  `json:"history_order_version,omitempty"`
+	HistoryStreamID             string `json:"history_stream_id,omitempty"`
+	HistorySequence             uint64 `json:"history_sequence,omitempty"`
+	HistoryLegacyFileGeneration string `json:"history_legacy_file_generation,omitempty"`
+	HistoryLegacyBytes          int64  `json:"history_legacy_bytes,omitempty"`
 }
 
 // JSONLStore implements Store using append-only JSONL files.
@@ -482,9 +488,25 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if err != nil {
 		return false, err
 	}
+	if err := validateHistoryMessageOrders(aliasHistory, aliasMeta); err != nil {
+		return false, err
+	}
+	if err := s.validateStoredHistoryOrderOrigins(alias, aliasMeta); err != nil {
+		return false, err
+	}
 	aliasSummary := strings.TrimSpace(aliasMeta.Summary)
 	if len(aliasHistory) == 0 && aliasSummary == "" {
 		return false, nil
+	}
+	// Promotion is a new canonical write, not continuity of the alias stream.
+	// Keep the canonical highwater and allocate fresh canonical proofs before
+	// changing the file/count metadata used to verify a legacy canonical file.
+	for index, message := range aliasHistory {
+		ordered, orderErr := s.allocateHistoryOrder(sessionKey, message, &canonicalMeta)
+		if orderErr != nil {
+			return false, orderErr
+		}
+		aliasHistory[index] = ordered
 	}
 
 	now := time.Now()
@@ -501,7 +523,6 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if aliasSummary != "" {
 		canonicalMeta.Summary = aliasSummary
 	}
-
 	if err := s.commitHistoryRewrite(sessionKey, aliasHistory, canonicalMeta); err != nil {
 		return false, err
 	}
@@ -588,6 +609,11 @@ func readMessages(path string, skip int) ([]providers.Message, error) {
 		}
 		msg.HistoryID = decodedHistoryID(line, filepath.Base(path), int64(lineNum-1))
 		msg.HistoryRunID = decodedHistoryRunID(line)
+		order, orderErr := decodedHistoryOrder(line)
+		if orderErr != nil {
+			return nil, orderErr
+		}
+		msg = messageWithHistoryOrder(msg, order)
 		msgs = append(msgs, msg)
 	}
 	if scanner.Err() != nil {
@@ -829,6 +855,9 @@ func (s *JSONLStore) Compact(
 	// without unmarshaling them.
 	active, err := readMessages(s.jsonlPath(sessionKey), meta.Skip)
 	if err != nil {
+		return err
+	}
+	if err := s.validateStoredHistoryOrderOrigins(sessionKey, meta); err != nil {
 		return err
 	}
 

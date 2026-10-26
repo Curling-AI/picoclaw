@@ -150,6 +150,9 @@ func (b *JSONLBackend) GetHistory(key string) []providers.Message {
 	for index := range msgs {
 		msgs[index].HistoryID = ""
 		msgs[index].HistoryRunID = ""
+		msgs[index].HistoryOrderVersion = 0
+		msgs[index].HistoryStreamID = ""
+		msgs[index].HistorySequence = 0
 	}
 	return msgs
 }
