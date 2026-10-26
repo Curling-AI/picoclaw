@@ -11,6 +11,8 @@ ReadHistoryWithReceipts(ctx, key) ([]memory.CommittedHistoryMessage, error)
 
 The receipt is constructed from the serialized write buffer and returned only after the durable commit decision, while the same physical-session lock still protects the operation. Its message owns its nested data and does not alias the caller's argument. A write or recovery that cannot establish a commit returns no live receipt. Recovery of a confirmed NEW commit preserves its receipt and counter; cleanup failure must never turn a confirmed commit into an OLD rollback.
 
+Recovery confirmation requires a durable NEW decision bound to that journal and metadata matching the complete order and legacy-origin checkpoint. Readable NEW metadata alone does not acknowledge a receipt. Once those guarantees hold, an unlink failure returns the confirmed receipt without an error that would request a duplicate append; recovery stays fenced and the cleanup error is logged.
+
 This follows the JSONL store's existing single-writer-per-directory contract. Ordering is allocated by the producer's commit, without timestamps, observer arrival order, generation UUID comparison, transcript indices, or a later tail read.
 
 ## Identity and mutations

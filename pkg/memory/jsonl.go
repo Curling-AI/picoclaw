@@ -187,8 +187,13 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	if meta, ok := s.cachedMeta(sanitized); ok {
 		return meta, nil
 	}
-	if err := s.recoverHistoryWrite(key); err != nil {
-		return SessionMeta{}, err
+	s.metaMu.RLock()
+	pending := s.historyPending[sanitized]
+	s.metaMu.RUnlock()
+	if pending {
+		if err := s.recoverHistoryWrite(key); err != nil {
+			return SessionMeta{}, err
+		}
 	}
 	if meta, ok := s.cachedMeta(sanitized); ok {
 		return meta, nil
@@ -584,10 +589,11 @@ func readMessages(path string, skip int) ([]providers.Message, error) {
 	scanner := bufio.NewScanner(f)
 	// Allow large lines for tool results (read_file, web search, etc.).
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	scanner.Split(scanCommittedHistoryLine)
 
 	lineNum := 0
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		line := bytes.TrimRight(scanner.Bytes(), "\r\n")
 		if len(line) == 0 {
 			continue
 		}
@@ -645,8 +651,9 @@ func scanRetainedMessageLines(path string) (int, []int, error) {
 	retained := make([]int, 0)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	scanner.Split(scanCommittedHistoryLine)
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		line := bytes.TrimRight(scanner.Bytes(), "\r\n")
 		if len(line) == 0 {
 			continue
 		}

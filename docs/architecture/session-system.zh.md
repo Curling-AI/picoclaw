@@ -157,16 +157,18 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 
 默认运行时后端是 `pkg/memory.JSONLStore`，外面包了一层 `session.JSONLBackend`。
 
-每个 session 使用两类文件：
+每个 session 使用两个持久文件和临时恢复文件：
 
 ```text
 {sanitized_key}.jsonl
 {sanitized_key}.meta.json
+{sanitized_key}.jsonl.commit.json      # 未完成写入的日志
+{sanitized_key}.jsonl.commit.decision  # 恢复时使用的决策
 ```
 
 各自保存：
 
-- `.jsonl`：一行一个 `providers.Message`，append-only
+- `.jsonl`：每个已提交的换行保存一条消息及私有 occurrence/run ID 和 generation；普通写入采用追加方式
 - `.meta.json`：摘要、时间戳、行数、逻辑截断偏移、scope、aliases
 
 `SessionMeta` 当前包含：
@@ -179,16 +181,20 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 - `UpdatedAt`
 - `Scope`
 - `Aliases`
+- `HistoryGeneration`、`HistoryFileGeneration`、lineage、digest 和 tip
+- `HistoryBytes`：已提交 JSONL 的字节边界
 
 ## 写入与崩溃语义
 
-JSONL store 的设计核心是“追加优先、宁可暂时读到旧数据也不要丢数据”：
+`AddMessage` / `AddFullMessage` 先写不可变日志，保存旧 metadata 和追加偏移，再追加并同步 JSONL，最后发布含 `HistoryBytes` 的 metadata。下一次追加会移除 checkpoint 之后未提交的字节。`SetHistory` 在证明前缀未变化时使用相同的追加路径；替换和 `Compact` 在日志中备份旧原始文件，先写 JSONL，最后写 metadata。共享文件写入器可能退回直接写入，造成 metadata 部分写入失败，因此不能只靠 checkpoint 取消日志。
 
-- `AddMessage` / `AddFullMessage` 先追加一行 JSON，再 `fsync`，最后更新 metadata。
-- `TruncateHistory` 先做逻辑截断，本质上只是推进 `meta.Skip`。
-- `Compact` 才会真正重写 JSONL 文件，把被跳过的旧行物理移除。
-- `SetHistory` 和 `Compact` 都会先写 metadata 再改写 JSONL；如果中途崩溃，最多短时间暴露旧数据，不应丢数据。
-- 读取 JSONL 时如果碰到损坏行，会跳过该行，而不是让整个 session 读取失败。
+恢复会将磁盘上的 metadata 与日志中的 next checkpoint 对比。在恢复 OLD 数据前，先写入绑定该日志内容的独立 OLD/NEW 决策。metadata 读取失败时，决策保持 unknown，该 session 被隔离，不执行破坏性回滚。日志清理失败也会维持隔离，直到清理成功。这样，即使 metadata 已提交而写入返回错误，也不会丢失 NEW 数据；已经恢复 OLD 数据的重试也不会改判为 NEW。
+
+启动时只扫描一次恢复文件。日志损坏只会阻止对应 session 的读写并记录错误，健康 session 继续使用 JSONL 后端。冷 metadata 读取仅在进程将该 key 标记为 pending 时检查日志。迁移会排除 metadata 和日志，避免将它们当作旧 JSON session 导入。
+
+`TruncateHistory` 只根据完整物理行推进 `meta.Skip`，并清除字节 checkpoint，以便之后做一次旧格式扫描。所有扫描器都将没有末尾换行的最后一行视为未提交。损坏行和临时 thought 行会被过滤，但保留其他行的物理位置；重写导致位置移动时会停用旧 generation，同时保留 occurrence ID。超过 256 KiB 的消息仍会让有界捕获返回明确的容量错误。
+
+紧急压缩只在安全的 turn 边界进行逻辑截断。如果只剩一个受保护 turn 且没有安全边界，持久历史保持完整；模型 prompt 仍可在内存中裁剪。
 
 `JSONLBackend.Save` 对应到底层的 `store.Compact(...)`。
 也就是说，`Save` 在新实现里不再是“把内存脏数据刷盘”，而是“在逻辑截断后回收无效行占用的磁盘空间”。
@@ -197,6 +203,9 @@ JSONL store 的设计核心是“追加优先、宁可暂时读到旧数据也�
 
 `pkg/memory.JSONLStore` 使用固定 64 分片 mutex，按 session key 的 hash 做串行化。
 这样既能做到“按 session 串行”，又不会因为 session 数量增长而把 mutex map 做成无界结构。
+列表读取和 cron 清理使用与写入相同的 sanitized-key 锁。清理在锁内重新检查文件时间，删除 transcript、metadata、日志和决策文件，再清除缓存。
+
+这里采用单写入进程模型，不提供跨进程删除事务。launcher DELETE 删除相同的文件；追加操作在独占重建 transcript 并确认 metadata 已删除后，会使用全新 generation。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
 
 旧的 `SessionManager` 则是一个内存 map 加 RW mutex。
 
@@ -212,6 +221,8 @@ JSONL store 的设计核心是“追加优先、宁可暂时读到旧数据也�
 2. 执行 `memory.MigrateFromJSON(...)`，把旧 `.json` session 迁入新格式。
 3. 用 `session.NewJSONLBackend(store)` 包装。
 4. 如果 JSONL 初始化或迁移失败，则回退到 `session.NewSessionManager(dir)`。
+
+单个 session 的恢复失败会在 JSONL store 内被隔离，不会触发整个后端回退。
 
 这个回退是刻意设计的：做一半的迁移，比整轮继续使用旧后端更危险。
 

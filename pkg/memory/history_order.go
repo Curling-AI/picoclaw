@@ -483,16 +483,6 @@ func (s *JSONLStore) validateStoredHistoryOrderOrigins(key string, meta SessionM
 	return err
 }
 
-func scanCommittedHistoryLine(data []byte, atEOF bool) (int, []byte, error) {
-	if index := bytes.IndexByte(data, '\n'); index >= 0 {
-		return index + 1, data[:index+1], nil
-	}
-	if atEOF {
-		return len(data), nil, nil
-	}
-	return 0, nil, nil
-}
-
 // Decode the serialized write buffer so a receipt has exactly the stored
 // representation and never aliases pointers/slices owned by the caller.
 func committedHistoryMessages(data []byte) ([]CommittedHistoryMessage, error) {

@@ -267,6 +267,11 @@ func TestHistoryRecoveryAfterInterruptedCommit(t *testing.T) {
 
 func TestHistoryInvalidRecoveryPreservesTranscript(t *testing.T) {
 	s, key := pagedStore(t, 2)
+	for range 5 {
+		if err := s.AddMessage(t.Context(), "healthy", "user", "healthy history"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	before, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil {
 		t.Fatal(err)
@@ -278,8 +283,16 @@ func TestHistoryInvalidRecoveryPreservesTranscript(t *testing.T) {
 	); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	if _, operationErr := NewJSONLStore(s.dir); operationErr == nil {
-		t.Fatal("incomplete recovery checkpoint was accepted")
+	restarted, err := NewJSONLStore(s.dir)
+	if err != nil {
+		t.Fatal("one invalid checkpoint disabled the whole store", err)
+	}
+	healthy, err := restarted.GetHistory(t.Context(), "healthy")
+	if err != nil || len(healthy) != 5 {
+		t.Fatal("invalid checkpoint hid another session", healthy, err)
+	}
+	if _, pageErr := restarted.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); pageErr == nil {
+		t.Fatal("broken session was not fenced")
 	}
 	after, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil || !bytes.Equal(before, after) {

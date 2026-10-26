@@ -3,13 +3,12 @@ package memory
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
-	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -29,19 +28,23 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(key string, messages []pr
 	}
 	file, err := os.OpenFile(s.jsonlPath(key), os.O_RDWR, 0o644)
 	if errors.Is(err, os.ErrNotExist) {
-		if _, metaErr := os.Stat(s.metaPath(key)); errors.Is(metaErr, os.ErrNotExist) {
-			// Physical deletion retires the old stream, including a cached meta.
-			// Logical clear/truncate keeps its metadata and never resets order.
-			original = SessionMeta{Key: key}
-			meta = SessionMeta{Key: key, CreatedAt: meta.UpdatedAt, UpdatedAt: meta.UpdatedAt}
-			ensureHistoryGeneration(&meta, key)
-			s.storeCachedMeta(sanitizeKey(key), original)
-		} else if metaErr != nil {
-			return nil, metaErr
-		} else if meta.Count != 0 {
-			return nil, ErrHistoryCursor
-		}
+		// Only this successful exclusive create proves the old transcript is
+		// gone. A concurrent creator is ambiguous and must retry from disk.
 		file, err = os.OpenFile(s.jsonlPath(key), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+		if err == nil {
+			if _, statErr := os.Stat(s.metaPath(key)); errors.Is(statErr, os.ErrNotExist) {
+				now := time.Now()
+				original = SessionMeta{Key: key}
+				meta = SessionMeta{Key: key, CreatedAt: now, UpdatedAt: now}
+				resetHistoryGeneration(&meta)
+				s.metaMu.Lock()
+				delete(s.metaCache, sanitizeKey(key))
+				s.metaMu.Unlock()
+			} else if statErr != nil || original.Count != 0 || original.HistoryBytes != nil {
+				file.Close()
+				return nil, errors.Join(ErrHistoryCursor, statErr)
+			}
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("memory: open jsonl for append: %w", err)
@@ -97,10 +100,10 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(key string, messages []pr
 	}
 	// This also removes bytes left by a prior append that never committed meta.
 	if truncateErr := file.Truncate(offset); truncateErr != nil {
-		return nil, errors.Join(truncateErr, s.recoverHistoryWrite(key))
+		return nil, errors.Join(truncateErr, s.recoverFailedHistoryWrite(key))
 	}
 	if _, seekErr := file.Seek(offset, io.SeekStart); seekErr != nil {
-		return nil, errors.Join(seekErr, s.recoverHistoryWrite(key))
+		return nil, errors.Join(seekErr, s.recoverFailedHistoryWrite(key))
 	}
 	written, err := file.Write(data)
 	if err == nil && written != len(data) {
@@ -116,6 +119,9 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(key string, messages []pr
 	if err == nil {
 		err = s.writeMeta(key, meta)
 	}
+	if err == nil {
+		err = s.finishHistoryWrite(key)
+	}
 	if err != nil {
 		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
 		if !committed {
@@ -123,7 +129,6 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(key string, messages []pr
 		}
 		return receipts, nil
 	}
-	s.finishHistoryWrite(key)
 	return receipts, nil
 }
 
@@ -177,81 +182,15 @@ func historyAppendOffset(file *os.File, meta *SessionMeta) (int64, error) {
 	return offset, nil
 }
 
-// Both write paths persist recovery metadata before changing the transcript.
-// Appends need only the old byte offset; rewrites also retain the original
-// bytes. The new metadata checkpoint determines whether a write committed.
-type historyWriteRecovery struct {
-	Meta         SessionMeta `json:"meta"`
-	Next         SessionMeta `json:"next"`
-	AppendOffset *int64      `json:"appendOffset,omitempty"`
-	Data         []byte      `json:"data,omitempty"`
-	Existed      bool        `json:"existed,omitempty"`
-}
-
-func (s *JSONLStore) historyRecoveryPath(key string) string {
-	return s.jsonlPath(key) + ".commit.json"
-}
-
-// Recover before session listings can populate the metadata cache. After
-// startup, the session lock protects each transaction and any failure recovery.
-func (s *JSONLStore) recoverPendingHistoryWrites() error {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return err
+// Only a newline commits a physical row, including for legacy truncation scans.
+func scanCommittedHistoryLine(data []byte, atEOF bool) (int, []byte, error) {
+	if index := bytes.IndexByte(data, '\n'); index >= 0 {
+		return index + 1, data[:index+1], nil
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl.commit.json") {
-			continue
-		}
-		data, readErr := os.ReadFile(filepath.Join(s.dir, entry.Name()))
-		if readErr != nil {
-			return readErr
-		}
-		var pending struct {
-			Meta struct {
-				Key string `json:"key"`
-			} `json:"meta"`
-		}
-		if decodeErr := json.Unmarshal(data, &pending); decodeErr != nil {
-			return decodeErr
-		}
-		if filepath.Base(s.historyRecoveryPath(pending.Meta.Key)) != entry.Name() {
-			return errors.New("invalid history recovery key")
-		}
-		if recoveryErr := s.recoverHistoryWrite(pending.Meta.Key); recoveryErr != nil {
-			return recoveryErr
-		}
+	if atEOF {
+		return len(data), nil, nil
 	}
-	return nil
-}
-
-func (s *JSONLStore) beginHistoryWrite(key string, recovery historyWriteRecovery) error {
-	data, err := json.Marshal(recovery)
-	if err != nil {
-		return err
-	}
-	if err := s.writeSessionFile(s.historyRecoveryPath(key), data, 0o600); err != nil {
-		// No transcript write has begun, so a partial recovery file is unused.
-		_ = os.Remove(s.historyRecoveryPath(key))
-		return err
-	}
-	s.markHistoryPending(key)
-	return nil
-}
-
-func (s *JSONLStore) markHistoryPending(key string) {
-	sanitized := sanitizeKey(key)
-	s.metaMu.Lock()
-	s.historyPending[sanitized] = true
-	delete(s.metaCache, sanitized)
-	s.metaMu.Unlock()
-}
-
-func (s *JSONLStore) finishHistoryWrite(key string) {
-	_ = os.Remove(s.historyRecoveryPath(key))
-	s.metaMu.Lock()
-	delete(s.historyPending, sanitizeKey(key))
-	s.metaMu.Unlock()
+	return 0, nil, nil
 }
 
 func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Message, meta SessionMeta) error {
@@ -279,80 +218,40 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 		return err
 	}
 	if err := s.writeSessionFile(s.jsonlPath(key), data, 0o644); err != nil {
-		_, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
-		return errors.Join(err, recoveryErr)
+		return errors.Join(err, s.recoverFailedHistoryWrite(key))
 	}
-	if err := s.writeMeta(key, meta); err != nil {
+	err = s.writeMeta(key, meta)
+	if err == nil {
+		err = s.finishHistoryWrite(key)
+	}
+	if err != nil {
 		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
 		if committed {
 			return nil
 		}
 		return errors.Join(err, recoveryErr)
 	}
-	// If cleanup is interrupted, recovery recognizes the committed generation.
-	s.finishHistoryWrite(key)
 	return nil
-}
-
-func (s *JSONLStore) recoverHistoryWrite(key string) error {
-	data, err := os.ReadFile(s.historyRecoveryPath(key))
-	if errors.Is(err, os.ErrNotExist) {
-		sanitized := sanitizeKey(key)
-		s.metaMu.Lock()
-		if s.historyPending[sanitized] {
-			delete(s.metaCache, sanitized)
-			delete(s.historyPending, sanitized)
-		}
-		s.metaMu.Unlock()
-		return nil
-	}
-	s.markHistoryPending(key)
-	if err != nil {
-		return fmt.Errorf("memory: read history recovery: %w", err)
-	}
-	var recovery historyWriteRecovery
-	if err := json.Unmarshal(data, &recovery); err != nil {
-		return fmt.Errorf("memory: decode history recovery: %w", err)
-	}
-	if recovery.Next.HistoryBytes == nil || *recovery.Next.HistoryBytes < 0 ||
-		recovery.Next.HistoryFileGeneration == "" || recovery.Next.Count < 0 {
-		return errors.New("invalid history recovery checkpoint")
-	}
-	committedMeta, readErr := os.ReadFile(s.metaPath(key))
-	var current SessionMeta
-	if readErr == nil && json.Unmarshal(committedMeta, &current) == nil && historyCommitMatches(current, recovery.Next) {
-		s.storeCachedMeta(sanitizeKey(key), current)
-	} else {
-		var err error
-		if recovery.AppendOffset != nil {
-			err = s.rollbackHistoryAppend(key, *recovery.AppendOffset)
-		} else {
-			err = s.restoreRawJSONL(key, recovery.Data, recovery.Existed)
-		}
-		if err != nil {
-			return err
-		}
-		if err := s.writeMeta(key, recovery.Meta); err != nil {
-			return err
-		}
-	}
-	s.finishHistoryWrite(key)
-	return nil
-}
-
-func historyCommitMatches(current, next SessionMeta) bool {
-	return current.HistoryFileGeneration == next.HistoryFileGeneration &&
-		current.HistoryTip == next.HistoryTip && current.Count == next.Count &&
-		current.HistoryBytes != nil && next.HistoryBytes != nil && *current.HistoryBytes == *next.HistoryBytes &&
-		current.HistoryOrderVersion == next.HistoryOrderVersion &&
-		current.HistoryStreamID == next.HistoryStreamID && current.HistorySequence == next.HistorySequence &&
-		current.HistoryLegacyFileGeneration == next.HistoryLegacyFileGeneration && current.HistoryLegacyBytes == next.HistoryLegacyBytes
 }
 
 func (s *JSONLStore) recoverExpectedHistoryCommit(key string, next SessionMeta) (bool, error) {
-	if err := s.recoverHistoryWrite(key); err != nil {
-		return false, err
+	decision, recoveryErr := s.recoverHistoryWriteFor(key, historyFailedWrite)
+	if decision != historyWriteNew {
+		return false, recoveryErr
 	}
-	current, err := s.readMeta(key)
-	return err == nil && historyCommitMatches(current, next), err
+	// A durable NEW decision can also accompany unreadable/mismatched metadata.
+	// Confirm this operation's exact checkpoint before acknowledging a receipt;
+	// cleanup errors retain their fence and do not turn a committed write into
+	// a caller retry and a second occurrence.
+	current, readErr := s.readRecoveryMeta(key)
+	if readErr != nil {
+		return false, errors.Join(recoveryErr, readErr)
+	}
+	if !historyNewCheckpointMatches(current, next) {
+		return false, errors.Join(recoveryErr, ErrHistoryOrderUnavailable)
+	}
+	if recoveryErr != nil {
+		log.Printf("memory: confirmed history commit has pending recovery cleanup: %v", recoveryErr)
+	}
+	return true, recoveryErr
 }

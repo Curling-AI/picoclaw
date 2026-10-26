@@ -1598,6 +1598,12 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 	if err := store.SetSummary(nil, sessionKey, "delete summary"); err != nil {
 		t.Fatalf("SetSummary() error = %v", err)
 	}
+	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
+	for _, suffix := range []string{".jsonl.commit.json", ".jsonl.commit.decision"} {
+		if err := os.WriteFile(base+suffix, []byte("interrupted recovery"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	h := NewHandler(configPath)
 	mux := http.NewServeMux()
@@ -1611,11 +1617,17 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 
-	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
-	for _, path := range []string{base + ".jsonl", base + ".meta.json"} {
+	for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision"} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be removed, stat err = %v", path, err)
 		}
+	}
+	if err := store.AddMessage(t.Context(), sessionKey, "user", "fresh session"); err != nil {
+		t.Fatal("confirmed deletion left the agent's cache unusable", err)
+	}
+	history, historyErr := store.GetHistory(t.Context(), sessionKey)
+	if historyErr != nil || len(history) != 1 || history[0].Content != "fresh session" {
+		t.Fatal("confirmed deletion resurrected previous history", history, historyErr)
 	}
 }
 

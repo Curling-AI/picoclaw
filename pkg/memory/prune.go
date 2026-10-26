@@ -68,8 +68,17 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 
 	cutoff := now.Add(-retention)
 	removed := 0
+	seen := make(map[string]bool)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
+		if entry.IsDir() {
+			continue
+		}
+		suffix := ".meta.json"
+		if strings.HasSuffix(entry.Name(), ".jsonl.commit.json") {
+			suffix = ".jsonl.commit.json"
+		} else if strings.HasSuffix(entry.Name(), ".jsonl.commit.decision") {
+			suffix = ".jsonl.commit.decision"
+		} else if !strings.HasSuffix(entry.Name(), suffix) {
 			continue
 		}
 		if !isCronRunFile(entry.Name()) {
@@ -79,21 +88,54 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 		if ierr != nil || !info.ModTime().Before(cutoff) {
 			continue
 		}
-		sanitized := strings.TrimSuffix(entry.Name(), ".meta.json")
-		if err := s.removeSessionFiles(sanitized); err != nil {
+		sanitized := strings.TrimSuffix(entry.Name(), suffix)
+		if seen[sanitized] {
 			continue
 		}
-		removed++
+		seen[sanitized] = true
+		lock := s.sessionLock(sanitized)
+		lock.Lock()
+		pruned, pruneErr := s.pruneSessionFilesLocked(sanitized, cutoff)
+		lock.Unlock()
+		if pruneErr == nil && pruned {
+			removed++
+		}
 	}
 	return removed, nil
 }
 
-// removeSessionFiles deletes both files of a session addressed by its already
+func (s *JSONLStore) pruneSessionFilesLocked(sanitized string, cutoff time.Time) (bool, error) {
+	for _, path := range []string{
+		s.metaPath(sanitized), s.jsonlPath(sanitized), s.historyRecoveryPath(sanitized), s.historyDecisionPath(sanitized),
+	} {
+		info, err := os.Stat(path)
+		if err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		if err == nil && !info.ModTime().Before(cutoff) {
+			return false, nil
+		}
+	}
+	if err := s.removeSessionFilesLocked(sanitized); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// removeSessionFiles deletes all files of a session addressed by its already
 // sanitized name and drops it from the meta cache, so a later listing cannot
 // resurrect it from memory.
 func (s *JSONLStore) removeSessionFiles(sanitized string) error {
+	lock := s.sessionLock(sanitized)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.removeSessionFilesLocked(sanitized)
+}
+
+func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
 	jsonlPath := filepath.Join(s.dir, sanitized+".jsonl")
+	s.markHistoryPending(sanitized)
 
 	// The meta goes first: while it exists the session is still listable, so
 	// removing it before the transcript avoids exposing a session whose
@@ -104,9 +146,16 @@ func (s *JSONLStore) removeSessionFiles(sanitized string) error {
 	if err := os.Remove(jsonlPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if err := os.Remove(s.historyRecoveryPath(sanitized)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(s.historyDecisionPath(sanitized)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 
 	s.metaMu.Lock()
 	delete(s.metaCache, sanitized)
+	delete(s.historyPending, sanitized)
 	s.metaMu.Unlock()
 	return nil
 }

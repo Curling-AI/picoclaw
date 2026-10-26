@@ -616,6 +616,123 @@ func TestHistoryReceiptUnknownCommitNeverRollsBackAConfirmedSequence(t *testing.
 	}
 }
 
+func TestHistoryReceiptRequiresDurableDecisionOnCleanupFailure(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires POSIX directory permissions for a non-root user")
+	}
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			s := newTestStore(t)
+			key := "agent:main:receipt-cleanup"
+			if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "first"}); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(s.dir, 0o755) })
+			writeFailure := errors.New("metadata write reported an uncertain result")
+			s.writeFile = func(path string, data []byte, mode os.FileMode) error {
+				if err := fileutil.WriteFileAtomic(path, data, mode); err != nil {
+					return err
+				}
+				if path == s.metaPath(key) {
+					if durable {
+						return writeFailure
+					}
+					return os.Chmod(s.dir, 0o555)
+				}
+				if durable && path == s.historyDecisionPath(key) {
+					// The decision can be synced, while unlink is now forbidden.
+					return os.Chmod(s.dir, 0o555)
+				}
+				return nil
+			}
+			receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "confirmed once"})
+			if durable {
+				if err != nil || !receipt.Order.Valid() || receipt.Order.Sequence != 2 || receipt.Message.Content != "confirmed once" {
+					t.Fatal("durable NEW cleanup failure requested a retry or lost its receipt", receipt, err)
+				}
+			} else if err == nil || receipt.Order != (HistoryOrderProof{}) {
+				t.Fatal("readable NEW metadata was acknowledged without a durable decision", receipt, err)
+			}
+			if _, err := os.Stat(s.historyRecoveryPath(key)); err != nil {
+				t.Fatal("cleanup failure discarded its recovery fence", err)
+			}
+			if _, cached := s.cachedMeta(sanitizeKey(key)); cached {
+				t.Fatal("pending cleanup exposed the metadata cache")
+			}
+			if err := os.Chmod(s.dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s.writeFile = nil
+			next, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "after cleanup"})
+			if err != nil || next.Order.Sequence != 3 {
+				t.Fatal("cleanup recovery reused a committed sequence", next, err)
+			}
+			read, err := s.ReadHistoryWithReceipts(t.Context(), key)
+			if err != nil || len(read) != 3 || read[1].Message.Content != "confirmed once" || read[1].Order.Sequence != 2 ||
+				(durable && !reflect.DeepEqual(read[1], receipt)) {
+				t.Fatal("recovery lost or duplicated the exact confirmed occurrence", read, err)
+			}
+		})
+	}
+}
+
+func TestHistoryReceiptRecoveryRequiresTheExactOrderCheckpoint(t *testing.T) {
+	for name, alter := range map[string]func(*SessionMeta){
+		"version": func(meta *SessionMeta) { meta.HistoryOrderVersion = 0 },
+		"stream":  func(meta *SessionMeta) { meta.HistoryStreamID = newHistoryID() },
+		"counter": func(meta *SessionMeta) { meta.HistorySequence-- },
+		"legacy generation": func(meta *SessionMeta) {
+			meta.HistoryLegacyFileGeneration = newHistoryID()
+		},
+		"legacy bytes": func(meta *SessionMeta) { meta.HistoryLegacyBytes++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			key := "agent:main:receipt-checkpoint"
+			first, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "first"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var expected []byte
+			s.writeFile = func(path string, data []byte, mode os.FileMode) error {
+				if path != s.metaPath(key) {
+					return fileutil.WriteFileAtomic(path, data, mode)
+				}
+				expected = append([]byte(nil), data...)
+				var partial SessionMeta
+				if err := json.Unmarshal(data, &partial); err != nil {
+					return err
+				}
+				alter(&partial)
+				changed, err := json.Marshal(partial)
+				if err != nil {
+					return err
+				}
+				return errors.Join(errors.New("order checkpoint was only partially written"), fileutil.WriteFileAtomic(path, changed, mode))
+			}
+			receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "uncertain"})
+			if err == nil || receipt.Order != (HistoryOrderProof{}) {
+				t.Fatal("recovery acknowledged metadata that lost order provenance", receipt, err)
+			}
+			if _, err := os.Stat(s.historyRecoveryPath(key)); err != nil {
+				t.Fatal("ambiguous order checkpoint lost its recovery journal", err)
+			}
+			s.writeFile = nil
+			if err := fileutil.WriteFileAtomic(s.metaPath(key), expected, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := NewJSONLStore(s.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read, err := reopened.ReadHistoryWithReceipts(t.Context(), key)
+			if err != nil || len(read) != 2 || read[0].Order != first.Order || read[1].Order.Sequence != 2 {
+				t.Fatal("repair rolled back the committed content or reused its sequence", read, err)
+			}
+		})
+	}
+}
+
 func TestHistoryOrderExhaustionDoesNotWriteOrRotateStream(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:order-capacity"
