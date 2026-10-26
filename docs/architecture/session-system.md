@@ -156,16 +156,18 @@ Both dispatch matching and session allocation use that mapping so that the same 
 
 The default runtime backend is `pkg/memory.JSONLStore`, wrapped by `session.JSONLBackend`.
 
-Each session uses two files:
+Each session has two persistent files and temporary recovery files:
 
 ```text
 {sanitized_key}.jsonl
 {sanitized_key}.meta.json
+{sanitized_key}.jsonl.commit.json      # pending write journal
+{sanitized_key}.jsonl.commit.decision  # recovery decision, when needed
 ```
 
 The files store:
 
-- `.jsonl`: one `providers.Message` per line, append-only
+- `.jsonl`: one message per committed newline, with private occurrence/run IDs and generation metadata; ordinary writes append
 - `.meta.json`: summary, timestamps, line counts, logical truncation offset, scope, aliases
 
 `SessionMeta` currently includes:
@@ -178,16 +180,20 @@ The files store:
 - `UpdatedAt`
 - `Scope`
 - `Aliases`
+- `HistoryGeneration`, `HistoryFileGeneration`, lineage, digest and tip fields
+- `HistoryBytes`: the committed JSONL byte boundary
 
 ## Write And Crash Semantics
 
-The JSONL store is designed around append-first durability and stale-over-loss recovery:
+`AddMessage` and `AddFullMessage` write an immutable journal of the previous metadata and append offset, append and sync the JSONL, then publish metadata with `HistoryBytes`. The next append removes any abandoned bytes after that checkpoint. `SetHistory` can use the same path for a proven suffix; replacements and `Compact` journal the previous raw transcript, write JSONL first, and publish metadata last. The journal remains necessary because the shared file writer can fall back to a direct, partially failing metadata write.
 
-- `AddMessage` and `AddFullMessage` append one JSON line, `fsync`, then update metadata.
-- `TruncateHistory` is logical first: it only advances `meta.Skip`.
-- `Compact` physically rewrites the JSONL file to remove skipped lines.
-- `SetHistory` and `Compact` write metadata before rewriting JSONL so a crash may temporarily expose old data, but should not lose data.
-- Corrupt JSONL lines are skipped during reads instead of failing the entire session.
+Recovery compares the persisted metadata with the journal's next checkpoint. It records a small OLD/NEW decision bound to the exact journal before restoring OLD data. A failed metadata read leaves the decision unknown and the session fenced; it never authorizes destructive rollback. A failed journal cleanup also keeps the session fenced until cleanup succeeds. This preserves confirmed NEW data when a write reports an error after publishing metadata, and prevents a retried recovery from relabeling already restored OLD data as NEW.
+
+Startup scans recovery files once. A broken journal disables reads/writes only for that session and is logged; healthy sessions retain the JSONL backend. Cold metadata reads do not probe a journal unless this process marked the key pending. Migration excludes metadata and journals from legacy JSON imports.
+
+`TruncateHistory` advances `meta.Skip` against complete physical rows and clears the byte checkpoint for a one-time legacy rescan. An unterminated last row is uncommitted in all transcript scanners. Corrupt and transient thought rows are filtered without renumbering the remaining physical positions; a rewrite that moves positions retires the old generation while retaining occurrence IDs. Bounded capture continues to return an explicit capacity error for a message exceeding 256 KiB.
+
+Emergency compression uses logical truncation only at a safe turn boundary. With a single protected turn and no safe boundary, it leaves persisted history intact; prompt fitting can still trim the in-memory model context.
 
 `JSONLBackend.Save` maps onto `store.Compact(...)`.
 In other words, `Save` is no longer "flush dirty memory to disk"; it is now "reclaim dead lines after logical truncation".
@@ -196,6 +202,9 @@ In other words, `Save` is no longer "flush dirty memory to disk"; it is now "rec
 
 `pkg/memory.JSONLStore` uses a fixed 64-shard mutex array keyed by session hash.
 That gives per-session serialization without keeping an unbounded mutex map in memory.
+Listings and cron pruning use the same sanitized-key lock as writers. Pruning rechecks file ages under that lock and removes transcript, metadata, journal and decision together, then evicts the cached state.
+
+This is a single-writer process model, not an interprocess deletion transaction. Launcher DELETE removes the same owned files; an append that exclusively recreates a missing transcript after confirmed metadata deletion starts a fresh generation. Ambiguous recreation fails closed. Callers must separately prevent late events from recreating a globally deleted conversation; the file protocol does not provide that product-level guarantee.
 
 The legacy `SessionManager` uses a single in-memory map guarded by an RW mutex.
 
@@ -211,6 +220,8 @@ Startup sequence:
 2. Run `memory.MigrateFromJSON(...)` to import legacy `.json` sessions.
 3. Wrap the store with `session.NewJSONLBackend(store)`.
 4. If JSONL initialization or migration fails, fall back to `session.NewSessionManager(dir)`.
+
+An individual recovery failure is isolated inside the JSONL store and does not trigger this fallback.
 
 This fallback is intentional: a partial migration would be worse than staying on the legacy store for one run.
 

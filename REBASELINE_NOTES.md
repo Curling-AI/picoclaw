@@ -72,6 +72,13 @@ Product doesn't use it, but kept in the fork. Needs re-wiring onto upstream's ev
 3. guardrails/loop_detection — product config/UI contract; re-wire onto pipeline.
 4. S3 Mountpoint vs upstream `fileutil.WriteFileAtomic` (temp+rename+0600).
 
+## Preserved history capture overrides (MAPP-249)
+
+- `pkg/memory/jsonl.go`, `history_*.go`, `migration.go`, and `prune.go`: private occurrence/run IDs, generation lineage, bounded cursor pages, and the committed `HistoryBytes` boundary. Append journals retain OLD metadata/offset; rewrites also retain the previous raw JSONL because `WriteFileAtomic` can partially fail through its direct-write fallback. Recovery records an OLD/NEW decision before rollback; unknown metadata and cleanup failures fence only the affected key. Startup, metadata caching, alias promotion, listing and pruning must preserve that isolation and use the same sanitized-key lock. Deletion removes both recovery files and evicts owned caches; this is not a cross-process deletion transaction.
+- `pkg/providers/protocoltypes/types.go`, `pkg/session/jsonl_backend.go`, and agent history-write call sites: preserve private history provenance through internal reads/writes without adding it to the public provider DTO. Epoch and byte-count fields remain part of the existing capture consumer contract.
+- `pkg/agent/context_legacy.go`: forced compression uses `TruncateHistory` only at a safe turn boundary. With a single protected turn and no safe boundary it returns without mutating persisted history; prompt fitting can trim model context in memory. Preserve this override when reconciling upstream compression changes.
+- `web/backend/api/session.go` and the English/Chinese session architecture docs describe the same transcript, metadata, journal and decision lifecycle. Preserve the published `SetDeliveryConversationKept` API and main ancestry when updating this fork's consumer pin.
+
 ## Progress (branch rebaseline/upstream-sync)
 DONE (each builds + tests green, CGO off):
 - ✅ 2d880c71 constructor — resolved by upstream GetRegistry(); no fork change (product-side at re-import).
