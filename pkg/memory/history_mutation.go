@@ -99,7 +99,7 @@ func (s *JSONLStore) replaceHistory(
 			return appendErr
 		}
 	}
-	if err := s.prepareReplacementHistoryOrder(key, old, prepared, &meta); err != nil {
+	if err := s.prepareReplacementHistoryOrder(key, prepared, &meta); err != nil {
 		return err
 	}
 	ensureHistoryGeneration(&meta, key)

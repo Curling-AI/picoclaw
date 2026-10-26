@@ -29,6 +29,8 @@ A missing proof is represented by a completely zero `Order`. It is never convert
 
 The first version 1 commit records a fence for the existing unproven prefix, using its file generation and committed byte boundary under the same lock and journal. Rewrites of unchanged legacy occurrences preserve an explicit private origin marker in their records. A zero-proof record is attested as preceding the stream's first version 1 commit only when that fence or marker proves its origin.
 
+Corrupt rows proven to belong to the original legacy prefix remain filtered. Replacements reuse origin evidence only from the committed checkpoint; explicitly importing content from an external tail allocates a new proof.
+
 `CommittedHistoryMessage.LegacyBeforeStreamID` carries this atomic origin attestation. It is private, is not a sequence or a version 1 proof, and stays available even if the active transcript contains only legacy entries after all active version 1 messages have been removed. An edited version 1 entry physically before a retained legacy suffix does not change the suffix's origin.
 
 An absent frame, unavailable RPC, missing metadata, malformed version 1 proof, foreign stream, or missing modern proof is not an attested legacy entry. Consumers keep unproven order unavailable. If no prior stream evidence exists, legacy entries remain unbound; consumers must not guess a stream UUID or a predecessor relationship.

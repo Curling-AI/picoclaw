@@ -191,11 +191,15 @@ func (s *JSONLStore) allocateHistoryOrder(key string, message providers.Message,
 	}), nil
 }
 
-func (s *JSONLStore) prepareReplacementHistoryOrder(key string, old, prepared []providers.Message, meta *SessionMeta) error {
-	if err := validateHistoryMessageOrders(old, *meta); err != nil {
+func (s *JSONLStore) prepareReplacementHistoryOrder(key string, prepared []providers.Message, meta *SessionMeta) error {
+	// The provider reader may expose a complete external tail beyond the
+	// committed checkpoint. Only committed origin evidence can be reused;
+	// explicitly importing such a tail allocates fresh content events.
+	old, _, err := s.readCommittedHistoryOrderOrigins(key, *meta, meta.Skip, false)
+	if err != nil {
 		return err
 	}
-	if err := s.validateStoredHistoryOrderOrigins(key, *meta); err != nil {
+	if err := validateHistoryMessageOrders(old, *meta); err != nil {
 		return err
 	}
 	byID := make(map[string]providers.Message, len(old))
@@ -411,9 +415,10 @@ func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMe
 		if line <= skip {
 			continue
 		}
+		fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration && byteEnd <= meta.HistoryLegacyBytes
 		var message providers.Message
 		if json.Unmarshal(data, &message) != nil {
-			if meta.HistoryOrderVersion != 0 {
+			if meta.HistoryOrderVersion != 0 && !fromFence {
 				return nil, 0, ErrHistoryOrderUnavailable
 			}
 			continue
@@ -437,7 +442,6 @@ func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMe
 				return nil, 0, ErrHistoryOrderUnavailable
 			}
 		} else if meta.HistoryOrderVersion == HistoryOrderVersion {
-			fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration && byteEnd <= meta.HistoryLegacyBytes
 			if legacyStream != meta.HistoryStreamID && (legacyStream != "" || !fromFence) {
 				return nil, 0, ErrHistoryOrderUnavailable
 			}

@@ -171,6 +171,69 @@ func TestHistoryOrderLegacyRemainsUnproven(t *testing.T) {
 	}
 }
 
+func TestHistoryOrderLegacyCorruptRowsRemainFilteredAfterRollout(t *testing.T) {
+	s := newTestStore(t)
+	key := "agent:main:legacy-corrupt-order"
+	raw := []byte("{broken legacy row\n{\"role\":\"user\",\"content\":\"legacy\",\"created_at\":\"2000-01-01T00:00:00Z\"}\n")
+	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
+		t.Fatal(err)
+	}
+	appended, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "ordered"})
+	if err != nil || appended.Order.Sequence != 1 {
+		t.Fatal(appended, err)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
+	if err != nil || len(read) != 2 || read[0].LegacyBeforeStreamID != appended.Order.StreamID ||
+		read[0].Order != (HistoryOrderProof{}) || read[1].Order != appended.Order {
+		t.Fatal("a proven legacy corrupt row made the retained history unavailable", read, err)
+	}
+	history := []providers.Message{read[0].Message, read[1].Message}
+	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	rewritten, err := s.ReadHistoryWithReceipts(t.Context(), key)
+	if err != nil || !reflect.DeepEqual(rewritten, read) {
+		t.Fatal("filtering legacy corruption changed retained proofs", rewritten, err)
+	}
+}
+
+func TestHistoryOrderImportBeyondCheckpointGetsANewProof(t *testing.T) {
+	s := newTestStore(t)
+	key := "agent:main:uncommitted-import-order"
+	first, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "committed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(s.jsonlPath(key), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Appendf(nil, "{\"role\":\"assistant\",\"content\":\"uncommitted old writer\",\"history_id\":%q}\n", newHistoryID())
+	if _, err := file.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The legacy provider reader can see a complete external tail. Explicitly
+	// importing it may commit new content, but cannot attest it as old legacy.
+	history, err := s.GetHistory(t.Context(), key)
+	if err != nil || len(history) != 2 {
+		t.Fatal(history, err)
+	}
+	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
+	if err != nil || len(read) != 2 || read[0].Order != first.Order || read[1].Order.Sequence != 2 ||
+		read[1].Order.StreamID != first.Order.StreamID || read[1].LegacyBeforeStreamID != "" {
+		t.Fatal("an uncommitted import was laundered into an attested legacy occurrence", read, err)
+	}
+}
+
 func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:legacy-origin"
