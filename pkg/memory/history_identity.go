@@ -20,6 +20,7 @@ type historyRecord struct {
 
 	Order                *HistoryOrderProof `json:"history_order,omitempty"`
 	LegacyBeforeStreamID string             `json:"history_legacy_before_stream_id,omitempty"`
+	RecoveryRequired     bool               `json:"history_recovery_required,omitempty"`
 }
 
 func newHistoryID() string { return uuid.NewString() }
@@ -58,6 +59,7 @@ func marshalHistoryMessage(message providers.Message, meta SessionMeta) ([]byte,
 			FileGeneration:       meta.HistoryFileGeneration,
 			Order:                persistedHistoryOrder(message),
 			LegacyBeforeStreamID: persistedLegacyHistoryStream(message, meta),
+			RecoveryRequired:     meta.HistoryRecoveryRequired,
 		},
 	)
 }

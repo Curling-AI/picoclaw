@@ -17,7 +17,7 @@ import (
 // data is synced. Failed writes roll back; after a process interruption the
 // persisted checkpoint still excludes any abandoned tail from capture.
 func (s *JSONLStore) appendHistoryMessages(key string, messages []providers.Message, meta SessionMeta) error {
-	_, err := s.appendHistoryMessagesWithReceipts(key, messages, meta)
+	_, err := s.appendHistoryMessagesFor(key, messages, meta, false)
 	return err
 }
 
@@ -25,6 +25,15 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(
 	key string,
 	messages []providers.Message,
 	meta SessionMeta,
+) ([]CommittedHistoryMessage, error) {
+	return s.appendHistoryMessagesFor(key, messages, meta, true)
+}
+
+func (s *JSONLStore) appendHistoryMessagesFor(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	requireReceipt bool,
 ) ([]CommittedHistoryMessage, error) {
 	original, err := s.readMeta(key)
 	if err != nil {
@@ -54,23 +63,66 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(
 		return nil, fmt.Errorf("memory: open jsonl for append: %w", err)
 	}
 	defer file.Close()
-	legacyCount := meta.Count
-	offset, err := historyAppendOffset(file, &meta)
+	info, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
-	if meta.HistoryOrderVersion == 0 && meta.Count != legacyCount {
-		// A legacy offset upgrade may discover complete rows beyond Count.
-		// They have no committed-origin evidence and cannot be silently
-		// included in the first stream's legacy fence. SetHistory can import
-		// them explicitly and allocate fresh content proofs instead.
-		return nil, ErrHistoryOrderUnavailable
+	appendMeta := meta
+	legacyCount := meta.Count
+	offset, err := historyAppendOffset(file, &meta, info.Size())
+	if err != nil && !errors.Is(err, ErrHistoryCursor) {
+		return nil, err
+	}
+	proofErr := err
+	if proofErr == nil && meta.HistoryOrderVersion == 0 && meta.Count != legacyCount {
+		proofErr = ErrHistoryOrderUnavailable
+	}
+	completeTail := false
+	if proofErr == nil {
+		var tailErr error
+		completeTail, tailErr = hasCompleteHistoryTail(file, offset, info.Size())
+		if tailErr != nil {
+			return nil, tailErr
+		}
+		if completeTail {
+			proofErr = ErrHistoryOrderUnavailable
+		}
 	}
 	ordered := make([]providers.Message, len(messages))
-	for index, message := range messages {
-		ordered[index], err = s.allocateHistoryOrder(key, message, &meta)
-		if err != nil {
-			return nil, err
+	if proofErr == nil {
+		for index, message := range messages {
+			ordered[index], proofErr = s.allocateHistoryOrder(key, message, &meta)
+			if proofErr != nil {
+				if errors.Is(proofErr, ErrHistoryOrderExhausted) {
+					return nil, proofErr
+				}
+				break
+			}
+		}
+	}
+	if proofErr != nil {
+		if requireReceipt {
+			return nil, fmt.Errorf("%w: %w", ErrHistoryReceiptUnavailable, proofErr)
+		}
+		// Content persistence remains available, but no old stream/counter is
+		// reconstructed or attested. Latch the unavailable state in metadata
+		// and each new record until an explicit recovery chooses new evidence.
+		meta = appendMeta
+		meta.HistoryRecoveryRequired = true
+		meta.HistoryDigest = ""
+		if !appendMeta.HistoryRecoveryRequired || appendMeta.HistoryBytes == nil || err != nil || completeTail {
+			meta.HistoryBytes = nil
+			if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+				return nil, seekErr
+			}
+			offset, err = historyAppendOffset(file, &meta, info.Size())
+			if err != nil {
+				return nil, err
+			}
+			meta.Skip = max(0, min(meta.Skip, meta.Count))
+		}
+		for index, message := range messages {
+			ordered[index] = messageWithHistoryOrder(message, HistoryOrderProof{})
 		}
 	}
 	messages = ordered
@@ -78,9 +130,12 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(
 	if err != nil {
 		return nil, err
 	}
-	receipts, err := committedHistoryMessages(data)
-	if err != nil {
-		return nil, err
+	var receipts []CommittedHistoryMessage
+	if !meta.HistoryRecoveryRequired {
+		receipts, err = committedHistoryMessages(data)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if meta.Count == 0 && offset == 0 {
 		meta.HistoryDigest = emptyHistoryDigest
@@ -136,6 +191,23 @@ func (s *JSONLStore) appendHistoryMessagesWithReceipts(
 	return receipts, nil
 }
 
+// Complete rows beyond a checkpoint can be durable output from an older
+// writer whose metadata failed. They must not be truncated or called legacy.
+func hasCompleteHistoryTail(file *os.File, offset, physicalBytes int64) (bool, error) {
+	if offset == physicalBytes {
+		return false, nil
+	}
+	scanner := bufio.NewScanner(io.NewSectionReader(file, offset, physicalBytes-offset))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	scanner.Split(scanCommittedHistoryLine)
+	for scanner.Scan() {
+		if len(bytes.TrimRight(scanner.Bytes(), "\r\n")) != 0 {
+			return true, nil
+		}
+	}
+	return false, scanner.Err()
+}
+
 func (s *JSONLStore) rollbackHistoryAppend(key string, size int64) error {
 	file, err := os.OpenFile(s.jsonlPath(key), os.O_WRONLY, 0o644)
 	if err != nil {
@@ -151,13 +223,9 @@ func (s *JSONLStore) rollbackHistoryAppend(key string, size int64) error {
 	return file.Close()
 }
 
-func historyAppendOffset(file *os.File, meta *SessionMeta) (int64, error) {
-	info, err := file.Stat()
-	if err != nil {
-		return 0, err
-	}
+func historyAppendOffset(file *os.File, meta *SessionMeta, physicalBytes int64) (int64, error) {
 	if meta.HistoryBytes != nil {
-		if *meta.HistoryBytes < 0 || *meta.HistoryBytes > info.Size() {
+		if *meta.HistoryBytes < 0 || *meta.HistoryBytes > physicalBytes {
 			return 0, ErrHistoryCursor
 		}
 		return *meta.HistoryBytes, nil

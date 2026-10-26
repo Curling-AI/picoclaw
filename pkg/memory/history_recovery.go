@@ -12,6 +12,29 @@ import (
 	"strings"
 )
 
+var ErrHistoryRecoveryRequired = errors.New("history source requires explicit recovery")
+
+func historyRecoveryMarkerError(marker json.RawMessage) error {
+	if len(marker) == 0 {
+		return nil
+	}
+	var required *bool
+	if json.Unmarshal(marker, &required) != nil || required == nil || *required {
+		return ErrHistoryRecoveryRequired
+	}
+	return nil
+}
+
+func historyRecordRecoveryRequired(data []byte) error {
+	var record struct {
+		RecoveryRequired json.RawMessage `json:"history_recovery_required"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	return historyRecoveryMarkerError(record.RecoveryRequired)
+}
+
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
@@ -260,7 +283,8 @@ func historyCheckpointMatches(current, expected SessionMeta) bool {
 		current.HistoryOrderVersion == expected.HistoryOrderVersion &&
 		current.HistoryStreamID == expected.HistoryStreamID && current.HistorySequence == expected.HistorySequence &&
 		current.HistoryLegacyFileGeneration == expected.HistoryLegacyFileGeneration &&
-		current.HistoryLegacyBytes == expected.HistoryLegacyBytes
+		current.HistoryLegacyBytes == expected.HistoryLegacyBytes &&
+		current.HistoryRecoveryRequired == expected.HistoryRecoveryRequired
 }
 
 func journalDigest(data []byte) string {

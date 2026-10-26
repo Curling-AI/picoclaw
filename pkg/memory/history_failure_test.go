@@ -55,7 +55,7 @@ func TestHistoryPagePreservesContextErrors(t *testing.T) {
 	}
 }
 
-func TestHistoryPageIgnoresAppendBeforeMetaCommit(t *testing.T) {
+func TestHistoryPageExcludesTailUntilRuntimePreservesItWithoutOrder(t *testing.T) {
 	s, key := pagedStore(t, 1)
 	before, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
 	if err != nil {
@@ -70,6 +70,10 @@ func TestHistoryPageIgnoresAppendBeforeMetaCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendRawHistory(t, s, key, append(orphan, '\n'))
+	durablePrefix, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
 	s, err = NewJSONLStore(s.dir)
 	if err != nil {
 		t.Fatal(err)
@@ -82,8 +86,15 @@ func TestHistoryPageIgnoresAppendBeforeMetaCommit(t *testing.T) {
 		t.Fatal(operationErr)
 	}
 	page, err = s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key, Cursor: before.ResumeCursor, Refresh: true})
-	if err != nil || len(page.Entries) != 1 || page.Entries[0].Message.Content != "committed next" {
-		t.Fatal("the next append committed an abandoned record", page, err)
+	if !errors.Is(err, ErrHistoryRecoveryRequired) || len(page.Entries) != 0 {
+		t.Fatal("a cursor page attested a source requiring explicit recovery", page, err)
+	}
+	retained, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil || !bytes.HasPrefix(retained, durablePrefix) {
+		t.Fatal("content append rewrote an unknown complete prefix", err)
+	}
+	if _, receiptErr := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(receiptErr, ErrHistoryReceiptUnavailable) {
+		t.Fatal("preserving unknown content manufactured an order receipt", receiptErr)
 	}
 }
 

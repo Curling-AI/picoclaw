@@ -377,7 +377,12 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 				}
 				appendErr = memory.ErrHistoryOrderUnavailable
 			}
-			if errors.Is(receiptErr, memory.ErrHistoryUnsupported) {
+			if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
+				errors.Is(receiptErr, memory.ErrHistoryOwnershipUnavailable) ||
+				errors.Is(receiptErr, memory.ErrHistoryReceiptUnavailable) {
+				// Receipt eligibility failed before this message's write began.
+				// Keep the legacy persistence/notification contract; never retry
+				// a failed or uncertain commit through this fallback.
 				appendErr = appendToSession(agent.Sessions, sessionKey, msg)
 			}
 		} else {

@@ -27,6 +27,12 @@ const (
 var (
 	ErrHistoryOrderUnavailable = errors.New("history order proof unavailable or invalid")
 	ErrHistoryOrderExhausted   = errors.New("history order sequence exhausted")
+	// This error is returned before a receipt append writes the message.
+	// Content-only runtime writers can persist it without claiming order.
+	ErrHistoryReceiptUnavailable = fmt.Errorf("%w: %w", ErrHistoryOrderUnavailable, ErrHistoryRecoveryRequired)
+	// Resolution failed before this append started. Runtime callers may use
+	// their legacy persistence path without claiming a canonical receipt.
+	ErrHistoryOwnershipUnavailable = fmt.Errorf("%w: canonical ownership unavailable", ErrHistoryOrderUnavailable)
 )
 
 // HistoryOrderProof identifies a committed content event in one persistent
@@ -77,7 +83,8 @@ func persistedHistoryOrder(message providers.Message) *HistoryOrderProof {
 }
 
 func persistedLegacyHistoryStream(message providers.Message, meta SessionMeta) string {
-	if messageHistoryOrder(message) == (HistoryOrderProof{}) && meta.HistoryOrderVersion == HistoryOrderVersion {
+	if messageHistoryOrder(message) == (HistoryOrderProof{}) && meta.HistoryOrderVersion == HistoryOrderVersion &&
+		!meta.HistoryRecoveryRequired {
 		return meta.HistoryStreamID
 	}
 	return ""
@@ -102,10 +109,14 @@ func decodedLegacyHistoryStream(data []byte) (string, error) {
 
 func decodedHistoryOrder(data []byte) (HistoryOrderProof, error) {
 	var raw struct {
-		Order json.RawMessage `json:"history_order"`
+		Order       json.RawMessage `json:"history_order"`
+		Unavailable json.RawMessage `json:"history_recovery_required"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return HistoryOrderProof{}, ErrHistoryOrderUnavailable
+	}
+	if markerErr := historyRecoveryMarkerError(raw.Unavailable); markerErr != nil {
+		return HistoryOrderProof{}, fmt.Errorf("%w: %w", ErrHistoryReceiptUnavailable, markerErr)
 	}
 	if len(raw.Order) == 0 {
 		return HistoryOrderProof{}, nil
@@ -118,6 +129,9 @@ func decodedHistoryOrder(data []byte) (HistoryOrderProof, error) {
 }
 
 func validateHistoryOrderState(meta SessionMeta) error {
+	if meta.HistoryRecoveryRequired {
+		return ErrHistoryReceiptUnavailable
+	}
 	if meta.HistoryOrderVersion == 0 && meta.HistoryStreamID == "" && meta.HistorySequence == 0 &&
 		meta.HistoryLegacyFileGeneration == "" && meta.HistoryLegacyBytes == 0 {
 		return nil
@@ -167,14 +181,9 @@ func (s *JSONLStore) ensureHistoryOrderStream(key string, meta *SessionMeta) err
 	if meta.HistoryOrderVersion != 0 {
 		return nil
 	}
-	legacy, legacyBytes, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, true)
+	_, legacyBytes, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, true)
 	if err != nil {
 		return err
-	}
-	for _, message := range legacy {
-		if messageHistoryOrder(message) != (HistoryOrderProof{}) {
-			return ErrHistoryOrderUnavailable
-		}
 	}
 	ensureHistoryGeneration(meta, key)
 	meta.HistoryOrderVersion, meta.HistoryStreamID = HistoryOrderVersion, newHistoryID()
@@ -253,7 +262,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	if shouldShortCircuitSessionResolve(key) && s.sessionExists(key) {
 		meta, err := s.GetSessionMeta(context.Background(), key)
 		if err != nil {
-			return "", fmt.Errorf("%w: canonical metadata: %w", ErrHistoryOrderUnavailable, err)
+			return "", fmt.Errorf("%w: canonical metadata: %w", ErrHistoryOwnershipUnavailable, err)
 		}
 		if meta.Key == key {
 			return key, nil
@@ -261,7 +270,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return "", fmt.Errorf("%w: canonical directory: %w", ErrHistoryOrderUnavailable, err)
+		return "", fmt.Errorf("%w: canonical directory: %w", ErrHistoryOwnershipUnavailable, err)
 	}
 	canonical := ""
 	for _, entry := range entries {
@@ -277,7 +286,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 			// Silently skipping an unreadable alias owner could mint a valid
 			// receipt in a different session. Ordinary listings may skip it;
 			// canonical order resolution must fail closed instead.
-			return "", fmt.Errorf("%w: alias ownership: %w", ErrHistoryOrderUnavailable, readErr)
+			return "", fmt.Errorf("%w: alias ownership: %w", ErrHistoryOwnershipUnavailable, readErr)
 		}
 		for _, alias := range meta.Aliases {
 			if alias != key || meta.Key == key {
@@ -366,6 +375,9 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	}
 	if ownershipErr := validateCanonicalHistoryKey(key, canonical, meta); ownershipErr != nil {
 		return nil, ownershipErr
+	}
+	if stateErr := validateHistoryOrderState(meta); stateErr != nil {
+		return nil, stateErr
 	}
 	var messages []providers.Message
 	if _, statErr := os.Stat(s.metaPath(canonical)); errors.Is(statErr, os.ErrNotExist) {

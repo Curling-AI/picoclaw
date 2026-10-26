@@ -67,6 +67,7 @@ type SessionMeta struct {
 	HistorySequence             uint64 `json:"history_sequence,omitempty"`
 	HistoryLegacyFileGeneration string `json:"history_legacy_file_generation,omitempty"`
 	HistoryLegacyBytes          int64  `json:"history_legacy_bytes,omitempty"`
+	HistoryRecoveryRequired     bool   `json:"history_recovery_required,omitempty"`
 }
 
 // JSONLStore implements Store using append-only JSONL files.
@@ -576,6 +577,17 @@ func (s *JSONLStore) restoreRawJSONL(sessionKey string, data []byte, existed boo
 // cost of json.Unmarshal on logically truncated messages.
 // Malformed trailing lines (e.g. from a crash) are silently skipped.
 func readMessages(path string, skip int) ([]providers.Message, error) {
+	return readHistoryMessages(path, skip, false)
+}
+
+// Provider/legacy readers do not consume ordering evidence. Keep readable
+// message content when private proof is corrupt or from a future producer;
+// mutation and receipt readers retain their strict decoding paths.
+func readProviderMessages(path string, skip int) ([]providers.Message, error) {
+	return readHistoryMessages(path, skip, true)
+}
+
+func readHistoryMessages(path string, skip int, providerOnly bool) ([]providers.Message, error) {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return []providers.Message{}, nil
@@ -617,7 +629,7 @@ func readMessages(path string, skip int) ([]providers.Message, error) {
 		msg.HistoryID = decodedHistoryID(line, filepath.Base(path), int64(lineNum-1))
 		msg.HistoryRunID = decodedHistoryRunID(line)
 		order, orderErr := decodedHistoryOrder(line)
-		if orderErr != nil {
+		if orderErr != nil && !providerOnly {
 			return nil, orderErr
 		}
 		msg = messageWithHistoryOrder(msg, order)
@@ -729,7 +741,7 @@ func (s *JSONLStore) GetHistory(
 
 	// Pass meta.Skip so readMessages skips those lines without
 	// unmarshaling them — avoids wasted CPU on truncated messages.
-	msgs, err := readMessages(s.jsonlPath(sessionKey), meta.Skip)
+	msgs, err := readProviderMessages(s.jsonlPath(sessionKey), meta.Skip)
 	if err != nil {
 		return nil, err
 	}
