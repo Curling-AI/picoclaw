@@ -191,7 +191,11 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 		}
 		line, err := readHistoryLine(reader)
 		page.LinesRead++
-		if errors.Is(err, bufio.ErrBufferFull) || len(line) > HistoryMessageBytes {
+		if errors.Is(err, ErrHistoryCapacity) || errors.Is(err, bufio.ErrBufferFull) ||
+			len(line) > HistoryMessageBytes {
+			if len(page.Entries) > 0 {
+				break
+			}
 			return HistoryPage{}, ErrHistoryCapacity
 		}
 		if err != nil {
@@ -200,15 +204,19 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 			}
 			return HistoryPage{}, fmt.Errorf("read bounded history line: %w", err)
 		}
+		if len(line) == 1 && line[0] == '\n' {
+			cursor.Byte++
+			continue
+		}
 		var message providers.Message
-		if json.Unmarshal(line, &message) != nil {
-			return HistoryPage{}, ErrHistoryCapacity
+		if json.Unmarshal(line, &message) != nil || messageutil.IsTransientAssistantThoughtMessage(message) {
+			// Match GetHistory's legacy filtering while retaining physical cursor positions.
+			cursor.Byte += int64(len(line))
+			cursor.Line++
+			continue
 		}
 		if !historyLineageMatches(line, meta, state.key) {
 			return HistoryPage{}, ErrHistoryCursor
-		}
-		if messageutil.IsTransientAssistantThoughtMessage(message) {
-			return HistoryPage{}, ErrHistoryCapacity
 		}
 		message.HistoryID = decodedHistoryID(line, filepath.Base(file.Name()), cursor.Line)
 		message.HistoryRunID = decodedHistoryRunID(line)

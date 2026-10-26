@@ -14,7 +14,9 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // ---------------------------------------------------------------------------
@@ -929,4 +931,44 @@ func testConfig(t *testing.T) *config.Config {
 func newCMTestAgentLoop(cfg *config.Config) *AgentLoop {
 	msgBus := bus.NewMessageBus()
 	return NewAgentLoop(cfg, msgBus, &simpleMockProvider{response: "test"})
+}
+
+func TestForcedCompressionKeepsJSONLHistoryIdentity(t *testing.T) {
+	al := newCMTestAgentLoop(testConfig(t))
+	t.Cleanup(al.Close)
+	store, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := session.NewJSONLBackend(store)
+	al.registry.GetDefaultAgent().Sessions = backend
+	key := "force-compression-lineage"
+	var messages []providers.Message
+	for i := 0; i < 8; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		messages = append(messages, providers.Message{Role: role, Content: strings.Repeat(role, i+1)})
+	}
+	backend.SetHistory(key, messages)
+	before, err := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operationErr := al.contextManager.Compact(
+		t.Context(),
+		&CompactRequest{SessionKey: key, Reason: ContextCompressReasonRetry},
+	); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	after, err := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation != before.Generation || after.ActiveStartPosition != 4 ||
+		after.Entries[0].ID != before.Entries[4].ID ||
+		after.Entries[0].Position != 4 {
+		t.Fatalf("compression retired stable source: before=%+v after=%+v", before, after)
+	}
 }

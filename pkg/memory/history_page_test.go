@@ -235,18 +235,106 @@ func TestHistoryPagePinsCeilingAndRejectsForeignOrOverBudgetReads(t *testing.T) 
 	); operationErr != nil {
 		t.Fatal(operationErr)
 	}
+	partial, operationErr := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
+	if operationErr != nil || partial.Complete || len(partial.Entries) != 2 {
+		t.Fatal("valid prefix lost before over-budget row", operationErr)
+	}
 	if _, operationErr := s.ReadHistoryPage(
 		t.Context(),
-		HistoryPageRequest{Key: key},
+		HistoryPageRequest{Key: key, Cursor: partial.ResumeCursor},
 	); !errors.Is(
 		operationErr,
 		ErrHistoryCapacity,
 	) {
-		t.Fatal("oversized message silently skipped", operationErr)
+		t.Fatal("oversized row silently skipped", operationErr)
 	}
+
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
 	if _, operationErr := s.ReadHistoryPage(canceled, HistoryPageRequest{Key: key}); operationErr == nil {
 		t.Fatal("canceled read continued")
+	}
+}
+
+func TestHistoryPageSkipsLegacyInvalidAndThoughtLines(t *testing.T) {
+	s, key := pagedStore(t, 0)
+	raw := []byte(
+		"{\"role\":\"user\",\"content\":\"before\"}\n\n{broken\n{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"private thought\"}\n{\"role\":\"assistant\",\"content\":\"after\"}\n",
+	)
+	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeMeta(key, SessionMeta{Count: 4}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Complete || page.EndPosition != 4 || len(page.Entries) != 2 || page.Entries[1].Position != 3 ||
+		page.Entries[1].Message.Content != "after" {
+		t.Fatalf("legacy filtering lost physical coverage: %+v", page)
+	}
+}
+
+func TestHistoryPageEnforcesSerializedPageByteLimit(t *testing.T) {
+	s, key := pagedStore(t, 0)
+	var messages []providers.Message
+	for i := 0; i < 6; i++ {
+		messages = append(messages, providers.Message{Role: "user", Content: strings.Repeat("x", 200<<10)})
+	}
+	if err := s.SetHistory(t.Context(), key, messages); err != nil {
+		t.Fatal(err)
+	}
+	request := HistoryPageRequest{Key: key}
+	count := 0
+	for attempt := 0; attempt < 6; attempt++ {
+		page, err := s.ReadHistoryPage(t.Context(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(page)
+		if err != nil || len(data) > HistoryPageBytes {
+			t.Fatalf("page exceeded byte budget: %d %v", len(data), err)
+		}
+		count += len(page.Entries)
+		if page.Complete {
+			break
+		}
+		request.Cursor = page.ResumeCursor
+	}
+	if count != 6 {
+		t.Fatal("byte boundary lost source entries", count)
+	}
+}
+
+func TestHistoryCursorRejectsAnotherKeyEvenWithIdenticalLineage(t *testing.T) {
+	s, key := pagedStore(t, 2)
+	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := s.readMeta(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operationErr := s.writeMeta("other", meta); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	data, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.jsonlPath("other"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadHistoryPage(
+		t.Context(),
+		HistoryPageRequest{Key: "other", Cursor: page.ResumeCursor},
+	); !errors.Is(
+		err,
+		ErrHistoryCursor,
+	) {
+		t.Fatal("foreign key accepted with identical lineage", err)
 	}
 }

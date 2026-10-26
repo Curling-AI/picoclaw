@@ -201,7 +201,12 @@ func (m *legacyContextManager) forceCompression(sessionKey string, protectedTail
 	}
 	agent.Sessions.SetSummary(sessionKey, compressionNote)
 
-	agent.Sessions.SetHistory(sessionKey, keptHistory)
+	if mid > 0 {
+		// This is compaction of an unchanged suffix, not a transcript edit.
+		agent.Sessions.TruncateHistory(sessionKey, len(keptHistory))
+	} else {
+		agent.Sessions.SetHistory(sessionKey, keptHistory)
+	}
 	agent.Sessions.Save(sessionKey)
 
 	logger.WarnCF("agent", "Forced compression executed", map[string]any{

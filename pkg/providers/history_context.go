@@ -17,6 +17,9 @@ func WithHistoryRun(ctx context.Context, runID string) context.Context {
 }
 
 func HistoryRun(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
 	value, _ := ctx.Value(historyRunKey{}).(string)
 	return value
 }

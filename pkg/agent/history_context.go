@@ -22,7 +22,11 @@ func (ts *turnState) appendHistoryMessage(message providers.Message) {
 			ts.sessionKey,
 			message,
 		); err != nil {
-			logger.WarnCF("agent", "Turn history append failed", map[string]any{"operation": "append_turn_history"})
+			logger.WarnCF(
+				"agent",
+				"Turn history append failed",
+				map[string]any{"operation": "append_turn_history", "error": err.Error()},
+			)
 		}
 		return
 	}
@@ -39,7 +43,7 @@ func (ts *turnState) replaceHistory(store session.SessionStore, messages []provi
 			logger.WarnCF(
 				"agent",
 				"Turn history replacement failed",
-				map[string]any{"operation": "replace_turn_history"},
+				map[string]any{"operation": "replace_turn_history", "error": err.Error()},
 			)
 		}
 		return
