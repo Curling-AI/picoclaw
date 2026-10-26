@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -857,8 +858,17 @@ func (s *JSONLStore) Compact(
 	if err != nil {
 		return err
 	}
-	if err := s.validateStoredHistoryOrderOrigins(sessionKey, meta); err != nil {
+	committed, _, err := s.readCommittedHistoryOrderOrigins(sessionKey, meta, meta.Skip, false)
+	if err != nil {
 		return err
+	}
+	if len(active) != len(committed) {
+		return ErrHistoryOrderUnavailable
+	}
+	for index := range active {
+		if !reflect.DeepEqual(active[index], committed[index]) {
+			return ErrHistoryOrderUnavailable
+		}
 	}
 
 	retainedPrefix, err := unchangedPhysicalPrefix(s.jsonlPath(sessionKey), meta.Skip, len(active))

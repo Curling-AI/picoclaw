@@ -355,7 +355,20 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
 		return nil, err
 	}
-	messages, err := s.readCommittedHistory(canonical, meta, meta.Skip)
+	var messages []providers.Message
+	if _, statErr := os.Stat(s.metaPath(canonical)); errors.Is(statErr, os.ErrNotExist) {
+		if validateHistoryOrderState(meta) != nil || meta.HistoryOrderVersion != 0 {
+			return nil, ErrHistoryOrderUnavailable
+		}
+		// Old JSONL sessions can predate metadata entirely. Their content is
+		// readable, but no stream/fence may be inferred. The unbound decoder
+		// still rejects any residual modern proof or origin marker.
+		messages, _, err = s.readHistoryOrderOrigins(canonical, SessionMeta{Key: canonical}, 0, false, true)
+	} else if statErr != nil {
+		return nil, statErr
+	} else {
+		messages, err = s.readCommittedHistory(canonical, meta, meta.Skip)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -379,6 +392,10 @@ func (s *JSONLStore) readCommittedHistory(key string, meta SessionMeta, skip int
 }
 
 func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMeta, skip int, requireLineage bool) ([]providers.Message, int64, error) {
+	return s.readHistoryOrderOrigins(key, meta, skip, requireLineage, false)
+}
+
+func (s *JSONLStore) readHistoryOrderOrigins(key string, meta SessionMeta, skip int, requireLineage, unboundLegacy bool) ([]providers.Message, int64, error) {
 	ensureHistoryGeneration(&meta, key)
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) && meta.Count == 0 {
@@ -405,7 +422,7 @@ func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMe
 	messages := []providers.Message{}
 	line := 0
 	var byteEnd int64
-	for line < meta.Count && scanner.Scan() {
+	for (unboundLegacy || line < meta.Count) && scanner.Scan() {
 		data := scanner.Bytes()
 		byteEnd += int64(len(data))
 		if len(bytes.TrimRight(data, "\r\n")) == 0 {
@@ -421,9 +438,6 @@ func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMe
 			if meta.HistoryOrderVersion != 0 && !fromFence {
 				return nil, 0, ErrHistoryOrderUnavailable
 			}
-			continue
-		}
-		if messageutil.IsTransientAssistantThoughtMessage(message) {
 			continue
 		}
 		if requireLineage && !historyLineageMatches(data, meta, key) {
@@ -448,6 +462,9 @@ func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMe
 		} else if legacyStream != "" {
 			return nil, 0, ErrHistoryOrderUnavailable
 		}
+		if messageutil.IsTransientAssistantThoughtMessage(message) {
+			continue
+		}
 		message.HistoryID = decodedHistoryID(data, filepath.Base(file.Name()), int64(line-1))
 		message.HistoryRunID = decodedHistoryRunID(data)
 		messages = append(messages, messageWithHistoryOrder(message, order))
@@ -455,7 +472,7 @@ func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMe
 	if err := scanner.Err(); err != nil {
 		return nil, 0, fmt.Errorf("read committed history: %w", err)
 	}
-	if line != meta.Count {
+	if !unboundLegacy && line != meta.Count {
 		return nil, 0, ErrHistoryCursor
 	}
 	return messages, byteEnd, nil

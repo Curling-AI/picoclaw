@@ -269,6 +269,86 @@ func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
 	}
 }
 
+func TestHistoryOrderMissingMetadataReadsOnlyUnboundLegacy(t *testing.T) {
+	s := newTestStore(t)
+	key := "sk_v1_written_before_audit_fields"
+	raw := []byte("{\"role\":\"user\",\"content\":\"before audit\"}\n{\"role\":\"assistant\",\"content\":\"legacy reply\"}\n")
+	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
+	if err != nil || len(read) != 2 || read[0].Message.Content != "before audit" || read[1].Message.Content != "legacy reply" {
+		t.Fatal("missing legacy metadata hid existing content", read, err)
+	}
+	for _, receipt := range read {
+		if receipt.Order != (HistoryOrderProof{}) || receipt.LegacyBeforeStreamID != "" {
+			t.Fatal("missing metadata invented legacy stream provenance", receipt)
+		}
+	}
+	if _, err := os.Stat(s.metaPath(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("reading unbound history wrote metadata", err)
+	}
+}
+
+func TestHistoryOrderMissingMetadataRejectsResidualModernEvidence(t *testing.T) {
+	stream := newHistoryID()
+	for _, field := range []string{
+		fmt.Sprintf(`"history_order":{"version":1,"streamId":%q,"sequence":1}`, stream),
+		fmt.Sprintf(`"history_legacy_before_stream_id":%q`, stream),
+		`"history_order":null`,
+	} {
+		t.Run(field, func(t *testing.T) {
+			s := newTestStore(t)
+			key := "legacy-without-metadata"
+			raw := []byte("{\"role\":\"assistant\",\"content\":\"residual evidence\"," + field + "}\n")
+			if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(err, ErrHistoryOrderUnavailable) {
+				t.Fatal("missing metadata downgraded modern evidence to unbound legacy", err)
+			}
+		})
+	}
+}
+
+func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
+	s := newTestStore(t)
+	key := "agent:main:compact-uncommitted-order"
+	for _, content := range []string{"drop", "keep"} {
+		if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.TruncateHistory(t.Context(), key, 1); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(s.jsonlPath(key), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("{\"role\":\"assistant\",\"content\":\"uncommitted tail\"}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Compact(t.Context(), key); !errors.Is(err, ErrHistoryOrderUnavailable) {
+		t.Fatal("compaction confirmed an external tail as old legacy", err)
+	}
+	after, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("rejected compaction changed the raw transcript", err)
+	}
+	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
+	if err != nil || len(read) != 1 || read[0].Order.Sequence != 2 || read[0].Message.Content != "keep" {
+		t.Fatal("rejected compaction changed confirmed history", read, err)
+	}
+}
+
 func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:legacy-origin"
