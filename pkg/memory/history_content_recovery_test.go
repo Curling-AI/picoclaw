@@ -112,6 +112,48 @@ func TestContentRecoveryTruncateCompactAndReplaceKeepReceiptsUnavailable(t *test
 	requireContentRecoveryFence(t, store, key)
 }
 
+func TestContentRecoveryReplacementKeepsStoredProofAcrossRewrites(t *testing.T) {
+	store := newTestStore(t)
+	key := "sk_v1_content_recovery_rewrite_evidence"
+	for _, content := range []string{"keep", "edit"} {
+		if _, err := store.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	meta, err := store.readMeta(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.markHistoryRecoveryRequired(key, &meta); err != nil {
+		t.Fatal(err)
+	}
+	history, err := store.GetHistory(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := messageHistoryOrder(history[0])
+	for _, content := range []string{"edit one", "edit two", "edit three"} {
+		history[1].Content = content
+		if err := store.SetHistory(t.Context(), key, history); err != nil {
+			t.Fatal(err)
+		}
+		store, err = NewJSONLStore(store.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		history, err = store.GetHistory(t.Context(), key)
+		if err != nil || len(history) != 2 || history[1].Content != content ||
+			messageHistoryOrder(history[0]) != kept || messageHistoryOrder(history[1]) != (HistoryOrderProof{}) {
+			t.Fatal("content rewrite lost old evidence or assigned new proof", history, err)
+		}
+		meta, err = store.GetSessionMeta(t.Context(), key)
+		if err != nil || meta.HistorySequence != 2 || !meta.HistoryRecoveryRequired {
+			t.Fatal("content rewrite changed the order counter or fence", meta, err)
+		}
+		requireContentRecoveryFence(t, store, key)
+	}
+}
+
 func TestContentMutationCannotHideLostStreamBeforeLatchingRecovery(t *testing.T) {
 	for _, operation := range []string{"clear", "truncate"} {
 		t.Run(operation, func(t *testing.T) {
