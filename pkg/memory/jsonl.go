@@ -88,6 +88,9 @@ type JSONLStore struct {
 	// seconds; with the cache it costs one ReadDir.
 	metaMu    sync.RWMutex
 	metaCache map[string]SessionMeta
+	// Marker state belongs to this single writer and survives metadata-cache
+	// eviction while a journal is pending. A positive latch is never cleared.
+	historyMarkers map[string]historyMarkerState
 	// A failed rollback can outlive cache eviction. Fence every cache read
 	// until the pending journal has published either the OLD or NEW state.
 	historyPending map[string]bool
@@ -101,6 +104,7 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 	}
 	store := &JSONLStore{
 		dir: dir, metaCache: make(map[string]SessionMeta), historyPending: make(map[string]bool),
+		historyMarkers: make(map[string]historyMarkerState),
 	}
 	if err := store.recoverPendingHistoryWrites(); err != nil {
 		return nil, fmt.Errorf("memory: recover interrupted history: %w", err)
@@ -171,6 +175,7 @@ func (s *JSONLStore) cachedMeta(sanitized string) (SessionMeta, bool) {
 
 func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
 	s.metaMu.Lock()
+	meta.HistoryRecoveryRequired = meta.HistoryRecoveryRequired || s.historyMarkers[sanitized].present
 	s.metaCache[sanitized] = copyMeta(meta)
 	s.metaMu.Unlock()
 }
@@ -187,9 +192,9 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 			return SessionMeta{}, err
 		}
 	}
-	// Resolve our own OLD/NEW journal before interpreting external divergence.
-	// Check the latch before the cache: old binaries can erase unknown fields.
-	marked, err := s.hasHistoryRecoveryMarker(key)
+	// Resolve our own OLD/NEW journal first. Only this process writes the
+	// directory, so warm metadata and its write-through latch need no I/O.
+	marked, err := s.historyRecoveryMarkerState(key)
 	if err != nil {
 		return SessionMeta{}, err
 	}
@@ -235,12 +240,17 @@ func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 	if strings.TrimSpace(meta.Key) == "" {
 		meta.Key = key
 	}
-	marked, err := s.hasHistoryRecoveryMarker(key)
+	marked, err := s.historyRecoveryMarkerState(key)
 	if err != nil {
 		return err
 	}
 	if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
 		return operationErr
+	}
+	if meta.HistoryRecoveryRequired {
+		if operationErr := s.markHistoryRecoveryRequired(key, &meta); operationErr != nil {
+			return operationErr
+		}
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -495,7 +505,7 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if err != nil {
 		return false, err
 	}
-	if operationErr := s.guardHistoryMutation(sessionKey, canonicalMeta); operationErr != nil {
+	if operationErr := s.prepareHistoryMutation(sessionKey, &canonicalMeta); operationErr != nil {
 		return false, operationErr
 	}
 	canonicalHasContent, err := s.sessionHasVisibleContentLocked(sessionKey, canonicalMeta)
@@ -510,7 +520,7 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if err != nil {
 		return false, err
 	}
-	if operationErr := s.guardHistoryMutation(alias, aliasMeta); operationErr != nil {
+	if operationErr := s.prepareHistoryMutation(alias, &aliasMeta); operationErr != nil {
 		return false, operationErr
 	}
 	aliasHistory, err := readMessages(s.jsonlPath(alias), aliasMeta.Skip)
@@ -533,6 +543,14 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	resetHistoryGeneration(&canonicalMeta)
 	canonicalMeta.Count = len(aliasHistory)
 	canonicalMeta.UpdatedAt = now
+	if aliasMeta.HistoryRecoveryRequired || canonicalMeta.HistoryRecoveryRequired {
+		if operationErr := s.markHistoryRecoveryRequired(alias, &aliasMeta); operationErr != nil {
+			return false, operationErr
+		}
+		if operationErr := s.markHistoryRecoveryRequired(sessionKey, &canonicalMeta); operationErr != nil {
+			return false, operationErr
+		}
+	}
 	if aliasSummary != "" {
 		canonicalMeta.Summary = aliasSummary
 	}
@@ -786,7 +804,7 @@ func (s *JSONLStore) TruncateHistory(
 	if err != nil {
 		return err
 	}
-	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
+	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
 	}
 
@@ -827,7 +845,7 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	if err != nil {
 		return err
 	}
-	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
+	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
 	}
 	now := time.Now()
@@ -863,7 +881,7 @@ func (s *JSONLStore) Compact(
 	if err != nil {
 		return err
 	}
-	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
+	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
 	}
 	if meta.Skip == 0 {

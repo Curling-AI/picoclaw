@@ -50,12 +50,21 @@ func TestJSONLBackendSavePreservesUnownedDurableTail(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Save("unproven-save"); !errors.Is(err, memory.ErrHistoryRecoveryRequired) {
-		t.Fatal("Save accepted a source requiring recovery", err)
+	if err := b.Save("unproven-save"); err != nil {
+		t.Fatal("Save rejected ordinary content without capture proof", err)
 	}
 	history := b.GetHistory("unproven-save")
 	if len(history) != 2 || history[1].Content != "external durable message" {
 		t.Fatal("Save erased unowned durable history", history)
+	}
+	if _, err := b.ReadHistoryPage(
+		t.Context(),
+		memory.HistoryPageRequest{Key: "unproven-save"},
+	); !errors.Is(
+		err,
+		memory.ErrHistoryRecoveryRequired,
+	) {
+		t.Fatal("ordinary Save fabricated a capture proof", err)
 	}
 }
 

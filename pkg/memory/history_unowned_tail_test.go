@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 const durableExternalRow = "{\"role\":\"user\",\"content\":\"durable legacy tail\"}\n"
@@ -167,22 +166,18 @@ func TestHistoryUnownedTailMarkerFailureNeverChangesTranscript(t *testing.T) {
 	}
 }
 
-func TestHistoryUnownedTailCompactPreservesSkippedPrefix(t *testing.T) {
+func TestHistoryUnownedTailCompactKeepsActiveDurableTail(t *testing.T) {
 	s, key := pagedStore(t, 4)
 	if err := s.TruncateHistory(t.Context(), key, 2); err != nil {
 		t.Fatal(err)
 	}
 	appendRawHistory(t, s, key, []byte(durableExternalRow))
-	before, err := os.ReadFile(s.jsonlPath(key))
-	if err != nil {
-		t.Fatal(err)
+	if operationErr := s.Compact(t.Context(), key); operationErr != nil {
+		t.Fatal("capture unavailability stopped legitimate content compaction", operationErr)
 	}
-	if operationErr := s.Compact(t.Context(), key); !errors.Is(operationErr, ErrHistoryRecoveryRequired) {
-		t.Fatal("compaction adopted unowned rows after a logical truncation", operationErr)
-	}
-	after, err := os.ReadFile(s.jsonlPath(key))
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("compaction discarded the retained physical history", err)
+	physical, err := readMessages(s.jsonlPath(key), 0)
+	if err != nil || len(physical) != 3 {
+		t.Fatal("compaction did not retain the complete active suffix", physical, err)
 	}
 	requireHistoryContents(t, s, key, "synthetic-2", "synthetic-3", "durable legacy tail")
 	requireUnprovenPage(t, s, key, "")
@@ -233,50 +228,22 @@ func TestHistoryUnownedTailOwnJournalDecidesBeforeTailDetection(t *testing.T) {
 	}
 }
 
-func TestHistoryUnownedTailGuardsMutators(t *testing.T) {
+func TestHistoryUnownedTailGuardsAutomaticDeletion(t *testing.T) {
 	operations := map[string]func(*JSONLStore, string) error{
-		"set-identical-fast-path": func(s *JSONLStore, key string) error {
-			history, err := s.GetHistory(t.Context(), key)
-			if err != nil {
-				return err
-			}
-			return s.SetHistory(t.Context(), key, history[:2])
-		},
-		"set-suffix-fast-path": func(s *JSONLStore, key string) error {
-			history, err := s.GetHistory(t.Context(), key)
-			if err != nil {
-				return err
-			}
-			return s.SetHistory(
-				t.Context(),
-				key,
-				append(history[:2], providers.Message{Role: "user", Content: "replacement"}),
-			)
-		},
-		"replace": func(s *JSONLStore, key string) error {
-			return s.SetHistory(t.Context(), key, []providers.Message{{Role: "user", Content: "replacement"}})
-		},
-		"truncate": func(s *JSONLStore, key string) error { return s.TruncateHistory(t.Context(), key, 1) },
-		"compact":  func(s *JSONLStore, key string) error { return s.Compact(t.Context(), key) },
-		"delete":   func(s *JSONLStore, key string) error { return s.removeSessionFiles(sanitizeKey(key)) },
-		"alias-source": func(s *JSONLStore, key string) error {
-			_, err := s.PromoteAliasHistory(t.Context(), "empty-target", nil, []string{key})
-			return err
-		},
-		"alias-target": func(s *JSONLStore, key string) error {
-			_, err := s.PromoteAliasHistory(t.Context(), key, nil, []string{"empty-alias"})
-			return err
+		"delete": func(s *JSONLStore, key string) error { return s.removeSessionFiles(sanitizeKey(key)) },
+		"launcher-delete": func(s *JSONLStore, key string) error {
+			return CheckHistoryDeletion(s.dir, key)
 		},
 	}
 	for name, mutate := range operations {
 		t.Run(name, func(t *testing.T) {
 			s, key, preserved, _ := historyWithExternalTail(t, false)
 			if err := mutate(s, key); !errors.Is(err, ErrHistoryRecoveryRequired) {
-				t.Fatal("mutator accepted unowned durable history")
+				t.Fatal("deletion accepted unowned durable history")
 			}
 			raw, err := os.ReadFile(s.jsonlPath(key))
 			if err != nil || !bytes.Equal(raw, preserved) {
-				t.Fatal("mutator discarded durable history", err)
+				t.Fatal("deletion discarded durable history", err)
 			}
 			requireUnprovenPage(t, s, key, "")
 		})
