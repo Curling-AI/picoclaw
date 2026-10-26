@@ -60,7 +60,7 @@ func (s *JSONLStore) replaceHistory(
 	original SessionMeta,
 ) error {
 	meta := original
-	old, err := readMessages(s.jsonlPath(key), meta.Skip)
+	old, err := s.readHistoryForContentMutation(key, &meta)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

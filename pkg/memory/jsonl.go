@@ -505,6 +505,9 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if operationErr := s.guardHistoryMutation(sessionKey, canonicalMeta); operationErr != nil {
 		return false, operationErr
 	}
+	if operationErr := s.prepareHistoryContentOrder(sessionKey, &canonicalMeta); operationErr != nil {
+		return false, operationErr
+	}
 	canonicalHasContent, err := s.sessionHasVisibleContentLocked(sessionKey, canonicalMeta)
 	if err != nil {
 		return false, err
@@ -520,29 +523,33 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	if operationErr := s.guardHistoryMutation(alias, aliasMeta); operationErr != nil {
 		return false, operationErr
 	}
-	aliasHistory, err := readMessages(s.jsonlPath(alias), aliasMeta.Skip)
+	aliasHistory, err := s.readHistoryForContentMutation(alias, &aliasMeta)
 	if err != nil {
-		return false, err
-	}
-	if err := validateHistoryMessageOrders(aliasHistory, aliasMeta); err != nil {
-		return false, err
-	}
-	if err := s.validateStoredHistoryOrderOrigins(alias, aliasMeta); err != nil {
 		return false, err
 	}
 	aliasSummary := strings.TrimSpace(aliasMeta.Summary)
 	if len(aliasHistory) == 0 && aliasSummary == "" {
 		return false, nil
 	}
-	// Promotion is a new canonical write, not continuity of the alias stream.
-	// Keep the canonical highwater and allocate fresh canonical proofs before
-	// changing the file/count metadata used to verify a legacy canonical file.
-	for index, message := range aliasHistory {
-		ordered, orderErr := s.allocateHistoryOrder(sessionKey, message, &canonicalMeta)
-		if orderErr != nil {
-			return false, orderErr
+	if canonicalMeta.HistoryRecoveryRequired || aliasMeta.HistoryRecoveryRequired {
+		if markerErr := s.markHistoryRecoveryRequired(sessionKey, &canonicalMeta); markerErr != nil {
+			return false, markerErr
 		}
-		aliasHistory[index] = ordered
+		// The original marked source retains its evidence. Copy only content;
+		// a foreign stream cannot become an order proof in this destination.
+		for index, message := range aliasHistory {
+			aliasHistory[index] = messageWithHistoryOrder(message, HistoryOrderProof{})
+		}
+	} else {
+		// Healthy promotion allocates fresh canonical proofs while retaining
+		// the canonical highwater, before changing file/count metadata.
+		for index, message := range aliasHistory {
+			ordered, orderErr := s.allocateHistoryOrder(sessionKey, message, &canonicalMeta)
+			if orderErr != nil {
+				return false, orderErr
+			}
+			aliasHistory[index] = ordered
+		}
 	}
 
 	now := time.Now()
@@ -569,7 +576,7 @@ func (s *JSONLStore) sessionHasVisibleContentLocked(sessionKey string, meta Sess
 	if strings.TrimSpace(meta.Summary) != "" {
 		return true, nil
 	}
-	history, err := readMessages(s.jsonlPath(sessionKey), meta.Skip)
+	history, err := s.readHistoryForContentMutation(sessionKey, &meta)
 	if err != nil {
 		return false, err
 	}
@@ -611,7 +618,7 @@ func readMessages(path string, skip int) ([]providers.Message, error) {
 
 // Provider/legacy readers do not consume ordering evidence. Keep readable
 // message content when private proof is corrupt or from a future producer;
-// mutation and receipt readers retain their strict decoding paths.
+// Receipt readers remain strict; content mutations retain the recovery fence.
 func readProviderMessages(path string, skip int) ([]providers.Message, error) {
 	return readHistoryMessages(path, skip, true)
 }
@@ -660,6 +667,9 @@ func readHistoryMessages(path string, skip int, providerOnly bool) ([]providers.
 		order, orderErr := decodedHistoryOrder(line)
 		if orderErr != nil && !providerOnly {
 			return nil, orderErr
+		}
+		if orderErr != nil && providerOnly {
+			order = decodedStoredContentOrder(line)
 		}
 		msg = messageWithHistoryOrder(msg, order)
 		msgs = append(msgs, msg)
@@ -827,6 +837,9 @@ func (s *JSONLStore) TruncateHistory(
 	if operationErr := s.guardHistoryMutation(sessionKey, meta); operationErr != nil {
 		return operationErr
 	}
+	if operationErr := s.prepareHistoryContentOrder(sessionKey, &meta); operationErr != nil {
+		return operationErr
+	}
 
 	rawCount, retainedRawLines, scanErr := scanRetainedMessageLines(s.jsonlPath(sessionKey))
 	if scanErr != nil {
@@ -910,20 +923,22 @@ func (s *JSONLStore) Compact(
 
 	// Read only the active messages, skipping truncated lines
 	// without unmarshaling them.
-	active, err := readMessages(s.jsonlPath(sessionKey), meta.Skip)
+	active, err := s.readHistoryForContentMutation(sessionKey, &meta)
 	if err != nil {
 		return err
 	}
-	committed, _, err := s.readCommittedHistoryOrderOrigins(sessionKey, meta, meta.Skip, false)
-	if err != nil {
-		return err
-	}
-	if len(active) != len(committed) {
-		return ErrHistoryOrderUnavailable
-	}
-	for index := range active {
-		if !reflect.DeepEqual(active[index], committed[index]) {
+	if !meta.HistoryRecoveryRequired {
+		committed, _, orderErr := s.readCommittedHistoryOrderOrigins(sessionKey, meta, meta.Skip, false)
+		if orderErr != nil {
+			return orderErr
+		}
+		if len(active) != len(committed) {
 			return ErrHistoryOrderUnavailable
+		}
+		for index := range active {
+			if !reflect.DeepEqual(active[index], committed[index]) {
+				return ErrHistoryOrderUnavailable
+			}
 		}
 	}
 

@@ -236,3 +236,67 @@ func TestSessionHistoryUncertainCommitDoesNotRetryThroughLegacyFallback(t *testi
 		t.Fatal("canonical reconciliation lost the durable event", reconciled, readErr)
 	}
 }
+
+func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) {
+	for _, checkpoint := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy count", true: "stale checkpoint"}[checkpoint], func(t *testing.T) {
+			al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+			defer cleanup()
+			dir := t.TempDir()
+			key := "sk_v1_real_turn_content_recovery"
+			prefix := []byte("{\"role\":\"user\",\"content\":\"original request\"}\n{\"role\":\"assistant\",\"content\":\"original answer\"}\n")
+			raw := append(append([]byte(nil), prefix...), []byte("{\"role\":\"assistant\",\"content\":\"durable external answer\"}\n")...)
+			meta := memory.SessionMeta{Key: key, Count: 2}
+			if checkpoint {
+				size := int64(len(prefix))
+				meta.HistoryBytes = &size
+			}
+			data, err := json.Marshal(meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, contents := range map[string][]byte{key + ".jsonl": raw, key + ".meta.json": data} {
+				if err := os.WriteFile(filepath.Join(dir, path), contents, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := memory.NewJSONLStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := session.NewJSONLBackend(store)
+			agent.Sessions = backend
+			for _, input := range []string{"first live request", "second live request"} {
+				if response, err := al.ProcessDirect(t.Context(), input, key); err != nil || response == "" {
+					t.Fatal("real turn could not finalize its preserved content", response, err)
+				}
+			}
+			before := backend.GetHistory(key)
+			if len(before) != 7 || before[2].Content != "durable external answer" {
+				t.Fatal("real turns lost durable history", before)
+			}
+			if err := backend.AppendMessage(key, providers.Message{Role: "user", Content: "aborted input"}); err != nil {
+				t.Fatal(err)
+			}
+			ts := &turnState{sessionKey: key, restorePointHistory: before}
+			if err := ts.restoreSession(agent); err != nil {
+				t.Fatal("turn rollback could not save content", err)
+			}
+			after := backend.GetHistory(key)
+			if len(after) != len(before) {
+				t.Fatal("rollback retained the aborted input", after)
+			}
+			for index := range before {
+				if before[index].Role != after[index].Role || before[index].Content != after[index].Content {
+					t.Fatal("rollback changed retained content", index, before, after)
+				}
+			}
+			if response, err := al.ProcessDirect(t.Context(), "after rollback", key); err != nil || response == "" {
+				t.Fatal("turn after rollback could not complete", response, err)
+			}
+			if _, err := store.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(err, memory.ErrHistoryOrderUnavailable) {
+				t.Fatal("successful turns restored order receipts", err)
+			}
+		})
+	}
+}

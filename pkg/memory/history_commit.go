@@ -341,8 +341,10 @@ func scanCommittedHistoryLine(data []byte, atEOF bool) (int, []byte, error) {
 }
 
 func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Message, meta SessionMeta) error {
-	if err := validateHistoryMessageOrders(messages, meta); err != nil {
-		return err
+	if !meta.HistoryRecoveryRequired {
+		if err := validateHistoryMessageOrders(messages, meta); err != nil {
+			return err
+		}
 	}
 	original, err := s.readMeta(key)
 	if err != nil {

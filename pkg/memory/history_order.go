@@ -128,6 +128,49 @@ func decodedHistoryOrder(data []byte) (HistoryOrderProof, error) {
 	return order, nil
 }
 
+// Content readers may retain an existing proof as private storage evidence,
+// including on a fenced record. This never makes the proof receipt-eligible.
+func decodedStoredContentOrder(data []byte) HistoryOrderProof {
+	var raw struct {
+		Order *HistoryOrderProof `json:"history_order"`
+	}
+	if json.Unmarshal(data, &raw) != nil || raw.Order == nil || !raw.Order.Valid() {
+		return HistoryOrderProof{}
+	}
+	return *raw.Order
+}
+
+// Detect lost ordering evidence before a content mutation can remove it. A
+// content operation may proceed after latching recovery; receipt operations
+// still reject that source. Inspect skipped rows too, before compact/clear.
+func (s *JSONLStore) prepareHistoryContentOrder(key string, meta *SessionMeta) error {
+	if meta.HistoryRecoveryRequired {
+		return nil
+	}
+	stored, _, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, false)
+	if err == nil {
+		err = validateHistoryMessageOrders(stored, *meta)
+	}
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrHistoryOrderUnavailable) && !errors.Is(err, ErrHistoryRecoveryRequired) &&
+		!errors.Is(err, ErrHistoryCursor) {
+		return err
+	}
+	return s.markHistoryRecoveryRequired(key, meta)
+}
+
+func (s *JSONLStore) readHistoryForContentMutation(key string, meta *SessionMeta) ([]providers.Message, error) {
+	if err := s.prepareHistoryContentOrder(key, meta); err != nil {
+		return nil, err
+	}
+	if meta.HistoryRecoveryRequired {
+		return readProviderMessages(s.jsonlPath(key), meta.Skip)
+	}
+	return readMessages(s.jsonlPath(key), meta.Skip)
+}
+
 func validateHistoryOrderState(meta SessionMeta) error {
 	if meta.HistoryRecoveryRequired {
 		return ErrHistoryReceiptUnavailable
@@ -209,9 +252,25 @@ func (s *JSONLStore) allocateHistoryOrder(
 }
 
 func (s *JSONLStore) prepareReplacementHistoryOrder(key string, prepared []providers.Message, meta *SessionMeta) error {
-	// The provider reader may expose a complete external tail beyond the
-	// committed checkpoint. Only committed origin evidence can be reused;
-	// explicitly importing such a tail allocates fresh content events.
+	if meta.HistoryRecoveryRequired {
+		old, err := readProviderMessages(s.jsonlPath(key), meta.Skip)
+		if err != nil {
+			return err
+		}
+		byID := make(map[string]providers.Message, len(old))
+		for _, message := range old {
+			byID[message.HistoryID] = message
+		}
+		for index, message := range prepared {
+			prepared[index] = messageWithHistoryOrder(message, HistoryOrderProof{})
+			if previous, exists := byID[message.HistoryID]; exists && sameHistoryCore(previous, message) {
+				prepared[index] = messageWithHistoryOrder(message, messageHistoryOrder(previous))
+			}
+		}
+		return nil
+	}
+	// On a proven source only committed origin evidence can be reused.
+	// Recovery-required content was handled above without allocating proofs.
 	old, _, err := s.readCommittedHistoryOrderOrigins(key, *meta, meta.Skip, false)
 	if err != nil {
 		return err
