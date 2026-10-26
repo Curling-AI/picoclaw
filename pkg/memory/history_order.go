@@ -39,8 +39,8 @@ type HistoryOrderProof struct {
 }
 
 type CommittedHistoryMessage struct {
-	Message providers.Message
-	Order   HistoryOrderProof
+	Message providers.Message `json:"message"`
+	Order   HistoryOrderProof `json:"order"`
 	// This is an atomic source-origin attestation, not a v1 proof or sequence.
 	LegacyBeforeStreamID string `json:"-"`
 }
@@ -56,7 +56,11 @@ func validHistoryStreamID(value string) bool {
 }
 
 func messageHistoryOrder(message providers.Message) HistoryOrderProof {
-	return HistoryOrderProof{Version: message.HistoryOrderVersion, StreamID: message.HistoryStreamID, Sequence: message.HistorySequence}
+	return HistoryOrderProof{
+		Version:  message.HistoryOrderVersion,
+		StreamID: message.HistoryStreamID,
+		Sequence: message.HistorySequence,
+	}
 }
 
 func messageWithHistoryOrder(message providers.Message, order HistoryOrderProof) providers.Message {
@@ -178,7 +182,11 @@ func (s *JSONLStore) ensureHistoryOrderStream(key string, meta *SessionMeta) err
 	return nil
 }
 
-func (s *JSONLStore) allocateHistoryOrder(key string, message providers.Message, meta *SessionMeta) (providers.Message, error) {
+func (s *JSONLStore) allocateHistoryOrder(
+	key string,
+	message providers.Message,
+	meta *SessionMeta,
+) (providers.Message, error) {
 	if err := s.ensureHistoryOrderStream(key, meta); err != nil {
 		return providers.Message{}, err
 	}
@@ -289,7 +297,11 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 
 // AppendHistoryReceipt returns only the exact durable message from this append.
 // A filtered transient thought returns a zero receipt, never an ordering proof.
-func (s *JSONLStore) AppendHistoryReceipt(ctx context.Context, key string, input providers.Message) (CommittedHistoryMessage, error) {
+func (s *JSONLStore) AppendHistoryReceipt(
+	ctx context.Context,
+	key string,
+	input providers.Message,
+) (CommittedHistoryMessage, error) {
 	canonical, err := s.canonicalHistoryOrderKey(key)
 	if err != nil {
 		return CommittedHistoryMessage{}, err
@@ -304,8 +316,8 @@ func (s *JSONLStore) AppendHistoryReceipt(ctx context.Context, key string, input
 	if err != nil {
 		return CommittedHistoryMessage{}, err
 	}
-	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
-		return CommittedHistoryMessage{}, err
+	if ownershipErr := validateCanonicalHistoryKey(key, canonical, meta); ownershipErr != nil {
+		return CommittedHistoryMessage{}, ownershipErr
 	}
 	if messageutil.IsTransientAssistantThoughtMessage(input) {
 		return CommittedHistoryMessage{}, nil
@@ -352,8 +364,8 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
-		return nil, err
+	if ownershipErr := validateCanonicalHistoryKey(key, canonical, meta); ownershipErr != nil {
+		return nil, ownershipErr
 	}
 	var messages []providers.Message
 	if _, statErr := os.Stat(s.metaPath(canonical)); errors.Is(statErr, os.ErrNotExist) {
@@ -391,11 +403,21 @@ func (s *JSONLStore) readCommittedHistory(key string, meta SessionMeta, skip int
 	return messages, err
 }
 
-func (s *JSONLStore) readCommittedHistoryOrderOrigins(key string, meta SessionMeta, skip int, requireLineage bool) ([]providers.Message, int64, error) {
+func (s *JSONLStore) readCommittedHistoryOrderOrigins(
+	key string,
+	meta SessionMeta,
+	skip int,
+	requireLineage bool,
+) ([]providers.Message, int64, error) {
 	return s.readHistoryOrderOrigins(key, meta, skip, requireLineage, false)
 }
 
-func (s *JSONLStore) readHistoryOrderOrigins(key string, meta SessionMeta, skip int, requireLineage, unboundLegacy bool) ([]providers.Message, int64, error) {
+func (s *JSONLStore) readHistoryOrderOrigins(
+	key string,
+	meta SessionMeta,
+	skip int,
+	requireLineage, unboundLegacy bool,
+) ([]providers.Message, int64, error) {
 	ensureHistoryGeneration(&meta, key)
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) && meta.Count == 0 {
@@ -432,7 +454,8 @@ func (s *JSONLStore) readHistoryOrderOrigins(key string, meta SessionMeta, skip 
 		if line <= skip {
 			continue
 		}
-		fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration && byteEnd <= meta.HistoryLegacyBytes
+		fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration &&
+			byteEnd <= meta.HistoryLegacyBytes
 		var message providers.Message
 		if json.Unmarshal(data, &message) != nil {
 			if meta.HistoryOrderVersion != 0 && !fromFence {

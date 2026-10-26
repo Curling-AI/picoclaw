@@ -6,7 +6,9 @@ import "github.com/sipeed/picoclaw/pkg/memory"
 // It runs synchronously; enqueue network work only after retaining these receipts.
 // A nil batch is a durable legacy-history notification with no receipt or order
 // evidence. It is emitted only after the fallback's existing Save/checked gate.
-func (al *AgentLoop) SetSessionHistoryReceiptObserver(observer func(sessionKey string, committed []memory.CommittedHistoryMessage)) {
+func (al *AgentLoop) SetSessionHistoryReceiptObserver(
+	observer func(sessionKey string, committed []memory.CommittedHistoryMessage),
+) {
 	al.sessionHistoryObserverMu.Lock()
 	defer al.sessionHistoryObserverMu.Unlock()
 	al.sessionHistoryReceiptObserver = observer

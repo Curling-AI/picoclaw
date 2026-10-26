@@ -21,7 +21,11 @@ func (s *JSONLStore) appendHistoryMessages(key string, messages []providers.Mess
 	return err
 }
 
-func (s *JSONLStore) appendHistoryMessagesWithReceipts(key string, messages []providers.Message, meta SessionMeta) ([]CommittedHistoryMessage, error) {
+func (s *JSONLStore) appendHistoryMessagesWithReceipts(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+) ([]CommittedHistoryMessage, error) {
 	original, err := s.readMeta(key)
 	if err != nil {
 		return nil, err
@@ -211,14 +215,14 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 	}
 	size := int64(len(data))
 	meta.HistoryBytes = &size
-	if err := s.beginHistoryWrite(
+	if commitErr := s.beginHistoryWrite(
 		key,
 		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed},
-	); err != nil {
-		return err
+	); commitErr != nil {
+		return commitErr
 	}
-	if err := s.writeSessionFile(s.jsonlPath(key), data, 0o644); err != nil {
-		return errors.Join(err, s.recoverFailedHistoryWrite(key))
+	if writeErr := s.writeSessionFile(s.jsonlPath(key), data, 0o644); writeErr != nil {
+		return errors.Join(writeErr, s.recoverFailedHistoryWrite(key))
 	}
 	err = s.writeMeta(key, meta)
 	if err == nil {

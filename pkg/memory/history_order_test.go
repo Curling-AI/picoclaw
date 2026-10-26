@@ -22,10 +22,14 @@ func TestHistoryOrderReceiptIsExactPersistentAndIndependentOfInput(t *testing.T)
 	key := "agent:main:ordered"
 	at := time.Unix(100, 0).UTC()
 	input := providers.Message{
-		Role: "assistant", Content: "same timestamp", CreatedAt: &at,
+		Role:      "assistant",
+		Content:   "same timestamp",
+		CreatedAt: &at,
 		HistoryID: newHistoryID(),
 		Media:     []string{"original-media"},
-		ToolCalls: []providers.ToolCall{{ID: "call", Type: "function", Function: &providers.FunctionCall{Name: "original-tool", Arguments: `{}`}}},
+		ToolCalls: []providers.ToolCall{
+			{ID: "call", Type: "function", Function: &providers.FunctionCall{Name: "original-tool", Arguments: `{}`}},
+		},
 	}
 	first, err := s.AppendHistoryReceipt(t.Context(), key, input)
 	if err != nil || !first.Order.Valid() || first.Order.Sequence != 1 || first.Message.HistoryID == "" {
@@ -36,7 +40,8 @@ func TestHistoryOrderReceiptIsExactPersistentAndIndependentOfInput(t *testing.T)
 		t.Fatal("receipt aliases the caller's input", first)
 	}
 	encoded, err := json.Marshal(first.Message)
-	if err != nil || bytes.Contains(encoded, []byte(first.Order.StreamID)) || bytes.Contains(encoded, []byte("history_")) {
+	if err != nil || bytes.Contains(encoded, []byte(first.Order.StreamID)) ||
+		bytes.Contains(encoded, []byte("history_")) {
 		t.Fatal("order evidence leaked into provider/session JSON", string(encoded), err)
 	}
 	reopened, err := NewJSONLStore(s.dir)
@@ -63,7 +68,11 @@ func TestHistoryOrderPreservesContentProofAndNeverRewindsOnEditRollbackOrCompact
 	before := make([]CommittedHistoryMessage, 4)
 	for index := range before {
 		var err error
-		before[index], err = s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: fmt.Sprint(index)})
+		before[index], err = s.AppendHistoryReceipt(
+			t.Context(),
+			key,
+			providers.Message{Role: "assistant", Content: fmt.Sprint(index)},
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +103,8 @@ func TestHistoryOrderPreservesContentProofAndNeverRewindsOnEditRollbackOrCompact
 		t.Fatal(operationErr)
 	}
 	restored, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(restored) != 2 || restored[1].Order.Sequence != 6 || restored[1].Message.Content != original[1].Content {
+	if err != nil || len(restored) != 2 || restored[1].Order.Sequence != 6 ||
+		restored[1].Message.Content != original[1].Content {
 		t.Fatal("logical rollback reused an earlier content proof", restored, err)
 	}
 	tail, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "tail"})
@@ -108,14 +118,19 @@ func TestHistoryOrderPreservesContentProofAndNeverRewindsOnEditRollbackOrCompact
 		t.Fatal(operationErr)
 	}
 	compacted, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(compacted) != 2 || compacted[0].Order != restored[1].Order || compacted[1].Order != tail.Order {
+	if err != nil || len(compacted) != 2 || compacted[0].Order != restored[1].Order ||
+		compacted[1].Order != tail.Order {
 		t.Fatal("truncate/compaction changed content order", compacted, err)
 	}
 	s, err = NewJSONLStore(s.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "after compact/reopen"})
+	next, err := s.AppendHistoryReceipt(
+		t.Context(),
+		key,
+		providers.Message{Role: "assistant", Content: "after compact/reopen"},
+	)
 	if err != nil || next.Order.Sequence != 8 || next.Order.StreamID != tail.Order.StreamID {
 		t.Fatal("highwater rewound after compaction/reopen", next, err)
 	}
@@ -174,7 +189,9 @@ func TestHistoryOrderLegacyRemainsUnproven(t *testing.T) {
 func TestHistoryOrderLegacyCorruptRowsRemainFilteredAfterRollout(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:legacy-corrupt-order"
-	raw := []byte("{broken legacy row\n{\"role\":\"user\",\"content\":\"legacy\",\"created_at\":\"2000-01-01T00:00:00Z\"}\n")
+	raw := []byte(
+		"{broken legacy row\n{\"role\":\"user\",\"content\":\"legacy\",\"created_at\":\"2000-01-01T00:00:00Z\"}\n",
+	)
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -211,12 +228,16 @@ func TestHistoryOrderImportBeyondCheckpointGetsANewProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data := fmt.Appendf(nil, "{\"role\":\"assistant\",\"content\":\"uncommitted old writer\",\"history_id\":%q}\n", newHistoryID())
-	if _, err := file.Write(data); err != nil {
-		t.Fatal(err)
+	data := fmt.Appendf(
+		nil,
+		"{\"role\":\"assistant\",\"content\":\"uncommitted old writer\",\"history_id\":%q}\n",
+		newHistoryID(),
+	)
+	if _, writeErr := file.Write(data); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := file.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	// The legacy provider reader can see a complete external tail. Explicitly
 	// importing it may commit new content, but cannot attest it as old legacy.
@@ -237,7 +258,9 @@ func TestHistoryOrderImportBeyondCheckpointGetsANewProof(t *testing.T) {
 func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:legacy-uncommitted-order"
-	raw := []byte("{\"role\":\"assistant\",\"content\":\"committed legacy\"}\n{\"role\":\"assistant\",\"content\":\"uncommitted tail\"}\n")
+	raw := []byte(
+		"{\"role\":\"assistant\",\"content\":\"committed legacy\"}\n{\"role\":\"assistant\",\"content\":\"uncommitted tail\"}\n",
+	)
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -272,12 +295,15 @@ func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
 func TestHistoryOrderMissingMetadataReadsOnlyUnboundLegacy(t *testing.T) {
 	s := newTestStore(t)
 	key := "sk_v1_written_before_audit_fields"
-	raw := []byte("{\"role\":\"user\",\"content\":\"before audit\"}\n{\"role\":\"assistant\",\"content\":\"legacy reply\"}\n")
+	raw := []byte(
+		"{\"role\":\"user\",\"content\":\"before audit\"}\n{\"role\":\"assistant\",\"content\":\"legacy reply\"}\n",
+	)
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 2 || read[0].Message.Content != "before audit" || read[1].Message.Content != "legacy reply" {
+	if err != nil || len(read) != 2 || read[0].Message.Content != "before audit" ||
+		read[1].Message.Content != "legacy reply" {
 		t.Fatal("missing legacy metadata hid existing content", read, err)
 	}
 	for _, receipt := range read {
@@ -315,7 +341,11 @@ func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:compact-uncommitted-order"
 	for _, content := range []string{"drop", "keep"} {
-		if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: content}); err != nil {
+		if _, err := s.AppendHistoryReceipt(
+			t.Context(),
+			key,
+			providers.Message{Role: "assistant", Content: content},
+		); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -326,18 +356,18 @@ func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := file.Write([]byte("{\"role\":\"assistant\",\"content\":\"uncommitted tail\"}\n")); err != nil {
-		t.Fatal(err)
+	if _, writeErr := file.WriteString("{\"role\":\"assistant\",\"content\":\"uncommitted tail\"}\n"); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := file.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	before, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Compact(t.Context(), key); !errors.Is(err, ErrHistoryOrderUnavailable) {
-		t.Fatal("compaction confirmed an external tail as old legacy", err)
+	if compactErr := s.Compact(t.Context(), key); !errors.Is(compactErr, ErrHistoryOrderUnavailable) {
+		t.Fatal("compaction confirmed an external tail as old legacy", compactErr)
 	}
 	after, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil || !bytes.Equal(before, after) {
@@ -352,7 +382,9 @@ func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
 func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.T) {
 	s := newTestStore(t)
 	key := "agent:main:legacy-origin"
-	raw := []byte("{\"role\":\"assistant\",\"content\":\"legacy A\"}\n{\"role\":\"assistant\",\"content\":\"legacy B\"}\n")
+	raw := []byte(
+		"{\"role\":\"assistant\",\"content\":\"legacy A\"}\n{\"role\":\"assistant\",\"content\":\"legacy B\"}\n",
+	)
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +425,8 @@ func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.
 		t.Fatal(err)
 	}
 	read, err = s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 1 || read[0].Order != (HistoryOrderProof{}) || read[0].LegacyBeforeStreamID != v1.Order.StreamID {
+	if err != nil || len(read) != 1 || read[0].Order != (HistoryOrderProof{}) ||
+		read[0].LegacyBeforeStreamID != v1.Order.StreamID {
 		t.Fatal("all-legacy active history lost its persisted before-v1 provenance", read, err)
 	}
 	encoded, err := json.Marshal(read[0])
@@ -419,7 +452,11 @@ func TestHistoryOrderMissingModernProofIsNotGenuineLegacy(t *testing.T) {
 		t.Run(fmt.Sprint(lostMeta), func(t *testing.T) {
 			s := newTestStore(t)
 			key := "agent:main:old-writer"
-			if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "modern"}); err != nil {
+			if _, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "modern"},
+			); err != nil {
 				t.Fatal(err)
 			}
 			meta, err := s.readMeta(key)
@@ -456,7 +493,13 @@ func TestHistoryOrderMissingModernProofIsNotGenuineLegacy(t *testing.T) {
 			if writeErr := s.writeMeta(key, meta); writeErr != nil {
 				t.Fatal(writeErr)
 			}
-			if _, readErr := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(readErr, ErrHistoryOrderUnavailable) {
+			if _, readErr := s.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				readErr,
+				ErrHistoryOrderUnavailable,
+			) {
 				t.Fatal("old/missing proof was silently converted to an attested legacy entry", readErr)
 			}
 		})
@@ -468,14 +511,23 @@ func TestHistoryOrderRewriteCannotReuseAnOldLegacyByteFence(t *testing.T) {
 		t.Run(fmt.Sprint(row), func(t *testing.T) {
 			s := newTestStore(t)
 			key := "agent:main:rewritten-legacy-fence"
-			raw := []byte("{\"role\":\"assistant\",\"content\":\"" + strings.Repeat("x", 2048) + "\"}\n{\"role\":\"assistant\",\"content\":\"legacy\"}\n")
+			raw := []byte(
+				"{\"role\":\"assistant\",\"content\":\"" + strings.Repeat(
+					"x",
+					2048,
+				) + "\"}\n{\"role\":\"assistant\",\"content\":\"legacy\"}\n",
+			)
 			if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "v1"}); err != nil {
+			if _, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "v1"},
+			); err != nil {
 				t.Fatal(err)
 			}
 			history, err := s.GetHistory(t.Context(), key)
@@ -483,8 +535,8 @@ func TestHistoryOrderRewriteCannotReuseAnOldLegacyByteFence(t *testing.T) {
 				t.Fatal(err)
 			}
 			history[0].Content = "short edit"
-			if err := s.SetHistory(t.Context(), key, history); err != nil {
-				t.Fatal(err)
+			if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
+				t.Fatal(operationErr)
 			}
 			data, err := os.ReadFile(s.jsonlPath(key))
 			if err != nil {
@@ -492,8 +544,8 @@ func TestHistoryOrderRewriteCannotReuseAnOldLegacyByteFence(t *testing.T) {
 			}
 			lines := bytes.Split(bytes.TrimSuffix(data, []byte("\n")), []byte("\n"))
 			var record map[string]json.RawMessage
-			if err := json.Unmarshal(lines[row], &record); err != nil {
-				t.Fatal(err)
+			if decodeErr := json.Unmarshal(lines[row], &record); decodeErr != nil {
+				t.Fatal(decodeErr)
 			}
 			delete(record, "history_order")
 			delete(record, "history_legacy_before_stream_id")
@@ -502,14 +554,15 @@ func TestHistoryOrderRewriteCannotReuseAnOldLegacyByteFence(t *testing.T) {
 				t.Fatal(err)
 			}
 			data = append(bytes.Join(lines, []byte("\n")), '\n')
-			if err := os.WriteFile(s.jsonlPath(key), data, 0o600); err != nil {
-				t.Fatal(err)
+			if writeErr := os.WriteFile(s.jsonlPath(key), data, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
 			}
 			meta, err := s.readMeta(key)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration || int64(len(lines[0])+1) > meta.HistoryLegacyBytes {
+			if meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration ||
+				int64(len(lines[0])+1) > meta.HistoryLegacyBytes {
 				t.Fatal("fixture does not distinguish file lineage from byte position", meta)
 			}
 			size := int64(len(data))
@@ -535,7 +588,11 @@ func TestHistoryOrderConcurrentCommitsUseOnePersistentCounter(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: fmt.Sprint(index)})
+			receipt, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: fmt.Sprint(index)},
+			)
 			results <- receipt
 			errorsOut <- err
 		}()
@@ -587,24 +644,28 @@ func TestHistoryReceiptUnknownCommitNeverRollsBackAConfirmedSequence(t *testing.
 	s.writeFile = func(path string, data []byte, mode os.FileMode) error {
 		if path == metaPath {
 			if !committed {
-				if err := fileutil.WriteFileAtomic(path, data, mode); err != nil {
-					return err
+				if writeErr := fileutil.WriteFileAtomic(path, data, mode); writeErr != nil {
+					return writeErr
 				}
 				committed = true
-				if err := os.Chmod(path, 0); err != nil {
-					return err
+				if permissionErr := os.Chmod(path, 0); permissionErr != nil {
+					return permissionErr
 				}
 			}
 			return sentinel
 		}
 		return fileutil.WriteFileAtomic(path, data, mode)
 	}
-	attempt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "committed but temporarily unknown"})
+	attempt, err := s.AppendHistoryReceipt(
+		t.Context(),
+		key,
+		providers.Message{Role: "assistant", Content: "committed but temporarily unknown"},
+	)
 	if err == nil || attempt.Order.Valid() {
 		t.Fatal("unknown decision emitted a live receipt", attempt, err)
 	}
-	if err := os.Chmod(metaPath, 0o644); err != nil {
-		t.Fatal(err)
+	if permissionErr := os.Chmod(metaPath, 0o644); permissionErr != nil {
+		t.Fatal(permissionErr)
 	}
 	s, err = NewJSONLStore(s.dir)
 	if err != nil {
@@ -624,14 +685,18 @@ func TestHistoryReceiptRequiresDurableDecisionOnCleanupFailure(t *testing.T) {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
 			s := newTestStore(t)
 			key := "agent:main:receipt-cleanup"
-			if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "first"}); err != nil {
+			if _, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "first"},
+			); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(s.dir, 0o755) })
 			writeFailure := errors.New("metadata write reported an uncertain result")
 			s.writeFile = func(path string, data []byte, mode os.FileMode) error {
-				if err := fileutil.WriteFileAtomic(path, data, mode); err != nil {
-					return err
+				if writeErr := fileutil.WriteFileAtomic(path, data, mode); writeErr != nil {
+					return writeErr
 				}
 				if path == s.metaPath(key) {
 					if durable {
@@ -645,30 +710,40 @@ func TestHistoryReceiptRequiresDurableDecisionOnCleanupFailure(t *testing.T) {
 				}
 				return nil
 			}
-			receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "confirmed once"})
+			receipt, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "confirmed once"},
+			)
 			if durable {
-				if err != nil || !receipt.Order.Valid() || receipt.Order.Sequence != 2 || receipt.Message.Content != "confirmed once" {
+				if err != nil || !receipt.Order.Valid() || receipt.Order.Sequence != 2 ||
+					receipt.Message.Content != "confirmed once" {
 					t.Fatal("durable NEW cleanup failure requested a retry or lost its receipt", receipt, err)
 				}
 			} else if err == nil || receipt.Order != (HistoryOrderProof{}) {
 				t.Fatal("readable NEW metadata was acknowledged without a durable decision", receipt, err)
 			}
-			if _, err := os.Stat(s.historyRecoveryPath(key)); err != nil {
-				t.Fatal("cleanup failure discarded its recovery fence", err)
+			if _, statErr := os.Stat(s.historyRecoveryPath(key)); statErr != nil {
+				t.Fatal("cleanup failure discarded its recovery fence", statErr)
 			}
 			if _, cached := s.cachedMeta(sanitizeKey(key)); cached {
 				t.Fatal("pending cleanup exposed the metadata cache")
 			}
-			if err := os.Chmod(s.dir, 0o755); err != nil {
-				t.Fatal(err)
+			if permissionErr := os.Chmod(s.dir, 0o755); permissionErr != nil {
+				t.Fatal(permissionErr)
 			}
 			s.writeFile = nil
-			next, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "after cleanup"})
+			next, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "after cleanup"},
+			)
 			if err != nil || next.Order.Sequence != 3 {
 				t.Fatal("cleanup recovery reused a committed sequence", next, err)
 			}
 			read, err := s.ReadHistoryWithReceipts(t.Context(), key)
-			if err != nil || len(read) != 3 || read[1].Message.Content != "confirmed once" || read[1].Order.Sequence != 2 ||
+			if err != nil || len(read) != 3 || read[1].Message.Content != "confirmed once" ||
+				read[1].Order.Sequence != 2 ||
 				(durable && !reflect.DeepEqual(read[1], receipt)) {
 				t.Fatal("recovery lost or duplicated the exact confirmed occurrence", read, err)
 			}
@@ -689,7 +764,11 @@ func TestHistoryReceiptRecoveryRequiresTheExactOrderCheckpoint(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newTestStore(t)
 			key := "agent:main:receipt-checkpoint"
-			first, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "first"})
+			first, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "first"},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -700,26 +779,33 @@ func TestHistoryReceiptRecoveryRequiresTheExactOrderCheckpoint(t *testing.T) {
 				}
 				expected = append([]byte(nil), data...)
 				var partial SessionMeta
-				if err := json.Unmarshal(data, &partial); err != nil {
-					return err
+				if decodeErr := json.Unmarshal(data, &partial); decodeErr != nil {
+					return decodeErr
 				}
 				alter(&partial)
-				changed, err := json.Marshal(partial)
-				if err != nil {
-					return err
+				changed, marshalErr := json.Marshal(partial)
+				if marshalErr != nil {
+					return marshalErr
 				}
-				return errors.Join(errors.New("order checkpoint was only partially written"), fileutil.WriteFileAtomic(path, changed, mode))
+				return errors.Join(
+					errors.New("order checkpoint was only partially written"),
+					fileutil.WriteFileAtomic(path, changed, mode),
+				)
 			}
-			receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "uncertain"})
+			receipt, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "uncertain"},
+			)
 			if err == nil || receipt.Order != (HistoryOrderProof{}) {
 				t.Fatal("recovery acknowledged metadata that lost order provenance", receipt, err)
 			}
-			if _, err := os.Stat(s.historyRecoveryPath(key)); err != nil {
-				t.Fatal("ambiguous order checkpoint lost its recovery journal", err)
+			if _, statErr := os.Stat(s.historyRecoveryPath(key)); statErr != nil {
+				t.Fatal("ambiguous order checkpoint lost its recovery journal", statErr)
 			}
 			s.writeFile = nil
-			if err := fileutil.WriteFileAtomic(s.metaPath(key), expected, 0o600); err != nil {
-				t.Fatal(err)
+			if writeErr := fileutil.WriteFileAtomic(s.metaPath(key), expected, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
 			}
 			reopened, err := NewJSONLStore(s.dir)
 			if err != nil {
@@ -787,7 +873,11 @@ func TestHistoryReceiptFollowsJournalCommitDecision(t *testing.T) {
 				}
 				return fileutil.WriteFileAtomic(path, data, mode)
 			}
-			attempt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "attempt"})
+			attempt, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "assistant", Content: "attempt"},
+			)
 			if committed && (err != nil || !attempt.Order.Valid() || attempt.Order.Sequence != 2) {
 				t.Fatal("confirmed NEW state did not return its exact receipt", attempt, err)
 			}
@@ -867,7 +957,13 @@ func TestHistoryOrderInvalidOrForeignProofIsNotLegacyZero(t *testing.T) {
 			if writeErr := s.writeMeta(key, meta); writeErr != nil {
 				t.Fatal(writeErr)
 			}
-			if _, readErr := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(readErr, ErrHistoryOrderUnavailable) {
+			if _, readErr := s.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				readErr,
+				ErrHistoryOrderUnavailable,
+			) {
 				t.Fatal("invalid proof was silently downgraded to a legacy record", readErr)
 			}
 		})
@@ -877,11 +973,19 @@ func TestHistoryOrderInvalidOrForeignProofIsNotLegacyZero(t *testing.T) {
 func TestHistoryOrderAliasPromotionAllocatesCanonicalProof(t *testing.T) {
 	s := newTestStore(t)
 	alias, canonical := "agent:legacy:chat", "canonical-order"
-	aliasReceipt, err := s.AppendHistoryReceipt(t.Context(), alias, providers.Message{Role: "user", Content: "alias content"})
+	aliasReceipt, err := s.AppendHistoryReceipt(
+		t.Context(),
+		alias,
+		providers.Message{Role: "user", Content: "alias content"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldCanonical, err := s.AppendHistoryReceipt(t.Context(), canonical, providers.Message{Role: "user", Content: "cleared canonical content"})
+	oldCanonical, err := s.AppendHistoryReceipt(
+		t.Context(),
+		canonical,
+		providers.Message{Role: "user", Content: "cleared canonical content"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -901,14 +1005,25 @@ func TestHistoryOrderAliasPromotionAllocatesCanonicalProof(t *testing.T) {
 		read[0].Message.HistoryID != aliasReceipt.Message.HistoryID {
 		t.Fatal("alias proof was mistaken for canonical order", read, err)
 	}
-	next, err := s.AppendHistoryReceipt(t.Context(), alias, providers.Message{Role: "assistant", Content: "canonical append"})
+	next, err := s.AppendHistoryReceipt(
+		t.Context(),
+		alias,
+		providers.Message{Role: "assistant", Content: "canonical append"},
+	)
 	if err != nil || next.Order.StreamID != oldCanonical.Order.StreamID || next.Order.Sequence != 3 {
 		t.Fatal("alias append did not use the canonical stream", next, err)
 	}
 	if operationErr := s.UpsertSessionMeta(t.Context(), "another-owner", nil, []string{alias}); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if _, appendErr := s.AppendHistoryReceipt(t.Context(), alias, providers.Message{Role: "assistant", Content: "ambiguous"}); !errors.Is(appendErr, ErrHistoryOrderUnavailable) {
+	if _, appendErr := s.AppendHistoryReceipt(
+		t.Context(),
+		alias,
+		providers.Message{Role: "assistant", Content: "ambiguous"},
+	); !errors.Is(
+		appendErr,
+		ErrHistoryOrderUnavailable,
+	) {
 		t.Fatal("ambiguous alias ownership produced a receipt", appendErr)
 	}
 	providerJSON, err := json.Marshal(read[0].Message)

@@ -17,7 +17,11 @@ func TestPublicSessionDetailDoesNotExposeHistoryOrderProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := store.AppendHistoryReceipt(t.Context(), picoSessionPrefix+"private-history-order", providers.Message{Role: "assistant", Content: "public content"})
+	receipt, err := store.AppendHistoryReceipt(
+		t.Context(),
+		picoSessionPrefix+"private-history-order",
+		providers.Message{Role: "assistant", Content: "public content"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

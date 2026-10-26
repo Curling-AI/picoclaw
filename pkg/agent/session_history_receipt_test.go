@@ -17,7 +17,11 @@ type interleavedReceiptBackend struct {
 	interleaved bool
 }
 
-func (backend *interleavedReceiptBackend) AppendHistoryReceipt(ctx context.Context, key string, message providers.Message) (memory.CommittedHistoryMessage, error) {
+func (backend *interleavedReceiptBackend) AppendHistoryReceipt(
+	ctx context.Context,
+	key string,
+	message providers.Message,
+) (memory.CommittedHistoryMessage, error) {
 	receipt, err := backend.JSONLBackend.AppendHistoryReceipt(ctx, key, message)
 	if err != nil || backend.interleaved {
 		return receipt, err
@@ -62,7 +66,11 @@ func TestSessionHistoryReceiptObserverUsesExactCommittedMessageBeforeIngest(t *t
 		observed = true
 		actual = committed
 	})
-	if operationErr := al.writeMirrored(agent, key, []providers.Message{{Role: "assistant", Content: "A"}}); operationErr != nil {
+	if operationErr := al.writeMirrored(
+		agent,
+		key,
+		[]providers.Message{{Role: "assistant", Content: "A"}},
+	); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	read, err := backend.ReadHistoryWithReceipts(t.Context(), key)
@@ -84,7 +92,9 @@ func TestSessionHistoryReceiptObserverContainsOnlyRealSuccessfulBatchMembers(t *
 	agent.Sessions = backend
 	key := "agent:main:receipt-partial-batch"
 	var actual []memory.CommittedHistoryMessage
-	al.SetSessionHistoryReceiptObserver(func(_ string, committed []memory.CommittedHistoryMessage) { actual = committed })
+	al.SetSessionHistoryReceiptObserver(
+		func(_ string, committed []memory.CommittedHistoryMessage) { actual = committed },
+	)
 	invalidDate := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	err = al.writeMirrored(agent, key, []providers.Message{
 		{Role: "assistant", Content: "a"},
@@ -95,8 +105,12 @@ func TestSessionHistoryReceiptObserverContainsOnlyRealSuccessfulBatchMembers(t *
 		t.Fatal("real serialization failure was hidden")
 	}
 	read, err := backend.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 2 || len(actual) != 2 || actual[0].Message.Content != "a" || actual[1].Message.Content != "c" ||
-		actual[0].Order != read[0].Order || actual[1].Order != read[1].Order || actual[0].Order.Sequence != 1 || actual[1].Order.Sequence != 2 {
+	if err != nil || len(read) != 2 || len(actual) != 2 {
+		t.Fatal("failed b changed the committed batch membership", actual, read, err)
+	}
+	if actual[0].Message.Content != "a" || actual[1].Message.Content != "c" ||
+		actual[0].Order != read[0].Order || actual[1].Order != read[1].Order ||
+		actual[0].Order.Sequence != 1 || actual[1].Order.Sequence != 2 {
 		t.Fatal("failed b acquired a receipt, or successful a/c was lost", actual, read, err)
 	}
 }

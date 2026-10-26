@@ -18,12 +18,17 @@ func TestJSONLBackendReceiptReadPreservesPrivateProofAndProviderHistoryDoesNot(t
 	}
 	backend := session.NewJSONLBackend(store)
 	key := "agent:main:backend-receipt"
-	receipt, err := backend.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "confirmed"})
+	receipt, err := backend.AppendHistoryReceipt(
+		t.Context(),
+		key,
+		providers.Message{Role: "assistant", Content: "confirmed"},
+	)
 	if err != nil || !receipt.Order.Valid() {
 		t.Fatal(receipt, err)
 	}
 	read, err := backend.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || len(read) != 1 || read[0].Order != receipt.Order || read[0].Message.HistoryID != receipt.Message.HistoryID {
+	if err != nil || len(read) != 1 || read[0].Order != receipt.Order ||
+		read[0].Message.HistoryID != receipt.Message.HistoryID {
 		t.Fatal("backend lost the private receipt", read, err)
 	}
 	projected := backend.GetHistory(key)
@@ -32,18 +37,29 @@ func TestJSONLBackendReceiptReadPreservesPrivateProofAndProviderHistoryDoesNot(t
 		t.Fatal("provider history retained persistence provenance", projected)
 	}
 	encoded, err := json.Marshal(projected)
-	if err != nil || strings.Contains(string(encoded), receipt.Order.StreamID) || strings.Contains(string(encoded), "history_") {
+	if err != nil || strings.Contains(string(encoded), receipt.Order.StreamID) ||
+		strings.Contains(string(encoded), "history_") {
 		t.Fatal("private proof leaked into provider serialization", string(encoded), err)
 	}
 }
 
 func TestJSONLBackendReceiptUnsupportedNeverFabricatesProof(t *testing.T) {
 	backend := session.NewJSONLBackend(fullDiskStore{})
-	receipt, err := backend.AppendHistoryReceipt(t.Context(), "unsupported", providers.Message{Role: "assistant", Content: "unconfirmed"})
+	receipt, err := backend.AppendHistoryReceipt(
+		t.Context(),
+		"unsupported",
+		providers.Message{Role: "assistant", Content: "unconfirmed"},
+	)
 	if !errors.Is(err, memory.ErrHistoryUnsupported) || receipt.Order.Valid() {
 		t.Fatal("unsupported store fabricated a receipt", receipt, err)
 	}
-	if _, err := backend.ReadHistoryWithReceipts(t.Context(), "unsupported"); !errors.Is(err, memory.ErrHistoryUnsupported) {
+	if _, err := backend.ReadHistoryWithReceipts(
+		t.Context(),
+		"unsupported",
+	); !errors.Is(
+		err,
+		memory.ErrHistoryUnsupported,
+	) {
 		t.Fatal("unsupported store claimed ordering evidence", err)
 	}
 }
