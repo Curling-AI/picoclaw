@@ -13,7 +13,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
-	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 func (al *AgentLoop) buildContinuationTarget(msg bus.InboundMessage) (*continuationTarget, error) {
@@ -178,21 +177,17 @@ func (al *AgentLoop) processMessageResult(
 ) (turnresult.Result, error) {
 	msg = al.prepareInboundMessageForAgent(ctx, msg)
 
-	// Add message preview to log (show full content for error messages)
-	var logContent string
-	if strings.Contains(msg.Content, "Error:") || strings.Contains(msg.Content, "error") {
-		logContent = msg.Content // Full content for errors
-	} else {
-		logContent = utils.Truncate(msg.Content, 80)
-	}
+	// The size, not the text: what the user writes is theirs, passwords
+	// included, and logs leave the pod.
 	logger.InfoCF(
 		"agent",
-		fmt.Sprintf("Processing message from %s:%s: %s", msg.Channel, msg.SenderID, logContent),
+		fmt.Sprintf("Processing message from %s:%s", msg.Channel, msg.SenderID),
 		map[string]any{
 			"channel":     msg.Channel,
 			"chat_id":     msg.ChatID,
 			"sender_id":   msg.SenderID,
 			"session_key": msg.SessionKey,
+			"content_len": len(msg.Content),
 		},
 	)
 
