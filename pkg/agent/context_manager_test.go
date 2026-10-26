@@ -972,3 +972,36 @@ func TestForcedCompressionKeepsJSONLHistoryIdentity(t *testing.T) {
 		t.Fatalf("compression retired stable source: before=%+v after=%+v", before, after)
 	}
 }
+
+func TestForcedCompressionKeepsSingleJSONLTurnWithoutSafeBoundary(t *testing.T) {
+	al := newCMTestAgentLoop(testConfig(t))
+	t.Cleanup(al.Close)
+	store, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := session.NewJSONLBackend(store)
+	al.registry.GetDefaultAgent().Sessions = backend
+	key := "single-heavy-turn-lineage"
+	backend.SetHistory(key, []providers.Message{
+		{Role: "user", Content: "question"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "call_1", Type: "function"}}},
+		{Role: "tool", ToolCallID: "call_1", Content: strings.Repeat("x", 128<<10)},
+		{Role: "assistant", Content: "confirmed answer"},
+	})
+	before, err := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operationErr := al.contextManager.Compact(
+		t.Context(),
+		&CompactRequest{SessionKey: key, Reason: ContextCompressReasonProactive},
+	); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	after, err := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
+	if err != nil || after.Generation != before.Generation || after.TotalPosition != before.TotalPosition ||
+		len(after.Entries) != len(before.Entries) || after.Entries[3].ID != before.Entries[3].ID {
+		t.Fatal("compression removed part of a complete turn without a safe boundary", after, err)
+	}
+}

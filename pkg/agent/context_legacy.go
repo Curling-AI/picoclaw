@@ -177,17 +177,12 @@ func (m *legacyContextManager) forceCompression(sessionKey string, protectedTail
 			mid = start
 		}
 	}
-	var keptHistory []providers.Message
 	if mid <= 0 {
-		for i := len(history) - 1; i >= 0; i-- {
-			if history[i].Role == "user" {
-				keptHistory = []providers.Message{history[i]}
-				break
-			}
-		}
-	} else {
-		keptHistory = history[mid:]
+		// A single complete turn has no safe compaction boundary. Keeping
+		// just its user message would erase the confirmed response and tools.
+		return compressionResult{}, false
 	}
+	keptHistory := history[mid:]
 
 	droppedCount := len(history) - len(keptHistory)
 
@@ -201,12 +196,8 @@ func (m *legacyContextManager) forceCompression(sessionKey string, protectedTail
 	}
 	agent.Sessions.SetSummary(sessionKey, compressionNote)
 
-	if mid > 0 {
-		// This is compaction of an unchanged suffix, not a transcript edit.
-		agent.Sessions.TruncateHistory(sessionKey, len(keptHistory))
-	} else {
-		agent.Sessions.SetHistory(sessionKey, keptHistory)
-	}
+	// This is compaction of an unchanged suffix, not a transcript edit.
+	agent.Sessions.TruncateHistory(sessionKey, len(keptHistory))
 	agent.Sessions.Save(sessionKey)
 
 	logger.WarnCF("agent", "Forced compression executed", map[string]any{

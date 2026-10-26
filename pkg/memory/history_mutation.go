@@ -64,6 +64,10 @@ func (s *JSONLStore) replaceHistory(
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	physicalPrefix, err := unchangedPhysicalPrefix(s.jsonlPath(key), meta.Skip, len(old))
+	if err != nil {
+		return err
+	}
 	common := 0
 	prepared := append([]providers.Message(nil), input...)
 	for index, message := range prepared {
@@ -95,9 +99,10 @@ func (s *JSONLStore) replaceHistory(
 	}
 	ensureHistoryGeneration(&meta, key)
 	meta.HistoryPrefix += int64(meta.Skip)
-	if common != len(old) || len(prepared) < len(old) {
+	if common != len(old) || len(prepared) < len(old) || meta.Count-meta.Skip != len(old) {
 		meta.HistoryParentGeneration = meta.HistoryGeneration
-		meta.HistoryRetainedUntil = meta.HistoryPrefix + int64(common)
+		retained := min(common, physicalPrefix, max(0, meta.Count-meta.Skip))
+		meta.HistoryRetainedUntil = meta.HistoryPrefix + int64(retained)
 		meta.HistoryMutationRunID = providers.HistoryRun(ctx)
 		resetHistoryGeneration(&meta)
 	} else {
@@ -113,10 +118,27 @@ func (s *JSONLStore) replaceHistory(
 	if len(prepared) > 0 {
 		meta.HistoryTip = prepared[len(prepared)-1].HistoryID
 	}
-	if err := s.writeMeta(key, meta); err != nil {
-		return err
+	return s.commitHistoryRewrite(key, prepared, meta)
+}
+
+// Return the dense prefix whose positions survive a filtered rewrite. A gap
+// before a retained message moves that message and all following positions.
+func unchangedPhysicalPrefix(path string, skip, retainedCount int) (int, error) {
+	_, retained, err := scanRetainedMessageLines(path)
+	if err != nil {
+		return 0, err
 	}
-	return s.rewriteJSONL(key, prepared, meta)
+	common := 0
+	for _, line := range retained {
+		if line <= skip {
+			continue
+		}
+		if line != skip+common+1 {
+			break
+		}
+		common++
+	}
+	return min(common, retainedCount), nil
 }
 
 func sameHistoryCore(a, b providers.Message) bool {
@@ -157,38 +179,7 @@ func (s *JSONLStore) appendHistorySuffix(key string, messages []providers.Messag
 		}
 		return true, s.writeMeta(key, meta)
 	}
-	var data bytes.Buffer
-	for _, message := range messages[activeCount:] {
-		line, err := marshalHistoryMessage(message, meta)
-		if err != nil {
-			return false, err
-		}
-		data.Write(line)
-		data.WriteByte('\n')
-		digest, digestErr = appendHistoryDigest(digest, message)
-		if digestErr != nil {
-			return false, digestErr
-		}
-	}
-	file, err := os.OpenFile(s.jsonlPath(key), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return false, err
-	}
-	if _, err := file.Write(data.Bytes()); err != nil {
-		file.Close()
-		return false, err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return false, err
-	}
-	if err := file.Close(); err != nil {
-		return false, err
-	}
-	meta.Count += len(messages) - activeCount
-	meta.HistoryDigest = digest
-	meta.HistoryTip = messages[len(messages)-1].HistoryID
-	return true, s.writeMeta(key, meta)
+	return true, s.appendHistoryMessages(key, messages[activeCount:], meta)
 }
 
 func (s *JSONLStore) historyTipMatches(key string, meta SessionMeta) bool {

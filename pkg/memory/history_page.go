@@ -81,8 +81,11 @@ func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageReq
 	lock := s.sessionLock(request.Key)
 	lock.Lock()
 	defer lock.Unlock()
-	if request.Key == "" || ctx.Err() != nil {
+	if request.Key == "" {
 		return HistoryPage{}, ErrHistoryCursor
+	}
+	if err := ctx.Err(); err != nil {
+		return HistoryPage{}, err
 	}
 	meta, err := s.readMeta(request.Key)
 	if err != nil {
@@ -112,6 +115,12 @@ func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageReq
 }
 
 func readPageCursor(request HistoryPageRequest, meta SessionMeta, size int64) (historyPageCursor, error) {
+	if meta.HistoryBytes != nil {
+		if *meta.HistoryBytes < 0 || *meta.HistoryBytes > size {
+			return historyPageCursor{}, ErrHistoryCursor
+		}
+		size = *meta.HistoryBytes
+	}
 	c := historyPageCursor{
 		Key:            sha256.Sum256([]byte(request.Key)),
 		Generation:     meta.HistoryGeneration,
@@ -185,14 +194,13 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 	counter := &historyReadCounter{reader: io.LimitReader(file, cursor.Ceiling-cursor.Byte)}
 	reader := bufio.NewReaderSize(counter, historyReadBufferBytes)
 	payloadBytes := historyEnvelopeBytes + len(summary)
-	for cursor.Byte < cursor.Ceiling && page.LinesRead < HistoryPageMessages {
+	for cursor.Byte < cursor.Ceiling && cursor.Line < cursor.Total-meta.HistoryPrefix && page.LinesRead < HistoryPageMessages {
 		if err := ctx.Err(); err != nil {
 			return HistoryPage{}, err
 		}
 		line, err := readHistoryLine(reader)
 		page.LinesRead++
-		if errors.Is(err, ErrHistoryCapacity) || errors.Is(err, bufio.ErrBufferFull) ||
-			len(line) > HistoryMessageBytes {
+		if errors.Is(err, ErrHistoryCapacity) {
 			if len(page.Entries) > 0 {
 				break
 			}
@@ -200,7 +208,9 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return HistoryPage{}, ErrHistoryCapacity
+				// The final unterminated row has no commit marker. Keep the
+				// checkpoint before it so a later append can replace that tail.
+				break
 			}
 			return HistoryPage{}, fmt.Errorf("read bounded history line: %w", err)
 		}
@@ -226,6 +236,9 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 			return HistoryPage{}, fmt.Errorf("encode bounded history entry: %w", err)
 		}
 		if payloadBytes+len(encoded) > HistoryPageBytes {
+			if len(page.Entries) == 0 {
+				return HistoryPage{}, ErrHistoryCapacity
+			}
 			break
 		}
 		page.Entries = append(page.Entries, entry)
@@ -235,8 +248,13 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 	}
 	page.EndPosition = meta.HistoryPrefix + cursor.Line
 	page.BytesRead = counter.bytes
-	page.Complete = cursor.Byte == cursor.Ceiling
-	if page.EndPosition > cursor.Total || (page.Complete && page.EndPosition != cursor.Total) {
+	page.Complete = page.EndPosition == cursor.Total
+	if page.Complete {
+		// Count is the metadata commit point for pre-checkpoint legacy files.
+		// Do not expose complete or torn appends beyond that committed prefix.
+		cursor.Ceiling = cursor.Byte
+	}
+	if page.EndPosition > cursor.Total || (!page.Complete && cursor.Byte == state.cursor.Byte) {
 		return HistoryPage{}, ErrHistoryCursor
 	}
 	data, err := json.Marshal(cursor)
