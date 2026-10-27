@@ -9,11 +9,16 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 type emptySessionPruner interface {
-	PruneEmptySessions(minIdle time.Duration, now time.Time, beforeRemove func(key string) error) ([]string, error)
+	PruneEmptySessions(
+		minIdle time.Duration,
+		now time.Time,
+		beforeRemove func(memory.SessionMeta) error,
+	) ([]string, error)
 }
 
 // A config reload replaces the agent's session store with a new one on the
@@ -47,7 +52,7 @@ func TestPruneEmptySessions_AMessageThroughTheReloadedStoreSurvivesTheSweep(t *t
 	}
 
 	written := make(chan struct{})
-	_, err := pruner.PruneEmptySessions(24*time.Hour, time.Now(), func(string) error {
+	_, err := pruner.PruneEmptySessions(24*time.Hour, time.Now(), func(memory.SessionMeta) error {
 		if err := al.ReloadProviderAndConfig(context.Background(), &countingReplyProvider{}, cfg); err != nil {
 			t.Errorf("ReloadProviderAndConfig: %v", err)
 		}
@@ -68,7 +73,11 @@ func TestPruneEmptySessions_AMessageThroughTheReloadedStoreSurvivesTheSweep(t *t
 	if err != nil {
 		t.Fatalf("PruneEmptySessions: %v", err)
 	}
-	<-written
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the write through the reloaded store never finished")
+	}
 
 	if got := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(key); len(got) != 1 {
 		t.Fatalf("history = %v; the message written during the sweep is gone", got)

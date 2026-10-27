@@ -34,7 +34,11 @@ type sessionDeletingStore interface {
 }
 
 type emptySessionPruningStore interface {
-	PruneEmptySessions(minIdle time.Duration, now time.Time, beforeRemove func(key string) error) ([]string, error)
+	PruneEmptySessions(
+		minIdle time.Duration,
+		now time.Time,
+		beforeRemove func(meta memory.SessionMeta) error,
+	) ([]string, error)
 }
 
 // MetadataAwareSessionStore exposes structured session metadata operations.
@@ -231,7 +235,7 @@ func (b *JSONLBackend) DeleteSession(key string) error {
 func (b *JSONLBackend) PruneEmptySessions(
 	minIdle time.Duration,
 	now time.Time,
-	beforeRemove func(key string) error,
+	beforeRemove func(meta memory.SessionMeta) error,
 ) ([]string, error) {
 	pruner, ok := b.store.(emptySessionPruningStore)
 	if !ok {

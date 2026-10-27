@@ -11,12 +11,19 @@ import (
 	"time"
 )
 
-// DeleteSession removes a session from disk: its meta, its transcript and the
-// meta's cache entry. Deleting a session that does not exist is not an error.
+// DeleteSession removes a session from disk: its meta, its transcript, the
+// files of the legacy keys its meta names as aliases, and their cache entries.
+// Deleting a session that does not exist is not an error.
 //
 // It holds the session's lock, so an append in flight finishes before the files
 // go, and one that follows starts a new session instead of continuing a
 // half-removed one.
+//
+// A conversation from before the canonical keys keeps its history under the
+// legacy key. Left behind, it would be promoted back into the canonical session
+// on the next message (PromoteAliasHistory), so the aliases go first, each under
+// the pair lock that promotion takes. The main session's alias is every agent's
+// shared fallback, not one conversation's, and stays.
 //
 // Clearing a session (empty history, empty summary) is not a delete: the meta
 // and the transcript stay, and the session stays in every listing with no
@@ -26,14 +33,46 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 		return errors.New("memory: delete session: empty key")
 	}
 
+	var errs []error
+	for _, alias := range s.legacyAliases(sessionKey) {
+		unlock := s.lockSessionPair(sessionKey, alias)
+		if err := s.removeSessionFiles(sanitizeKey(alias)); err != nil {
+			errs = append(errs, err)
+		}
+		unlock()
+	}
+
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
-
 	if err := s.removeSessionFiles(sanitizeKey(sessionKey)); err != nil {
-		return fmt.Errorf("memory: delete session: %w", err)
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("memory: delete session: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+// legacyAliases are the aliases in a session's meta that hold a conversation of
+// their own: not the session's key, and not the main session's. A meta that
+// cannot be read names none; the session itself is still deleted.
+func (s *JSONLStore) legacyAliases(sessionKey string) []string {
+	l := s.sessionLock(sessionKey)
+	l.Lock()
+	meta, err := s.readMeta(sessionKey)
+	l.Unlock()
+	if err != nil {
+		return nil
+	}
+	var aliases []string
+	for _, alias := range meta.Aliases {
+		if alias == "" || alias == sessionKey || isMainSessionAlias(alias) {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases
 }
 
 // PruneEmptySessions deletes the sessions that hold nothing and have not been
@@ -48,16 +87,22 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 // as the last write is the files' modification time, as in PruneCronRuns, so a
 // session cannot look idle through a meta that says so.
 //
-// beforeRemove runs under the session's lock, before its files go, for
-// whatever else is kept per session. When it fails the session stays and the
-// next pass tries again, so the hook never ends up owning data of a session
-// that is gone. A session that fails is skipped, not fatal: the others are
-// still pruned and the errors come back joined. ErrKeepSession from the hook
-// keeps the session without counting as a failure.
+// beforeRemove runs before a session's files go, for whatever else is kept per
+// session, and gets the meta just read from disk. When it fails the session
+// stays and the next pass tries again, so the hook never ends up owning data of
+// a session that is gone. A session that fails is skipped, not fatal: the
+// others are still pruned and the errors come back joined. ErrKeepSession from
+// the hook keeps the session without counting as a failure.
+//
+// The hook runs under the session's lock, which is what keeps a write from
+// landing between the check and the removal. It must not call the session
+// store: a call for that session, or for any session of the same lock shard,
+// waits for the hook forever. It also holds off writes to that shard while it
+// runs, so it has to be quick.
 func (s *JSONLStore) PruneEmptySessions(
 	minIdle time.Duration,
 	now time.Time,
-	beforeRemove func(key string) error,
+	beforeRemove func(meta SessionMeta) error,
 ) ([]string, error) {
 	if minIdle <= 0 {
 		return nil, nil
@@ -97,7 +142,7 @@ func isEmptyMeta(meta SessionMeta) bool {
 // pruneIfEmpty decides again, under the session's lock and from the files
 // themselves, what PruneEmptySessions decided from the listing: a message may
 // have been written in between, and the cache is not the disk.
-func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove func(string) error) (bool, error) {
+func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove func(SessionMeta) error) (bool, error) {
 	l := s.sessionLock(key)
 	l.Lock()
 	defer l.Unlock()
@@ -130,7 +175,7 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	}
 
 	if beforeRemove != nil {
-		if err := beforeRemove(key); err != nil {
+		if err := beforeRemove(meta); err != nil {
 			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 		}
 	}

@@ -64,8 +64,21 @@ type SessionMeta struct {
 // append-only, which is both fast and crash-safe.
 type JSONLStore struct {
 	dir string
-	// locks are shared by every store open on dir (see sharedSessionLocks).
-	locks *[numLockShards]sync.Mutex
+	// The locks and the meta cache belong to the directory, not to the store
+	// (see sharedDirState).
+	*dirState
+}
+
+// dirState is what every store open on one session directory shares.
+//
+// A config reload opens a new store on the directory of the old one while work
+// started on the old store (a sweep, a turn) may still be running. With locks
+// of their own, that work did not exclude a write through the new store, and a
+// sweep removed a message written after it checked the session. With caches of
+// their own, a meta one store had cached outlived a delete through the other,
+// and its next write brought back the summary, scope and aliases.
+type dirState struct {
+	locks [numLockShards]sync.Mutex
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
 	// This process is the only writer of the session directory, so a
@@ -81,29 +94,11 @@ type JSONLStore struct {
 	metaRemovals uint64
 }
 
-// NewJSONLStore creates a new JSONL-backed store rooted at dir.
-func NewJSONLStore(dir string) (*JSONLStore, error) {
-	err := os.MkdirAll(dir, 0o755)
-	if err != nil {
-		return nil, fmt.Errorf("memory: create directory: %w", err)
-	}
-	return &JSONLStore{
-		dir:       dir,
-		locks:     sharedSessionLocks(dir),
-		metaCache: make(map[string]SessionMeta),
-	}, nil
-}
+// dirStates holds the state of each session directory, one per directory, so
+// memory stays bounded by the directories rather than by the stores opened.
+var dirStates sync.Map // canonical dir -> *dirState
 
-// sessionLocksByDir holds the per-session locks of each session directory.
-var sessionLocksByDir sync.Map // canonical dir -> *[numLockShards]sync.Mutex
-
-// sharedSessionLocks returns the per-session locks of dir, the same for every
-// store opened on it. A config reload opens a new store on the directory of
-// the old one while work started on the old store (a sweep that removes
-// sessions) may still be running; with locks of their own, that work does not
-// exclude a write through the new store, and removes a message written after
-// it checked the session. One set per directory keeps memory bounded.
-func sharedSessionLocks(dir string) *[numLockShards]sync.Mutex {
+func sharedDirState(dir string) *dirState {
 	key := filepath.Clean(dir)
 	if abs, err := filepath.Abs(key); err == nil {
 		key = abs
@@ -111,8 +106,17 @@ func sharedSessionLocks(dir string) *[numLockShards]sync.Mutex {
 	if resolved, err := filepath.EvalSymlinks(key); err == nil {
 		key = resolved
 	}
-	locks, _ := sessionLocksByDir.LoadOrStore(key, new([numLockShards]sync.Mutex))
-	return locks.(*[numLockShards]sync.Mutex)
+	state, _ := dirStates.LoadOrStore(key, &dirState{metaCache: make(map[string]SessionMeta)})
+	return state.(*dirState)
+}
+
+// NewJSONLStore creates a new JSONL-backed store rooted at dir.
+func NewJSONLStore(dir string) (*JSONLStore, error) {
+	err := os.MkdirAll(dir, 0o755)
+	if err != nil {
+		return nil, fmt.Errorf("memory: create directory: %w", err)
+	}
+	return &JSONLStore{dir: dir, dirState: sharedDirState(dir)}, nil
 }
 
 // sessionLock returns a mutex for the given session key.

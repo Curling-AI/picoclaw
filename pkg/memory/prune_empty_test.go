@@ -46,7 +46,7 @@ func seedGhost(t *testing.T, store *JSONLStore, key string) {
 	}
 }
 
-func keepAll(string) error { return nil }
+func keepAll(SessionMeta) error { return nil }
 
 // staleCacheOverDisk caches an empty meta for key and then puts body on disk
 // behind the cache's back.
@@ -72,8 +72,8 @@ func TestPruneEmptySessions_RemovesAbandonedGhosts(t *testing.T) {
 	age(t, store, "agent:main:web-never-used", 2*ghostIdle)
 
 	var seen []string
-	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(key string) error {
-		seen = append(seen, key)
+	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(meta SessionMeta) error {
+		seen = append(seen, meta.Key)
 		return nil
 	})
 	if err != nil {
@@ -227,8 +227,8 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 			}
 			age(t, store, key, idle)
 
-			removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(k string) error {
-				t.Errorf("before-remove hook called for %q", k)
+			removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(meta SessionMeta) error {
+				t.Errorf("before-remove hook called for %q", meta.Key)
 				return nil
 			})
 			if err != nil {
@@ -275,8 +275,8 @@ func TestPruneEmptySessions_KeepsTheSessionWhenTheHookFails(t *testing.T) {
 	}
 	boom := errors.New("index unavailable")
 
-	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(key string) error {
-		if key == "agent:main:web-a" {
+	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(meta SessionMeta) error {
+		if meta.Key == "agent:main:web-a" {
 			return boom
 		}
 		return nil
@@ -305,8 +305,8 @@ func TestPruneEmptySessions_TheHookCanKeepASession(t *testing.T) {
 		age(t, store, key, 2*ghostIdle)
 	}
 
-	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(key string) error {
-		if key == "agent:main:web-a" {
+	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(meta SessionMeta) error {
+		if meta.Key == "agent:main:web-a" {
 			return ErrKeepSession
 		}
 		return nil
@@ -343,7 +343,7 @@ func TestPruneEmptySessions_HoldsOffWritesThroughAnotherStoreOnTheSameDirectory(
 	age(t, sweeping, key, 2*ghostIdle)
 
 	written := make(chan error, 1)
-	_, err = sweeping.PruneEmptySessions(ghostIdle, time.Now(), func(string) error {
+	_, err = sweeping.PruneEmptySessions(ghostIdle, time.Now(), func(SessionMeta) error {
 		go func() { written <- reloaded.AddMessage(ctx, key, "user", "olá") }()
 		select {
 		case writeErr := <-written:
@@ -355,12 +355,54 @@ func TestPruneEmptySessions_HoldsOffWritesThroughAnotherStoreOnTheSameDirectory(
 	if err != nil {
 		t.Fatalf("PruneEmptySessions: %v", err)
 	}
-	if writeErr := <-written; writeErr != nil {
-		t.Fatalf("AddMessage: %v", writeErr)
+	select {
+	case writeErr := <-written:
+		if writeErr != nil {
+			t.Fatalf("AddMessage: %v", writeErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the write through the other store never finished")
 	}
 
 	history, err := reloaded.GetHistory(ctx, key)
 	if err != nil || len(history) != 1 {
 		t.Fatalf("history = %v, %v; the message written during the sweep is gone", history, err)
+	}
+}
+
+// The hook runs under the session's lock, which is what holds writes off
+// during the removal: the store does not answer for that session until the hook
+// returns, so the hook gets the meta it needs instead of asking for it.
+func TestPruneEmptySessions_TheHookRunsUnderTheSessionLockWithItsMeta(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const key = "agent:main:whatsapp:direct:42"
+	scope := json.RawMessage(`{"version":1,"channel":"whatsapp"}`)
+	if err := store.UpsertSessionMeta(ctx, key, scope, nil); err != nil {
+		t.Fatal(err)
+	}
+	age(t, store, key, 2*ghostIdle)
+
+	var given SessionMeta
+	_, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(meta SessionMeta) error {
+		given = meta
+		read := make(chan struct{})
+		go func() {
+			_, _ = store.GetSessionMeta(ctx, key)
+			close(read)
+		}()
+		select {
+		case <-read:
+			t.Error("the store answered for the session while the hook held its lock")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PruneEmptySessions: %v", err)
+	}
+	var givenScope map[string]any
+	if given.Key != key || json.Unmarshal(given.Scope, &givenScope) != nil || givenScope["channel"] != "whatsapp" {
+		t.Errorf("hook got %+v, want the session's meta", given)
 	}
 }

@@ -239,3 +239,66 @@ func TestListSessionMetas_AFillNeverUndoesADeleteOrAWrite(t *testing.T) {
 		t.Fatalf("a fill replaced the cached meta: %+v, want %+v", got, newer)
 	}
 }
+
+// A config reload leaves two stores on one directory. A meta one of them has
+// cached (a sidebar listing is enough) must not outlive a delete through the
+// other: its next write would bring back the summary, scope and aliases.
+func TestDeleteSession_AnotherStoreOnTheDirectoryForgetsTheMetaToo(t *testing.T) {
+	dir := t.TempDir()
+	deleting, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	seedSession(t, deleting, "agent:main:web-1")
+	other.ListSessionMetas()
+
+	if err = deleting.DeleteSession(ctx, "agent:main:web-1"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if err = other.AddMessage(ctx, "agent:main:web-1", "user", "hi"); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+
+	meta, err := other.GetSessionMeta(ctx, "agent:main:web-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Count != 1 || meta.Summary != "" || len(meta.Scope) != 0 {
+		t.Errorf("meta = count %d, summary %q, scope %s; want a fresh session", meta.Count, meta.Summary, meta.Scope)
+	}
+}
+
+// A conversation from before the canonical keys still has files under its
+// legacy key, named in the canonical meta's aliases. Left behind, the next
+// message promotes them back into the canonical session. The main session's
+// alias is every agent's shared fallback, not this conversation's.
+func TestDeleteSession_RemovesTheLegacyAliasesButNotTheMainOne(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const legacy, main = "agent:main:whatsapp:direct:7", "agent:main:main"
+	for _, key := range []string{legacy, main} {
+		if err := store.AddMessage(ctx, key, "user", "from "+key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedSession(t, store, "sk_v1_canonical")
+	if err := store.UpsertSessionMeta(ctx, "sk_v1_canonical", nil, []string{legacy, main}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteSession(ctx, "sk_v1_canonical"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if fileExists(store.metaPath(legacy)) || fileExists(store.jsonlPath(legacy)) {
+		t.Error("the legacy alias's files survived the delete")
+	}
+	if history, _ := store.GetHistory(ctx, main); len(history) != 1 {
+		t.Errorf("the main session has %d messages, want the 1 it had", len(history))
+	}
+}

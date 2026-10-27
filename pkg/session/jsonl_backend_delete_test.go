@@ -69,6 +69,7 @@ func TestJSONLBackend_DeleteSessionDropsItFromEveryListing(t *testing.T) {
 func TestJSONLBackend_DeleteSessionResolvesAnAlias(t *testing.T) {
 	b := newBackend(t)
 	scope := &session.SessionScope{Version: session.ScopeVersionV1, AgentID: "main", Channel: "whatsapp"}
+	b.AddMessage("agent:main:direct:7", "user", "before the canonical key")
 	b.EnsureSessionMetadata("canonical", scope, []string{"agent:main:direct:7"})
 	b.AddMessage("canonical", "user", "hello")
 
@@ -120,8 +121,8 @@ func TestJSONLBackend_PruneEmptySessionsRemovesAbandonedGhostsOnly(t *testing.T)
 	}
 
 	var seen []string
-	removed, err := b.PruneEmptySessions(24*time.Hour, time.Now(), func(key string) error {
-		seen = append(seen, key)
+	removed, err := b.PruneEmptySessions(24*time.Hour, time.Now(), func(meta memory.SessionMeta) error {
+		seen = append(seen, meta.Key)
 		return nil
 	})
 	if err != nil {
@@ -146,5 +147,30 @@ func TestJSONLBackend_PruneEmptySessionsNeedsAStoreThatCan(t *testing.T) {
 	b := session.NewJSONLBackend(struct{ memory.Store }{store})
 	if _, err := b.PruneEmptySessions(time.Hour, time.Now(), nil); err == nil {
 		t.Fatal("PruneEmptySessions on a store that cannot prune reported success")
+	}
+}
+
+// The pre-migration history lives under the legacy key, and the next message
+// to the conversation promotes it into an empty canonical session.
+func TestJSONLBackend_ADeletedConversationDoesNotComeBackFromItsLegacyAlias(t *testing.T) {
+	b := newBackend(t)
+	const legacy = "agent:main:whatsapp:direct:7"
+	scope := &session.SessionScope{Version: session.ScopeVersionV1, AgentID: "main", Channel: "whatsapp"}
+	b.AddMessage(legacy, "user", "legacy secret")
+	b.EnsureSessionMetadata("canonical", scope, []string{legacy})
+	if got := b.GetHistory("canonical"); len(got) != 1 {
+		t.Fatalf("the legacy history was not promoted: %v", got)
+	}
+
+	if err := b.DeleteSession("canonical"); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	b.EnsureSessionMetadata("canonical", scope, []string{legacy})
+
+	if got := b.GetHistory("canonical"); len(got) != 0 {
+		t.Errorf("the deleted conversation came back: %v", got)
+	}
+	if slices.Contains(b.ListSessions(), legacy) {
+		t.Error("the legacy alias is still listed")
 	}
 }
