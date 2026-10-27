@@ -363,7 +363,7 @@ func (s *JSONLStore) UpsertSessionMeta(
 	l.Lock()
 	defer l.Unlock()
 
-	meta, err := s.readMeta(sessionKey)
+	meta, err := s.sessionMetaForUpsert(sessionKey)
 	if err != nil {
 		return err
 	}
@@ -376,6 +376,44 @@ func (s *JSONLStore) UpsertSessionMeta(
 	meta.UpdatedAt = now
 
 	return s.writeMeta(sessionKey, meta)
+}
+
+func (s *JSONLStore) sessionMetaForUpsert(key string) (SessionMeta, error) {
+	sanitized := sanitizeKey(key)
+	s.metaMu.RLock()
+	pending := s.historyPending[sanitized]
+	s.metaMu.RUnlock()
+	if pending {
+		if err := s.recoverHistoryWrite(key); err != nil {
+			return SessionMeta{}, err
+		}
+	}
+	// Launcher deletion happens outside this writer. Its next turn updates
+	// scope before appending, so do not republish a deleted source's warm
+	// checkpoint or recreate its deleted recovery marker during readMeta.
+	for _, path := range []string{s.metaPath(key), s.jsonlPath(key)} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
+				return SessionMeta{}, err
+			}
+			return s.readMeta(key)
+		}
+	}
+	marked, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	s.metaMu.Lock()
+	delete(s.metaCache, sanitized)
+	if !marked {
+		delete(s.historyMarkers, sanitized)
+	}
+	s.metaMu.Unlock()
+	meta := SessionMeta{Key: key, HistoryRecoveryRequired: marked, HistoryGeneration: newHistoryID()}
+	// Retire even an empty source's identity without advancing its physical
+	// epoch: metadata-only sessions must still have an empty bounded page.
+	ensureHistoryGeneration(&meta, key)
+	return meta, nil
 }
 
 // PromoteAliasHistory atomically promotes the first non-empty alias session

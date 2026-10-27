@@ -1618,8 +1618,8 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	for suffix, data := range map[string][]byte{".jsonl.commit.json": journal, ".jsonl.commit.decision": decision} {
-		if err := os.WriteFile(base+suffix, data, 0o600); err != nil {
-			t.Fatal(err)
+		if operationErr := os.WriteFile(base+suffix, data, 0o600); operationErr != nil {
+			t.Fatal(operationErr)
 		}
 	}
 
@@ -1636,16 +1636,30 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 	}
 
 	for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision", base + ".jsonl.recovery-required", base + ".jsonl.order-witness"} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("expected %s to be removed, stat err = %v", path, err)
+		if _, operationErr := os.Stat(path); !os.IsNotExist(operationErr) {
+			t.Fatalf("expected %s to be removed, stat err = %v", path, operationErr)
 		}
 	}
-	if err := store.AddMessage(t.Context(), sessionKey, "user", "fresh session"); err != nil {
-		t.Fatal("confirmed deletion left the agent's cache unusable", err)
+	scope := json.RawMessage(`{"channel":"pico","chat_id":"fresh-owner"}`)
+	if operationErr := store.UpsertSessionMeta(
+		t.Context(),
+		sessionKey,
+		scope,
+		[]string{"fresh-alias"},
+	); operationErr != nil {
+		t.Fatal("metadata update after completed deletion failed", operationErr)
+	}
+	if operationErr := store.AddMessage(t.Context(), sessionKey, "user", "fresh session"); operationErr != nil {
+		t.Fatal("confirmed deletion left the agent's cache unusable", operationErr)
 	}
 	history, historyErr := store.GetHistory(t.Context(), sessionKey)
 	if historyErr != nil || len(history) != 1 || history[0].Content != "fresh session" {
 		t.Fatal("confirmed deletion resurrected previous history", history, historyErr)
+	}
+	after, err := store.GetSessionMeta(t.Context(), sessionKey)
+	if err != nil || after.Count != 1 || after.Skip != 0 || after.Summary != "" ||
+		!bytes.Equal(after.Scope, scope) || len(after.Aliases) != 1 || after.Aliases[0] != "fresh-alias" {
+		t.Fatal("fresh metadata lost scope/aliases or retained deleted bookkeeping", after, err)
 	}
 }
 
@@ -1713,8 +1727,13 @@ func TestHandleDeleteSession_ExplicitlyDeletesUnprovenHistory(t *testing.T) {
 					t.Fatal("explicit deletion retained session data", suffix, statErr)
 				}
 			}
+			backend := session.NewJSONLBackend(store)
+			backend.EnsureSessionMetadata(key, &session.SessionScope{Channel: "pico", Account: "fresh-owner"}, nil)
 			if appendErr := store.AddMessage(t.Context(), key, "user", "fresh session"); appendErr != nil {
 				t.Fatal("explicit deletion left a cached session unusable", appendErr)
+			}
+			if scope := backend.GetSessionScope(key); scope == nil || scope.Account != "fresh-owner" {
+				t.Fatal("metadata precursor silently lost the recreated session's scope", scope)
 			}
 			after, pageErr := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
 			if pageErr != nil || len(after.Entries) != 1 || after.Entries[0].Message.Content != "fresh session" ||
