@@ -73,16 +73,50 @@ func TestMetadataUpsertDoesNotRetireAmbiguousSource(t *testing.T) {
 				after.HistoryBytes == nil || *after.HistoryBytes != *before.HistoryBytes {
 				t.Fatal("metadata update inferred a confirmed source deletion", after, err)
 			}
-			if operationErr := s.AddMessage(
+			content := "must not attach"
+			if replacement {
+				content = "new content without proof"
+			}
+			appendErr := s.AddMessage(
 				t.Context(),
 				key,
 				"user",
-				"must not attach",
-			); !errors.Is(
-				operationErr,
-				ErrHistoryCursor,
-			) {
-				t.Fatal("ambiguous recreation bypassed the existing checkpoint guard", operationErr)
+				content,
+			)
+			if replacement {
+				if appendErr != nil {
+					t.Fatal("unproven readable replacement blocked ordinary content", appendErr)
+				}
+				history, historyErr := s.GetHistory(t.Context(), key)
+				if historyErr != nil || len(history) != 1 || history[0].Content != content ||
+					messageHistoryOrder(history[0]) != (HistoryOrderProof{}) {
+					t.Fatal("replacement content was lost or received new order", history, historyErr)
+				}
+				fenced, metaErr := s.GetSessionMeta(t.Context(), key)
+				if metaErr != nil || fenced.HistoryGeneration != before.HistoryGeneration ||
+					fenced.HistoryFileGeneration != before.HistoryFileGeneration ||
+					fenced.HistoryStreamID != before.HistoryStreamID || fenced.HistorySequence != before.HistorySequence {
+					t.Fatal("replacement retired identity or reconstructed stream/sequence", fenced, metaErr)
+				}
+				if _, markerErr := os.Stat(s.historyRecoveryRequiredPath(key)); markerErr != nil {
+					t.Fatal("unproven replacement did not durably retain recovery", markerErr)
+				}
+				requireContentRecoveryFence(t, s, key)
+				reopened, openErr := NewJSONLStore(s.dir)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				requireHistoryContents(t, reopened, key, content)
+				requireContentRecoveryFence(t, reopened, key)
+				persisted, metaErr := reopened.GetSessionMeta(t.Context(), key)
+				if metaErr != nil || persisted.HistoryGeneration != before.HistoryGeneration ||
+					persisted.HistoryStreamID != before.HistoryStreamID || persisted.HistorySequence != before.HistorySequence {
+					t.Fatal("reopen reattested an ambiguous replacement", persisted, metaErr)
+				}
+				return
+			}
+			if !errors.Is(appendErr, ErrHistoryCursor) {
+				t.Fatal("ambiguous recreation bypassed the existing checkpoint guard", appendErr)
 			}
 			if data, operationErr := os.ReadFile(s.jsonlPath(key)); operationErr != nil || len(data) != 0 {
 				t.Fatal("ambiguous recreation appended or restored old content", string(data), operationErr)

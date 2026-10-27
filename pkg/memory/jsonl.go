@@ -405,6 +405,7 @@ func (s *JSONLStore) sessionMetaForUpsert(key string) (SessionMeta, error) {
 	}
 	s.metaMu.Lock()
 	delete(s.metaCache, sanitized)
+	delete(s.historyWitnesses, sanitized)
 	if !marked {
 		delete(s.historyMarkers, sanitized)
 	}
