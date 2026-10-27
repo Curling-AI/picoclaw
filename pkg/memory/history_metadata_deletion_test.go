@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -39,6 +40,78 @@ func TestMetadataOnlySourceKeepsEmptyPagesAndRetiresDeletedCursors(t *testing.T)
 		ErrHistoryCursor,
 	) {
 		t.Fatal("deleted empty cursor remained live", operationErr)
+	}
+}
+
+func TestMetadataUpsertRecoversPendingJournalBeforeRecreatingDeletedSource(t *testing.T) {
+	s, key := pagedStore(t, 2)
+	if operationErr := s.SetSummary(t.Context(), key, "deleted private summary"); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	before, err := s.GetSessionMeta(t.Context(), key)
+	if err != nil || before.Count != 2 || before.HistoryBytes == nil {
+		t.Fatal("fixture needs an existing committed source", before, err)
+	}
+	offset := *before.HistoryBytes
+	next := before
+	next.Count++
+	if operationErr := s.beginHistoryWrite(
+		key,
+		historyWriteRecovery{Meta: before, Next: next, AppendOffset: &offset},
+	); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	// A completed external removal can leave this writer's journal pending.
+	// Exercise the live metadata precursor, not startup cleanup or concurrent DELETE.
+	for _, path := range []string{s.jsonlPath(key), s.metaPath(key)} {
+		if operationErr := os.Remove(path); operationErr != nil {
+			t.Fatal(operationErr)
+		}
+	}
+	scope := []byte(`{"channel":"web"}`)
+	if operationErr := s.UpsertSessionMeta(t.Context(), key, scope, []string{"fresh-alias"}); operationErr != nil {
+		t.Fatal("metadata recreation did not resolve its pending journal", operationErr)
+	}
+	for _, content := range []string{"fresh first", "fresh second"} {
+		if operationErr := s.AddMessage(t.Context(), key, "user", content); operationErr != nil {
+			t.Error("append after metadata recreation failed", operationErr)
+		}
+	}
+	history, historyErr := s.GetHistory(t.Context(), key)
+	if historyErr != nil || len(history) != 2 || history[0].Content != "fresh first" ||
+		history[1].Content != "fresh second" {
+		t.Error("recreation restored deleted content or lost fresh appends", history, historyErr)
+	}
+	if operationErr := s.SetHistory(t.Context(), key, nil); operationErr != nil {
+		t.Error("clear after metadata recreation failed", operationErr)
+	}
+	if operationErr := s.Close(); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	restarted, openErr := NewJSONLStore(s.dir)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer restarted.Close()
+	if operationErr := restarted.AddMessage(t.Context(), key, "assistant", "after restart"); operationErr != nil {
+		t.Error("append after restart retained the deleted journal checkpoint", operationErr)
+	}
+	finalHistory, finalHistoryErr := restarted.GetHistory(t.Context(), key)
+	if finalHistoryErr != nil || len(finalHistory) != 1 || finalHistory[0].Content != "after restart" {
+		t.Error("clear and restart did not retain only the final append", finalHistory, finalHistoryErr)
+	}
+	after, metaErr := restarted.GetSessionMeta(t.Context(), key)
+	var afterScope map[string]string
+	scopeErr := json.Unmarshal(after.Scope, &afterScope)
+	if metaErr != nil || after.HistoryGeneration == before.HistoryGeneration || after.Count != 1 ||
+		after.Skip != 0 || after.Summary != "" || scopeErr != nil || afterScope["channel"] != "web" ||
+		len(after.Aliases) != 1 || after.Aliases[0] != "fresh-alias" {
+		t.Error("recreation retained deleted metadata or lost fresh ownership", after, metaErr, scopeErr)
+	}
+	for _, path := range []string{s.historyRecoveryPath(key), s.historyDecisionPath(key)} {
+		if _, operationErr := os.Stat(path); !errors.Is(operationErr, os.ErrNotExist) {
+			t.Error("completed lifecycle retained the deleted source's journal", path, operationErr)
+		}
 	}
 }
 
