@@ -321,6 +321,19 @@ func validateCanonicalHistoryKey(requested, canonical string, meta SessionMeta) 
 	return nil
 }
 
+// Format/ownership failures retain the checked legacy write path. A real I/O
+// error or canceled operation does not authorize retrying through that path.
+func historyOwnershipReadError(operation string, err error) error {
+	var pathErr *os.PathError
+	var linkErr *os.LinkError
+	var syscallErr *os.SyscallError
+	if errors.As(err, &pathErr) || errors.As(err, &linkErr) || errors.As(err, &syscallErr) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("memory: %s: %w", operation, err)
+	}
+	return fmt.Errorf("%w: %s: %w", ErrHistoryOwnershipUnavailable, operation, err)
+}
+
 func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -329,7 +342,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	if shouldShortCircuitSessionResolve(key) && s.sessionExists(key) {
 		meta, err := s.GetSessionMeta(context.Background(), key)
 		if err != nil {
-			return "", fmt.Errorf("memory: canonical metadata: %w", err)
+			return "", historyOwnershipReadError("canonical metadata", err)
 		}
 		if meta.Key == key {
 			return key, nil
@@ -353,7 +366,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 			// Silently skipping an unreadable alias owner could mint a valid
 			// receipt in a different session. Ordinary listings may skip it;
 			// canonical order resolution must fail closed instead.
-			return "", fmt.Errorf("memory: alias ownership: %w", readErr)
+			return "", historyOwnershipReadError("alias ownership", readErr)
 		}
 		for _, alias := range meta.Aliases {
 			if alias != key || meta.Key == key {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -159,6 +160,90 @@ func TestSessionHistoryReceiptOwnershipFailurePreservesMirroredDelivery(t *testi
 				if wrongErr != nil || len(wrong) != 0 {
 					t.Fatal("fallback wrote the alias as a separate session", wrong, wrongErr)
 				}
+			}
+		})
+	}
+}
+
+func TestSessionHistoryWitnessReadFailureDoesNotFallbackMirroredDelivery(t *testing.T) {
+	for _, cache := range []string{"warm", "cold"} {
+		t.Run(cache, func(t *testing.T) {
+			al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+			defer cleanup()
+			dir, key := t.TempDir(), "sk_v1_transient_witness_delivery"
+			store, openErr := memory.NewJSONLStore(dir)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			first, appendErr := store.AppendHistoryReceipt(
+				t.Context(), key, providers.Message{Role: "user", Content: "retained"},
+			)
+			if appendErr != nil {
+				t.Fatal(appendErr)
+			}
+			path := filepath.Join(dir, key+".jsonl")
+			before, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			witness := path + ".order-witness"
+			if err := os.Rename(witness, witness+".io-fixture"); err != nil {
+				t.Fatal(err)
+			}
+			restored := false
+			restore := func() {
+				if restored {
+					return
+				}
+				if err := os.Remove(witness); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if err := os.Rename(witness+".io-fixture", witness); err != nil {
+					t.Fatal(err)
+				}
+				restored = true
+			}
+			t.Cleanup(restore)
+			if err := os.Mkdir(witness, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_, witnessErr := os.ReadFile(witness)
+			var ioErr *os.PathError
+			if !errors.As(witnessErr, &ioErr) {
+				t.Fatal("fixture did not produce a real witness read error", witnessErr)
+			}
+			if cache == "cold" {
+				reopened, reopenErr := memory.NewJSONLStore(dir)
+				if reopenErr != nil {
+					t.Fatal(reopenErr)
+				}
+				store = reopened
+			}
+			agent.Sessions = session.NewJSONLBackend(store)
+			callbacks := 0
+			al.SetSessionHistoryReceiptObserver(func(string, []memory.CommittedHistoryMessage) { callbacks++ })
+			input := []providers.Message{{Role: "assistant", Content: "delivered once"}}
+			writeErr := al.writeMirrored(agent, key, input)
+			restore()
+			if !errors.Is(writeErr, ioErr.Err) || errors.Is(writeErr, memory.ErrHistoryOrderUnavailable) ||
+				callbacks != 0 {
+				t.Fatal("witness I/O authorized an unproven delivery fallback", writeErr, callbacks)
+			}
+			after, afterErr := os.ReadFile(path)
+			if afterErr != nil || !bytes.Equal(after, before) {
+				t.Fatal("failed witness read still committed mirrored content", afterErr)
+			}
+			if _, markerErr := os.Stat(path + ".recovery-required"); !errors.Is(markerErr, os.ErrNotExist) {
+				t.Fatal("runtime fallback created a durable proof-loss marker", markerErr)
+			}
+			if retryErr := al.writeMirrored(agent, key, input); retryErr != nil {
+				t.Fatal("runtime delivery stayed fenced after witness access recovered", retryErr)
+			}
+			receipts, receiptErr := store.ReadHistoryWithReceipts(t.Context(), key)
+			if receiptErr != nil || len(receipts) != 2 || callbacks != 1 || receipts[0].Order != first.Order ||
+				receipts[0].Message.HistoryID != first.Message.HistoryID || receipts[1].Order.StreamID != first.Order.StreamID ||
+				receipts[1].Order.Sequence != 2 {
+				t.Fatal("runtime retry lost or reattested an occurrence", receipts, receiptErr, callbacks)
 			}
 		})
 	}
