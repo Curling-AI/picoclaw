@@ -216,6 +216,30 @@ func TestToolArgs(t *testing.T) {
 			want: map[string]any{"task": Mask + " (19 chars)", "raw": Mask + " (9 chars)"},
 		},
 		{
+			name: "file bodies nested in an allowed argument are logged by size",
+			tool: "mcp_github_push_files",
+			in: map[string]any{
+				"owner": "acme", "repo": "app", "branch": "main", "message": "add login",
+				"files": []any{map[string]any{"path": "src/env.ts", "content": "export const k = 'hunter2'"}},
+			},
+			want: map[string]any{
+				"owner": "acme", "repo": "app", "branch": "main", "message": Mask + " (9 chars)",
+				"files": []any{map[string]any{"path": "src/env.ts", "content": Mask + " (26 chars)"}},
+			},
+		},
+		{
+			name: "edge function files keep their names only",
+			tool: "mcp_supabase_deploy_edge_function",
+			in: map[string]any{
+				"name":  "extract",
+				"files": []any{map[string]any{"name": "index.ts", "content": "Deno.serve(() => 1)"}},
+			},
+			want: map[string]any{
+				"name":  "extract",
+				"files": []any{map[string]any{"name": "index.ts", "content": Mask + " (19 chars)"}},
+			},
+		},
+		{
 			name: "sensitive argument name",
 			tool: "web_fetch",
 			in:   map[string]any{"url": "https://x", "api_key": "abc"},
