@@ -63,8 +63,9 @@ type SessionMeta struct {
 // GetHistory ignores lines before that offset. This keeps all writes
 // append-only, which is both fast and crash-safe.
 type JSONLStore struct {
-	dir   string
-	locks [numLockShards]sync.Mutex
+	dir string
+	// locks are shared by every store open on dir (see sharedSessionLocks).
+	locks *[numLockShards]sync.Mutex
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
 	// This process is the only writer of the session directory, so a
@@ -86,7 +87,32 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory: create directory: %w", err)
 	}
-	return &JSONLStore{dir: dir, metaCache: make(map[string]SessionMeta)}, nil
+	return &JSONLStore{
+		dir:       dir,
+		locks:     sharedSessionLocks(dir),
+		metaCache: make(map[string]SessionMeta),
+	}, nil
+}
+
+// sessionLocksByDir holds the per-session locks of each session directory.
+var sessionLocksByDir sync.Map // canonical dir -> *[numLockShards]sync.Mutex
+
+// sharedSessionLocks returns the per-session locks of dir, the same for every
+// store opened on it. A config reload opens a new store on the directory of
+// the old one while work started on the old store (a sweep that removes
+// sessions) may still be running; with locks of their own, that work does not
+// exclude a write through the new store, and removes a message written after
+// it checked the session. One set per directory keeps memory bounded.
+func sharedSessionLocks(dir string) *[numLockShards]sync.Mutex {
+	key := filepath.Clean(dir)
+	if abs, err := filepath.Abs(key); err == nil {
+		key = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(key); err == nil {
+		key = resolved
+	}
+	locks, _ := sessionLocksByDir.LoadOrStore(key, new([numLockShards]sync.Mutex))
+	return locks.(*[numLockShards]sync.Mutex)
 }
 
 // sessionLock returns a mutex for the given session key.

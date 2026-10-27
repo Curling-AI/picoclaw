@@ -321,3 +321,46 @@ func TestPruneEmptySessions_TheHookCanKeepASession(t *testing.T) {
 		t.Error("the session the hook kept was removed")
 	}
 }
+
+// A config reload opens a second store on the directory of the first, and a
+// sweep started on the first keeps running. Its lock has to hold off a write
+// through the second, or it removes a message written after its re-check.
+func TestPruneEmptySessions_HoldsOffWritesThroughAnotherStoreOnTheSameDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sweeping, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const key = "agent:main:whatsapp:direct:42"
+	if upsertErr := sweeping.UpsertSessionMeta(ctx, key, nil, nil); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+	age(t, sweeping, key, 2*ghostIdle)
+
+	written := make(chan error, 1)
+	_, err = sweeping.PruneEmptySessions(ghostIdle, time.Now(), func(string) error {
+		go func() { written <- reloaded.AddMessage(ctx, key, "user", "olá") }()
+		select {
+		case writeErr := <-written:
+			written <- writeErr
+		case <-time.After(300 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PruneEmptySessions: %v", err)
+	}
+	if writeErr := <-written; writeErr != nil {
+		t.Fatalf("AddMessage: %v", writeErr)
+	}
+
+	history, err := reloaded.GetHistory(ctx, key)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history = %v, %v; the message written during the sweep is gone", history, err)
+	}
+}
