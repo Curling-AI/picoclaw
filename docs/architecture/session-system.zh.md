@@ -214,7 +214,7 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 这样既能做到“按 session 串行”，又不会因为 session 数量增长而把 mutex map 做成无界结构。
 列表读取和 cron 清理使用与写入相同的 sanitized-key 锁。清理在锁内重新检查文件时间及恢复状态。符合清理条件的健康会话删除 transcript、metadata、日志和决策文件后清除缓存；需要恢复的会话及持久标记保持不变。
 
-这里采用单写入进程模型，不提供跨进程删除事务。部署和 launcher 必须在升级、回滚期间避免多个进程同时写同一 session 目录；metadata 缓存不提供跨进程一致性。launcher DELETE 删除显式选定的来源、metadata 和独立文件前先解决待定写入；无法解决的日志仍阻止删除。追加操作在独占重建 transcript 并确认 metadata 已删除后，会使用全新 generation；仅当持久恢复标记也已删除时才清除缓存中的隔离状态，遗留标记仍阻止证明。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
+这里采用单写入进程模型，不提供跨进程删除事务。部署和 launcher 必须在升级、回滚期间避免多个进程同时写同一 session 目录；metadata 缓存不提供跨进程一致性。launcher DELETE 删除显式选定的来源、metadata 和独立文件前先解决待定写入；无法解决的日志仍阻止删除。当 transcript 和 metadata 都不存在时，下一次带 scope 的 turn 会先调用 `UpsertSessionMeta`，丢弃缓存的 checkpoint 并在追加前开启全新 generation。直接追加在独占重建 transcript 并确认 metadata 已删除后，也会使用全新 generation。两种重建路径都仅在持久恢复标记也已删除时清除缓存中的隔离状态，遗留标记仍阻止证明。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
 
 旧的 `SessionManager` 则是一个内存 map 加 RW mutex。
 
