@@ -69,6 +69,7 @@ type SessionMeta struct {
 	HistorySequence             uint64 `json:"history_sequence,omitempty"`
 	HistoryLegacyFileGeneration string `json:"history_legacy_file_generation,omitempty"`
 	HistoryLegacyBytes          int64  `json:"history_legacy_bytes,omitempty"`
+	HistoryOrderWitnessVersion  uint8  `json:"history_order_witness_version,omitempty"`
 }
 
 // JSONLStore implements Store using append-only JSONL files.
@@ -97,7 +98,8 @@ type JSONLStore struct {
 	metaCache map[string]SessionMeta
 	// Marker state belongs to this single writer and survives metadata-cache
 	// eviction while a journal is pending. A positive latch is never cleared.
-	historyMarkers map[string]historyMarkerState
+	historyMarkers   map[string]historyMarkerState
+	historyWitnesses map[string]historyOrderWitnessState
 	// A failed rollback can outlive cache eviction. Fence every cache read
 	// until the pending journal has published either the OLD or NEW state.
 	historyPending map[string]bool
@@ -209,6 +211,7 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
 			return SessionMeta{}, operationErr
 		}
+		s.applyHistoryOrderWitness(key, &meta)
 		return meta, nil
 	}
 	data, err := os.ReadFile(s.metaPath(key))
@@ -217,6 +220,7 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
 			return SessionMeta{}, operationErr
 		}
+		s.applyHistoryOrderWitness(key, &meta)
 		s.storeCachedMeta(sanitized, meta)
 		return meta, nil
 	}
@@ -237,6 +241,7 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	if err := s.applyHistoryRecoveryMarker(key, &meta, marked); err != nil {
 		return SessionMeta{}, err
 	}
+	s.applyHistoryOrderWitness(key, &meta)
 	s.storeCachedMeta(sanitized, meta)
 	return meta, nil
 }

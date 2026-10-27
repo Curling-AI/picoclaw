@@ -147,6 +147,14 @@ func (s *JSONLStore) prepareHistoryContentOrder(key string, meta *SessionMeta) e
 	if meta.HistoryRecoveryRequired {
 		return nil
 	}
+	if meta.HistoryOrderVersion == HistoryOrderVersion && meta.HistoryOrderWitnessVersion == 0 {
+		if migrationErr := s.migrateHistoryOrderWitness(key, meta); migrationErr != nil {
+			if !errors.Is(migrationErr, ErrHistoryReceiptUnavailable) {
+				return migrationErr
+			}
+			return s.markHistoryRecoveryRequired(key, meta)
+		}
+	}
 	stored, _, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, false)
 	if err == nil {
 		err = validateHistoryMessageOrders(stored, *meta)
@@ -222,6 +230,12 @@ func (s *JSONLStore) ensureHistoryOrderStream(key string, meta *SessionMeta) err
 		return err
 	}
 	if meta.HistoryOrderVersion != 0 {
+		if meta.HistoryOrderWitnessVersion == 0 {
+			if _, err := s.validateHistoryWitnessMigration(key, *meta); err != nil {
+				return err
+			}
+			meta.HistoryOrderWitnessVersion = historyOrderWitnessVersion
+		}
 		return nil
 	}
 	_, legacyBytes, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, true)
@@ -231,6 +245,7 @@ func (s *JSONLStore) ensureHistoryOrderStream(key string, meta *SessionMeta) err
 	ensureHistoryGeneration(meta, key)
 	meta.HistoryOrderVersion, meta.HistoryStreamID = HistoryOrderVersion, newHistoryID()
 	meta.HistoryLegacyFileGeneration, meta.HistoryLegacyBytes = meta.HistoryFileGeneration, legacyBytes
+	meta.HistoryOrderWitnessVersion = historyOrderWitnessVersion
 	return nil
 }
 
@@ -393,6 +408,9 @@ func (s *JSONLStore) AppendHistoryReceipt(
 	if markerErr := s.probeHistoryRecoveryMarker(canonical, &meta); markerErr != nil {
 		return CommittedHistoryMessage{}, markerErr
 	}
+	if witnessErr := s.probeHistoryOrderWitness(canonical, &meta); witnessErr != nil {
+		return CommittedHistoryMessage{}, witnessErr
+	}
 	now := time.Now()
 	message := prepareHistoryMessage(input, now, providers.HistoryRun(ctx))
 	if uuid.Validate(input.HistoryID) == nil {
@@ -440,6 +458,12 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	}
 	if markerErr := s.probeHistoryRecoveryMarker(canonical, &meta); markerErr != nil {
 		return nil, markerErr
+	}
+	if witnessErr := s.probeHistoryOrderWitness(canonical, &meta); witnessErr != nil {
+		return nil, witnessErr
+	}
+	if migrationErr := s.migrateHistoryOrderWitness(canonical, &meta); migrationErr != nil {
+		return nil, migrationErr
 	}
 	if stateErr := validateHistoryOrderState(meta); stateErr != nil {
 		return nil, stateErr

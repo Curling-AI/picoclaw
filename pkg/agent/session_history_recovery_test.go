@@ -19,6 +19,76 @@ type uncertainReceiptBackend struct {
 	fallbackCalls int
 }
 
+func TestSessionHistoryWitnessSyncFailurePreservesMirroredDelivery(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	defer cleanup()
+	dir := t.TempDir()
+	key := "sk_v1_witness_sync_delivery"
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"first", "second", "third"} {
+		if _, appendErr := store.AppendHistoryReceipt(
+			t.Context(), key, providers.Message{Role: "assistant", Content: content},
+		); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	meta, err := store.GetSessionMeta(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.HistoryOrderWitnessVersion = 0
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(filepath.Join(dir, key+".meta.json"), data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if chmodErr := os.Chmod(filepath.Join(dir, key+".jsonl.order-witness"), 0o400); chmodErr != nil {
+		t.Fatal(chmodErr)
+	}
+	store, err = memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.Sessions = session.NewJSONLBackend(store)
+	callbacks, legacyCallbacks := 0, 0
+	al.SetSessionHistoryReceiptObserver(func(_ string, committed []memory.CommittedHistoryMessage) {
+		callbacks++
+		if committed != nil {
+			t.Error("unsynced witness produced an order notification", committed)
+		}
+	})
+	al.SetSessionHistoryObserver(func(string) { legacyCallbacks++ })
+	if mirrorErr := al.writeMirrored(agent, key, []providers.Message{
+		{Role: "assistant", Content: "delivered once"},
+		{Role: "assistant", Content: "later delivery"},
+	}); mirrorErr != nil {
+		t.Fatal("proof-only failure lost mirrored content", mirrorErr)
+	}
+	history := agent.Sessions.GetHistory(key)
+	if len(history) != 5 || history[3].Content != "delivered once" || history[4].Content != "later delivery" ||
+		callbacks != 1 || legacyCallbacks != 1 {
+		t.Fatal("content-only delivery lost data or duplicated input", history, callbacks, legacyCallbacks)
+	}
+	if _, receiptErr := store.ReadHistoryWithReceipts(
+		t.Context(),
+		key,
+	); !errors.Is(
+		receiptErr,
+		memory.ErrHistoryReceiptUnavailable,
+	) {
+		t.Fatal("content fallback restored order eligibility", receiptErr)
+	}
+	stored, err := store.GetSessionMeta(t.Context(), key)
+	if err != nil || stored.HistoryStreamID != meta.HistoryStreamID || stored.HistorySequence != meta.HistorySequence {
+		t.Fatal("content fallback changed committed stream/counter", stored, err)
+	}
+}
+
 func (backend *uncertainReceiptBackend) AppendHistoryReceipt(
 	ctx context.Context,
 	key string,

@@ -230,6 +230,16 @@ func (s *JSONLStore) beginHistoryWrite(key string, recovery historyWriteRecovery
 		return operationErr
 	}
 	s.markHistoryPending(key)
+	if witnessErr := s.ensureDurableHistoryOrderWitness(key, recovery); witnessErr != nil {
+		decision, recoveryErr := s.recoverHistoryWriteFor(key, historyFailedWrite)
+		if decision == historyWriteOld && recoveryErr == nil {
+			// No transcript or metadata publication follows a failed witness
+			// phase. Only fully recovered OLD permits a content-only retry.
+			return errors.Join(ErrHistoryReceiptUnavailable, witnessErr)
+		}
+		return fmt.Errorf("%w: witness activation outcome unconfirmed: %v",
+			ErrHistoryOrderUnavailable, errors.Join(witnessErr, recoveryErr))
+	}
 	return nil
 }
 
@@ -396,6 +406,7 @@ func historyCheckpointMatches(current, expected SessionMeta) bool {
 		current.HistoryStreamID == expected.HistoryStreamID && current.HistorySequence == expected.HistorySequence &&
 		current.HistoryLegacyFileGeneration == expected.HistoryLegacyFileGeneration &&
 		current.HistoryLegacyBytes == expected.HistoryLegacyBytes &&
+		current.HistoryOrderWitnessVersion == expected.HistoryOrderWitnessVersion &&
 		current.HistoryRecoveryRequired == expected.HistoryRecoveryRequired
 }
 

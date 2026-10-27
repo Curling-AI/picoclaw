@@ -982,7 +982,7 @@ func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		base := filepath.Join(dir, sanitizeSessionKey(ref.Key))
-		for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision"} {
+		for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision", base + ".jsonl.order-witness"} {
 			if err := os.Remove(path); err != nil {
 				if os.IsNotExist(err) {
 					continue

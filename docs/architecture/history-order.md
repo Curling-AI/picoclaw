@@ -55,6 +55,16 @@ Recovery is an explicit owner decision. One supported action is to retain the or
 
 Older binaries do not understand this fence. In particular, the legacy producer and the earlier bounded-history producer can ignore its fields and sidecar while running. Returning to an aware binary preserves the recovery requirement, but the sidecar cannot prevent an older binary from editing or deleting data. Keep the source and its private files together when preserving recovery evidence.
 
+## Established-stream witness and downgrade
+
+Before the first version 1 proof is written, the producer durably writes the owning OLD/NEW journal, then a private `0600` `.jsonl.order-witness`, and only then publishes the new transcript and metadata. The witness records the established stream and its immutable legacy-origin boundary; it does not duplicate the counter. Metadata records completion with `history_order_witness_version: 1`. Warm ordinary writes reuse the write-through state; receipt boundaries and cold reads inspect the private file.
+
+Unlike unknown JSON fields, this file survives the transcript and metadata rewrites performed by the older `6c89ca2a` and `b523ddb0` binaries. After such a downgrade removes all order fields, the surviving witness prevents the source from being mistaken for genuine legacy history. A missing, corrupt, or mismatched witness on known modern metadata also fences receipts. Content reads, normal agent turns and requested content mutations remain available without a new stream or reassigned order. Keep the witness with backups and rollback data; removing it is not recovery.
+
+An intact experimental modern stream without a witness can migrate once using its existing validated stream, counter and origin evidence. The producer journals this metadata-only activation and syncs the witness before publishing its version, including after a failed activation followed by a cold reopen. It neither rewrites transcript bytes nor assigns order to old events. A genuine legacy source without evidence of a previous stream keeps its existing bootstrap behavior. Data from an experimental producer whose entire modern evidence was already erased before any witness existed cannot be distinguished retroactively from genuine legacy data; this change does not claim otherwise.
+
+A confirmed healthy deletion removes the witness last and permits a later unrelated stream. An older deletion that leaves the witness behind is conservative: recreation can store and display content, but cannot claim order continuity or start another proven stream. The existing single-writer deployment requirement still applies; these files cannot prevent deletion by unaware software or an external filesystem operation.
+
 ## Out-of-turn observer
 
 `AgentLoop.SetSessionHistoryReceiptObserver(func(sessionKey string, committed []memory.CommittedHistoryMessage))` observes durable out-of-turn writes. The callback runs synchronously before ingestion can enqueue network work. Consumers retain these exact receipts before starting goroutines or network requests.
@@ -65,7 +75,7 @@ For a legacy backend without receipt support, a **nil batch** means only that le
 
 ## Private boundaries
 
-Order metadata is persisted only in private JSONL records and session metadata. `providers.Message` carries private storage fields with `json:"-"`; `JSONLBackend.GetHistory` clears them for provider use. The legacy origin attestation belongs to the receipt wrapper and also has `json:"-"`.
+Order metadata is persisted only in private JSONL records, session metadata and the established-stream witness. `providers.Message` carries private storage fields with `json:"-"`; `JSONLBackend.GetHistory` clears them for provider use. The legacy origin attestation belongs to the receipt wrapper and also has `json:"-"`.
 
 The provider content reader ignores invalid or future private order metadata on otherwise valid message records. Recovery-aware content mutations keep the fence and preserve useful private evidence for unchanged content. Receipt readers validate private metadata strictly; content compatibility does not turn malformed proof into legacy evidence.
 

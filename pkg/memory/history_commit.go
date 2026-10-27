@@ -46,6 +46,11 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 		file, err = os.OpenFile(s.jsonlPath(key), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
 		if err == nil {
 			if _, statErr := os.Stat(s.metaPath(key)); errors.Is(statErr, os.ErrNotExist) {
+				// A healthy external deletion may have removed every owned
+				// file. Refresh the witness cache before retiring the old
+				// generation; a surviving or unreadable witness stays fenced.
+				witness, witnessErr := s.readHistoryOrderWitness(key, true)
+				meta.HistoryRecoveryRequired = meta.HistoryRecoveryRequired || witnessErr != nil || witness.present
 				now := time.Now()
 				original = SessionMeta{Key: key, HistoryRecoveryRequired: meta.HistoryRecoveryRequired}
 				meta = SessionMeta{
@@ -163,6 +168,18 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	if commitErr := s.beginHistoryWrite(key, historyWriteRecovery{
 		Meta: original, Next: meta, AppendOffset: &offset,
 	}); commitErr != nil {
+		if errors.Is(commitErr, ErrHistoryReceiptUnavailable) {
+			meta = appendMeta
+			if markerErr := s.markHistoryRecoveryRequired(key, &meta); markerErr != nil {
+				return nil, errors.Join(commitErr, markerErr)
+			}
+			if !requireReceipt {
+				// The failed witness phase recovered OLD before this input's
+				// bytes. Retry once with the durable content-only fence; that
+				// branch neither allocates order nor activates a witness.
+				return s.appendHistoryMessagesFor(key, messages, meta, false)
+			}
+		}
 		return nil, commitErr
 	}
 	// Discard only an incomplete suffix. Complete external rows are before
@@ -425,6 +442,17 @@ func (s *JSONLStore) recoverExpectedHistoryCommit(key string, next SessionMeta) 
 	}
 	if !historyNewCheckpointMatches(current, next) {
 		return false, errors.Join(recoveryErr, ErrHistoryOrderUnavailable)
+	}
+	if current.HistoryOrderVersion != 0 && !current.HistoryRecoveryRequired {
+		if witnessErr := s.probeHistoryOrderWitness(key, &current); witnessErr != nil {
+			// The input may already be durable. Do not expose the pre-write
+			// sentinel here: mirrored delivery must not retry this occurrence.
+			return false, fmt.Errorf(
+				"%w: committed history witness unavailable: %v",
+				ErrHistoryOrderUnavailable,
+				witnessErr,
+			)
+		}
 	}
 	if recoveryErr != nil {
 		log.Printf("memory: confirmed history commit has pending recovery cleanup: %v", recoveryErr)

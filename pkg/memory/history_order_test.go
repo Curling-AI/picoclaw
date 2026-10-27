@@ -143,10 +143,8 @@ func TestHistoryOrderPhysicalDeleteRetiresCachedStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{s.jsonlPath(key), s.metaPath(key)} {
-		if removeErr := os.Remove(path); removeErr != nil {
-			t.Fatal(removeErr)
-		}
+	if removeErr := s.removeSessionFiles(sanitizeKey(key)); removeErr != nil {
+		t.Fatal(removeErr)
 	}
 	next, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "user", Content: "new"})
 	if err != nil || next.Order.Sequence != 1 || next.Order.StreamID == old.Order.StreamID {
