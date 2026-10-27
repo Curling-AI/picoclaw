@@ -974,15 +974,11 @@ func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	removed := false
 	if ref, err := h.findPicoJSONLSession(dir, sessionID); err == nil {
 		if err := memory.CheckHistoryDeletion(dir, ref.Key); err != nil {
-			if errors.Is(err, memory.ErrHistoryRecoveryRequired) {
-				http.Error(w, "session requires explicit recovery", http.StatusConflict)
-			} else {
-				http.Error(w, "failed to verify session history", http.StatusInternalServerError)
-			}
+			http.Error(w, "failed to resolve session history", http.StatusInternalServerError)
 			return
 		}
 		base := filepath.Join(dir, sanitizeSessionKey(ref.Key))
-		for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision"} {
+		for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision", base + ".jsonl.recovery-required"} {
 			if err := os.Remove(path); err != nil {
 				if os.IsNotExist(err) {
 					continue

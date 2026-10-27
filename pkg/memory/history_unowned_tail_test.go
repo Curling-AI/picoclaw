@@ -229,24 +229,56 @@ func TestHistoryUnownedTailOwnJournalDecidesBeforeTailDetection(t *testing.T) {
 }
 
 func TestHistoryUnownedTailGuardsAutomaticDeletion(t *testing.T) {
-	operations := map[string]func(*JSONLStore, string) error{
-		"delete": func(s *JSONLStore, key string) error { return s.removeSessionFiles(sanitizeKey(key)) },
-		"launcher-delete": func(s *JSONLStore, key string) error {
-			return CheckHistoryDeletion(s.dir, key)
-		},
+	s, key, preserved, _ := historyWithExternalTail(t, false)
+	if err := s.removeSessionFiles(sanitizeKey(key)); !errors.Is(err, ErrHistoryRecoveryRequired) {
+		t.Fatal("automatic deletion accepted unowned durable history", err)
 	}
-	for name, mutate := range operations {
-		t.Run(name, func(t *testing.T) {
-			s, key, preserved, _ := historyWithExternalTail(t, false)
-			if err := mutate(s, key); !errors.Is(err, ErrHistoryRecoveryRequired) {
-				t.Fatal("deletion accepted unowned durable history")
-			}
-			raw, err := os.ReadFile(s.jsonlPath(key))
-			if err != nil || !bytes.Equal(raw, preserved) {
-				t.Fatal("deletion discarded durable history", err)
-			}
-			requireUnprovenPage(t, s, key, "")
-		})
+	raw, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil || !bytes.Equal(raw, preserved) {
+		t.Fatal("automatic deletion discarded durable history", err)
+	}
+	requireUnprovenPage(t, s, key, "")
+}
+
+func TestHistoryWarmRecoveryFenceSurvivesUnawareDeletion(t *testing.T) {
+	s, key, _, _ := historyWithExternalTail(t, false)
+	requireUnprovenPage(t, s, key, "")
+	for _, path := range []string{s.jsonlPath(key), s.metaPath(key)} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.AddMessage(t.Context(), key, "user", "new content without recovery"); err != nil {
+		t.Fatal(err)
+	}
+	requireHistoryContents(t, s, key, "new content without recovery")
+	requireUnprovenPage(t, s, key, "")
+}
+
+func TestPruneCronRunsPreservesRecoveryRequiredSource(t *testing.T) {
+	s := newTestStore(t)
+	key := "agent:cron-unproven-source"
+	if err := s.AddMessage(t.Context(), key, "assistant", "retain this run"); err != nil {
+		t.Fatal(err)
+	}
+	marker := s.historyRecoveryRequiredPath(key)
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireUnprovenPage(t, s, key, "")
+	stamp := time.Now().Add(-48 * time.Hour)
+	for _, path := range []string{s.jsonlPath(key), s.metaPath(key), marker} {
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := s.PruneCronRuns(24*time.Hour, time.Now())
+	if err != nil || removed != 0 {
+		t.Fatal("retention removed an unproven source", removed, err)
+	}
+	requireHistoryContents(t, s, key, "retain this run")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("retention discarded the recovery marker", err)
 	}
 }
 

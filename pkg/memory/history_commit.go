@@ -27,14 +27,22 @@ func (s *JSONLStore) appendHistoryMessages(key string, messages []providers.Mess
 		file, err = os.OpenFile(s.jsonlPath(key), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
 		if err == nil {
 			if _, statErr := os.Stat(s.metaPath(key)); errors.Is(statErr, os.ErrNotExist) {
+				marked, markerErr := s.hasHistoryRecoveryMarker(key)
+				if markerErr != nil {
+					return errors.Join(markerErr, file.Close())
+				}
 				now := time.Now()
-				original = SessionMeta{Key: key, HistoryRecoveryRequired: meta.HistoryRecoveryRequired}
+				original = SessionMeta{Key: key, HistoryRecoveryRequired: marked}
 				meta = SessionMeta{
-					Key: key, CreatedAt: now, UpdatedAt: now, HistoryRecoveryRequired: meta.HistoryRecoveryRequired,
+					Key: key, CreatedAt: now, UpdatedAt: now, HistoryRecoveryRequired: marked,
 				}
 				resetHistoryGeneration(&meta)
 				s.metaMu.Lock()
 				delete(s.metaCache, sanitizeKey(key))
+				if !marked {
+					// A complete physical deletion also retires a warm cache's latch.
+					delete(s.historyMarkers, sanitizeKey(key))
+				}
 				s.metaMu.Unlock()
 			} else if statErr != nil || original.Count != 0 || original.HistoryBytes != nil {
 				file.Close()
