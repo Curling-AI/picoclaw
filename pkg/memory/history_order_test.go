@@ -246,7 +246,7 @@ func TestHistoryOrderImportBeyondCheckpointRequiresExplicitNewSession(t *testing
 	if err != nil || len(history) != 2 {
 		t.Fatal(history, err)
 	}
-	if operationErr := s.SetHistory(t.Context(), key, history); !errors.Is(operationErr, ErrHistoryRecoveryRequired) {
+	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	recoveredKey := "sk_v1_recovered_external_tail"
@@ -290,7 +290,7 @@ func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
 	if err != nil || len(history) != 2 {
 		t.Fatal(history, err)
 	}
-	if operationErr := s.SetHistory(t.Context(), key, history); !errors.Is(operationErr, ErrHistoryRecoveryRequired) {
+	if operationErr := s.SetHistory(t.Context(), key, history); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	recoveredKey := "sk_v1_recovered_legacy_tail"
@@ -375,24 +375,26 @@ func TestHistoryOrderCompactDoesNotAttestAnUncommittedTail(t *testing.T) {
 	if closeErr := file.Close(); closeErr != nil {
 		t.Fatal(closeErr)
 	}
-	before, err := os.ReadFile(s.jsonlPath(key))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compactErr := s.Compact(t.Context(), key); !errors.Is(compactErr, ErrHistoryRecoveryRequired) {
-		t.Fatal("compaction confirmed an external tail as old legacy", compactErr)
+	if compactErr := s.Compact(t.Context(), key); compactErr != nil {
+		t.Fatal("unproven order froze content compaction", compactErr)
 	}
 	after, err := os.ReadFile(s.jsonlPath(key))
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("rejected compaction changed the raw transcript", err)
+	if err != nil || bytes.Count(after, []byte{'\n'}) != 2 {
+		t.Fatal("content compaction did not retain the requested physical window", err)
 	}
 	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
 	if !errors.Is(err, ErrHistoryReceiptUnavailable) || len(read) != 0 {
-		t.Fatal("rejected compaction forgot its recovery fence", read, err)
+		t.Fatal("content compaction forgot its recovery fence", read, err)
 	}
 	visible, err := s.GetHistory(t.Context(), key)
 	if err != nil || len(visible) != 2 || visible[0].Content != "keep" || visible[1].Content != "uncommitted tail" {
-		t.Fatal("rejected compaction hid durable content", visible, err)
+		t.Fatal("content compaction hid durable content", visible, err)
+	}
+	if order := messageHistoryOrder(visible[0]); !order.Valid() || order.Sequence != 2 {
+		t.Fatal("content compaction lost the retained private evidence", order)
+	}
+	if order := messageHistoryOrder(visible[1]); order != (HistoryOrderProof{}) {
+		t.Fatal("content compaction attested an external tail", order)
 	}
 }
 

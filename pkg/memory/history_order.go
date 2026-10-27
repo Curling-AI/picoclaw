@@ -390,6 +390,9 @@ func (s *JSONLStore) AppendHistoryReceipt(
 	if messageutil.IsTransientAssistantThoughtMessage(input) {
 		return CommittedHistoryMessage{}, nil
 	}
+	if markerErr := s.probeHistoryRecoveryMarker(canonical, &meta); markerErr != nil {
+		return CommittedHistoryMessage{}, markerErr
+	}
 	now := time.Now()
 	message := prepareHistoryMessage(input, now, providers.HistoryRun(ctx))
 	if uuid.Validate(input.HistoryID) == nil {
@@ -434,6 +437,9 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	}
 	if ownershipErr := validateCanonicalHistoryKey(key, canonical, meta); ownershipErr != nil {
 		return nil, ownershipErr
+	}
+	if markerErr := s.probeHistoryRecoveryMarker(canonical, &meta); markerErr != nil {
+		return nil, markerErr
 	}
 	if stateErr := validateHistoryOrderState(meta); stateErr != nil {
 		return nil, stateErr
@@ -570,11 +576,6 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 		return nil, 0, ErrHistoryCursor
 	}
 	return messages, byteEnd, nil
-}
-
-func (s *JSONLStore) validateStoredHistoryOrderOrigins(key string, meta SessionMeta) error {
-	_, _, err := s.readCommittedHistoryOrderOrigins(key, meta, meta.Skip, false)
-	return err
 }
 
 // Decode the serialized write buffer so a receipt has exactly the stored

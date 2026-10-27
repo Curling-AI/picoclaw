@@ -91,6 +91,11 @@ func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageReq
 	if err != nil {
 		return HistoryPage{}, err
 	}
+	// Proof boundaries also inspect the durable sidecar. Ordinary metadata
+	// reads keep the upstream warm-cache path free of filesystem probes.
+	if operationErr := s.probeHistoryRecoveryMarker(request.Key, &meta); operationErr != nil {
+		return HistoryPage{}, operationErr
+	}
 	if meta.HistoryRecoveryRequired {
 		return HistoryPage{}, ErrHistoryRecoveryRequired
 	}

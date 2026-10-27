@@ -244,8 +244,12 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 			defer cleanup()
 			dir := t.TempDir()
 			key := "sk_v1_real_turn_content_recovery"
-			prefix := []byte("{\"role\":\"user\",\"content\":\"original request\"}\n{\"role\":\"assistant\",\"content\":\"original answer\"}\n")
-			raw := append(append([]byte(nil), prefix...), []byte("{\"role\":\"assistant\",\"content\":\"durable external answer\"}\n")...)
+			prefix := []byte(
+				"{\"role\":\"user\",\"content\":\"original request\"}\n{\"role\":\"assistant\",\"content\":\"original answer\"}\n",
+			)
+			raw := append(
+				append([]byte(nil), prefix...),
+				[]byte("{\"role\":\"assistant\",\"content\":\"durable external answer\"}\n")...)
 			meta := memory.SessionMeta{Key: key, Count: 2}
 			if checkpoint {
 				size := int64(len(prefix))
@@ -256,8 +260,8 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 				t.Fatal(err)
 			}
 			for path, contents := range map[string][]byte{key + ".jsonl": raw, key + ".meta.json": data} {
-				if err := os.WriteFile(filepath.Join(dir, path), contents, 0o600); err != nil {
-					t.Fatal(err)
+				if writeErr := os.WriteFile(filepath.Join(dir, path), contents, 0o600); writeErr != nil {
+					t.Fatal(writeErr)
 				}
 			}
 			store, err := memory.NewJSONLStore(dir)
@@ -275,7 +279,10 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 			if len(before) != 7 || before[2].Content != "durable external answer" {
 				t.Fatal("real turns lost durable history", before)
 			}
-			if err := backend.AppendMessage(key, providers.Message{Role: "user", Content: "aborted input"}); err != nil {
+			if err := backend.AppendMessage(
+				key,
+				providers.Message{Role: "user", Content: "aborted input"},
+			); err != nil {
 				t.Fatal(err)
 			}
 			ts := &turnState{sessionKey: key, restorePointHistory: before}
@@ -294,7 +301,13 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 			if response, err := al.ProcessDirect(t.Context(), "after rollback", key); err != nil || response == "" {
 				t.Fatal("turn after rollback could not complete", response, err)
 			}
-			if _, err := store.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(err, memory.ErrHistoryOrderUnavailable) {
+			if _, err := store.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				err,
+				memory.ErrHistoryOrderUnavailable,
+			) {
 				t.Fatal("successful turns restored order receipts", err)
 			}
 		})

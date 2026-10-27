@@ -162,6 +162,7 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 	s.metaMu.Lock()
 	delete(s.metaCache, sanitized)
 	delete(s.historyPending, sanitized)
+	delete(s.historyMarkers, sanitized)
 	s.metaMu.Unlock()
 	return nil
 }

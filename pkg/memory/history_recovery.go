@@ -47,13 +47,79 @@ func (s *JSONLStore) hasHistoryRecoveryMarker(key string) (bool, error) {
 	return err == nil, err
 }
 
+type historyMarkerState struct {
+	present bool
+	synced  bool
+}
+
+// Proof boundaries recheck the durable sidecar even with warm metadata. A
+// positive observation latches the cache but does not claim it has been synced.
+func (s *JSONLStore) probeHistoryRecoveryMarker(key string, meta *SessionMeta) error {
+	marked, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return err
+	}
+	if marked {
+		s.rememberHistoryRecoveryMarker(key, true)
+		meta.HistoryRecoveryRequired = true
+	}
+	return nil
+}
+
+func (s *JSONLStore) historyRecoveryMarkerState(key string) (bool, error) {
+	sanitized := sanitizeKey(key)
+	s.metaMu.RLock()
+	state, known := s.historyMarkers[sanitized]
+	s.metaMu.RUnlock()
+	if known {
+		return state.present, nil
+	}
+	marked, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return false, err
+	}
+	return s.rememberHistoryRecoveryMarker(key, marked), nil
+}
+
+// Only the owning writer creates the latch. Cache both the cold absence and
+// durable presence; a pending journal may evict metadata but not this state.
+func (s *JSONLStore) rememberHistoryRecoveryMarker(key string, marked bool) bool {
+	return s.cacheHistoryRecoveryMarker(key, marked, false)
+}
+
+func (s *JSONLStore) cacheHistoryRecoveryMarker(key string, marked, synced bool) bool {
+	sanitized := sanitizeKey(key)
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if s.historyMarkers == nil {
+		s.historyMarkers = make(map[string]historyMarkerState)
+	}
+	state := s.historyMarkers[sanitized]
+	state.present = state.present || marked
+	state.synced = state.synced || synced
+	s.historyMarkers[sanitized] = state
+	marked = state.present
+	if meta, ok := s.metaCache[sanitized]; ok && marked {
+		meta.HistoryRecoveryRequired = true
+		s.metaCache[sanitized] = meta
+	}
+	return marked
+}
+
 // This latch has no automatic reset. Legacy binaries can erase unknown JSON
 // fields while rewriting metadata or rows; a separate durable marker survives
 // those rewrites. Its existence is sufficient, even if its contents are torn.
 func (s *JSONLStore) markHistoryRecoveryRequired(key string, meta *SessionMeta) error {
-	exists, err := s.hasHistoryRecoveryMarker(key)
+	exists, err := s.historyRecoveryMarkerState(key)
 	if err != nil {
 		return err
+	}
+	s.metaMu.RLock()
+	synced := s.historyMarkers[sanitizeKey(key)].synced
+	s.metaMu.RUnlock()
+	if exists && synced {
+		meta.HistoryRecoveryRequired = true
+		return nil
 	}
 	if !exists {
 		if err := s.writeSessionFile(
@@ -66,6 +132,7 @@ func (s *JSONLStore) markHistoryRecoveryRequired(key string, meta *SessionMeta) 
 		return err
 	}
 	meta.HistoryRecoveryRequired = true
+	s.cacheHistoryRecoveryMarker(key, true, true)
 	return nil
 }
 

@@ -302,12 +302,10 @@ func hasCompleteHistoryTail(file *os.File, offset, physicalBytes int64) (bool, e
 	return false, nil
 }
 
-// Destructive operations cannot adopt, hide, or rewrite an unowned tail. The
-// caller holds the session lock; our own journal has already been resolved.
-func (s *JSONLStore) guardHistoryMutation(key string, meta SessionMeta) error {
-	if meta.HistoryRecoveryRequired {
-		return ErrHistoryRecoveryRequired
-	}
+// Content lifecycle remains available without capture proofs. Reconcile the
+// physical count and durably propagate the latch before a legitimate rewrite.
+// The caller holds the session lock; our own journal is already resolved.
+func (s *JSONLStore) prepareHistoryMutation(key string, meta *SessionMeta) error {
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -320,11 +318,22 @@ func (s *JSONLStore) guardHistoryMutation(key string, meta SessionMeta) error {
 	if err != nil {
 		return err
 	}
-	if _, err := historyAppendOffset(file, &meta, info.Size()); err != nil {
+	if _, err := historyAppendOffset(file, meta, info.Size()); err != nil {
 		return err
 	}
 	if meta.HistoryRecoveryRequired {
-		return errors.Join(ErrHistoryRecoveryRequired, s.markHistoryRecoveryRequired(key, &meta))
+		return s.markHistoryRecoveryRequired(key, meta)
+	}
+	return nil
+}
+
+// Automatic pruning and file deletion must not discard an unproven source.
+func (s *JSONLStore) guardHistoryMutation(key string, meta SessionMeta) error {
+	if err := s.prepareHistoryMutation(key, &meta); err != nil {
+		return err
+	}
+	if meta.HistoryRecoveryRequired {
+		return ErrHistoryRecoveryRequired
 	}
 	return nil
 }
@@ -341,17 +350,32 @@ func scanCommittedHistoryLine(data []byte, atEOF bool) (int, []byte, error) {
 }
 
 func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Message, meta SessionMeta) error {
-	if !meta.HistoryRecoveryRequired {
-		if err := validateHistoryMessageOrders(messages, meta); err != nil {
-			return err
-		}
-	}
 	original, err := s.readMeta(key)
 	if err != nil {
 		return err
 	}
-	if operationErr := s.guardHistoryMutation(key, original); operationErr != nil {
+	if operationErr := s.prepareHistoryMutation(key, &original); operationErr != nil {
 		return operationErr
+	}
+	if original.HistoryRecoveryRequired {
+		meta.HistoryRecoveryRequired = true
+		// The cache overlays the proof fence and reconciled row count. OLD
+		// must instead fingerprint the metadata actually present on disk.
+		original, err = s.readRecoveryMeta(key)
+		if errors.Is(err, os.ErrNotExist) {
+			original, err = SessionMeta{Key: key}, nil
+		}
+		if err != nil {
+			return err
+		}
+		if original.Key == "" {
+			original.Key = key
+		}
+	}
+	if !meta.HistoryRecoveryRequired {
+		if orderErr := validateHistoryMessageOrders(messages, meta); orderErr != nil {
+			return orderErr
+		}
 	}
 	previous, existed, err := s.readRawJSONL(key)
 	if err != nil {

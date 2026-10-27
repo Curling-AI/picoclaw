@@ -13,7 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 )
 
-func TestProviderHistoryIgnoresInvalidPrivateOrderWhileReceiptsAndRewritesRejectIt(t *testing.T) {
+func TestProviderHistoryAndContentRewriteKeepInvalidPrivateOrderUnavailable(t *testing.T) {
 	for name, order := range map[string]json.RawMessage{
 		"null":        json.RawMessage(`null`),
 		"future":      json.RawMessage(`{"version":2,"streamId":"11111111-1111-4111-8111-111111111111","sequence":2}`),
@@ -97,20 +97,37 @@ func TestProviderHistoryIgnoresInvalidPrivateOrderWhileReceiptsAndRewritesReject
 			) {
 				t.Fatal("receipt reader accepted invalid private proof", readErr)
 			}
-			history[1].Content = "attempted rewrite"
+			history[1].Content = "requested rewrite"
 			if rewriteErr := store.SetHistory(
 				t.Context(),
 				key,
 				history,
-			); !errors.Is(
-				rewriteErr,
-				memory.ErrHistoryOrderUnavailable,
-			) {
-				t.Fatal("rewrite washed invalid private proof", rewriteErr)
+			); rewriteErr != nil {
+				t.Fatal("private proof corruption froze content replacement", rewriteErr)
 			}
-			after, err := os.ReadFile(dataPath)
-			if err != nil || !bytes.Equal(after, changed) {
-				t.Fatal("strict rewrite changed the durable transcript", err)
+			store, err = memory.NewJSONLStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend = session.NewJSONLBackend(store)
+			history = backend.GetHistory(key)
+			if len(history) != 2 || history[0].Content != "earlier content" ||
+				history[1].Content != "requested rewrite" {
+				t.Fatal("content replacement lost visible history", history)
+			}
+			if _, readErr := backend.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				readErr,
+				memory.ErrHistoryReceiptUnavailable,
+			) {
+				t.Fatal("content replacement washed invalid order evidence", readErr)
+			}
+			for _, message := range history {
+				if message.HistoryOrderVersion != 0 || message.HistoryStreamID != "" || message.HistorySequence != 0 {
+					t.Fatal("provider exposed private evidence after content replacement", message)
+				}
 			}
 		})
 	}
