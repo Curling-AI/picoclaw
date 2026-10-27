@@ -321,17 +321,54 @@ func validateCanonicalHistoryKey(requested, canonical string, meta SessionMeta) 
 	return nil
 }
 
-// Format/ownership failures retain the checked legacy write path. A real I/O
-// error or canceled operation does not authorize retrying through that path.
-func historyOwnershipReadError(operation string, err error) error {
-	var pathErr *os.PathError
-	var linkErr *os.LinkError
-	var syscallErr *os.SyscallError
-	if errors.As(err, &pathErr) || errors.As(err, &linkErr) || errors.As(err, &syscallErr) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("memory: %s: %w", operation, err)
+// This projection selects a source; it does not assess its content or proof.
+// In particular, a non-owner's witness must not affect another session. Never
+// publish this partial value to metaCache, whose callers require full state.
+type historyOwnership struct {
+	Key     string   `json:"key"`
+	Aliases []string `json:"aliases"`
+	pending bool
+}
+
+// The caller holds the physical-session lock. Pending recovery can change
+// identity, so a non-owner with an unsettled journal cannot exclude ownership.
+func (s *JSONLStore) readHistoryOwnership(key string) (historyOwnership, error) {
+	sanitized := sanitizeKey(key)
+	s.metaMu.RLock()
+	pending := s.historyPending[sanitized]
+	meta, cached := s.metaCache[sanitized]
+	if cached && !pending {
+		owner := historyOwnership{Key: meta.Key, Aliases: append([]string(nil), meta.Aliases...)}
+		s.metaMu.RUnlock()
+		return owner, nil
 	}
-	return fmt.Errorf("%w: %s: %w", ErrHistoryOwnershipUnavailable, operation, err)
+	s.metaMu.RUnlock()
+	owner := historyOwnership{Key: key, pending: pending}
+	data, err := os.ReadFile(s.metaPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return owner, nil
+	}
+	if err != nil {
+		return historyOwnership{}, err
+	}
+	if err = json.Unmarshal(data, &owner); err != nil {
+		return historyOwnership{}, err
+	}
+	if owner.Key == "" {
+		owner.Key = key
+	}
+	return owner, nil
+}
+
+// The caller holds the source lock. A selected source gets a full read before
+// the final API-level recheck; its I/O and recovery errors never authorize a
+// second append through the ownership-unavailable legacy path.
+func (s *JSONLStore) checkHistoryOwner(requested, physical, canonical string) error {
+	meta, err := s.readMeta(physical)
+	if err != nil {
+		return err
+	}
+	return validateCanonicalHistoryKey(requested, canonical, meta)
 }
 
 func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
@@ -342,7 +379,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	if shouldShortCircuitSessionResolve(key) && s.sessionExists(key) {
 		meta, err := s.GetSessionMeta(context.Background(), key)
 		if err != nil {
-			return "", historyOwnershipReadError("canonical metadata", err)
+			return "", fmt.Errorf("memory: canonical metadata: %w", err)
 		}
 		if meta.Key == key {
 			return key, nil
@@ -357,26 +394,39 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
 			continue
 		}
-		sanitized := strings.TrimSuffix(entry.Name(), ".meta.json")
-		lock := s.sessionLock(sanitized)
+		physical := strings.TrimSuffix(entry.Name(), ".meta.json")
+		lock := s.sessionLock(physical)
 		lock.Lock()
-		meta, readErr := s.readMeta(sanitized)
+		owner, readErr := s.readHistoryOwnership(physical)
+		if readErr != nil {
+			lock.Unlock()
+			if physical == sanitizeKey(key) {
+				return "", fmt.Errorf("memory: canonical metadata: %w", readErr)
+			}
+			// Its identity may hide an alias owner. Fail before any write,
+			// allowing content-only callers to retain their legacy contract.
+			return "", fmt.Errorf("%w: alias identity: %w", ErrHistoryOwnershipUnavailable, readErr)
+		}
+		selected := owner.Key == key
+		for _, alias := range owner.Aliases {
+			selected = selected || alias == key
+		}
+		if selected {
+			readErr = s.checkHistoryOwner(key, physical, owner.Key)
+		} else if owner.pending {
+			readErr = fmt.Errorf("%w: unsettled alias identity", ErrHistoryOwnershipUnavailable)
+		}
 		lock.Unlock()
 		if readErr != nil {
-			// Silently skipping an unreadable alias owner could mint a valid
-			// receipt in a different session. Ordinary listings may skip it;
-			// canonical order resolution must fail closed instead.
-			return "", historyOwnershipReadError("alias ownership", readErr)
+			return "", readErr
 		}
-		for _, alias := range meta.Aliases {
-			if alias != key || meta.Key == key {
-				continue
-			}
-			if canonical != "" && canonical != meta.Key {
-				return "", ErrHistoryOrderUnavailable
-			}
-			canonical = meta.Key
+		if !selected || owner.Key == key {
+			continue
 		}
+		if canonical != "" && canonical != owner.Key {
+			return "", ErrHistoryOrderUnavailable
+		}
+		canonical = owner.Key
 	}
 	if canonical == "" {
 		canonical = key
@@ -391,6 +441,9 @@ func (s *JSONLStore) AppendHistoryReceipt(
 	key string,
 	input providers.Message,
 ) (CommittedHistoryMessage, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return CommittedHistoryMessage{}, ctx.Err()
+	}
 	canonical, err := s.canonicalHistoryOrderKey(key)
 	if err != nil {
 		return CommittedHistoryMessage{}, err
@@ -445,6 +498,9 @@ func (s *JSONLStore) AppendHistoryReceipt(
 // ReadHistoryWithReceipts returns transcript order, not sequence order. An edit
 // can have a newer sequence than unchanged messages later in the transcript.
 func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([]CommittedHistoryMessage, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	canonical, err := s.canonicalHistoryOrderKey(key)
 	if err != nil {
 		return nil, err
