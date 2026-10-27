@@ -80,7 +80,7 @@ func historyWitnessMatchesMeta(state historyOrderWitnessState, meta SessionMeta)
 		return false
 	}
 	if !state.present {
-		return meta.HistoryOrderWitnessVersion == 0
+		return meta.HistoryOrderVersion == 0 && validateHistoryOrderState(meta) == nil
 	}
 	return validateHistoryOrderState(meta) == nil && meta.HistoryOrderVersion == HistoryOrderVersion &&
 		state.witness == witnessForHistory(meta)
@@ -125,9 +125,9 @@ func (s *JSONLStore) ensureDurableHistoryOrderWitness(key string, recovery histo
 	if err != nil || state.invalid || (state.present && state.witness != expected) {
 		return errors.Join(ErrHistoryReceiptUnavailable, err)
 	}
-	// A cold readable witness is reusable only when OLD already records its
-	// durable activation. A failed v0 migration may have left readable bytes
-	// without a completed sync, so it must finish that phase before publishing v1.
+	// Reuse a cold witness only when OLD records its durable activation.
+	// An interrupted first commit may leave readable bytes without a completed
+	// sync; finish that phase before publishing the new stream.
 	if state.present && state.synced && recovery.Meta.HistoryOrderWitnessVersion == historyOrderWitnessVersion {
 		return nil
 	}
@@ -154,61 +154,5 @@ func (s *JSONLStore) ensureDurableHistoryOrderWitness(key string, recovery histo
 	}
 	state.synced = true
 	s.cacheHistoryOrderWitness(key, state)
-	return nil
-}
-
-func (s *JSONLStore) validateHistoryWitnessMigration(key string, meta SessionMeta) (int64, error) {
-	if err := validateHistoryOrderState(meta); err != nil {
-		return 0, err
-	}
-	stored, end, err := s.readCommittedHistoryOrderOrigins(key, meta, 0, true)
-	if err != nil {
-		return 0, err
-	}
-	return end, validateHistoryMessageOrders(stored, meta)
-}
-
-// A read-only receipt request can activate an intact experimental modern stream
-// without allocating another sequence or rewriting any transcript bytes.
-func (s *JSONLStore) migrateHistoryOrderWitness(key string, meta *SessionMeta) error {
-	if meta.HistoryOrderVersion == 0 || meta.HistoryOrderWitnessVersion != 0 {
-		return nil
-	}
-	if err := s.prepareHistoryMutation(key, meta); err != nil {
-		return err
-	}
-	end, err := s.validateHistoryWitnessMigration(key, *meta)
-	if err != nil {
-		return errors.Join(ErrHistoryReceiptUnavailable, err, s.markHistoryRecoveryRequired(key, meta))
-	}
-	previous, existed, err := s.readRawJSONL(key)
-	if err != nil {
-		return err
-	}
-	next := *meta
-	next.HistoryOrderWitnessVersion = historyOrderWitnessVersion
-	if next.HistoryBytes == nil {
-		// Logical truncation can leave a valid modern source without a byte
-		// checkpoint. Use the validated committed boundary, preserving Skip,
-		// so the metadata-only journal has recoverable OLD/NEW fingerprints.
-		next.HistoryBytes = &end
-	}
-	if commitErr := s.beginHistoryWrite(
-		key,
-		historyWriteRecovery{Meta: *meta, Next: next, Data: previous, Existed: existed},
-	); commitErr != nil {
-		return commitErr
-	}
-	err = s.writeMeta(key, next)
-	if err == nil {
-		err = s.finishHistoryWrite(key)
-	}
-	if err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, next)
-		if !committed {
-			return errors.Join(err, recoveryErr)
-		}
-	}
-	*meta = next
 	return nil
 }

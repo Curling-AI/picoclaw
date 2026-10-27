@@ -147,14 +147,6 @@ func (s *JSONLStore) prepareHistoryContentOrder(key string, meta *SessionMeta) e
 	if meta.HistoryRecoveryRequired {
 		return nil
 	}
-	if meta.HistoryOrderVersion == HistoryOrderVersion && meta.HistoryOrderWitnessVersion == 0 {
-		if migrationErr := s.migrateHistoryOrderWitness(key, meta); migrationErr != nil {
-			if !errors.Is(migrationErr, ErrHistoryReceiptUnavailable) {
-				return migrationErr
-			}
-			return s.markHistoryRecoveryRequired(key, meta)
-		}
-	}
 	stored, _, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, false)
 	if err == nil {
 		err = validateHistoryMessageOrders(stored, *meta)
@@ -184,11 +176,12 @@ func validateHistoryOrderState(meta SessionMeta) error {
 		return ErrHistoryReceiptUnavailable
 	}
 	if meta.HistoryOrderVersion == 0 && meta.HistoryStreamID == "" && meta.HistorySequence == 0 &&
-		meta.HistoryLegacyFileGeneration == "" && meta.HistoryLegacyBytes == 0 {
+		meta.HistoryLegacyFileGeneration == "" && meta.HistoryLegacyBytes == 0 && meta.HistoryOrderWitnessVersion == 0 {
 		return nil
 	}
-	if meta.HistoryOrderVersion != HistoryOrderVersion || !validHistoryStreamID(meta.HistoryStreamID) ||
-		meta.HistorySequence == 0 || meta.HistorySequence > MaxHistorySequence {
+	if meta.HistoryOrderVersion != HistoryOrderVersion || meta.HistoryOrderWitnessVersion != historyOrderWitnessVersion ||
+		!validHistoryStreamID(meta.HistoryStreamID) || meta.HistorySequence == 0 ||
+		meta.HistorySequence > MaxHistorySequence {
 		return ErrHistoryOrderUnavailable
 	}
 	if !validHistoryStreamID(meta.HistoryLegacyFileGeneration) || meta.HistoryLegacyBytes < 0 {
@@ -230,12 +223,6 @@ func (s *JSONLStore) ensureHistoryOrderStream(key string, meta *SessionMeta) err
 		return err
 	}
 	if meta.HistoryOrderVersion != 0 {
-		if meta.HistoryOrderWitnessVersion == 0 {
-			if _, err := s.validateHistoryWitnessMigration(key, *meta); err != nil {
-				return err
-			}
-			meta.HistoryOrderWitnessVersion = historyOrderWitnessVersion
-		}
 		return nil
 	}
 	_, legacyBytes, err := s.readCommittedHistoryOrderOrigins(key, *meta, 0, true)
@@ -461,9 +448,6 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	}
 	if witnessErr := s.probeHistoryOrderWitness(canonical, &meta); witnessErr != nil {
 		return nil, witnessErr
-	}
-	if migrationErr := s.migrateHistoryOrderWitness(canonical, &meta); migrationErr != nil {
-		return nil, migrationErr
 	}
 	if stateErr := validateHistoryOrderState(meta); stateErr != nil {
 		return nil, stateErr

@@ -19,7 +19,7 @@ type uncertainReceiptBackend struct {
 	fallbackCalls int
 }
 
-func TestSessionHistoryWitnessSyncFailurePreservesMirroredDelivery(t *testing.T) {
+func TestSessionHistoryUnsupportedOrderFormatPreservesMirroredDelivery(t *testing.T) {
 	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
 	defer cleanup()
 	dir := t.TempDir()
@@ -47,9 +47,6 @@ func TestSessionHistoryWitnessSyncFailurePreservesMirroredDelivery(t *testing.T)
 	if writeErr := os.WriteFile(filepath.Join(dir, key+".meta.json"), data, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	if chmodErr := os.Chmod(filepath.Join(dir, key+".jsonl.order-witness"), 0o400); chmodErr != nil {
-		t.Fatal(chmodErr)
-	}
 	store, err = memory.NewJSONLStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +56,7 @@ func TestSessionHistoryWitnessSyncFailurePreservesMirroredDelivery(t *testing.T)
 	al.SetSessionHistoryReceiptObserver(func(_ string, committed []memory.CommittedHistoryMessage) {
 		callbacks++
 		if committed != nil {
-			t.Error("unsynced witness produced an order notification", committed)
+			t.Error("unsupported order format produced an order notification", committed)
 		}
 	})
 	al.SetSessionHistoryObserver(func(string) { legacyCallbacks++ })

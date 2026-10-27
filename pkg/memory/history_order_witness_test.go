@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"reflect"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
@@ -133,86 +132,6 @@ func TestHistoryOrderWitnessKeepsKnownModernLossUnavailable(t *testing.T) {
 	}
 }
 
-func TestHistoryOrderWitnessMigrationRetainsExactStreamAndMessages(t *testing.T) {
-	for _, item := range []struct {
-		outcome   string
-		truncated bool
-	}{{"success", false}, {"OLD", false}, {"NEW", false}, {"OLD", true}, {"NEW", true}} {
-		name := item.outcome
-		if item.truncated {
-			name += " after logical truncate"
-		}
-		t.Run(name, func(t *testing.T) {
-			s, key, expected := witnessedHistory(t)
-			if item.truncated {
-				if err := s.TruncateHistory(t.Context(), key, 2); err != nil {
-					t.Fatal(err)
-				}
-				expected = expected[1:]
-			}
-			before, err := os.ReadFile(s.jsonlPath(key))
-			if err != nil {
-				t.Fatal(err)
-			}
-			meta, err := s.readMeta(key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			meta.HistoryOrderWitnessVersion = 0
-			data, err := json.Marshal(meta)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if writeErr := os.WriteFile(s.metaPath(key), data, 0o600); writeErr != nil {
-				t.Fatal(writeErr)
-			}
-			if removeErr := os.Remove(s.historyOrderWitnessPath(key)); removeErr != nil {
-				t.Fatal(removeErr)
-			}
-			s, err = NewJSONLStore(s.dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			sentinel := errors.New("migration metadata failure")
-			failed := false
-			if item.outcome != "success" {
-				s.writeFile = func(path string, data []byte, mode os.FileMode) error {
-					if path == s.metaPath(key) && !failed {
-						failed = true
-						if item.outcome == "NEW" {
-							if writeErr := fileutil.WriteFileAtomic(path, data, mode); writeErr != nil {
-								return writeErr
-							}
-						}
-						return sentinel
-					}
-					return fileutil.WriteFileAtomic(path, data, mode)
-				}
-			}
-			read, readErr := s.ReadHistoryWithReceipts(t.Context(), key)
-			if item.outcome == "OLD" {
-				if !errors.Is(readErr, sentinel) || len(read) != 0 {
-					t.Fatal("uncommitted migration exposed receipts", read, readErr)
-				}
-				s.writeFile = nil
-				read, readErr = s.ReadHistoryWithReceipts(t.Context(), key)
-			}
-			if readErr != nil || !reflect.DeepEqual(read, expected) {
-				t.Fatal("migration changed the stream or reattested an event", read, readErr)
-			}
-			after, err := os.ReadFile(s.jsonlPath(key))
-			if err != nil || !bytes.Equal(before, after) {
-				t.Fatal("witness migration rewrote transcript bytes", err)
-			}
-			current, err := s.GetSessionMeta(t.Context(), key)
-			if err != nil || current.HistorySequence != 3 ||
-				current.HistoryOrderWitnessVersion != historyOrderWitnessVersion {
-				t.Fatal("migration allocated order or omitted its durable marker", current, err)
-			}
-		})
-	}
-}
-
 func TestHistoryOrderWitnessWriteAndSyncFailuresNeverPublishFirstProof(t *testing.T) {
 	for _, failure := range []string{"before write", "after write", "sync"} {
 		t.Run(failure, func(t *testing.T) {
@@ -255,72 +174,6 @@ func TestHistoryOrderWitnessWriteAndSyncFailuresNeverPublishFirstProof(t *testin
 	}
 }
 
-func TestHistoryOrderWitnessMigrationResyncsObservedWitnessAfterColdOldRecovery(t *testing.T) {
-	s, key, expected := witnessedHistory(t)
-	before, err := os.ReadFile(s.jsonlPath(key))
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := s.readMeta(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta.HistoryOrderWitnessVersion = 0
-	data, err := json.Marshal(meta)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if writeErr := os.WriteFile(s.metaPath(key), data, 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	if removeErr := os.Remove(s.historyOrderWitnessPath(key)); removeErr != nil {
-		t.Fatal(removeErr)
-	}
-	s, err = NewJSONLStore(s.dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.writeFile = func(path string, data []byte, mode os.FileMode) error {
-		if path == s.historyOrderWitnessPath(key) {
-			// Simulate the atomic writer's direct-write fallback without a
-			// completed sync. It stays readable across a cold reopen, but
-			// activating the witness must still be unable to sync it.
-			return os.WriteFile(path, data, 0o400)
-		}
-		return fileutil.WriteFileAtomic(path, data, mode)
-	}
-	for attempt := range 2 {
-		read, readErr := s.ReadHistoryWithReceipts(t.Context(), key)
-		if !errors.Is(readErr, os.ErrPermission) || len(read) != 0 {
-			t.Fatal("observed but unsynced witness activated receipts", attempt, read, readErr)
-		}
-		stored, metaErr := s.readRecoveryMeta(key)
-		if metaErr != nil || stored.HistoryOrderWitnessVersion != 0 ||
-			stored.HistoryStreamID != meta.HistoryStreamID || stored.HistorySequence != meta.HistorySequence {
-			t.Fatal("failed witness sync did not retain exact OLD stream", attempt, stored, metaErr)
-		}
-		if _, statErr := os.Stat(s.historyRecoveryPath(key)); !os.IsNotExist(statErr) {
-			t.Fatal("OLD recovery left its owning journal", attempt, statErr)
-		}
-		requireHistoryContents(t, s, key, "first", "second", "third")
-		s, metaErr = NewJSONLStore(s.dir)
-		if metaErr != nil {
-			t.Fatal(metaErr)
-		}
-	}
-	if chmodErr := os.Chmod(s.historyOrderWitnessPath(key), 0o600); chmodErr != nil {
-		t.Fatal(chmodErr)
-	}
-	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
-	if err != nil || !reflect.DeepEqual(read, expected) {
-		t.Fatal("explicit sync repair changed established receipts", read, err)
-	}
-	after, err := os.ReadFile(s.jsonlPath(key))
-	if err != nil || !bytes.Equal(after, before) {
-		t.Fatal("witness repair rewrote transcript bytes", err)
-	}
-}
-
 func TestHistoryOrderWitnessHealthyDeleteAndOldDeleteRecreate(t *testing.T) {
 	for _, oldDelete := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aware", true: "old"}[oldDelete], func(t *testing.T) {
@@ -360,7 +213,7 @@ func TestHistoryOrderWitnessHealthyDeleteAndOldDeleteRecreate(t *testing.T) {
 	}
 }
 
-func TestHistoryOrderWitnessUncommittedFailureKeepsContentAppendAvailable(t *testing.T) {
+func TestHistoryOrderUnsupportedWitnessFormatKeepsContentAppendAvailable(t *testing.T) {
 	for _, receiptFirst := range []bool{false, true} {
 		t.Run(
 			map[bool]string{false: "content append", true: "receipt then fallback"}[receiptFirst],
@@ -378,9 +231,6 @@ func TestHistoryOrderWitnessUncommittedFailureKeepsContentAppendAvailable(t *tes
 				if writeErr := os.WriteFile(s.metaPath(key), data, 0o600); writeErr != nil {
 					t.Fatal(writeErr)
 				}
-				if chmodErr := os.Chmod(s.historyOrderWitnessPath(key), 0o400); chmodErr != nil {
-					t.Fatal(chmodErr)
-				}
 				s, err = NewJSONLStore(s.dir)
 				if err != nil {
 					t.Fatal(err)
@@ -392,7 +242,7 @@ func TestHistoryOrderWitnessUncommittedFailureKeepsContentAppendAvailable(t *tes
 						providers.Message{Role: "assistant", Content: "still delivered"},
 					)
 					if !errors.Is(appendErr, ErrHistoryReceiptUnavailable) || receipt.Order.Valid() {
-						t.Fatal("confirmed OLD did not permit pre-write content fallback", receipt, appendErr)
+						t.Fatal("unsupported proof did not permit pre-write content fallback", receipt, appendErr)
 					}
 					requireHistoryContents(t, s, key, "first", "second", "third")
 				}
@@ -411,7 +261,7 @@ func TestHistoryOrderWitnessUncommittedFailureKeepsContentAppendAvailable(t *tes
 	}
 }
 
-func TestHistoryOrderWitnessMigrationFailureKeepsContentLifecycleAvailable(t *testing.T) {
+func TestHistoryOrderUnsupportedWitnessFormatKeepsContentLifecycleAvailable(t *testing.T) {
 	for _, operation := range []string{"replace", "compact"} {
 		t.Run(operation, func(t *testing.T) {
 			s, key, _ := witnessedHistory(t)
@@ -432,9 +282,6 @@ func TestHistoryOrderWitnessMigrationFailureKeepsContentLifecycleAvailable(t *te
 			if writeErr := os.WriteFile(s.metaPath(key), data, 0o600); writeErr != nil {
 				t.Fatal(writeErr)
 			}
-			if chmodErr := os.Chmod(s.historyOrderWitnessPath(key), 0o400); chmodErr != nil {
-				t.Fatal(chmodErr)
-			}
 			s, err = NewJSONLStore(s.dir)
 			if err != nil {
 				t.Fatal(err)
@@ -445,12 +292,12 @@ func TestHistoryOrderWitnessMigrationFailureKeepsContentLifecycleAvailable(t *te
 					key,
 					[]providers.Message{{Role: "user", Content: "edited content"}},
 				); rewriteErr != nil {
-					t.Fatal("witness migration failure blocked requested content edit", rewriteErr)
+					t.Fatal("unsupported order format blocked requested content edit", rewriteErr)
 				}
 				requireHistoryContents(t, s, key, "edited content")
 			} else {
 				if compactErr := s.Compact(t.Context(), key); compactErr != nil {
-					t.Fatal("witness migration failure blocked requested compaction", compactErr)
+					t.Fatal("unsupported order format blocked requested compaction", compactErr)
 				}
 				requireHistoryContents(t, s, key, "second", "third")
 			}
