@@ -302,3 +302,46 @@ func TestDeleteSession_RemovesTheLegacyAliasesButNotTheMainOne(t *testing.T) {
 		t.Errorf("the main session has %d messages, want the 1 it had", len(history))
 	}
 }
+
+// The canonical meta is the only list of a session's legacy aliases. A delete
+// that failed on an alias and removed the canonical session anyway would leave
+// the retry nothing to find, and the alias's history would be promoted back.
+func TestDeleteSession_AFailedAliasKeepsTheCanonicalSessionForTheRetry(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const legacy = "agent:main:whatsapp:direct:7"
+	if err := store.AddMessage(ctx, legacy, "user", "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, store, "sk_v1_canonical")
+	if err := store.UpsertSessionMeta(ctx, "sk_v1_canonical", nil, []string{legacy}); err != nil {
+		t.Fatal(err)
+	}
+	// A directory with something in it cannot be removed like a file.
+	stuck := store.jsonlPath(legacy)
+	if err := os.Remove(stuck); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stuck, "stuck"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteSession(ctx, "sk_v1_canonical"); err == nil {
+		t.Fatal("DeleteSession reported success with an alias left behind")
+	}
+	if !fileExists(store.metaPath("sk_v1_canonical")) {
+		t.Fatal("the canonical session went, and with it the list of aliases to retry")
+	}
+
+	if err := os.RemoveAll(stuck); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteSession(ctx, "sk_v1_canonical"); err != nil {
+		t.Fatalf("the retry: %v", err)
+	}
+	for _, key := range []string{legacy, "sk_v1_canonical"} {
+		if fileExists(store.metaPath(key)) || fileExists(store.jsonlPath(key)) {
+			t.Errorf("files of %s survived the retry", key)
+		}
+	}
+}

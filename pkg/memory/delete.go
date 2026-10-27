@@ -41,15 +41,17 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 		}
 		unlock()
 	}
+	// The canonical meta is the only list of the aliases: it stays until every
+	// alias is gone, so a retry still finds the ones that failed.
+	if len(errs) > 0 {
+		return fmt.Errorf("memory: delete session: %w", errors.Join(errs...))
+	}
 
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
 	if err := s.removeSessionFiles(sanitizeKey(sessionKey)); err != nil {
-		errs = append(errs, err)
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("memory: delete session: %w", errors.Join(errs...))
+		return fmt.Errorf("memory: delete session: %w", err)
 	}
 	return nil
 }
