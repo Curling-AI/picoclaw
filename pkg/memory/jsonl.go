@@ -74,6 +74,10 @@ type JSONLStore struct {
 	// seconds; with the cache it costs one ReadDir.
 	metaMu    sync.RWMutex
 	metaCache map[string]SessionMeta
+	// metaRemovals counts the entries removed from metaCache. A listing fills
+	// the cache without the session's lock, and a meta it read before a
+	// removal must not come back after it.
+	metaRemovals uint64
 }
 
 // NewJSONLStore creates a new JSONL-backed store rooted at dir.
@@ -143,6 +147,28 @@ func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
 	s.metaMu.Lock()
 	s.metaCache[sanitized] = copyMeta(meta)
 	s.metaMu.Unlock()
+}
+
+func (s *JSONLStore) metaRemovalCount() uint64 {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	return s.metaRemovals
+}
+
+// fillCachedMeta caches a meta read without the session's lock, unless the
+// cache changed since the read began (removals is metaRemovalCount from
+// before it): a removal means the meta may belong to a deleted session, and an
+// entry already there was written after the read.
+func (s *JSONLStore) fillCachedMeta(sanitized string, meta SessionMeta, removals uint64) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if s.metaRemovals != removals {
+		return
+	}
+	if _, cached := s.metaCache[sanitized]; cached {
+		return
+	}
+	s.metaCache[sanitized] = copyMeta(meta)
 }
 
 // readMeta loads the metadata file for a session.
@@ -920,6 +946,7 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 			}
 			continue
 		}
+		removals := s.metaRemovalCount()
 		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
 			continue
@@ -929,7 +956,7 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 			continue
 		}
 		if meta.Key != "" {
-			s.storeCachedMeta(sanitized, meta)
+			s.fillCachedMeta(sanitized, meta, removals)
 			metas = append(metas, meta)
 		}
 	}

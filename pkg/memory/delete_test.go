@@ -187,3 +187,55 @@ func TestDeleteSession_ConcurrentAppendsKeepTranscriptAndMetaInStep(t *testing.T
 		t.Errorf("meta counts %d messages, the transcript has %d", meta.Count, lines)
 	}
 }
+
+// A delete that removed the meta and then failed on the transcript must not
+// leave the meta in the cache: the next write would bring back its count,
+// summary and scope.
+func TestDeleteSession_AFailedDeleteLeavesNoMetaInTheCache(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedSession(t, store, "agent:main:web-1")
+	// A directory with something in it cannot be removed like a file.
+	transcript := store.jsonlPath("agent:main:web-1")
+	if err := os.Remove(transcript); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(transcript, "stuck"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.DeleteSession(ctx, "agent:main:web-1"); err == nil {
+		t.Fatal("DeleteSession reported success with the transcript still there")
+	}
+
+	if _, cached := store.cachedMeta(sanitizeKey("agent:main:web-1")); cached {
+		t.Error("the deleted meta stayed in the cache")
+	}
+}
+
+// ListSessionMetas fills the cache without the session's lock. A meta it read
+// before a delete must not come back after it, and one it read before a write
+// must not replace what the write cached.
+func TestListSessionMetas_AFillNeverUndoesADeleteOrAWrite(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedSession(t, store, "agent:main:web-1")
+	sanitized := sanitizeKey("agent:main:web-1")
+	readBefore, _ := store.cachedMeta(sanitized)
+
+	removals := store.metaRemovalCount()
+	if err := store.DeleteSession(ctx, "agent:main:web-1"); err != nil {
+		t.Fatal(err)
+	}
+	store.fillCachedMeta(sanitized, readBefore, removals)
+	if _, cached := store.cachedMeta(sanitized); cached {
+		t.Fatal("a meta read before the delete was cached after it")
+	}
+
+	seedSession(t, store, "agent:main:web-1")
+	newer, _ := store.cachedMeta(sanitized)
+	store.fillCachedMeta(sanitized, SessionMeta{Key: "agent:main:web-1"}, store.metaRemovalCount())
+	if got, _ := store.cachedMeta(sanitized); got.Count != newer.Count || got.Summary != newer.Summary {
+		t.Fatalf("a fill replaced the cached meta: %+v, want %+v", got, newer)
+	}
+}
