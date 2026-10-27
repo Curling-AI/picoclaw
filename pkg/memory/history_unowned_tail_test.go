@@ -175,7 +175,7 @@ func TestHistoryUnownedTailCompactKeepsActiveDurableTail(t *testing.T) {
 	if operationErr := s.Compact(t.Context(), key); operationErr != nil {
 		t.Fatal("capture unavailability stopped legitimate content compaction", operationErr)
 	}
-	physical, err := readMessages(s.jsonlPath(key), 0)
+	physical, err := readProviderMessages(s.jsonlPath(key), 0)
 	if err != nil || len(physical) != 3 {
 		t.Fatal("compaction did not retain the complete active suffix", physical, err)
 	}

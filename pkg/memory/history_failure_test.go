@@ -70,6 +70,10 @@ func TestHistoryPagePreservesAppendWithoutAnOwnJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendRawHistory(t, s, key, append(orphan, '\n'))
+	durablePrefix, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
 	s, err = NewJSONLStore(s.dir)
 	if err != nil {
 		t.Fatal(err)
@@ -82,8 +86,21 @@ func TestHistoryPagePreservesAppendWithoutAnOwnJournal(t *testing.T) {
 		t.Fatal(operationErr)
 	}
 	page, err = s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key, Cursor: before.ResumeCursor, Refresh: true})
-	if !errors.Is(err, ErrHistoryRecoveryRequired) || page.Complete {
-		t.Fatal("a later append cleared the recovery fence", page, err)
+	if !errors.Is(err, ErrHistoryRecoveryRequired) || len(page.Entries) != 0 {
+		t.Fatal("a cursor page attested a source requiring explicit recovery", page, err)
+	}
+	retained, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil || !bytes.HasPrefix(retained, durablePrefix) {
+		t.Fatal("content append rewrote an unknown complete prefix", err)
+	}
+	if _, receiptErr := s.ReadHistoryWithReceipts(
+		t.Context(),
+		key,
+	); !errors.Is(
+		receiptErr,
+		ErrHistoryReceiptUnavailable,
+	) {
+		t.Fatal("preserving unknown content manufactured an order receipt", receiptErr)
 	}
 	history, err := s.GetHistory(t.Context(), key)
 	if err != nil || len(history) != 3 || history[1].Content != "uncommitted" ||

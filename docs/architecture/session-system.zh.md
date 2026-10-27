@@ -165,6 +165,7 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 {sanitized_key}.jsonl.commit.json      # 未完成写入的日志
 {sanitized_key}.jsonl.commit.decision  # 恢复时使用的决策
 {sanitized_key}.jsonl.recovery-required # 来源无法证明时的持久隔离标记
+{sanitized_key}.jsonl.order-witness    # 已建立的顺序 stream（如存在）
 ```
 
 各自保存：

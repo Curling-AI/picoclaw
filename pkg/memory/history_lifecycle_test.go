@@ -174,7 +174,15 @@ func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
 			}
 			s.markHistoryPending(key)
 			old := time.Now().Add(-30 * 24 * time.Hour)
-			paths := []string{s.metaPath(key), s.jsonlPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key)}
+			paths := []string{
+				s.metaPath(
+					key,
+				),
+				s.jsonlPath(key),
+				s.historyRecoveryPath(key),
+				s.historyDecisionPath(key),
+				s.historyOrderWitnessPath(key),
+			}
 			for _, path := range paths {
 				if operationErr := os.Chtimes(path, old, old); operationErr != nil {
 					t.Fatal(operationErr)
@@ -352,7 +360,7 @@ func TestHistoryConfirmedDeleteRetiresCachedGeneration(t *testing.T) {
 				t.Fatal(err)
 			}
 			if external {
-				for _, path := range []string{s.metaPath(key), s.jsonlPath(key)} {
+				for _, path := range []string{s.metaPath(key), s.jsonlPath(key), s.historyOrderWitnessPath(key)} {
 					if operationErr := os.Remove(path); operationErr != nil {
 						t.Fatal(operationErr)
 					}
@@ -415,9 +423,17 @@ func TestHistoryDeletionDoesNotRestoreAnOrphanedRewrite(t *testing.T) {
 	if operationErr := restarted.AddMessage(t.Context(), key, "user", "fresh after deletion"); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	page, err := restarted.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-	if err != nil || len(page.Entries) != 1 || page.Generation == meta.HistoryGeneration {
-		t.Fatal("orphan cleanup retained the deleted generation", page, err)
+	// The unaware deletion left the established-stream witness. Do not
+	// resurrect OLD content or interpret the recreation as a fresh proven stream.
+	requireHistoryContents(t, restarted, key, "fresh after deletion")
+	if _, err := restarted.ReadHistoryPage(
+		t.Context(),
+		HistoryPageRequest{Key: key},
+	); !errors.Is(
+		err,
+		ErrHistoryRecoveryRequired,
+	) {
+		t.Fatal("orphan cleanup discarded a surviving witness", err)
 	}
 }
 

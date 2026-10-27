@@ -24,6 +24,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -72,8 +73,9 @@ type AgentLoop struct {
 	mirror deliveryMirror
 	mu     sync.RWMutex
 
-	sessionHistoryObserverMu sync.RWMutex
-	sessionHistoryObserver   func(string)
+	sessionHistoryObserverMu      sync.RWMutex
+	sessionHistoryObserver        func(string)
+	sessionHistoryReceiptObserver func(string, []memory.CommittedHistoryMessage)
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}

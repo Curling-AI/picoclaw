@@ -106,6 +106,7 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 func (s *JSONLStore) pruneSessionFilesLocked(sanitized string, cutoff time.Time) (bool, error) {
 	for _, path := range []string{
 		s.metaPath(sanitized), s.jsonlPath(sanitized), s.historyRecoveryPath(sanitized), s.historyDecisionPath(sanitized),
+		s.historyOrderWitnessPath(sanitized),
 	} {
 		info, err := os.Stat(path)
 		if err != nil && !os.IsNotExist(err) {
@@ -158,11 +159,15 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 	if err := os.Remove(s.historyDecisionPath(sanitized)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if err := os.Remove(s.historyOrderWitnessPath(sanitized)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 
 	s.metaMu.Lock()
 	delete(s.metaCache, sanitized)
 	delete(s.historyPending, sanitized)
 	delete(s.historyMarkers, sanitized)
+	delete(s.historyWitnesses, sanitized)
 	s.metaMu.Unlock()
 	return nil
 }

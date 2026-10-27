@@ -99,6 +99,9 @@ func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageReq
 	if meta.HistoryRecoveryRequired {
 		return HistoryPage{}, ErrHistoryRecoveryRequired
 	}
+	if operationErr := s.probeHistoryOrderWitness(request.Key, &meta); operationErr != nil {
+		return HistoryPage{}, operationErr
+	}
 	ensureHistoryGeneration(&meta, request.Key)
 	file, err := os.Open(s.jsonlPath(request.Key))
 	if errors.Is(err, os.ErrNotExist) && meta.Count == 0 && meta.HistoryFileEpoch == 0 {

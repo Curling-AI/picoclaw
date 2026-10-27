@@ -164,6 +164,7 @@ Each session has a transcript, metadata, temporary write recovery files, and an 
 {sanitized_key}.jsonl.commit.json      # pending write journal
 {sanitized_key}.jsonl.commit.decision  # recovery decision, when needed
 {sanitized_key}.jsonl.recovery-required # persistent latch for an unproven source
+{sanitized_key}.jsonl.order-witness    # established order stream, when present
 ```
 
 The files store:

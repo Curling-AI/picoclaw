@@ -325,7 +325,14 @@ func TestHistoryCursorRejectsAnotherKeyEvenWithIdenticalLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(s.jsonlPath("other"), data, 0o600); err != nil {
+	if writeErr := os.WriteFile(s.jsonlPath("other"), data, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	witness, err := os.ReadFile(s.historyOrderWitnessPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.historyOrderWitnessPath("other"), witness, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ReadHistoryPage(

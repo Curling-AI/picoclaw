@@ -13,11 +13,14 @@ import (
 
 type historyRecord struct {
 	providers.Message
-	ID               string `json:"history_id"`
-	RunID            string `json:"history_run_id,omitempty"`
-	Generation       string `json:"history_generation"`
-	FileGeneration   string `json:"history_file_generation"`
-	RecoveryRequired bool   `json:"history_recovery_required,omitempty"`
+	ID             string `json:"history_id"`
+	RunID          string `json:"history_run_id,omitempty"`
+	Generation     string `json:"history_generation"`
+	FileGeneration string `json:"history_file_generation"`
+
+	Order                *HistoryOrderProof `json:"history_order,omitempty"`
+	LegacyBeforeStreamID string             `json:"history_legacy_before_stream_id,omitempty"`
+	RecoveryRequired     bool               `json:"history_recovery_required,omitempty"`
 }
 
 func newHistoryID() string { return uuid.NewString() }
@@ -49,12 +52,14 @@ func marshalHistoryMessage(message providers.Message, meta SessionMeta) ([]byte,
 	}
 	return json.Marshal(
 		historyRecord{
-			Message:          message,
-			ID:               id,
-			RunID:            message.HistoryRunID,
-			Generation:       meta.HistoryGeneration,
-			FileGeneration:   meta.HistoryFileGeneration,
-			RecoveryRequired: meta.HistoryRecoveryRequired,
+			Message:              message,
+			ID:                   id,
+			RunID:                message.HistoryRunID,
+			Generation:           meta.HistoryGeneration,
+			FileGeneration:       meta.HistoryFileGeneration,
+			Order:                persistedHistoryOrder(message),
+			LegacyBeforeStreamID: persistedLegacyHistoryStream(message, meta),
+			RecoveryRequired:     meta.HistoryRecoveryRequired,
 		},
 	)
 }

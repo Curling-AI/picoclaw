@@ -1635,7 +1635,7 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 
-	for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision"} {
+	for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision", base + ".jsonl.recovery-required", base + ".jsonl.order-witness"} {
 		if _, operationErr := os.Stat(path); !os.IsNotExist(operationErr) {
 			t.Fatalf("expected %s to be removed, stat err = %v", path, operationErr)
 		}
@@ -1681,6 +1681,10 @@ func TestHandleDeleteSession_ExplicitlyDeletesUnprovenHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			oldReceipts, receiptErr := store.ReadHistoryWithReceipts(t.Context(), key)
+			if receiptErr != nil || len(oldReceipts) != 1 || !oldReceipts[0].Order.Valid() {
+				t.Fatal("fixture has no current witnessed stream", oldReceipts, receiptErr)
+			}
 			base := filepath.Join(dir, sanitizeSessionKey(key))
 			if marked {
 				if operationErr := os.WriteFile(base+".jsonl.recovery-required", nil, 0o600); operationErr != nil {
@@ -1718,7 +1722,7 @@ func TestHandleDeleteSession_ExplicitlyDeletesUnprovenHistory(t *testing.T) {
 			if rec.Code != http.StatusNoContent {
 				t.Fatal("explicit deletion was blocked by unavailable capture proof", rec.Code, rec.Body.String())
 			}
-			for _, suffix := range []string{".jsonl", ".meta.json", ".jsonl.commit.json", ".jsonl.commit.decision", ".jsonl.recovery-required"} {
+			for _, suffix := range []string{".jsonl", ".meta.json", ".jsonl.commit.json", ".jsonl.commit.decision", ".jsonl.recovery-required", ".jsonl.order-witness"} {
 				if _, statErr := os.Stat(base + suffix); !errors.Is(statErr, os.ErrNotExist) {
 					t.Fatal("explicit deletion retained session data", suffix, statErr)
 				}
@@ -1735,6 +1739,11 @@ func TestHandleDeleteSession_ExplicitlyDeletesUnprovenHistory(t *testing.T) {
 			if pageErr != nil || len(after.Entries) != 1 || after.Entries[0].Message.Content != "fresh session" ||
 				after.Generation == before.Generation {
 				t.Fatal("recreated session reused the deleted source or recovery fence", after, pageErr)
+			}
+			fresh, receiptErr := store.ReadHistoryWithReceipts(t.Context(), key)
+			if receiptErr != nil || len(fresh) != 1 || !fresh[0].Order.Valid() || fresh[0].Order.Sequence != 1 ||
+				fresh[0].Order.StreamID == oldReceipts[0].Order.StreamID {
+				t.Fatal("recreated source reused a retired order stream", fresh, receiptErr)
 			}
 			if _, cursorErr := store.ReadHistoryPage(
 				t.Context(),

@@ -193,15 +193,16 @@ func TestHistoryUnownedRewriteRecoversActualOldMetadata(t *testing.T) {
 				}
 				return fileutil.WriteFileAtomic(path, data, mode)
 			}
-			if err := s.SetHistory(
+			rewriteErr := s.SetHistory(
 				t.Context(),
 				key,
 				[]providers.Message{{Role: "user", Content: "replacement"}},
-			); !errors.Is(
-				err,
-				sentinel,
-			) {
-				t.Fatal("metadata failure disappeared", err)
+			)
+			if committed && rewriteErr != nil {
+				t.Fatal("confirmed durable NEW rewrite was reported as uncommitted", rewriteErr)
+			}
+			if !committed && !errors.Is(rewriteErr, sentinel) {
+				t.Fatal("uncommitted metadata failure disappeared", rewriteErr)
 			}
 			raw, err := os.ReadFile(s.jsonlPath(key))
 			if err != nil {
@@ -217,6 +218,15 @@ func TestHistoryUnownedRewriteRecoversActualOldMetadata(t *testing.T) {
 				t.Fatal(err)
 			}
 			requireUnprovenPage(t, reopened, key, "")
+			if _, readErr := reopened.ReadHistoryWithReceipts(
+				t.Context(),
+				key,
+			); !errors.Is(
+				readErr,
+				ErrHistoryReceiptUnavailable,
+			) {
+				t.Fatal("rewrite recovery restored unproven receipts", readErr)
+			}
 			if err := reopened.SetHistory(
 				t.Context(),
 				key,
