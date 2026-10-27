@@ -49,7 +49,7 @@ var loggableArgs = map[string]bool{
 	"mode": true, "format": true, "language": true, "channel": true, "schedule": true,
 	"cwd": true, "working_dir": true, "workdir": true, "limit": true, "offset": true,
 	"page": true, "recursive": true, "depth": true, "count": true, "max_results": true,
-	"start_line": true, "end_line": true,
+	"start_line": true, "end_line": true, "owner": true, "repo": true, "branch": true,
 }
 
 // Browser subcommands that carry no typed text. Any other one (fill, type,
@@ -165,9 +165,27 @@ func toolArg(tool, key string, v any) any {
 	case tool == "browser" && key == "command":
 		return browserCommand(v)
 	case loggableArg(key):
-		return Value(v)
+		return loggableValue(tool, v)
 	default:
 		return summarize(v)
+	}
+}
+
+// loggableValue applies the same rule one level down: an allowed argument
+// can hold objects (`files: [{path, content}]`), and the free text inside
+// them is as much the user's as at the top.
+func loggableValue(tool string, v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return ToolArgs(tool, val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = loggableValue(tool, item)
+		}
+		return out
+	default:
+		return Value(v)
 	}
 }
 
