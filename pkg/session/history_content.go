@@ -7,8 +7,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// HistoryContentReader is optional and returns ordinary history with explicit
-// ownership, context and I/O errors, without returning private order evidence.
+// HistoryContentReader optionally reads the requested canonical session with
+// explicit context/I/O errors. It rejects aliases and returns no order evidence.
 type HistoryContentReader interface {
 	ReadHistoryContent(ctx context.Context, key string) ([]providers.Message, error)
 }

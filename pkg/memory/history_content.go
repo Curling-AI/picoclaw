@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// ReadHistoryContent reads ordinary content without claiming an order receipt.
-// Canonical ownership and I/O errors remain explicit even when proof is lost.
+// ReadHistoryContent reads the requested canonical session without an order
+// receipt. Aliases and ownership/I/O errors stay explicit when proof is lost.
 func (s *JSONLStore) ReadHistoryContent(ctx context.Context, key string) ([]providers.Message, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -19,7 +18,6 @@ func (s *JSONLStore) ReadHistoryContent(ctx context.Context, key string) ([]prov
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	key = strings.TrimSpace(key)
 	canonical, err := s.canonicalHistoryOrderKey(key)
 	if err != nil {
 		return nil, err
@@ -29,6 +27,9 @@ func (s *JSONLStore) ReadHistoryContent(ctx context.Context, key string) ([]prov
 	defer lock.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if key != canonical {
+		return nil, fmt.Errorf("%w: content read requires the requested canonical key", ErrHistoryOrderUnavailable)
 	}
 	meta, err := s.readMeta(canonical)
 	if err != nil {

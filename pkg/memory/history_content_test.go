@@ -125,7 +125,7 @@ func TestCheckedContentSurvivesProofLossWithoutRestoringProof(t *testing.T) {
 }
 
 func TestCheckedContentDistinguishesReadFailuresFromEmptyHistory(t *testing.T) {
-	for _, failure := range []string{"missing content", "lost metadata and content", "recovery without content", "unknown byte checkpoint", "unreadable content", "invalid metadata", "wrong owner", "ambiguous alias", "canceled"} {
+	for _, failure := range []string{"missing content", "lost metadata and content", "recovery without content", "unknown byte checkpoint", "unreadable content", "invalid metadata", "wrong owner", "ambiguous alias", "padded canonical", "canceled"} {
 		t.Run(failure, func(t *testing.T) {
 			store := newTestStore(t)
 			key := "sk_v1_checked_errors"
@@ -205,6 +205,8 @@ func TestCheckedContentDistinguishesReadFailuresFromEmptyHistory(t *testing.T) {
 					}
 				}
 				key = "agent:main:ambiguous"
+			case "padded canonical":
+				key = " " + key + " "
 			case "canceled":
 				canceled, cancel := context.WithCancel(ctx)
 				cancel()
@@ -239,9 +241,16 @@ func TestCheckedContentDistinguishesReadFailuresFromEmptyHistory(t *testing.T) {
 	if read, err := checkedContentReader(
 		t,
 		store,
-	).ReadHistoryContent(t.Context(), "agent:main:empty"); err != nil || read == nil ||
+	).ReadHistoryContent(t.Context(), "sk_v1_owned_empty"); err != nil || read == nil ||
 		len(read) != 0 {
-		t.Fatal("an owned new alias cannot return empty history", read, err)
+		t.Fatal("an owned new canonical key cannot return empty history", read, err)
+	}
+	if read, err := checkedContentReader(
+		t,
+		store,
+	).ReadHistoryContent(t.Context(), "agent:main:empty"); err == nil ||
+		read != nil {
+		t.Fatal("a checked empty read followed an alias", read, err)
 	}
 	if _, err := store.AppendHistoryReceipt(
 		t.Context(),

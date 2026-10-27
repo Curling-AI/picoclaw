@@ -84,10 +84,14 @@ For a legacy backend without receipt support, a **nil batch** means only that le
 ReadHistoryContent(ctx, key) ([]providers.Message, error)
 ```
 
-It resolves the canonical session and rechecks its ownership under the same
-physical-session lock used by receipt operations. It reads the ordinary retained
-content even when order evidence is unavailable. Cancellation, unreadable
-metadata, ambiguous ownership and content I/O errors remain explicit; the adapter
+It requires the requested key to be the resolved canonical session and rechecks
+its ownership under the same physical-session lock used by receipt operations.
+Aliases are rejected, including a valid alias or one rebound between the failed
+receipt read and the content read. The legacy `GetHistory` alias behavior is
+unchanged; callers of the checked API must retain their canonical key.
+It reads the ordinary retained content even when order evidence is unavailable.
+Cancellation, unreadable metadata, ambiguous ownership and content I/O errors
+remain explicit; the adapter
 does not use the unchecked, error-suppressing `GetHistory` fallback. Unsupported
 stores return `ErrHistoryUnsupported`.
 
