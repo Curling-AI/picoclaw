@@ -14,7 +14,7 @@ import (
 )
 
 type checkedContentBackend interface {
-	ReadHistoryContent(context.Context, string) ([]providers.Message, error)
+	ReadHistoryContent(ctx context.Context, key string) ([]providers.Message, error)
 }
 
 func checkedBackend(t *testing.T, backend *session.JSONLBackend) checkedContentBackend {
@@ -28,9 +28,9 @@ func checkedBackend(t *testing.T, backend *session.JSONLBackend) checkedContentB
 
 func TestJSONLBackendCheckedContentPreservesOrdinaryMetadataAndErrors(t *testing.T) {
 	dir := t.TempDir()
-	store, err := memory.NewJSONLStore(dir)
-	if err != nil {
-		t.Fatal(err)
+	store, openErr := memory.NewJSONLStore(dir)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	backend := session.NewJSONLBackend(store)
 	key, alias := "sk_v1_checked_backend", "agent:main:checked-backend"
@@ -94,9 +94,9 @@ func TestJSONLBackendCheckedContentDoesNotUseUncheckedUnsupportedStore(t *testin
 
 func TestCheckedContentRejectsAliasRebindAfterReceiptFailure(t *testing.T) {
 	dir := t.TempDir()
-	store, err := memory.NewJSONLStore(dir)
-	if err != nil {
-		t.Fatal(err)
+	store, openErr := memory.NewJSONLStore(dir)
+	if openErr != nil {
+		t.Fatal(openErr)
 	}
 	backend := session.NewJSONLBackend(store)
 	first, second, alias := "sk_v1_first_canonical", "sk_v1_second_canonical", "agent:main:rebound"

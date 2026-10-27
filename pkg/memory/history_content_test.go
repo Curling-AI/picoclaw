@@ -14,7 +14,7 @@ import (
 )
 
 type checkedHistoryContentReader interface {
-	ReadHistoryContent(context.Context, string) ([]providers.Message, error)
+	ReadHistoryContent(ctx context.Context, key string) ([]providers.Message, error)
 }
 
 func checkedContentReader(t *testing.T, store *JSONLStore) checkedHistoryContentReader {
@@ -83,9 +83,9 @@ func TestCheckedContentSurvivesProofLossWithoutRestoringProof(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			store, err := NewJSONLStore(store.dir)
-			if err != nil {
-				t.Fatal(err)
+			store, openErr := NewJSONLStore(store.dir)
+			if openErr != nil {
+				t.Fatal(openErr)
 			}
 			if _, err := store.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(err, ErrHistoryOrderUnavailable) {
 				t.Fatal("proof loss did not fence receipts", err)
@@ -103,8 +103,8 @@ func TestCheckedContentSurvivesProofLossWithoutRestoringProof(t *testing.T) {
 			if !reflect.DeepEqual(contentSourceFiles(t, store, key), before) {
 				t.Fatal("reading content changed durable proof state or transcript bytes")
 			}
-			if err := store.AddMessage(t.Context(), key, "assistant", "next durable answer"); err != nil {
-				t.Fatal(err)
+			if appendErr := store.AddMessage(t.Context(), key, "assistant", "next durable answer"); appendErr != nil {
+				t.Fatal(appendErr)
 			}
 			history, err = checkedContentReader(t, store).ReadHistoryContent(t.Context(), key)
 			if err != nil || len(history) != 2 || history[1].Content != "next durable answer" {
@@ -292,7 +292,7 @@ func TestCheckedContentDecoderPreservesCancellationInsteadOfPartialSuccess(t *te
 		messages, err := decodeHistoryMessages(ctx, reader, 0, true)
 		done <- result{messages, err}
 	}()
-	if _, err := writer.Write([]byte("{\"role\":\"user\",\"content\":\"readable prefix\"}\n")); err != nil {
+	if _, err := writer.WriteString("{\"role\":\"user\",\"content\":\"readable prefix\"}\n"); err != nil {
 		t.Fatal(err)
 	}
 	cancel()

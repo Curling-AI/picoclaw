@@ -25,7 +25,7 @@ func (s *JSONLStore) ReadHistoryContent(ctx context.Context, key string) ([]prov
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return nil, err
 	}
 	if key != canonical {
@@ -35,7 +35,7 @@ func (s *JSONLStore) ReadHistoryContent(ctx context.Context, key string) ([]prov
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
+	if err = validateCanonicalHistoryKey(key, canonical, meta); err != nil {
 		return nil, err
 	}
 	file, err := os.Open(s.jsonlPath(canonical))
