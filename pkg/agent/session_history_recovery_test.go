@@ -305,8 +305,8 @@ func TestSessionHistoryUncertainCommitDoesNotRetryThroughLegacyFallback(t *testi
 }
 
 func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) {
-	for _, checkpoint := range []bool{false, true} {
-		t.Run(map[bool]string{false: "legacy count", true: "stale checkpoint"}[checkpoint], func(t *testing.T) {
+	for _, fixture := range []string{"legacy count", "stale checkpoint", "count above rows"} {
+		t.Run(fixture, func(t *testing.T) {
 			al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
 			defer cleanup()
 			dir := t.TempDir()
@@ -318,7 +318,10 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 				append([]byte(nil), prefix...),
 				[]byte("{\"role\":\"assistant\",\"content\":\"durable external answer\"}\n")...)
 			meta := memory.SessionMeta{Key: key, Count: 2}
-			if checkpoint {
+			if fixture == "count above rows" {
+				meta.Count = 4
+			}
+			if fixture == "stale checkpoint" {
 				size := int64(len(prefix))
 				meta.HistoryBytes = &size
 			}
@@ -367,6 +370,23 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 			}
 			if response, err := al.ProcessDirect(t.Context(), "after rollback", key); err != nil || response == "" {
 				t.Fatal("turn after rollback could not complete", response, err)
+			}
+			if clearErr := al.contextManager.Clear(t.Context(), key); clearErr != nil {
+				t.Fatal("clear could not persist the requested content removal", clearErr)
+			}
+			if history := backend.GetHistory(key); len(history) != 0 {
+				t.Fatal("clear reported success while keeping the conversation", history)
+			}
+			if response, turnErr := al.ProcessDirect(
+				t.Context(),
+				"after clear",
+				key,
+			); turnErr != nil ||
+				response == "" {
+				t.Fatal("turn after clear could not complete", response, turnErr)
+			}
+			if history := backend.GetHistory(key); len(history) != 2 {
+				t.Fatal("turn after clear did not persist its request and answer", history)
 			}
 			if _, err := store.ReadHistoryWithReceipts(
 				t.Context(),

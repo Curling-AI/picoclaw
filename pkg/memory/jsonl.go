@@ -87,6 +87,8 @@ type JSONLStore struct {
 	dir       string
 	locks     [numLockShards]sync.Mutex
 	writeFile func(string, []byte, os.FileMode) error
+	// Optional private seam for deterministic origin-reader I/O failures.
+	openHistoryFile func(string) (*os.File, error)
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
 	// This process is the only writer of the session directory, so a
