@@ -390,6 +390,7 @@ type turnState struct {
 	initialHistoryLength int                    // Snapshot of history length at turn start
 
 	// Additional SubTurn fields
+	historyRunID    string
 	ctx             context.Context    // Context for this turn
 	cancelFunc      context.CancelFunc // Cancel function for this turn's context
 	critical        bool               // Whether this SubTurn should continue after parent ends
@@ -926,7 +927,7 @@ func (ts *turnState) restoreSession(agent *AgentInstance) error {
 	summary := ts.restorePointSummary
 	ts.mu.RUnlock()
 
-	agent.Sessions.SetHistory(ts.sessionKey, history)
+	ts.replaceHistory(agent.Sessions, history)
 	agent.Sessions.SetSummary(ts.sessionKey, summary)
 	return agent.Sessions.Save(ts.sessionKey)
 }

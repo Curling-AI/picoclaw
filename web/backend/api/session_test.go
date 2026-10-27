@@ -1,7 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1589,14 +1593,34 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 	}
 
 	sessionKey := legacyPicoSessionPrefix + "delete-jsonl"
-	if err := store.AddFullMessage(nil, sessionKey, providers.Message{
+	if operationErr := store.AddFullMessage(nil, sessionKey, providers.Message{
 		Role:    "user",
 		Content: "delete me",
-	}); err != nil {
-		t.Fatalf("AddFullMessage() error = %v", err)
+	}); operationErr != nil {
+		t.Fatalf("AddFullMessage() error = %v", operationErr)
 	}
-	if err := store.SetSummary(nil, sessionKey, "delete summary"); err != nil {
-		t.Fatalf("SetSummary() error = %v", err)
+	if operationErr := store.SetSummary(nil, sessionKey, "delete summary"); operationErr != nil {
+		t.Fatalf("SetSummary() error = %v", operationErr)
+	}
+	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
+	meta, err := os.ReadFile(base + ".meta.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(map[string]json.RawMessage{"meta": meta, "next": meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := json.Marshal(
+		map[string]string{"journal": fmt.Sprintf("%x", sha256.Sum256(journal)), "decision": "new"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for suffix, data := range map[string][]byte{".jsonl.commit.json": journal, ".jsonl.commit.decision": decision} {
+		if operationErr := os.WriteFile(base+suffix, data, 0o600); operationErr != nil {
+			t.Fatal(operationErr)
+		}
 	}
 
 	h := NewHandler(configPath)
@@ -1611,10 +1635,153 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 
-	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
-	for _, path := range []string{base + ".jsonl", base + ".meta.json"} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("expected %s to be removed, stat err = %v", path, err)
+	for _, path := range []string{base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision"} {
+		if _, operationErr := os.Stat(path); !os.IsNotExist(operationErr) {
+			t.Fatalf("expected %s to be removed, stat err = %v", path, operationErr)
+		}
+	}
+	scope := json.RawMessage(`{"channel":"pico","chat_id":"fresh-owner"}`)
+	if operationErr := store.UpsertSessionMeta(
+		t.Context(),
+		sessionKey,
+		scope,
+		[]string{"fresh-alias"},
+	); operationErr != nil {
+		t.Fatal("metadata update after completed deletion failed", operationErr)
+	}
+	if operationErr := store.AddMessage(t.Context(), sessionKey, "user", "fresh session"); operationErr != nil {
+		t.Fatal("confirmed deletion left the agent's cache unusable", operationErr)
+	}
+	history, historyErr := store.GetHistory(t.Context(), sessionKey)
+	if historyErr != nil || len(history) != 1 || history[0].Content != "fresh session" {
+		t.Fatal("confirmed deletion resurrected previous history", history, historyErr)
+	}
+	after, err := store.GetSessionMeta(t.Context(), sessionKey)
+	if err != nil || after.Count != 1 || after.Skip != 0 || after.Summary != "" ||
+		!bytes.Equal(after.Scope, scope) || len(after.Aliases) != 1 || after.Aliases[0] != "fresh-alias" {
+		t.Fatal("fresh metadata lost scope/aliases or retained deleted bookkeeping", after, err)
+	}
+}
+
+func TestHandleDeleteSession_ExplicitlyDeletesUnprovenHistory(t *testing.T) {
+	for _, marked := range []bool{false, true} {
+		t.Run(fmt.Sprint(marked), func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+			dir := sessionsTestDir(t, configPath)
+			store, err := memory.NewJSONLStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := legacyPicoSessionPrefix + "unproven-delete"
+			if operationErr := store.AddMessage(t.Context(), key, "user", "owned message"); operationErr != nil {
+				t.Fatal(operationErr)
+			}
+			before, err := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := filepath.Join(dir, sanitizeSessionKey(key))
+			if marked {
+				if operationErr := os.WriteFile(base+".jsonl.recovery-required", nil, 0o600); operationErr != nil {
+					t.Fatal(operationErr)
+				}
+				if _, pageErr := store.ReadHistoryPage(
+					t.Context(),
+					memory.HistoryPageRequest{Key: key},
+				); !errors.Is(
+					pageErr,
+					memory.ErrHistoryRecoveryRequired,
+				) {
+					t.Fatal("fixture did not latch the producer's warm recovery cache", pageErr)
+				}
+			} else {
+				file, openErr := os.OpenFile(base+".jsonl", os.O_APPEND|os.O_WRONLY, 0o600)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				if _, writeErr := file.WriteString(
+					"{\"role\":\"user\",\"content\":\"durable external message\"}\n",
+				); writeErr != nil {
+					file.Close()
+					t.Fatal(writeErr)
+				}
+				if closeErr := file.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+			}
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/sessions/unproven-delete", nil))
+			if rec.Code != http.StatusNoContent {
+				t.Fatal("explicit deletion was blocked by unavailable capture proof", rec.Code, rec.Body.String())
+			}
+			for _, suffix := range []string{".jsonl", ".meta.json", ".jsonl.commit.json", ".jsonl.commit.decision", ".jsonl.recovery-required"} {
+				if _, statErr := os.Stat(base + suffix); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatal("explicit deletion retained session data", suffix, statErr)
+				}
+			}
+			backend := session.NewJSONLBackend(store)
+			backend.EnsureSessionMetadata(key, &session.SessionScope{Channel: "pico", Account: "fresh-owner"}, nil)
+			if appendErr := store.AddMessage(t.Context(), key, "user", "fresh session"); appendErr != nil {
+				t.Fatal("explicit deletion left a cached session unusable", appendErr)
+			}
+			if scope := backend.GetSessionScope(key); scope == nil || scope.Account != "fresh-owner" {
+				t.Fatal("metadata precursor silently lost the recreated session's scope", scope)
+			}
+			after, pageErr := store.ReadHistoryPage(t.Context(), memory.HistoryPageRequest{Key: key})
+			if pageErr != nil || len(after.Entries) != 1 || after.Entries[0].Message.Content != "fresh session" ||
+				after.Generation == before.Generation {
+				t.Fatal("recreated session reused the deleted source or recovery fence", after, pageErr)
+			}
+			if _, cursorErr := store.ReadHistoryPage(
+				t.Context(),
+				memory.HistoryPageRequest{Key: key, Cursor: before.ResumeCursor},
+			); !errors.Is(
+				cursorErr,
+				memory.ErrHistoryCursor,
+			) {
+				t.Fatal("deleted cursor remained valid after recreation", cursorErr)
+			}
+		})
+	}
+}
+
+func TestHandleDeleteSession_PreservesUnresolvedWrite(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := legacyPicoSessionPrefix + "pending-delete"
+	if operationErr := store.AddMessage(t.Context(), key, "user", "preserve pending source"); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	base := filepath.Join(dir, sanitizeSessionKey(key))
+	before, err := os.ReadFile(base + ".jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := []byte("{invalid checkpoint")
+	if operationErr := os.WriteFile(base+".jsonl.commit.json", journal, 0o600); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/sessions/pending-delete", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatal("unresolved write was treated as a completed deletion", rec.Code, rec.Body.String())
+	}
+	for suffix, expected := range map[string][]byte{".jsonl": before, ".jsonl.commit.json": journal} {
+		after, readErr := os.ReadFile(base + suffix)
+		if readErr != nil || !bytes.Equal(after, expected) {
+			t.Fatal("failed recovery changed the pending source", suffix, readErr)
 		}
 	}
 }

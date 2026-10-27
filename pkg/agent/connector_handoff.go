@@ -54,7 +54,7 @@ func persistToolHandoff(
 		}
 		messages = append(messages, msg)
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+			ts.appendHistoryMessage(msg)
 			ts.recordPersistedMessage(msg)
 		}
 	}
@@ -62,7 +62,7 @@ func persistToolHandoff(
 		if summary != "" {
 			msg := providers.Message{Role: "assistant", Content: summary, ModelName: exec.llmModelName}
 			messages = append(messages, msg)
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+			ts.appendHistoryMessage(msg)
 			ts.recordPersistedMessage(msg)
 		}
 		if err := ctx.Err(); err != nil {
