@@ -65,7 +65,7 @@ Unlike unknown JSON fields, this file survives the transcript and metadata rewri
 
 Intermediate experimental ordered formats without the current witness version are unsupported. Receipt and page operations reject them without migrating metadata, creating a witness, or reassigning order. Normal content reads and requested writes remain available with the recovery fence retained. Genuine legacy sources without evidence of a previous stream keep their existing bootstrap behavior. Data from an experimental producer whose entire modern evidence was already erased before any witness existed cannot be distinguished retroactively from genuine legacy data; this change does not claim otherwise.
 
-A confirmed healthy deletion removes the witness last and permits a later unrelated stream. An older deletion that leaves the witness behind is conservative: recreation can store and display content, but cannot claim order continuity or start another proven stream. The existing single-writer deployment requirement still applies; these files cannot prevent deletion by unaware software or an external filesystem operation.
+An explicit owner-requested deletion resolves the owning write journal, removes the source and recovery marker, then removes the witness last. It permits a later unrelated stream even when the deleted source had no valid order proof. Automatic pruning still preserves unproven sources. An older deletion that leaves the witness behind is conservative: recreation can store and display content, but cannot claim order continuity or start another proven stream. The existing single-writer deployment requirement still applies; these files cannot prevent deletion by unaware software or an external filesystem operation.
 
 ## Out-of-turn observer
 

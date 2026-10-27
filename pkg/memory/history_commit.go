@@ -46,19 +46,26 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 		file, err = os.OpenFile(s.jsonlPath(key), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
 		if err == nil {
 			if _, statErr := os.Stat(s.metaPath(key)); errors.Is(statErr, os.ErrNotExist) {
-				// A healthy external deletion may have removed every owned
-				// file. Refresh the witness cache before retiring the old
-				// generation; a surviving or unreadable witness stays fenced.
+				marked, markerErr := s.hasHistoryRecoveryMarker(key)
+				if markerErr != nil {
+					return nil, errors.Join(markerErr, file.Close())
+				}
+				// A complete deletion retires cached state; a surviving witness
+				// still fences sources removed by an unaware writer.
 				witness, witnessErr := s.readHistoryOrderWitness(key, true)
-				meta.HistoryRecoveryRequired = meta.HistoryRecoveryRequired || witnessErr != nil || witness.present
+				recoveryRequired := marked || witnessErr != nil || witness.present
 				now := time.Now()
-				original = SessionMeta{Key: key, HistoryRecoveryRequired: meta.HistoryRecoveryRequired}
+				original = SessionMeta{Key: key, HistoryRecoveryRequired: recoveryRequired}
 				meta = SessionMeta{
-					Key: key, CreatedAt: now, UpdatedAt: now, HistoryRecoveryRequired: meta.HistoryRecoveryRequired,
+					Key: key, CreatedAt: now, UpdatedAt: now, HistoryRecoveryRequired: recoveryRequired,
 				}
 				resetHistoryGeneration(&meta)
 				s.metaMu.Lock()
 				delete(s.metaCache, sanitizeKey(key))
+				if !marked {
+					// A complete physical deletion also retires a warm cache's latch.
+					delete(s.historyMarkers, sanitizeKey(key))
+				}
 				s.metaMu.Unlock()
 			} else if statErr != nil || original.Count != 0 || original.HistoryBytes != nil {
 				file.Close()

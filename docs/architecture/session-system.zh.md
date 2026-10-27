@@ -193,7 +193,7 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 
 无法归属的完整尾部会设置 `HistoryRecoveryRequired`，并在修改内容前创建权限为 `0600` 的 `.jsonl.recovery-required`，同步标记及目录。新行也携带 `history_recovery_required`。唯一写入进程在热 metadata 缓存旁同步维护标记状态；冷读和证明边界检查独立文件，即使标记内容损坏，文件存在仍隔离证明。观察到标记不等于标记已同步；写内容前必须确认其持久性。
 
-`GetHistory`、普通追加及正常内容生命周期继续可用。`SetHistory`、逻辑截断、`Compact`/`Save` 和显式 clear 按实际行数操作并保留标记，不再使已生成回复的 turn 失败。主动截断或替换仍按原有内容语义执行，但不修复来源证明。别名提升任一侧需要恢复时，两侧先保留标记，再复制内容，原始 transcript 不变。clear 后的空会话也保持隔离，后续追加不能重新证明来源。`ReadHistoryPage`（包括已有 cursor）返回 `ErrHistoryRecoveryRequired`；自动清理保留该会话，launcher DELETE 返回 HTTP 409。摘要和 scope 更新保留标记。为写入计数完整物理行并不证明来源或顺序。这里没有自动导入、新建 stream 或显式恢复流程。
+`GetHistory`、普通追加及正常内容生命周期继续可用。`SetHistory`、逻辑截断、`Compact`/`Save` 和显式 clear 按实际行数操作并保留标记，不再使已生成回复的 turn 失败。主动截断或替换仍按原有内容语义执行，但不修复来源证明。别名提升任一侧需要恢复时，两侧先保留标记，再复制内容，原始 transcript 不变。clear 后的空会话也保持隔离，后续追加不能重新证明来源。`ReadHistoryPage`（包括已有 cursor）返回 `ErrHistoryRecoveryRequired`；自动清理保留该会话。显式 launcher DELETE 先解决该会话的待定写入，再删除来源与恢复标记，不要求捕获证明。摘要和 scope 更新保留标记。为写入计数完整物理行并不证明来源或顺序。这里没有自动导入、新建 stream 或显式恢复流程。
 
 `6c89ca2a`、`b523ddb0` 等旧版本不理解这一隔离状态。它们可能丢弃未知 JSON 字段，其捕获和破坏性操作也不会执行该隔离。独立标记在旧版普通追加及 transcript/metadata 重写后仍保留，使之后的兼容版本继续拒绝证明，包括已越过带标记行的 cursor。标记无法阻止旧版本或外部文件操作实际删除数据。备份和回滚必须同时保留该标记；删除标记不是受支持的恢复流程。
 
@@ -212,9 +212,9 @@ dispatch 匹配和 session 分配都会使用这套映射，因此同一个人�
 
 `pkg/memory.JSONLStore` 使用固定 64 分片 mutex，按 session key 的 hash 做串行化。
 这样既能做到“按 session 串行”，又不会因为 session 数量增长而把 mutex map 做成无界结构。
-列表读取和 cron 清理使用与写入相同的 sanitized-key 锁。清理在锁内重新检查文件时间及恢复状态。健康会话删除 transcript、metadata、日志和决策文件后清除缓存；需要恢复的会话及持久标记保持不变。
+列表读取和 cron 清理使用与写入相同的 sanitized-key 锁。清理在锁内重新检查文件时间及恢复状态。符合清理条件的健康会话删除 transcript、metadata、日志和决策文件后清除缓存；需要恢复的会话及持久标记保持不变。
 
-这里采用单写入进程模型，不提供跨进程删除事务。部署和 launcher 必须在升级、回滚期间避免多个进程同时写同一 session 目录；metadata 缓存不提供跨进程一致性。launcher DELETE 删除健康会话文件前执行相同的恢复检查；追加操作在独占重建 transcript 并确认 metadata 已删除后，会使用全新 generation，但遗留恢复标记仍阻止证明。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
+这里采用单写入进程模型，不提供跨进程删除事务。部署和 launcher 必须在升级、回滚期间避免多个进程同时写同一 session 目录；metadata 缓存不提供跨进程一致性。launcher DELETE 删除显式选定的来源、metadata 和独立文件前先解决待定写入；无法解决的日志仍阻止删除。追加操作在独占重建 transcript 并确认 metadata 已删除后，会使用全新 generation；仅当持久恢复标记也已删除时才清除缓存中的隔离状态，遗留标记仍阻止证明。无法证明的重建会明确失败。调用方仍须阻止迟到事件重建已全局删除的 conversation；文件协议不提供这一产品级保证。
 
 旧的 `SessionManager` 则是一个内存 map 加 RW mutex。
 
