@@ -15,6 +15,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/redact"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -178,7 +179,7 @@ func RunToolLoop(
 					}
 				}()
 
-				argsJSON, _ := json.Marshal(tc.Arguments)
+				argsJSON, _ := json.Marshal(redact.ToolArgs(tc.Name, tc.Arguments))
 				argsPreview := utils.Truncate(string(argsJSON), 200)
 				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
 					map[string]any{

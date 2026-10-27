@@ -30,7 +30,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
-	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type AgentLoop struct {
@@ -727,8 +726,7 @@ func (al *AgentLoop) runAgentLoopResult(
 	}
 
 	if result.finalContent != "" {
-		responsePreview := utils.Truncate(result.finalContent, 120)
-		logger.InfoCF("agent", fmt.Sprintf("Response: %s", responsePreview),
+		logger.InfoCF("agent", "Response ready",
 			map[string]any{
 				"agent_id":     agent.ID,
 				"session_key":  opts.Dispatch.SessionKey,

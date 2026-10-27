@@ -16,6 +16,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/redact"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -187,7 +188,7 @@ toolLoop:
 				if toolReq != nil && toolReq.HookResult != nil {
 					hookResult := toolReq.HookResult
 
-					argsJSON, _ := json.Marshal(toolArgs)
+					argsJSON, _ := json.Marshal(redact.ToolArgs(toolName, toolArgs))
 					argsPreview := utils.Truncate(string(argsJSON), 200)
 					logger.InfoCF("agent", fmt.Sprintf("Tool call (hook respond): %s(%s)", toolName, argsPreview),
 						map[string]any{
@@ -485,7 +486,7 @@ toolLoop:
 			continue
 		}
 
-		argsJSON, _ := json.Marshal(toolArgs)
+		argsJSON, _ := json.Marshal(redact.ToolArgs(toolName, toolArgs))
 		argsPreview := utils.Truncate(string(argsJSON), 200)
 		logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", toolName, argsPreview),
 			map[string]any{

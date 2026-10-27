@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/redact"
 )
 
 type ToolEntry struct {
@@ -408,7 +409,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 	logger.InfoCF("tool", "Tool execution started",
 		map[string]any{
 			"tool": name,
-			"args": args,
+			"args": redact.ToolArgs(name, args),
 		})
 
 	tool, ok := r.Get(name)

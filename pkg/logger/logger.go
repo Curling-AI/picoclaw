@@ -3,6 +3,7 @@ package logger
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"golang.org/x/term"
+
+	"github.com/sipeed/picoclaw/pkg/redact"
 )
 
 type LogLevel = zerolog.Level
@@ -76,7 +79,21 @@ func init() {
 		writers = append(writers, consoleWriter)
 
 		logger = zerolog.New(io.MultiWriter(writers...)).With().Timestamp().Caller().Logger()
+
+		// The standard library logger, and slog's default handler that writes
+		// through it, bypass this package; what they write is masked too.
+		log.SetOutput(redactingWriter{out: os.Stderr})
 	})
+}
+
+// redactingWriter masks credentials in whatever is written through it.
+type redactingWriter struct{ out io.Writer }
+
+func (w redactingWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(w.out, redact.Text(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func formatFieldValue(i any) string {
@@ -319,15 +336,18 @@ func logMessage(level LogLevel, component string, message string, fields map[str
 
 	appendFields(event, fields)
 
-	event.CallerSkipFrame(skip).Msg(message)
+	// Every line is shipped off the pod, so credentials are masked here, for
+	// call sites present and future, and not only where someone remembered to.
+	event.CallerSkipFrame(skip).Msg(redact.Text(message))
 }
 
 func appendFields(event *zerolog.Event, fields map[string]any) {
 	for k, v := range fields {
+		if err, ok := v.(error); ok {
+			v = err.Error()
+		}
 		// Type switch to avoid double JSON serialization of strings
-		switch val := v.(type) {
-		case error:
-			event.Str(k, val.Error())
+		switch val := redact.Field(k, v).(type) {
 		case string:
 			event.Str(k, val)
 		case int:
@@ -339,7 +359,7 @@ func appendFields(event *zerolog.Event, fields map[string]any) {
 		case bool:
 			event.Bool(k, val)
 		default:
-			event.Interface(k, v) // Fallback for struct, slice and maps
+			event.Interface(k, val) // Fallback for struct, slice and maps
 		}
 	}
 }
