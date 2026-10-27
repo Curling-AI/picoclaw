@@ -97,6 +97,11 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 		}
 	}
 	if proofErr != nil {
+		if !isHistoryProofError(proofErr) {
+			// Failure to read a source does not prove lost continuity. Return
+			// it before changing bytes, counters, witnesses or the durable fence.
+			return nil, proofErr
+		}
 		if requireReceipt {
 			return nil, errors.Join(
 				fmt.Errorf("%w: %w", ErrHistoryReceiptUnavailable, proofErr),

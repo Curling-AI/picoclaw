@@ -179,6 +179,9 @@ func (s *JSONLStore) migrateHistoryOrderWitness(key string, meta *SessionMeta) e
 	}
 	end, err := s.validateHistoryWitnessMigration(key, *meta)
 	if err != nil {
+		if !isHistoryProofError(err) {
+			return err
+		}
 		return errors.Join(ErrHistoryReceiptUnavailable, err, s.markHistoryRecoveryRequired(key, meta))
 	}
 	previous, existed, err := s.readRawJSONL(key)

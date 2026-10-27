@@ -35,6 +35,11 @@ var (
 	ErrHistoryOwnershipUnavailable = fmt.Errorf("%w: canonical ownership unavailable", ErrHistoryOrderUnavailable)
 )
 
+func isHistoryProofError(err error) bool {
+	return errors.Is(err, ErrHistoryOrderUnavailable) || errors.Is(err, ErrHistoryRecoveryRequired) ||
+		errors.Is(err, ErrHistoryCursor)
+}
+
 // HistoryOrderProof identifies a committed content event in one persistent
 // canonical stream. It is independent of file positions and transcript edits.
 // A completely zero proof means that a legacy record has no ordering evidence.
@@ -162,8 +167,7 @@ func (s *JSONLStore) prepareHistoryContentOrder(key string, meta *SessionMeta) e
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, ErrHistoryOrderUnavailable) && !errors.Is(err, ErrHistoryRecoveryRequired) &&
-		!errors.Is(err, ErrHistoryCursor) {
+	if !isHistoryProofError(err) {
 		return err
 	}
 	return s.markHistoryRecoveryRequired(key, meta)
@@ -520,7 +524,11 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 	requireLineage, unboundLegacy bool,
 ) ([]providers.Message, int64, error) {
 	ensureHistoryGeneration(&meta, key)
-	file, err := os.Open(s.jsonlPath(key))
+	openFile := s.openHistoryFile
+	if openFile == nil {
+		openFile = os.Open
+	}
+	file, err := openFile(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) && meta.Count == 0 {
 		return []providers.Message{}, 0, nil
 	}
