@@ -15,7 +15,7 @@ import (
 )
 
 func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
-	for _, operation := range []string{"append", "read"} {
+	for _, operation := range []string{"append", "read", "content"} {
 		for _, change := range []string{"revoke alias", "replace owner"} {
 			t.Run(operation+"/"+change, func(t *testing.T) {
 				store := newTestStore(t)
@@ -38,6 +38,10 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				var contentReader checkedHistoryContentReader
+				if operation == "content" {
+					contentReader = checkedContentReader(t, store)
+				}
 				var barrier string
 				for index := 0; ; index++ {
 					barrier = fmt.Sprintf("zzz_receipt_barrier_%d", index)
@@ -59,6 +63,7 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				type result struct {
 					receipt CommittedHistoryMessage
 					history []CommittedHistoryMessage
+					content []providers.Message
 					err     error
 				}
 				done := make(chan result, 1)
@@ -70,6 +75,9 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 							providers.Message{Role: "assistant", Content: "must not persist"},
 						)
 						done <- result{receipt: receipt, err: appendErr}
+					} else if operation == "content" {
+						content, readErr := contentReader.ReadHistoryContent(t.Context(), alias)
+						done <- result{content: content, err: readErr}
 					} else {
 						history, readErr := store.ReadHistoryWithReceipts(t.Context(), alias)
 						done <- result{history: history, err: readErr}
@@ -112,7 +120,7 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				if !errors.Is(actual.err, ErrHistoryOrderUnavailable) ||
 					errors.Is(actual.err, ErrHistoryOwnershipUnavailable) ||
 					actual.receipt.Order.Valid() ||
-					len(actual.history) != 0 {
+					len(actual.history) != 0 || len(actual.content) != 0 {
 					t.Fatal("stale owner resolution authorized receipt or fallback", actual)
 				}
 				after, readErr := os.ReadFile(store.jsonlPath(canonical))

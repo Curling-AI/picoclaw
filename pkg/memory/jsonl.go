@@ -658,14 +658,27 @@ func readHistoryMessages(path string, skip int, providerOnly bool) ([]providers.
 	}
 	defer f.Close()
 
+	return decodeHistoryMessages(context.Background(), f, skip, providerOnly)
+}
+
+func decodeHistoryMessages(
+	ctx context.Context,
+	file *os.File,
+	skip int,
+	providerOnly bool,
+) ([]providers.Message, error) {
+	path := file.Name()
 	var msgs []providers.Message
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(file)
 	// Allow large lines for tool results (read_file, web search, etc.).
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	scanner.Split(scanCommittedHistoryLine)
 
 	lineNum := 0
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		line := bytes.TrimRight(scanner.Bytes(), "\r\n")
 		if len(line) == 0 {
 			continue
@@ -698,6 +711,9 @@ func readHistoryMessages(path string, skip int, providerOnly bool) ([]providers.
 		}
 		msg = messageWithHistoryOrder(msg, order)
 		msgs = append(msgs, msg)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if scanner.Err() != nil {
 		return nil, fmt.Errorf("memory: scan jsonl: %w", scanner.Err())

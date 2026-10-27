@@ -75,6 +75,36 @@ A batch preserves the existing write policy: when `b` fails while `a` and `c` ar
 
 For a legacy backend without receipt support, a **nil batch** means only that legacy history was confirmed through its existing Save/checked-write gate. The same notification applies when canonical ownership lookup is unavailable before the write or a recovery-required JSONL source confirms a content-only write through that gate. It carries no committed-message claim and no order proof, and is useful only for legacy source amendment. A known ownership conflict and failed persistence emit no such notification. An uncertain receipt commit is never retried through this fallback. The old session-history observer remains compatible.
 
+## Checked content reads
+
+`session.HistoryContentReader` is an optional capability implemented by
+`JSONLBackend` and `JSONLStore`:
+
+```go
+ReadHistoryContent(ctx, key) ([]providers.Message, error)
+```
+
+It resolves the canonical session and rechecks its ownership under the same
+physical-session lock used by receipt operations. It reads the ordinary retained
+content even when order evidence is unavailable. Cancellation, unreadable
+metadata, ambiguous ownership and content I/O errors remain explicit; the adapter
+does not use the unchecked, error-suppressing `GetHistory` fallback. Unsupported
+stores return `ErrHistoryUnsupported`.
+
+The returned messages retain ordinary metadata, including `CreatedAt` and
+`Delivery.Origin`/`Delivery.At`. Only `HistoryID`, `HistoryRunID`,
+`HistoryOrderVersion`, `HistoryStreamID` and `HistorySequence` are cleared.
+Reading content does not establish a stream or counter, remove the recovery
+marker, or make unavailable receipt APIs usable. Consumers must keep that content
+separate from proof-bearing responses rather than adopting it as genuine legacy
+order.
+
+A genuinely new or authoritatively empty session may return an empty slice.
+Missing content is an I/O error when metadata expects retained bytes/messages or
+the source has a known recovery fence; a zero count reconstructed after lost
+metadata is not proof of an empty history. The existing ordinary decoder's
+committed-line, retained-window and capacity policies remain unchanged.
+
 ## Private boundaries
 
 Order metadata is persisted only in private JSONL records, session metadata and the established-stream witness. `providers.Message` carries private storage fields with `json:"-"`; `JSONLBackend.GetHistory` clears them for provider use. The legacy origin attestation belongs to the receipt wrapper and also has `json:"-"`.
