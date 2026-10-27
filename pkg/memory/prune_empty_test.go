@@ -48,6 +48,18 @@ func seedGhost(t *testing.T, store *JSONLStore, key string) {
 
 func keepAll(string) error { return nil }
 
+// staleCacheOverDisk caches an empty meta for key and then puts body on disk
+// behind the cache's back.
+func staleCacheOverDisk(t *testing.T, store *JSONLStore, key, body string) {
+	t.Helper()
+	if err := store.UpsertSessionMeta(context.Background(), key, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.metaPath(key), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPruneEmptySessions_RemovesAbandonedGhosts(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -165,6 +177,26 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 			},
 			idle: -time.Hour,
 		},
+		// The listing comes from the meta cache; these sessions look empty there
+		// and are not on disk, which the sweep reads again before removing.
+		{
+			name: "a message on disk the cache has not seen",
+			setup: func(t *testing.T, store *JSONLStore, key string) {
+				staleCacheOverDisk(t, store, key, `{"key":"agent:main:web-1","count":1}`)
+			},
+		},
+		{
+			name: "a summary on disk the cache has not seen",
+			setup: func(t *testing.T, store *JSONLStore, key string) {
+				staleCacheOverDisk(t, store, key, `{"key":"agent:main:web-1","summary":"what was said"}`)
+			},
+		},
+		{
+			name: "a meta on disk that is no longer this session's",
+			setup: func(t *testing.T, store *JSONLStore, key string) {
+				staleCacheOverDisk(t, store, key, `{"key":"agent:main:somebody-else"}`)
+			},
+		},
 		{
 			name: "a meta that cannot be read",
 			setup: func(t *testing.T, store *JSONLStore, key string) {
@@ -258,5 +290,34 @@ func TestPruneEmptySessions_KeepsTheSessionWhenTheHookFails(t *testing.T) {
 	}
 	if !fileExists(store.metaPath("agent:main:web-a")) {
 		t.Error("the session whose hook failed was removed")
+	}
+}
+
+// The caller may keep a session the store would remove, for what it holds
+// about the session itself; that is a decision, not a failure.
+func TestPruneEmptySessions_TheHookCanKeepASession(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, key := range []string{"agent:main:web-a", "agent:main:web-b"} {
+		if err := store.UpsertSessionMeta(ctx, key, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		age(t, store, key, 2*ghostIdle)
+	}
+
+	removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(key string) error {
+		if key == "agent:main:web-a" {
+			return ErrKeepSession
+		}
+		return nil
+	})
+	if err != nil {
+		t.Errorf("error = %v, want none for a kept session", err)
+	}
+	if !slices.Equal(removed, []string{"agent:main:web-b"}) {
+		t.Errorf("removed = %v, want only the session the hook let go", removed)
+	}
+	if !fileExists(store.metaPath("agent:main:web-a")) {
+		t.Error("the session the hook kept was removed")
 	}
 }

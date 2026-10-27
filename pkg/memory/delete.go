@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -51,7 +52,8 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 // whatever else is kept per session. When it fails the session stays and the
 // next pass tries again, so the hook never ends up owning data of a session
 // that is gone. A session that fails is skipped, not fatal: the others are
-// still pruned and the errors come back joined.
+// still pruned and the errors come back joined. ErrKeepSession from the hook
+// keeps the session without counting as a failure.
 func (s *JSONLStore) PruneEmptySessions(
 	minIdle time.Duration,
 	now time.Time,
@@ -69,6 +71,9 @@ func (s *JSONLStore) PruneEmptySessions(
 			continue
 		}
 		done, err := s.pruneIfEmpty(meta.Key, cutoff, beforeRemove)
+		if errors.Is(err, ErrKeepSession) {
+			continue
+		}
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -79,6 +84,11 @@ func (s *JSONLStore) PruneEmptySessions(
 	}
 	return removed, errors.Join(errs...)
 }
+
+// ErrKeepSession is what a PruneEmptySessions hook returns to keep a session
+// the store would remove. A clear leaves a session that looks like the husk of
+// a delete, and the caller may hold something of its own for that session.
+var ErrKeepSession = errors.New("memory: session kept by the caller")
 
 func isEmptyMeta(meta SessionMeta) bool {
 	return meta.Count == 0 && meta.Skip == 0 && strings.TrimSpace(meta.Summary) == ""
@@ -92,23 +102,17 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	l.Lock()
 	defer l.Unlock()
 
-	metaInfo, err := os.Stat(s.metaPath(key))
+	meta, lastWrite, err := s.readMetaFile(key)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("memory: prune empty sessions: stat meta: %w", err)
+		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
-	data, err := os.ReadFile(s.metaPath(key))
-	if err != nil {
-		return false, fmt.Errorf("memory: prune empty sessions: read meta: %w", err)
-	}
-	var meta SessionMeta
-	if json.Unmarshal(data, &meta) != nil || meta.Key != key || !isEmptyMeta(meta) {
+	if meta.Key != key || !isEmptyMeta(meta) {
 		return false, nil
 	}
 
-	lastWrite := metaInfo.ModTime()
 	transcript, err := os.Stat(s.jsonlPath(key))
 	switch {
 	case err == nil:
@@ -134,4 +138,28 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 	return true, nil
+}
+
+// readMetaFile reads a session's meta from disk, bypassing the cache, with the
+// file's modification time. A meta that does not decode reads as one with no
+// key, which belongs to no session.
+func (s *JSONLStore) readMetaFile(key string) (SessionMeta, time.Time, error) {
+	f, err := os.Open(s.metaPath(key))
+	if err != nil {
+		return SessionMeta{}, time.Time{}, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return SessionMeta{}, time.Time{}, fmt.Errorf("stat meta: %w", err)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return SessionMeta{}, time.Time{}, fmt.Errorf("read meta: %w", err)
+	}
+	var meta SessionMeta
+	if json.Unmarshal(data, &meta) != nil {
+		return SessionMeta{}, info.ModTime(), nil
+	}
+	return meta, info.ModTime(), nil
 }
