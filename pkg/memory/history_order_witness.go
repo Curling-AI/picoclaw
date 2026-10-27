@@ -88,14 +88,18 @@ func historyWitnessMatchesMeta(state historyOrderWitnessState, meta SessionMeta)
 
 // Content reads do not require writing a recovery marker. A subsequent mutation
 // must durably latch the requirement before changing data; proof APIs reject it.
-func (s *JSONLStore) applyHistoryOrderWitness(key string, meta *SessionMeta) {
+func (s *JSONLStore) applyHistoryOrderWitness(key string, meta *SessionMeta) error {
 	if meta.HistoryRecoveryRequired {
-		return
+		return nil
 	}
 	state, err := s.readHistoryOrderWitness(key, false)
-	if err != nil || !historyWitnessMatchesMeta(state, *meta) {
+	if err != nil {
+		return err
+	}
+	if !historyWitnessMatchesMeta(state, *meta) {
 		meta.HistoryRecoveryRequired = true
 	}
+	return nil
 }
 
 func (s *JSONLStore) probeHistoryOrderWitness(key string, meta *SessionMeta) error {
@@ -103,9 +107,12 @@ func (s *JSONLStore) probeHistoryOrderWitness(key string, meta *SessionMeta) err
 		return ErrHistoryReceiptUnavailable
 	}
 	state, err := s.readHistoryOrderWitness(key, true)
-	if err != nil || !historyWitnessMatchesMeta(state, *meta) {
+	if err != nil {
+		return err
+	}
+	if !historyWitnessMatchesMeta(state, *meta) {
 		meta.HistoryRecoveryRequired = true
-		return errors.Join(ErrHistoryReceiptUnavailable, err, s.markHistoryRecoveryRequired(key, meta))
+		return errors.Join(ErrHistoryReceiptUnavailable, s.markHistoryRecoveryRequired(key, meta))
 	}
 	return nil
 }

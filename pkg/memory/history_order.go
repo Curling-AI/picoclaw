@@ -329,7 +329,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	if shouldShortCircuitSessionResolve(key) && s.sessionExists(key) {
 		meta, err := s.GetSessionMeta(context.Background(), key)
 		if err != nil {
-			return "", fmt.Errorf("%w: canonical metadata: %w", ErrHistoryOwnershipUnavailable, err)
+			return "", fmt.Errorf("memory: canonical metadata: %w", err)
 		}
 		if meta.Key == key {
 			return key, nil
@@ -353,7 +353,7 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 			// Silently skipping an unreadable alias owner could mint a valid
 			// receipt in a different session. Ordinary listings may skip it;
 			// canonical order resolution must fail closed instead.
-			return "", fmt.Errorf("%w: alias ownership: %w", ErrHistoryOwnershipUnavailable, readErr)
+			return "", fmt.Errorf("memory: alias ownership: %w", readErr)
 		}
 		for _, alias := range meta.Aliases {
 			if alias != key || meta.Key == key {

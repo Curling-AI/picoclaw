@@ -213,7 +213,9 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
 			return SessionMeta{}, operationErr
 		}
-		s.applyHistoryOrderWitness(key, &meta)
+		if operationErr := s.applyHistoryOrderWitness(key, &meta); operationErr != nil {
+			return SessionMeta{}, operationErr
+		}
 		return meta, nil
 	}
 	data, err := os.ReadFile(s.metaPath(key))
@@ -222,7 +224,9 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
 			return SessionMeta{}, operationErr
 		}
-		s.applyHistoryOrderWitness(key, &meta)
+		if operationErr := s.applyHistoryOrderWitness(key, &meta); operationErr != nil {
+			return SessionMeta{}, operationErr
+		}
 		s.storeCachedMeta(sanitized, meta)
 		return meta, nil
 	}
@@ -243,7 +247,9 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	if err := s.applyHistoryRecoveryMarker(key, &meta, marked); err != nil {
 		return SessionMeta{}, err
 	}
-	s.applyHistoryOrderWitness(key, &meta)
+	if operationErr := s.applyHistoryOrderWitness(key, &meta); operationErr != nil {
+		return SessionMeta{}, operationErr
+	}
 	s.storeCachedMeta(sanitized, meta)
 	return meta, nil
 }
