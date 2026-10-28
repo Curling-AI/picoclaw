@@ -42,6 +42,23 @@ func (s *JSONLStore) HistoryContentIdentityActive(ctx context.Context, key strin
 	if err := s.checkContentJournalSettled(key); err != nil {
 		return false, err
 	}
+	meta, present, err := s.readContentActivationMetadata(key)
+	if err != nil {
+		return false, err
+	}
+	if present && meta.Key == key && len(meta.Identity) == 0 {
+		// The legacy caller already resolved this source. Its own exact-key
+		// checkpoint, without any identity/witness/journal, proves only that
+		// this physical source never opted in. Do not require an unrelated
+		// metadata directory scan to retain that existing legacy behavior.
+		// Qualified reads/activation and typed append still use the separate
+		// strict ownership preflight below; this negative probe proves no alias.
+		if _, statErr := os.Stat(s.contentDomainPath(key)); errors.Is(statErr, os.ErrNotExist) {
+			return false, ctx.Err()
+		} else if statErr != nil {
+			return false, statErr
+		}
+	}
 	return s.contentIdentityActiveLocked(ctx, key)
 }
 
@@ -72,7 +89,7 @@ func (s *JSONLStore) contentIdentityActiveLocked(ctx context.Context, key string
 			if err = ctx.Err(); err != nil {
 				return false, err
 			}
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
+			if !strings.HasSuffix(entry.Name(), ".meta.json") {
 				continue
 			}
 			physical := strings.TrimSuffix(entry.Name(), ".meta.json")

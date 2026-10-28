@@ -55,6 +55,16 @@ func readContentCompactionView(ctx context.Context, agent *AgentInstance, key st
 	if err != nil {
 		return contentCompactionView{}, err
 	}
+	pending, err := api.ReadPendingHistoryCompaction(ctx, canonical)
+	if err != nil {
+		return contentCompactionView{}, err
+	}
+	if pending.MutationID != "" {
+		// Capture cannot accept another compaction until this exact preimage
+		// is archived. Do not spend provider calls on a plan that is already
+		// known to be uncommittable. Strict commit CAS still handles races.
+		return contentCompactionView{}, memory.ErrContentLineagePending
+	}
 	frame, err := api.ReadHistoryContentFrame(ctx, canonical)
 	if err != nil {
 		return contentCompactionView{}, err

@@ -126,8 +126,8 @@ func TestContentLineageExpiredRetentionPreservesRowsAndAcceptsQualifiedRecovery(
 	if !errors.Is(err, ErrContentLineageExpired) || pending.MutationID != transition.MutationID {
 		t.Fatal("expired pending operation became silent or disappeared", pending, err)
 	}
-	if err = s.Compact(t.Context(), key); !errors.Is(err, ErrContentLineageExpired) {
-		t.Fatal("expired physical GC did not expose backpressure", err)
+	if err = s.Compact(t.Context(), key); err != nil {
+		t.Fatal("expired physical GC blocked ordinary Save", err)
 	}
 	if err = s.AddMessage(t.Context(), key, "assistant", "late durable content"); err != nil {
 		t.Fatal("expired retention blocked ordinary append", err)

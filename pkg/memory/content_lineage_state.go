@@ -174,7 +174,7 @@ func (s *JSONLStore) canonicalContentKey(ctx context.Context, key string) error 
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
+		if !strings.HasSuffix(entry.Name(), ".meta.json") {
 			continue
 		}
 		physical := strings.TrimSuffix(entry.Name(), ".meta.json")

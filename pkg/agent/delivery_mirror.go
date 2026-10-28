@@ -360,6 +360,7 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	var lost []error
 	var committed []memory.CommittedHistoryMessage
 	var content []memory.ContentEntry
+	var contentCommits []memory.ContentAppendResult
 	var ingested []providers.Message
 	written := 0
 	unproven := 0
@@ -376,6 +377,7 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 					continue
 				}
 				content = append(content, result.Entry)
+				contentCommits = append(contentCommits, result)
 				if result.Receipt != nil && result.Receipt.Order.Valid() {
 					committed = append(committed, *result.Receipt)
 				} else {
@@ -423,6 +425,13 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	}
 	// A failed member does not discard later successful writes (a,c when b
 	// fails). Deliver exact receipts before ingestion can enqueue network work.
+	if len(contentCommits) > 0 {
+		if err := al.notifySessionHistoryContentCommits(sessionKey, contentCommits); err != nil {
+			logger.WarnCF("agent", "Could not snapshot committed history for observer", map[string]any{
+				"session_key": sessionKey, "error": err.Error(),
+			})
+		}
+	}
 	if len(content) > 0 {
 		al.notifySessionHistoryContent(sessionKey, content)
 	}

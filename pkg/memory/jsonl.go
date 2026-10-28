@@ -43,27 +43,28 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
-	ContentIdentity         *contentIdentityState `json:"content_identity,omitempty"`
-	HistoryEpoch            int64                 `json:"history_epoch,omitempty"`
-	HistoryFileEpoch        int64                 `json:"history_file_epoch,omitempty"`
-	HistoryGeneration       string                `json:"history_generation,omitempty"`
-	HistoryFileGeneration   string                `json:"history_file_generation,omitempty"`
-	HistoryPrefix           int64                 `json:"history_prefix,omitempty"`
-	HistoryParentGeneration string                `json:"history_parent_generation,omitempty"`
-	HistoryRetainedUntil    int64                 `json:"history_retained_until,omitempty"`
-	HistoryMutationRunID    string                `json:"history_mutation_run_id,omitempty"`
-	HistoryDigest           string                `json:"history_digest,omitempty"`
-	HistoryTip              string                `json:"history_tip,omitempty"`
-	HistoryBytes            *int64                `json:"history_bytes,omitempty"`
-	HistoryRecoveryRequired bool                  `json:"history_recovery_required,omitempty"`
-	Key                     string                `json:"key"`
-	Summary                 string                `json:"summary"`
-	Skip                    int                   `json:"skip"`
-	Count                   int                   `json:"count"`
-	CreatedAt               time.Time             `json:"created_at"`
-	UpdatedAt               time.Time             `json:"updated_at"`
-	Scope                   json.RawMessage       `json:"scope,omitempty"`
-	Aliases                 []string              `json:"aliases,omitempty"`
+	HistoryEpoch            int64           `json:"history_epoch,omitempty"`
+	HistoryFileEpoch        int64           `json:"history_file_epoch,omitempty"`
+	HistoryGeneration       string          `json:"history_generation,omitempty"`
+	HistoryFileGeneration   string          `json:"history_file_generation,omitempty"`
+	HistoryPrefix           int64           `json:"history_prefix,omitempty"`
+	HistoryParentGeneration string          `json:"history_parent_generation,omitempty"`
+	HistoryRetainedUntil    int64           `json:"history_retained_until,omitempty"`
+	HistoryMutationRunID    string          `json:"history_mutation_run_id,omitempty"`
+	HistoryDigest           string          `json:"history_digest,omitempty"`
+	HistoryTip              string          `json:"history_tip,omitempty"`
+	HistoryBytes            *int64          `json:"history_bytes,omitempty"`
+	HistoryRecoveryRequired bool            `json:"history_recovery_required,omitempty"`
+	Key                     string          `json:"key"`
+	Summary                 string          `json:"summary"`
+	Skip                    int             `json:"skip"`
+	Count                   int             `json:"count"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+	Scope                   json.RawMessage `json:"scope,omitempty"`
+	Aliases                 []string        `json:"aliases,omitempty"`
+
+	ContentIdentity *contentIdentityState `json:"content_identity,omitempty"`
 
 	HistoryOrderVersion         uint8  `json:"history_order_version,omitempty"`
 	HistoryStreamID             string `json:"history_stream_id,omitempty"`
@@ -1020,9 +1021,10 @@ func (s *JSONLStore) Compact(
 		return operationErr
 	}
 	if meta.ContentIdentity != nil && meta.ContentIdentity.Pending != nil {
-		if time.Now().After(meta.ContentIdentity.Pending.Transition.ExpiresAt) {
-			return ErrContentLineageExpired
-		}
+		// Save uses Compact after an ordinary durable turn. A delayed archive
+		// confirmation retains the physical prefix but must not turn that
+		// already-persisted reply into a failed or empty response. Its overdue
+		// status remains observable through ReadPendingHistoryCompaction.
 		return nil
 	}
 	if meta.Skip == 0 {

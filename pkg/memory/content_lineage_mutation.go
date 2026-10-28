@@ -112,7 +112,12 @@ func (s *JSONLStore) prepareContentRewrite(key string, original SessionMeta, nex
 		next.ContentIdentity = cloneContentState(original.ContentIdentity)
 		return nil
 	}
-	if len(data) == 0 {
+	prepared := next.ContentIdentity != nil && next.ContentIdentity.DomainID == original.ContentIdentity.DomainID &&
+		next.ContentIdentity.StateToken != original.ContentIdentity.StateToken
+	// Physical GC and checked edits already prepared their identity intent.
+	// An empty physical image still belongs to that domain and retains Last.
+	// Only an explicit unqualified legacy clear retires it here.
+	if len(data) == 0 && !prepared {
 		next.ContentIdentity = &contentIdentityState{
 			Version:       ContentLineageVersion,
 			DomainID:      uuid.NewString(),
@@ -250,9 +255,16 @@ func (s *JSONLStore) AppendHistoryContent(
 	if err != nil {
 		return ContentAppendResult{}, err
 	}
-	if state := current.ContentIdentity; state != nil && !state.Unavailable && len(state.Rows) > 0 {
+	before := meta.ContentIdentity
+	if state := current.ContentIdentity; state != nil && !state.Unavailable && len(state.Rows) > 0 &&
+		before != nil && !before.Unavailable && before.DomainID == state.DomainID &&
+		validHistoryStreamID(before.StateToken) && validHistoryStreamID(state.StateToken) &&
+		before.StateToken != state.StateToken {
 		ref := state.Rows[len(state.Rows)-1].Ref
 		result.Entry.Ref = &ref
+		result.DomainID = state.DomainID
+		result.BeforeState = before.StateToken
+		result.AfterState = state.StateToken
 	}
 	// Detach all persisted nested fields from the caller before any observer
 	// can enqueue work or a later caller edit can mutate this exact result.

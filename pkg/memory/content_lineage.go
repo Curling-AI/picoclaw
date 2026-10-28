@@ -109,7 +109,8 @@ const (
 )
 
 // ContentArchiveAck is supplied only after the authenticated consumer's legacy
-// archive transaction commits the exact dropped refs and projection metadata.
+// archive transaction commits ALL dropped refs. Projections that exclude refs
+// require the separate negotiated HistoryContentArchiveCoverage capability.
 // HTTP success alone is insufficient. ArchiveCommitID identifies that durable
 // confirmation; it does not represent user viewing or producer receipt order.
 type ContentArchiveAck struct {
@@ -134,10 +135,14 @@ type ContentEditPlan struct {
 
 // ContentAppendResult retains the exact committed entry before callbacks can
 // schedule other writes. Receipt is absent when the independent order fence is
-// closed. Content identity is optional before explicit initialization.
+// closed. DomainID/BeforeState/AfterState describe only this append, not a batch
+// containing intervening commits. All three are absent with unproved identity.
 type ContentAppendResult struct {
-	Entry   ContentEntry             `json:"entry"`
-	Receipt *CommittedHistoryMessage `json:"-"`
+	Entry       ContentEntry             `json:"entry"`
+	DomainID    string                   `json:"domainId,omitempty"`
+	BeforeState string                   `json:"beforeState,omitempty"`
+	AfterState  string                   `json:"afterState,omitempty"`
+	Receipt     *CommittedHistoryMessage `json:"-"`
 }
 
 type HistoryContentAppender interface {

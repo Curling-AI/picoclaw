@@ -229,6 +229,23 @@ func (s *JSONLStore) ReadHistoryCompactionFrame(
 	if pending == nil || pending.Transition.MutationID != mutation {
 		return ContentFrame{}, ErrContentArchiveAck
 	}
+	return s.contentCompactionSnapshot(ctx, key, image, pending, side)
+}
+
+func (s *JSONLStore) contentCompactionSnapshot(
+	ctx context.Context,
+	key string,
+	image contentImage,
+	pending *contentPending,
+	side ContentTransitionSide,
+) (ContentFrame, error) {
+	state := image.Meta.ContentIdentity
+	transition := pending.Transition
+	if transition.Version != ContentLineageVersion || transition.CanonicalKey != key ||
+		transition.DomainID != state.DomainID || uuid.Validate(transition.MutationID) != nil ||
+		!validHistoryStreamID(transition.BeforeState) || !validHistoryStreamID(transition.AfterState) {
+		return ContentFrame{}, ErrContentIdentityUnavailable
+	}
 	var snapshot contentSnapshot
 	switch side {
 	case ContentBefore:
@@ -237,6 +254,10 @@ func (s *JSONLStore) ReadHistoryCompactionFrame(
 		snapshot = pending.After
 	default:
 		return ContentFrame{}, ErrContentStateChanged
+	}
+	if (side == ContentBefore && snapshot.StateToken != pending.Transition.BeforeState) ||
+		(side == ContentAfter && snapshot.StateToken != pending.Transition.AfterState) {
+		return ContentFrame{}, ErrContentIdentityUnavailable
 	}
 	byLine := make(map[int]contentRawRow, len(image.Rows))
 	for _, row := range image.Rows {
@@ -252,8 +273,12 @@ func (s *JSONLStore) ReadHistoryCompactionFrame(
 		Entries:        make([]ContentEntry, len(snapshot.Rows)),
 	}
 	for i, locator := range snapshot.Rows {
+		if err := ctx.Err(); err != nil {
+			return ContentFrame{}, err
+		}
 		row, exists := byLine[locator.Line]
-		if !exists || contentDigest(row.Raw) != locator.Digest {
+		if !exists || !locator.Ref.Valid() || locator.Ref.DomainID != state.DomainID ||
+			contentDigest(row.Raw) != locator.Digest {
 			return ContentFrame{}, ErrContentIdentityUnavailable
 		}
 		ref := locator.Ref
@@ -292,9 +317,21 @@ func (s *JSONLStore) AcknowledgeHistoryCompaction(ctx context.Context, key strin
 		!sameContentRefs(ack.Archived, transition.Dropped) {
 		return ErrContentArchiveAck
 	}
+	return s.finalizeContentArchiveAck(ctx, key, image, digest)
+}
+
+// Each ACK protocol validates its own evidence before this retention-only
+// metadata commit. A coverage exclusion never becomes a v5 archived ref.
+func (s *JSONLStore) finalizeContentArchiveAck(
+	ctx context.Context,
+	key string,
+	image contentImage,
+	digest string,
+) error {
+	state := image.Meta.ContentIdentity
 	next := copyMeta(image.Meta)
 	next.ContentIdentity.Last = &contentAcknowledged{
-		Transition: transition,
+		Transition: state.Pending.Transition,
 		PlanDigest: state.Pending.PlanDigest,
 		AckDigest:  digest,
 	}

@@ -196,6 +196,19 @@ func (b *JSONLBackend) Save(key string) error {
 	return b.store.Compact(context.Background(), key)
 }
 
+// DeleteSession is explicit owner intent, unlike a legacy history replacement
+// or automatic pruning. Gateways can discover this optional SessionStore method
+// and propagate its error instead of clearing only part of the conversation.
+func (b *JSONLBackend) DeleteSession(key string) error {
+	store, ok := b.store.(interface {
+		DeleteSession(ctx context.Context, key string) error
+	})
+	if !ok {
+		return memory.ErrHistoryUnsupported
+	}
+	return store.DeleteSession(context.Background(), b.resolveSessionKey(key))
+}
+
 // Close releases resources held by the underlying store.
 func (b *JSONLBackend) Close() error {
 	return b.store.Close()
