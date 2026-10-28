@@ -7,8 +7,8 @@ import (
 )
 
 type publicHistoryStore interface {
-	ReadPublicHistory(context.Context, string) (memory.PublicHistory, error)
-	ImportPublicHistory(context.Context, memory.PublicHistoryImport) (memory.PublicHistory, error)
+	ReadPublicHistory(ctx context.Context, key string) (memory.PublicHistory, error)
+	ImportPublicHistory(ctx context.Context, request memory.PublicHistoryImport) (memory.PublicHistory, error)
 }
 
 func (b *JSONLBackend) ReadPublicHistory(ctx context.Context, key string) (memory.PublicHistory, error) {
@@ -19,7 +19,10 @@ func (b *JSONLBackend) ReadPublicHistory(ctx context.Context, key string) (memor
 	return store.ReadPublicHistory(ctx, key)
 }
 
-func (b *JSONLBackend) ImportPublicHistory(ctx context.Context, request memory.PublicHistoryImport) (memory.PublicHistory, error) {
+func (b *JSONLBackend) ImportPublicHistory(
+	ctx context.Context,
+	request memory.PublicHistoryImport,
+) (memory.PublicHistory, error) {
 	store, ok := b.store.(publicHistoryStore)
 	if !ok {
 		return memory.PublicHistory{}, memory.ErrHistoryUnsupported
@@ -29,7 +32,7 @@ func (b *JSONLBackend) ImportPublicHistory(ctx context.Context, request memory.P
 
 func (b *JSONLBackend) RecordPublicMedia(ctx context.Context, key, runID, content string) error {
 	store, ok := b.store.(interface {
-		RecordPublicMedia(context.Context, string, string, string) error
+		RecordPublicMedia(ctx context.Context, key, runID, content string) error
 	})
 	if !ok {
 		return memory.ErrHistoryUnsupported
@@ -39,10 +42,31 @@ func (b *JSONLBackend) RecordPublicMedia(ctx context.Context, key, runID, conten
 
 func (b *JSONLBackend) DeleteSession(key string) error {
 	store, ok := b.store.(interface {
-		DeleteSession(context.Context, string) error
+		DeleteSession(ctx context.Context, key string) error
 	})
 	if !ok {
 		return memory.ErrHistoryUnsupported
 	}
 	return store.DeleteSession(context.Background(), key)
+}
+
+func (b *JSONLBackend) PreparePublicHistory(
+	ctx context.Context,
+	key, cursor string,
+) (memory.PublicHistoryPreparationResult, error) {
+	store, ok := b.store.(interface {
+		PreparePublicHistory(ctx context.Context, key, cursor string) (memory.PublicHistoryPreparationResult, error)
+	})
+	if !ok {
+		return memory.PublicHistoryPreparationResult{}, memory.ErrHistoryUnsupported
+	}
+	return store.PreparePublicHistory(ctx, key, cursor)
+}
+
+func (b *JSONLBackend) SetPublicHistoryProjector(projector memory.PublicHistoryProjector) {
+	if store, ok := b.store.(interface {
+		SetPublicHistoryProjector(projector memory.PublicHistoryProjector)
+	}); ok {
+		store.SetPublicHistoryProjector(projector)
+	}
 }

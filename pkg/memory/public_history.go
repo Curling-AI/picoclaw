@@ -65,24 +65,34 @@ func publicHistoryMessage(message providers.Message) (providers.Message, bool) {
 		return providers.Message{}, false
 	}
 	raw := strings.TrimSpace(message.Content)
-	if !strings.HasPrefix(raw, "[SENDER") && (strings.HasPrefix(raw, "[System]") || strings.HasPrefix(raw, "[SYSTEM]") || strings.HasPrefix(raw, "[System: ")) {
+	if !strings.HasPrefix(raw, "[SENDER") &&
+		(strings.HasPrefix(raw, "[System]") || strings.HasPrefix(raw, "[SYSTEM]") || strings.HasPrefix(raw, "[System: ")) {
 		return providers.Message{}, false
 	}
 	return providers.Message{
 		Role: message.Role, Content: message.Content, ModelName: message.ModelName,
 		CreatedAt: message.CreatedAt, Media: message.Media, Attachments: message.Attachments,
-		ToolCalls: message.ToolCalls, ToolCallID: message.ToolCallID, Delivery: message.Delivery,
+		ToolCalls: publicToolCalls(message.ToolCalls), ToolCallID: message.ToolCallID, Delivery: message.Delivery,
 	}, true
 }
 
 func publicHistoryEntries(messages []providers.Message, meta SessionMeta) []PublicHistoryEntry {
 	entries := make([]PublicHistoryEntry, 0, len(messages))
 	for _, message := range messages {
-		public, ok := publicHistoryMessage(message)
+		input := message
+		if message.HistoryPublicMessage != nil {
+			input = *message.HistoryPublicMessage
+		}
+		public, ok := publicHistoryMessage(input)
 		if !ok {
 			continue
 		}
-		entry := PublicHistoryEntry{ID: message.HistoryID, RunID: message.HistoryRunID, Message: public, Order: messageHistoryOrder(message)}
+		entry := PublicHistoryEntry{
+			ID:      message.HistoryID,
+			RunID:   message.HistoryRunID,
+			Message: public,
+			Order:   messageHistoryOrder(message),
+		}
 		if entry.Order == (HistoryOrderProof{}) && meta.HistoryOrderVersion == HistoryOrderVersion {
 			entry.LegacyBeforeStreamID = meta.HistoryStreamID
 		}
@@ -92,12 +102,12 @@ func publicHistoryEntries(messages []providers.Message, meta SessionMeta) []Publ
 }
 
 func (s *JSONLStore) readPublicEntries(key string, meta SessionMeta) ([]PublicHistoryEntry, error) {
-	if meta.PublicHistoryVersion != PublicHistoryVersion {
+	if meta.PublicHistoryVersion != PublicHistoryVersion || meta.PublicHistoryPreparation != nil {
 		return nil, ErrPublicHistoryCoverage
 	}
-	data, err := os.ReadFile(s.publicHistoryPath(key))
-	if err != nil {
-		return nil, err
+	data, dataErr := os.ReadFile(s.publicHistoryPath(key))
+	if dataErr != nil {
+		return nil, dataErr
 	}
 	if int64(len(data)) != meta.PublicHistoryBytes {
 		return nil, ErrPublicHistoryCoverage
@@ -122,39 +132,48 @@ func (s *JSONLStore) readPublicEntries(key string, meta SessionMeta) ([]PublicHi
 }
 
 func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicHistory {
-	return PublicHistory{Version: PublicHistoryVersion, Generation: meta.PublicHistoryGeneration, Revision: meta.PublicHistoryRevision, Complete: meta.PublicHistoryComplete, Entries: entries}
+	return PublicHistory{
+		Version:    PublicHistoryVersion,
+		Generation: meta.PublicHistoryGeneration,
+		Revision:   meta.PublicHistoryRevision,
+		Complete:   meta.PublicHistoryComplete,
+		Entries:    entries,
+	}
 }
 
 func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicHistory, error) {
-	canonical, err := s.canonicalHistoryOrderKey(key)
-	if err != nil {
-		return PublicHistory{}, err
+	canonical, canonicalErr := s.canonicalHistoryOrderKey(key)
+	if canonicalErr != nil {
+		return PublicHistory{}, canonicalErr
 	}
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := ctx.Err(); err != nil {
-		return PublicHistory{}, err
+	if operationErr := ctx.Err(); operationErr != nil {
+		return PublicHistory{}, operationErr
 	}
-	meta, err := s.readMeta(canonical)
-	if err != nil {
-		return PublicHistory{}, err
+	if _, operationErr1 := os.Stat(s.metaPath(canonical)); operationErr1 != nil {
+		return PublicHistory{}, operationErr1
 	}
-	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
-		return PublicHistory{}, err
+	meta, canonicalErr := s.readMeta(canonical)
+	if canonicalErr != nil {
+		return PublicHistory{}, canonicalErr
 	}
-	if err := s.probeHistoryRecoveryMarker(canonical, &meta); err != nil {
-		return PublicHistory{}, err
+	if operationErr2 := validateCanonicalHistoryKey(key, canonical, meta); operationErr2 != nil {
+		return PublicHistory{}, operationErr2
+	}
+	if operationErr3 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr3 != nil {
+		return PublicHistory{}, operationErr3
 	}
 	if meta.HistoryRecoveryRequired {
 		return PublicHistory{}, ErrHistoryRecoveryRequired
 	}
-	if err := s.probeHistoryOrderWitness(canonical, &meta); err != nil {
-		return PublicHistory{}, err
+	if operationErr4 := s.probeHistoryOrderWitness(canonical, &meta); operationErr4 != nil {
+		return PublicHistory{}, operationErr4
 	}
-	entries, err := s.readPublicEntries(canonical, meta)
-	if err != nil {
-		return PublicHistory{}, err
+	entries, canonicalErr := s.readPublicEntries(canonical, meta)
+	if canonicalErr != nil {
+		return PublicHistory{}, canonicalErr
 	}
 	return publicHistoryResult(meta, entries), nil
 }
@@ -162,9 +181,9 @@ func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicH
 func encodePublicEntries(entries []PublicHistoryEntry) ([]byte, error) {
 	var data []byte
 	for _, entry := range entries {
-		line, err := json.Marshal(entry)
-		if err != nil {
-			return nil, err
+		line, lineErr := json.Marshal(entry)
+		if lineErr != nil {
+			return nil, lineErr
 		}
 		data = append(data, line...)
 		data = append(data, '\n')
@@ -174,7 +193,10 @@ func encodePublicEntries(entries []PublicHistoryEntry) ([]byte, error) {
 
 func validPublicEntry(entry PublicHistoryEntry) bool {
 	public, ok := publicHistoryMessage(entry.Message)
-	if !ok || uuid.Validate(entry.ID) != nil || entry.ImportID == "" || len(entry.ImportID) > 256 {
+	if !ok || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
+		(entry.AnchorID != "" && uuid.Validate(entry.AnchorID) != nil) ||
+		entry.ImportID == "" ||
+		len(entry.ImportID) > 256 {
 		return false
 	}
 	if entry.Order != (HistoryOrderProof{}) && !entry.Order.Valid() {
@@ -188,15 +210,16 @@ func validPublicEntry(entry PublicHistoryEntry) bool {
 }
 
 func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHistoryImport) (PublicHistory, error) {
-	payload, err := json.Marshal(request)
-	if err != nil {
-		return PublicHistory{}, err
+	payload, payloadErr := json.Marshal(request)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
 	}
-	if len(request.Entries) == 0 || len(request.Entries) > PublicHistoryImportMessages || len(payload) > PublicHistoryOperationBytes {
+	if len(request.Entries) == 0 || len(request.Entries) > PublicHistoryImportMessages ||
+		len(payload) > PublicHistoryOperationBytes {
 		return PublicHistory{}, ErrHistoryCapacity
 	}
 	for _, entry := range request.Entries {
-		data, _ := json.Marshal(entry)
+		data, _ := json.Marshal(entry.Message)
 		if len(data) > PublicHistoryMessageBytes {
 			return PublicHistory{}, ErrHistoryCapacity
 		}
@@ -204,55 +227,67 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 			return PublicHistory{}, ErrPublicHistoryCoverage
 		}
 	}
-	canonical, err := s.canonicalHistoryOrderKey(request.Key)
-	if err != nil {
-		return PublicHistory{}, err
+	canonical, payloadErr := s.canonicalHistoryOrderKey(request.Key)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
 	}
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := ctx.Err(); err != nil {
-		return PublicHistory{}, err
+	if operationErr5 := ctx.Err(); operationErr5 != nil {
+		return PublicHistory{}, operationErr5
 	}
-	meta, err := s.readMeta(canonical)
-	if err != nil {
-		return PublicHistory{}, err
+	if _, operationErr6 := os.Stat(s.metaPath(canonical)); operationErr6 != nil {
+		return PublicHistory{}, operationErr6
 	}
-	if err := validateCanonicalHistoryKey(request.Key, canonical, meta); err != nil {
-		return PublicHistory{}, err
+	meta, payloadErr := s.readMeta(canonical)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
 	}
-	if err := s.probeHistoryRecoveryMarker(canonical, &meta); err != nil {
-		return PublicHistory{}, err
+	if operationErr7 := validateCanonicalHistoryKey(request.Key, canonical, meta); operationErr7 != nil {
+		return PublicHistory{}, operationErr7
+	}
+	if operationErr8 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr8 != nil {
+		return PublicHistory{}, operationErr8
 	}
 	if meta.HistoryRecoveryRequired {
 		return PublicHistory{}, ErrHistoryRecoveryRequired
 	}
-	entries, err := s.readPublicEntries(canonical, meta)
-	if err != nil {
-		return PublicHistory{}, err
+	if operationErr9 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr9 != nil {
+		return PublicHistory{}, operationErr9
 	}
-	next, changed, err := mergePublicImport(entries, request, meta)
-	if err != nil {
-		return PublicHistory{}, err
+	if operationErr10 := s.probeHistoryOrderWitness(canonical, &meta); operationErr10 != nil {
+		return PublicHistory{}, operationErr10
+	}
+	if meta.HistoryRecoveryRequired {
+		return PublicHistory{}, ErrHistoryRecoveryRequired
+	}
+	entries, payloadErr := s.readPublicEntries(canonical, meta)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
+	}
+	next, changed, payloadErr := mergePublicImport(entries, request, meta)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
 	}
 	if !changed {
 		return publicHistoryResult(meta, entries), nil
 	}
-	next, err = s.orderPublicImports(canonical, entries, next, &meta)
-	if err != nil {
-		return PublicHistory{}, err
+	next, payloadErr = s.orderPublicImports(canonical, entries, next, &meta)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
 	}
 	// Insertion into an already published range is structural. A cursor from
 	// before that import must not discover new content inside its frozen range.
 	if request.BeforeID != "" || len(entries) == 0 || request.AfterID != entries[len(entries)-1].ID {
 		meta.PublicHistoryGeneration = newHistoryID()
 	}
-	change, err := s.replacePublicEntries(canonical, next, &meta)
-	if err != nil {
-		return PublicHistory{}, err
+	change, payloadErr := s.replacePublicEntries(canonical, next, &meta)
+	if payloadErr != nil {
+		return PublicHistory{}, payloadErr
 	}
-	if err := s.commitPublicChange(canonical, meta, change); err != nil {
-		return PublicHistory{}, err
+	if operationErr11 := s.commitPublicChange(canonical, meta, change); operationErr11 != nil {
+		return PublicHistory{}, operationErr11
 	}
 	return publicHistoryResult(meta, next), nil
 }
@@ -269,16 +304,20 @@ func appendPublicDigest(previous string, line []byte) string {
 func publicEntriesDigest(previous string, entries []PublicHistoryEntry) (string, error) {
 	digest := previous
 	for _, entry := range entries {
-		line, err := json.Marshal(entry)
-		if err != nil {
-			return "", err
+		line, lineErr12 := json.Marshal(entry)
+		if lineErr12 != nil {
+			return "", lineErr12
 		}
 		digest = appendPublicDigest(digest, line)
 	}
 	return digest, nil
 }
 
-func (s *JSONLStore) orderPublicImports(key string, previous, next []PublicHistoryEntry, meta *SessionMeta) ([]PublicHistoryEntry, error) {
+func (s *JSONLStore) orderPublicImports(
+	key string,
+	previous, next []PublicHistoryEntry,
+	meta *SessionMeta,
+) ([]PublicHistoryEntry, error) {
 	existing := make(map[string]bool, len(previous))
 	for _, entry := range previous {
 		existing[entry.ID] = true
@@ -294,12 +333,27 @@ func (s *JSONLStore) orderPublicImports(key string, previous, next []PublicHisto
 		input := entry.Message
 		input.HistoryID = entry.ID
 		input.HistoryRunID = entry.RunID
-		message, err := s.allocateHistoryOrder(key, input, meta)
-		if err != nil {
-			return nil, err
+		message, messageErr := s.allocateHistoryOrder(key, input, meta)
+		if messageErr != nil {
+			return nil, messageErr
 		}
 		entry.Order = messageHistoryOrder(message)
 		ordered[index] = entry
 	}
 	return ordered, nil
+}
+
+func publicToolCalls(calls []providers.ToolCall) []providers.ToolCall {
+	if calls == nil {
+		return nil
+	}
+	result := make([]providers.ToolCall, len(calls))
+	for index, call := range calls {
+		safe := providers.ToolCall{ID: call.ID, Type: call.Type, Name: call.Name, Arguments: call.Arguments}
+		if call.Function != nil {
+			safe.Function = &providers.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}
+		}
+		result[index] = safe
+	}
+	return result
 }

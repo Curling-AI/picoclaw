@@ -151,6 +151,7 @@ func (s *JSONLStore) applyHistoryRecoveryMarker(key string, meta *SessionMeta, m
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
+	PublicOnly bool `json:"publicOnly,omitempty"`
 	Public *publicHistoryRecovery `json:"public,omitempty"`
 	Meta              SessionMeta          `json:"meta"`
 	Next              SessionMeta          `json:"next"`
@@ -327,7 +328,7 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		filepath.Base(s.historyRecoveryPath(recovery.Meta.Key)) != filepath.Base(s.historyRecoveryPath(key)) {
 		return historyWriteUnknown, errors.New("invalid history recovery key")
 	}
-	if recovery.Next.HistoryBytes == nil || *recovery.Next.HistoryBytes < 0 ||
+	if (!recovery.PublicOnly && recovery.Next.HistoryBytes == nil) || (recovery.Next.HistoryBytes != nil && *recovery.Next.HistoryBytes < 0) ||
 		(recovery.NextSummaryDigest != "" && !validHistoryDigest(recovery.NextSummaryDigest)) ||
 		recovery.Next.HistoryFileGeneration == "" || recovery.Next.Count < 0 ||
 		recovery.Next.Skip < 0 || recovery.Next.Skip > recovery.Next.Count ||
@@ -398,7 +399,9 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		if operationErr := s.recoverContentStorageOld(recovery.Storage); operationErr != nil {
 			return decision, operationErr
 		}
-		if recovery.AppendOffset != nil {
+		if recovery.PublicOnly {
+			err = nil
+		} else if recovery.AppendOffset != nil {
 			err = s.rollbackHistoryAppend(key, *recovery.AppendOffset)
 		} else {
 			err = s.restoreRawJSONL(key, recovery.Data, recovery.Existed)
@@ -469,7 +472,7 @@ func historyNewCheckpointMatches(current, next SessionMeta) bool {
 }
 
 func historyCheckpointMatches(current, expected SessionMeta) bool {
-	return contentCheckpointMatches(current, expected) && current.PublicHistoryDigest == expected.PublicHistoryDigest && current.PublicHistoryVersion == expected.PublicHistoryVersion &&
+	return contentCheckpointMatches(current, expected) && samePublicPreparation(current.PublicHistoryPreparation, expected.PublicHistoryPreparation) && current.PublicHistoryDigest == expected.PublicHistoryDigest && current.PublicHistoryVersion == expected.PublicHistoryVersion &&
 		current.PublicHistoryGeneration == expected.PublicHistoryGeneration && current.PublicHistoryRevision == expected.PublicHistoryRevision &&
 		current.PublicHistoryBytes == expected.PublicHistoryBytes && current.PublicHistoryCount == expected.PublicHistoryCount &&
 		current.PublicHistoryComplete == expected.PublicHistoryComplete && current.HistoryGeneration == expected.HistoryGeneration &&

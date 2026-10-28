@@ -21,32 +21,51 @@ type publicHistoryChange struct {
 	Recovery *publicHistoryRecovery
 }
 
-func (s *JSONLStore) preparePublicAppend(key string, original SessionMeta, next *SessionMeta, messages []providers.Message) (publicHistoryChange, error) {
-	if next.HistoryRecoveryRequired {
+func (s *JSONLStore) preparePublicAppend(
+	key string,
+	original SessionMeta,
+	next *SessionMeta,
+	messages []providers.Message,
+	sourceOffset int64,
+) (publicHistoryChange, error) {
+	if next.HistoryRecoveryRequired || original.PublicHistoryPreparation != nil || original.PublicHistoryVersion < 0 ||
+		next.PublicHistoryVersion < 0 {
 		return publicHistoryChange{}, nil
 	}
 	newEntries := publicHistoryEntries(messages, *next)
 	if original.PublicHistoryVersion == 0 {
-		old, err := s.readCommittedHistory(key, original, 0)
-		if err != nil {
-			return publicHistoryChange{}, err
+		if _, statErr := os.Stat(s.publicHistoryPath(key)); statErr == nil {
+			next.PublicHistoryVersion = -1
+			return publicHistoryChange{}, nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return publicHistoryChange{}, statErr
 		}
-		oldEntries := publicHistoryEntries(old, original)
-		next.PublicHistoryComplete = original.HistoryPrefix == 0
+		next.PublicHistoryComplete = original.HistoryPrefix == 0 && original.Count == 0
 		next.PublicHistoryVersion = PublicHistoryVersion
 		next.PublicHistoryGeneration = newHistoryID()
-		return s.replacePublicEntries(key, append(oldEntries, newEntries...), next)
+		if original.Count > 0 {
+			ensureHistoryGeneration(&original, key)
+			next.PublicHistoryPreparation = &PublicHistoryPreparation{
+				FileGeneration: original.HistoryFileGeneration,
+				Generation:     original.HistoryGeneration,
+				Ceiling:        sourceOffset,
+				Count:          int64(original.Count),
+				Prefix:         original.HistoryPrefix,
+			}
+			return s.replacePublicEntries(key, nil, next)
+		}
+		return s.replacePublicEntries(key, newEntries, next)
 	}
 	if original.PublicHistoryVersion != PublicHistoryVersion {
 		return publicHistoryChange{}, ErrPublicHistoryCoverage
 	}
-	data, err := encodePublicEntries(newEntries)
-	if err != nil {
-		return publicHistoryChange{}, err
+	data, dataErr := encodePublicEntries(newEntries)
+	if dataErr != nil {
+		return publicHistoryChange{}, dataErr
 	}
-	next.PublicHistoryDigest, err = publicEntriesDigest(original.PublicHistoryDigest, newEntries)
-	if err != nil {
-		return publicHistoryChange{}, err
+	next.PublicHistoryDigest, dataErr = publicEntriesDigest(original.PublicHistoryDigest, newEntries)
+	if dataErr != nil {
+		return publicHistoryChange{}, dataErr
 	}
 	offset := original.PublicHistoryBytes
 	next.PublicHistoryBytes = offset + int64(len(data))
@@ -55,31 +74,54 @@ func (s *JSONLStore) preparePublicAppend(key string, original SessionMeta, next 
 	return publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true}}, nil
 }
 
-func (s *JSONLStore) preparePublicRewrite(key string, original SessionMeta, next *SessionMeta, messages []providers.Message) (publicHistoryChange, error) {
-	if next.HistoryRecoveryRequired {
+func (s *JSONLStore) preparePublicRewrite(
+	key string,
+	original SessionMeta,
+	next *SessionMeta,
+	messages []providers.Message,
+) (publicHistoryChange, error) {
+	if next.HistoryRecoveryRequired || original.PublicHistoryPreparation != nil || original.PublicHistoryVersion < 0 ||
+		next.PublicHistoryVersion < 0 {
 		return publicHistoryChange{}, nil
 	}
 	var entries []PublicHistoryEntry
 	if original.PublicHistoryVersion == 0 {
-		old, err := s.readCommittedHistory(key, original, 0)
-		if err != nil {
-			return publicHistoryChange{}, err
+		if _, statErr := os.Stat(s.publicHistoryPath(key)); statErr == nil {
+			next.PublicHistoryVersion = -1
+			return publicHistoryChange{}, nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return publicHistoryChange{}, statErr
+		}
+		old, oldErr := s.readCommittedHistory(key, original, 0)
+		if oldErr != nil {
+			return publicHistoryChange{}, oldErr
+		}
+		for index, message := range old {
+			projected, projectionErr := s.projectLegacyPublic(message)
+			hasProjection := projectionErr == nil
+			if !hasProjection {
+				next.PublicHistoryVersion = -1
+				return publicHistoryChange{}, nil
+			}
+			projected.HistoryID, projected.HistoryRunID = message.HistoryID, message.HistoryRunID
+			projected = messageWithHistoryOrder(projected, messageHistoryOrder(message))
+			old[index] = projected
 		}
 		entries = publicHistoryEntries(old, original)
 		next.PublicHistoryComplete = original.HistoryPrefix == 0
 		next.PublicHistoryVersion = PublicHistoryVersion
 		next.PublicHistoryGeneration = newHistoryID()
 	} else {
-		var err error
-		entries, err = s.readPublicEntries(key, original)
-		if err != nil {
-			return publicHistoryChange{}, err
+		var operationErr error
+		entries, operationErr = s.readPublicEntries(key, original)
+		if operationErr != nil {
+			return publicHistoryChange{}, operationErr
 		}
 	}
 	if next.HistoryGeneration != original.HistoryGeneration {
-		active, err := s.readCommittedHistory(key, original, original.Skip)
-		if err != nil {
-			return publicHistoryChange{}, err
+		active, activeErr := s.readCommittedHistory(key, original, original.Skip)
+		if activeErr != nil {
+			return publicHistoryChange{}, activeErr
 		}
 		activePublic := publicHistoryEntries(active, original)
 		boundary := len(entries)
@@ -103,19 +145,23 @@ func (s *JSONLStore) preparePublicRewrite(key string, original SessionMeta, next
 	return s.replacePublicEntries(key, entries, next)
 }
 
-func (s *JSONLStore) replacePublicEntries(key string, entries []PublicHistoryEntry, next *SessionMeta) (publicHistoryChange, error) {
-	data, err := encodePublicEntries(entries)
-	if err != nil {
-		return publicHistoryChange{}, err
+func (s *JSONLStore) replacePublicEntries(
+	key string,
+	entries []PublicHistoryEntry,
+	next *SessionMeta,
+) (publicHistoryChange, error) {
+	data, dataErr1 := encodePublicEntries(entries)
+	if dataErr1 != nil {
+		return publicHistoryChange{}, dataErr1
 	}
-	old, err := os.ReadFile(s.publicHistoryPath(key))
-	existed := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return publicHistoryChange{}, err
+	old, dataErr1 := os.ReadFile(s.publicHistoryPath(key))
+	existed := dataErr1 == nil
+	if dataErr1 != nil && !errors.Is(dataErr1, os.ErrNotExist) {
+		return publicHistoryChange{}, dataErr1
 	}
-	next.PublicHistoryDigest, err = publicEntriesDigest(emptyHistoryDigest, entries)
-	if err != nil {
-		return publicHistoryChange{}, err
+	next.PublicHistoryDigest, dataErr1 = publicEntriesDigest(emptyHistoryDigest, entries)
+	if dataErr1 != nil {
+		return publicHistoryChange{}, dataErr1
 	}
 	next.PublicHistoryBytes = int64(len(data))
 	next.PublicHistoryCount = int64(len(entries))
@@ -131,26 +177,26 @@ func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) e
 	if change.Recovery.Offset == nil {
 		return s.writeSessionFile(path, change.Data, 0o600)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
+	file, fileErr := os.OpenFile(path, os.O_WRONLY, 0o600)
+	if fileErr != nil {
+		return fileErr
 	}
 	defer file.Close()
-	if err := file.Truncate(*change.Recovery.Offset); err != nil {
-		return err
+	if operationErr2 := file.Truncate(*change.Recovery.Offset); operationErr2 != nil {
+		return operationErr2
 	}
-	if _, err := file.Seek(*change.Recovery.Offset, io.SeekStart); err != nil {
-		return err
+	if _, operationErr3 := file.Seek(*change.Recovery.Offset, io.SeekStart); operationErr3 != nil {
+		return operationErr3
 	}
-	n, err := file.Write(change.Data)
-	if err != nil {
-		return err
+	n, fileErr := file.Write(change.Data)
+	if fileErr != nil {
+		return fileErr
 	}
 	if n != len(change.Data) {
 		return io.ErrShortWrite
 	}
-	if err := file.Sync(); err != nil {
-		return err
+	if operationErr4 := file.Sync(); operationErr4 != nil {
+		return operationErr4
 	}
 	return file.Close()
 }
@@ -161,54 +207,53 @@ func (s *JSONLStore) restorePublicHistory(key string, recovery *publicHistoryRec
 	}
 	path := s.publicHistoryPath(key)
 	if recovery.Offset != nil {
-		file, err := os.OpenFile(path, os.O_WRONLY, 0o600)
-		if err != nil {
-			return err
+		file, fileErr5 := os.OpenFile(path, os.O_WRONLY, 0o600)
+		if fileErr5 != nil {
+			return fileErr5
 		}
 		defer file.Close()
-		if err := file.Truncate(*recovery.Offset); err != nil {
-			return err
+		if operationErr6 := file.Truncate(*recovery.Offset); operationErr6 != nil {
+			return operationErr6
 		}
-		if err := file.Sync(); err != nil {
-			return err
+		if operationErr7 := file.Sync(); operationErr7 != nil {
+			return operationErr7
 		}
 		return file.Close()
 	}
 	if !recovery.Existed {
-		err := os.Remove(path)
-		if errors.Is(err, os.ErrNotExist) {
+		operationErr8 := os.Remove(path)
+		if errors.Is(operationErr8, os.ErrNotExist) {
 			return nil
 		}
-		return err
+		return operationErr8
 	}
 	return s.writeSessionFile(path, recovery.Data, 0o600)
 }
 
 func (s *JSONLStore) commitPublicChange(key string, next SessionMeta, change publicHistoryChange) error {
-	old, err := s.readMeta(key)
-	if err != nil {
-		return err
+	old, oldErr9 := s.readMeta(key)
+	if oldErr9 != nil {
+		return oldErr9
 	}
-	if old.HistoryBytes == nil {
-		return ErrPublicHistoryCoverage
+	if operationErr10 := s.beginHistoryWrite(
+		key,
+		historyWriteRecovery{Meta: old, Next: next, PublicOnly: true, Public: change.Recovery},
+	); operationErr10 != nil {
+		return operationErr10
 	}
-	offset := *old.HistoryBytes
-	if err := s.beginHistoryWrite(key, historyWriteRecovery{Meta: old, Next: next, AppendOffset: &offset, Public: change.Recovery}); err != nil {
-		return err
+	oldErr9 = s.writePublicChange(key, change)
+	if oldErr9 == nil {
+		oldErr9 = s.writeMeta(key, next)
 	}
-	err = s.writePublicChange(key, change)
-	if err == nil {
-		err = s.writeMeta(key, next)
+	if oldErr9 == nil {
+		oldErr9 = s.finishHistoryWrite(key)
 	}
-	if err == nil {
-		err = s.finishHistoryWrite(key)
-	}
-	if err != nil {
+	if oldErr9 != nil {
 		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, next)
 		if committed {
 			return nil
 		}
-		return errors.Join(err, recoveryErr)
+		return errors.Join(oldErr9, recoveryErr)
 	}
 	return nil
 }
@@ -222,7 +267,11 @@ func samePublicEntry(a, b PublicHistoryEntry) bool {
 	return bytes.Equal(left, right)
 }
 
-func mergePublicImport(existing []PublicHistoryEntry, request PublicHistoryImport, meta SessionMeta) ([]PublicHistoryEntry, bool, error) {
+func mergePublicImport(
+	existing []PublicHistoryEntry,
+	request PublicHistoryImport,
+	meta SessionMeta,
+) ([]PublicHistoryEntry, bool, error) {
 	byID := make(map[string]PublicHistoryEntry, len(existing))
 	byImport := make(map[string]PublicHistoryEntry, len(existing))
 	for _, entry := range existing {
@@ -257,6 +306,9 @@ func mergePublicImport(existing []PublicHistoryEntry, request PublicHistoryImpor
 	}
 	if request.Generation != meta.PublicHistoryGeneration || request.Revision != meta.PublicHistoryRevision {
 		return nil, false, ErrPublicHistoryCoverage
+	}
+	if len(existing) == 0 && meta.PublicHistoryComplete && request.BeforeID == "" && request.AfterID == "" {
+		return pending, true, nil
 	}
 	if (request.BeforeID == "") == (request.AfterID == "") {
 		return nil, false, ErrPublicHistoryCoverage

@@ -146,7 +146,7 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 			ordered[index] = messageWithHistoryOrder(message, HistoryOrderProof{})
 		}
 	}
-	messages = ordered
+	messages = s.projectPublicCommits(ordered, &meta)
 	if meta.HistoryRecoveryRequired {
 		if operationErr := s.markHistoryRecoveryRequired(key, &meta); operationErr != nil {
 			return nil, operationErr
@@ -191,7 +191,7 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 			meta.HistoryTip = message.HistoryID
 		}
 	}
-	publicChange, publicErr := s.preparePublicAppend(key, original, &meta, messages)
+	publicChange, publicErr := s.preparePublicAppend(key, original, &meta, messages, offset)
 	if publicErr != nil {
 		return nil, publicErr
 	}

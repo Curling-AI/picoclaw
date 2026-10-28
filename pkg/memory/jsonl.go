@@ -43,33 +43,34 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
-	PublicHistoryVersion    int             `json:"public_history_version,omitempty"`
-	PublicHistoryGeneration string          `json:"public_history_generation,omitempty"`
-	PublicHistoryRevision   uint64          `json:"public_history_revision,omitempty"`
-	PublicHistoryBytes      int64           `json:"public_history_bytes,omitempty"`
-	PublicHistoryCount      int64           `json:"public_history_count,omitempty"`
-	PublicHistoryDigest     string          `json:"public_history_digest,omitempty"`
-	PublicHistoryComplete   bool            `json:"public_history_complete,omitempty"`
-	HistoryEpoch            int64           `json:"history_epoch,omitempty"`
-	HistoryFileEpoch        int64           `json:"history_file_epoch,omitempty"`
-	HistoryGeneration       string          `json:"history_generation,omitempty"`
-	HistoryFileGeneration   string          `json:"history_file_generation,omitempty"`
-	HistoryPrefix           int64           `json:"history_prefix,omitempty"`
-	HistoryParentGeneration string          `json:"history_parent_generation,omitempty"`
-	HistoryRetainedUntil    int64           `json:"history_retained_until,omitempty"`
-	HistoryMutationRunID    string          `json:"history_mutation_run_id,omitempty"`
-	HistoryDigest           string          `json:"history_digest,omitempty"`
-	HistoryTip              string          `json:"history_tip,omitempty"`
-	HistoryBytes            *int64          `json:"history_bytes,omitempty"`
-	HistoryRecoveryRequired bool            `json:"history_recovery_required,omitempty"`
-	Key                     string          `json:"key"`
-	Summary                 string          `json:"summary"`
-	Skip                    int             `json:"skip"`
-	Count                   int             `json:"count"`
-	CreatedAt               time.Time       `json:"created_at"`
-	UpdatedAt               time.Time       `json:"updated_at"`
-	Scope                   json.RawMessage `json:"scope,omitempty"`
-	Aliases                 []string        `json:"aliases,omitempty"`
+	PublicHistoryPreparation *PublicHistoryPreparation `json:"public_history_preparation,omitempty"`
+	PublicHistoryVersion     int                       `json:"public_history_version,omitempty"`
+	PublicHistoryGeneration  string                    `json:"public_history_generation,omitempty"`
+	PublicHistoryRevision    uint64                    `json:"public_history_revision,omitempty"`
+	PublicHistoryBytes       int64                     `json:"public_history_bytes,omitempty"`
+	PublicHistoryCount       int64                     `json:"public_history_count,omitempty"`
+	PublicHistoryDigest      string                    `json:"public_history_digest,omitempty"`
+	PublicHistoryComplete    bool                      `json:"public_history_complete,omitempty"`
+	HistoryEpoch             int64                     `json:"history_epoch,omitempty"`
+	HistoryFileEpoch         int64                     `json:"history_file_epoch,omitempty"`
+	HistoryGeneration        string                    `json:"history_generation,omitempty"`
+	HistoryFileGeneration    string                    `json:"history_file_generation,omitempty"`
+	HistoryPrefix            int64                     `json:"history_prefix,omitempty"`
+	HistoryParentGeneration  string                    `json:"history_parent_generation,omitempty"`
+	HistoryRetainedUntil     int64                     `json:"history_retained_until,omitempty"`
+	HistoryMutationRunID     string                    `json:"history_mutation_run_id,omitempty"`
+	HistoryDigest            string                    `json:"history_digest,omitempty"`
+	HistoryTip               string                    `json:"history_tip,omitempty"`
+	HistoryBytes             *int64                    `json:"history_bytes,omitempty"`
+	HistoryRecoveryRequired  bool                      `json:"history_recovery_required,omitempty"`
+	Key                      string                    `json:"key"`
+	Summary                  string                    `json:"summary"`
+	Skip                     int                       `json:"skip"`
+	Count                    int                       `json:"count"`
+	CreatedAt                time.Time                 `json:"created_at"`
+	UpdatedAt                time.Time                 `json:"updated_at"`
+	Scope                    json.RawMessage           `json:"scope,omitempty"`
+	Aliases                  []string                  `json:"aliases,omitempty"`
 
 	ContentIdentity   *contentIdentityState `json:"content_identity,omitempty"`
 	summaryCheckpoint string
@@ -94,9 +95,11 @@ type SessionMeta struct {
 // GetHistory ignores lines before that offset. This keeps all writes
 // append-only, which is both fast and crash-safe.
 type JSONLStore struct {
-	dir       string
-	locks     [numLockShards]sync.Mutex
-	writeFile func(string, []byte, os.FileMode) error
+	publicProjectionMu sync.RWMutex
+	publicProjector    PublicHistoryProjector
+	dir                string
+	locks              [numLockShards]sync.Mutex
+	writeFile          func(string, []byte, os.FileMode) error
 	// Optional private seam for deterministic origin-reader I/O failures.
 	openHistoryFile func(string) (*os.File, error)
 	// Private fault boundary for file/directory checkpoint sync recovery.
@@ -775,6 +778,7 @@ func decodeHistoryMessages(
 		}
 		msg.HistoryID = decodedHistoryID(line, filepath.Base(path), int64(lineNum-1))
 		msg.HistoryRunID = decodedHistoryRunID(line)
+		msg.HistoryPublicMessage = decodedPublicMessage(line)
 		order, orderErr := decodedHistoryOrder(line)
 		if orderErr != nil && !providerOnly {
 			return nil, orderErr

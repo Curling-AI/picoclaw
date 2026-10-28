@@ -269,6 +269,7 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 			delivery.ID = ""
 			message.Delivery = &delivery
 		}
+		message.HistoryPublicMessage = decodedPublicMessage(line)
 		entry := HistoryEntry{ID: message.HistoryID, Position: meta.HistoryPrefix + cursor.Line, Message: message}
 		encoded, err := json.Marshal(entry)
 		if err != nil {

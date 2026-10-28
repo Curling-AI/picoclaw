@@ -74,6 +74,7 @@ func (s *JSONLStore) replaceHistory(
 		if index < len(old) && sameHistoryCore(old[index], message) &&
 			(message.HistoryID == "" || message.HistoryID == old[index].HistoryID) {
 			message.HistoryID, message.HistoryRunID = old[index].HistoryID, old[index].HistoryRunID
+			message.HistoryPublicMessage = old[index].HistoryPublicMessage
 			if message.CreatedAt == nil {
 				message.CreatedAt = old[index].CreatedAt
 			}
@@ -83,6 +84,7 @@ func (s *JSONLStore) replaceHistory(
 		} else if index < len(old) && message.HistoryID == old[index].HistoryID &&
 			!sameHistoryCore(old[index], message) {
 			message.HistoryRunID = providers.HistoryRun(ctx)
+			message.HistoryPublicMessage = nil
 		}
 		prepared[index] = prepareHistoryMessage(message, meta.UpdatedAt, providers.HistoryRun(ctx))
 	}
@@ -99,6 +101,7 @@ func (s *JSONLStore) replaceHistory(
 			return appendErr
 		}
 	}
+	prepared = s.projectPublicCommits(prepared, &meta)
 	if orderErr := s.prepareReplacementHistoryOrder(key, prepared, &meta); orderErr != nil {
 		return orderErr
 	}

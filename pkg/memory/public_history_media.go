@@ -19,9 +19,9 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 		return ErrPublicHistoryCoverage
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		history, err := s.ReadPublicHistory(ctx, key)
-		if err != nil {
-			return err
+		history, historyErr := s.ReadPublicHistory(ctx, key)
+		if historyErr != nil {
+			return historyErr
 		}
 		var anchor *PublicHistoryEntry
 		afterID := ""
@@ -40,10 +40,26 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 		}
 		digest := sha256.Sum256([]byte(runID + ":" + content))
 		importID := "media:" + hex.EncodeToString(digest[:])
-		entry := PublicHistoryEntry{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(importID)).String(), RunID: runID, ImportID: importID, AnchorID: anchor.ID, AnchorOrder: anchor.Order, Message: providers.Message{Role: "assistant", Content: content}}
-		_, err = s.ImportPublicHistory(ctx, PublicHistoryImport{Key: key, Generation: history.Generation, Revision: history.Revision, AfterID: afterID, Entries: []PublicHistoryEntry{entry}})
-		if !errors.Is(err, ErrPublicHistoryCoverage) {
-			return err
+		entry := PublicHistoryEntry{
+			ID:          uuid.NewSHA1(uuid.NameSpaceOID, []byte(importID)).String(),
+			RunID:       runID,
+			ImportID:    importID,
+			AnchorID:    anchor.ID,
+			AnchorOrder: anchor.Order,
+			Message:     providers.Message{Role: "assistant", Content: content},
+		}
+		_, historyErr = s.ImportPublicHistory(
+			ctx,
+			PublicHistoryImport{
+				Key:        key,
+				Generation: history.Generation,
+				Revision:   history.Revision,
+				AfterID:    afterID,
+				Entries:    []PublicHistoryEntry{entry},
+			},
+		)
+		if !errors.Is(historyErr, ErrPublicHistoryCoverage) {
+			return historyErr
 		}
 	}
 	return ErrPublicHistoryCoverage
@@ -53,29 +69,29 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 // Resolve a pending commit first and remove the display source with its model
 // source; a failed proof never authorizes resurrecting either one later.
 func (s *JSONLStore) DeleteSession(ctx context.Context, key string) error {
-	canonical, err := s.canonicalHistoryOrderKey(key)
-	if err != nil {
-		return err
+	canonical, canonicalErr := s.canonicalHistoryOrderKey(key)
+	if canonicalErr != nil {
+		return canonicalErr
 	}
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
+	if operationErr := ctx.Err(); operationErr != nil {
+		return operationErr
 	}
-	if err := s.recoverHistoryWrite(canonical); err != nil {
-		return err
+	if operationErr1 := s.recoverHistoryWrite(canonical); operationErr1 != nil {
+		return operationErr1
 	}
-	meta, err := s.readMeta(canonical)
-	if err != nil {
-		return err
+	meta, canonicalErr := s.readMeta(canonical)
+	if canonicalErr != nil {
+		return canonicalErr
 	}
-	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
-		return err
+	if operationErr2 := validateCanonicalHistoryKey(key, canonical, meta); operationErr2 != nil {
+		return operationErr2
 	}
 	for _, path := range []string{s.metaPath(canonical), s.jsonlPath(canonical), s.publicHistoryPath(canonical), s.historyRecoveryPath(canonical), s.historyDecisionPath(canonical), s.historyOrderWitnessPath(canonical), s.historyRecoveryRequiredPath(canonical)} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		if operationErr3 := os.Remove(path); operationErr3 != nil && !errors.Is(operationErr3, os.ErrNotExist) {
+			return operationErr3
 		}
 	}
 	sanitized := sanitizeKey(canonical)

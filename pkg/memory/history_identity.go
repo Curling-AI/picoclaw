@@ -12,6 +12,7 @@ import (
 )
 
 type historyRecord struct {
+	PublicMessage *providers.Message `json:"history_public_message,omitempty"`
 	providers.Message
 	ID             string `json:"history_id"`
 	RunID          string `json:"history_run_id,omitempty"`
@@ -53,6 +54,7 @@ func marshalHistoryMessage(message providers.Message, meta SessionMeta) ([]byte,
 	return json.Marshal(
 		historyRecord{
 			Message:              message,
+			PublicMessage:        message.HistoryPublicMessage,
 			ID:                   id,
 			RunID:                message.HistoryRunID,
 			Generation:           meta.HistoryGeneration,
