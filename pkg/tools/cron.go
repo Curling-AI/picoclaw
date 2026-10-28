@@ -190,6 +190,10 @@ func (t *CronTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Job ID (for get/update/remove/enable/disable)",
 			},
+			"silent": map[string]any{
+				"type":        "boolean",
+				"description": "Optional: when true, a run delivers nothing to the chat on its own: no final reply, no tool progress, no command output on success. The run reaches the user only through the message tool. Use for monitoring jobs that usually have nothing new. For update, omit to preserve.",
+			},
 		},
 		"required": []string{"action"},
 	}
@@ -308,6 +312,10 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 	needsUpdate := false
 	if command != "" {
 		job.Payload.Command = command
+		needsUpdate = true
+	}
+	if silent, _ := args["silent"].(bool); silent {
+		job.Payload.Silent = true
 		needsUpdate = true
 	}
 	if needsUpdate {
@@ -455,6 +463,15 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 			return errResult
 		}
 		job.Payload.Command = command
+		patches++
+	}
+
+	if value, present := args["silent"]; present {
+		silent, ok := value.(bool)
+		if !ok {
+			return ErrorResult("silent must be a boolean")
+		}
+		job.Payload.Silent = silent
 		patches++
 	}
 
@@ -770,16 +787,21 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 			output = fmt.Sprintf("Scheduled command '%s' executed:\n%s", job.Payload.Command, result.ForLLM)
 		}
 
-		pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer pubCancel()
-		err := t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-			Context: bus.NewOutboundContext(channel, chatID, ""),
-			Content: output,
-		})
+		// Job silencioso: a saída de um command que deu certo não vai ao chat; a
+		// falha vai, porque um job quebrado é novidade. (seucaranguejo fork)
+		published := false
+		if !job.Payload.Silent || result.IsError {
+			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer pubCancel()
+			published = t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+				Context: bus.NewOutboundContext(channel, chatID, ""),
+				Content: output,
+			}) == nil
+		}
 		// The output reached the chat, so the chat's conversation keeps it, as
 		// it keeps a turn's final response. An error notice does not: it would
 		// poison the conversation the way an error response would.
-		if mirrorer, ok := t.executor.(deliveryMirrorer); ok && err == nil && !result.IsError {
+		if mirrorer, ok := t.executor.(deliveryMirrorer); ok && published && !result.IsError {
 			mirrorer.MirrorDelivery(ExternalDelivery{
 				Origin:  sessionKey,
 				Channel: channel,
@@ -827,8 +849,8 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		"state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
 		"• Notes: do NOT record routine runs in the daily notes — run silently when there is nothing "+
 		"new. Only write a note when the run produced a genuinely new fact the user would care about; "+
-		"never use the daily notes as a state store.)",
-		job.Name, job.Payload.Message, job.ID, job.ID)
+		"never use the daily notes as a state store.%s)",
+		job.Name, job.Payload.Message, job.ID, job.ID, silentRunNote(job))
 
 	// Call agent with the job message
 	result, err := t.executePrompt(
@@ -840,16 +862,34 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 			SessionKey: sessionKey,
 			Channel:    channel,
 			ChatID:     chatID,
+			Silent:     job.Payload.Silent,
 		},
 	)
 	if err != nil {
 		return result, err
 	}
 
-	if result.Content != "" {
+	// Job silencioso: o texto final nunca vai ao chat, mesmo que o modelo
+	// narre o próprio silêncio ("(vazio)", "Sem novidades") ou que o executor
+	// não conheça Request.Silent. (seucaranguejo fork)
+	if result.Content != "" && !job.Payload.Silent {
 		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, result.Content)
 	}
 	return result, nil
+}
+
+// silentRunNote completa a nota de sistema de um job silencioso. A nota comum
+// pede para "rodar em silêncio" e o modelo obedecia narrando o silêncio — texto
+// que virava mensagem. Aqui a regra é de entrega: a resposta final não chega a
+// ninguém, só a ferramenta message entrega. (seucaranguejo fork)
+func silentRunNote(job *cron.CronJob) string {
+	if !job.Payload.Silent {
+		return ""
+	}
+	return "\n• Delivery: this job is SILENT — your final reply is NOT delivered to anyone. If there " +
+		"is something the user should see, send it with the message tool. Otherwise end the turn " +
+		"with an empty reply: no text at all, do not say that there is nothing new or that you are " +
+		"staying silent."
 }
 
 func (t *CronTool) executePrompt(ctx context.Context, request turnresult.Request) (turnresult.Result, error) {

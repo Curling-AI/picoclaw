@@ -291,8 +291,10 @@ func (al *AgentLoop) runTurn(
 				turnStatus = TurnEndStatusError
 				return turnResult{}, fmt.Errorf("hook requested turn abort")
 			}
-			// Ensure empty response falls back to DefaultResponse
-			if finalContent == "" {
+			// Ensure empty response falls back to DefaultResponse. A silent
+			// turn that ends empty did what it was told: no fallback, and not
+			// incomplete. (seucaranguejo fork)
+			if finalContent == "" && !ts.opts.Silent {
 				finalContent = ts.opts.DefaultResponse
 				exec.finalIsFallback = true
 			}
