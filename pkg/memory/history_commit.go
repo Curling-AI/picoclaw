@@ -177,6 +177,9 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	}
 	end := offset + int64(len(data))
 	meta.HistoryBytes = &end
+	if err = s.prepareContentAppend(key, original, &meta, data, offset); err != nil {
+		return nil, err
+	}
 	if commitErr := s.beginHistoryWrite(key, historyWriteRecovery{
 		Meta: original, Next: meta, AppendOffset: &offset,
 	}); commitErr != nil {
@@ -215,6 +218,9 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	}
 	if err == nil {
 		err = s.writeMeta(key, meta)
+	}
+	if err == nil {
+		err = s.ensureContentDomain(key, original.ContentIdentity, meta.ContentIdentity)
 	}
 	if err == nil {
 		err = s.finishHistoryWrite(key)
@@ -416,6 +422,9 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 	}
 	size := int64(len(data))
 	meta.HistoryBytes = &size
+	if err = s.prepareContentRewrite(key, original, &meta, data); err != nil {
+		return err
+	}
 	if commitErr := s.beginHistoryWrite(
 		key,
 		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed},
@@ -426,6 +435,9 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 		return errors.Join(writeErr, s.recoverFailedHistoryWrite(key))
 	}
 	err = s.writeMeta(key, meta)
+	if err == nil {
+		err = s.ensureContentDomain(key, original.ContentIdentity, meta.ContentIdentity)
+	}
 	if err == nil {
 		err = s.finishHistoryWrite(key)
 	}

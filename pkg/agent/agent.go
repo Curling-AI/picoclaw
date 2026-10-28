@@ -76,6 +76,7 @@ type AgentLoop struct {
 	sessionHistoryObserverMu      sync.RWMutex
 	sessionHistoryObserver        func(string)
 	sessionHistoryReceiptObserver func(string, []memory.CommittedHistoryMessage)
+	sessionHistoryContentObserver func(string, []memory.ContentEntry)
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}

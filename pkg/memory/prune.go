@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -137,7 +138,13 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 	if err != nil {
 		return err
 	}
+	if err := s.contentPendingGuard(meta); err != nil {
+		return err
+	}
 	if err := s.guardHistoryMutation(sanitized, meta); err != nil {
+		return err
+	}
+	if err := s.checkContentGarbageCollection(context.Background(), meta.Key, meta); err != nil {
 		return err
 	}
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
@@ -157,6 +164,9 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 		return err
 	}
 	if err := os.Remove(s.historyDecisionPath(sanitized)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(s.contentDomainPath(sanitized)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.Remove(s.historyOrderWitnessPath(sanitized)); err != nil && !os.IsNotExist(err) {

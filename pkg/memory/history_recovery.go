@@ -336,6 +336,13 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		if !historyNewCheckpointMatches(current, recovery.Next) {
 			return decision, errors.New("memory: decided NEW metadata no longer matches its checkpoint")
 		}
+		if operationErr := s.recoverContentDomain(
+			key,
+			recovery.Meta.ContentIdentity,
+			current.ContentIdentity,
+		); operationErr != nil {
+			return decision, operationErr
+		}
 		s.storeCachedMeta(sanitizeKey(key), current)
 	} else {
 		if recovery.AppendOffset != nil {
@@ -398,7 +405,7 @@ func historyNewCheckpointMatches(current, next SessionMeta) bool {
 }
 
 func historyCheckpointMatches(current, expected SessionMeta) bool {
-	return current.HistoryGeneration == expected.HistoryGeneration &&
+	return contentCheckpointMatches(current, expected) && current.HistoryGeneration == expected.HistoryGeneration &&
 		current.HistoryFileGeneration == expected.HistoryFileGeneration &&
 		current.HistoryTip == expected.HistoryTip && current.Count == expected.Count &&
 		current.HistoryPrefix == expected.HistoryPrefix &&

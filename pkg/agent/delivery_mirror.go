@@ -359,10 +359,33 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
 	var lost []error
 	var committed []memory.CommittedHistoryMessage
+	var content []memory.ContentEntry
 	var ingested []providers.Message
 	written := 0
 	unproven := 0
+	observeContent := al.observesSessionHistoryContent()
 	for _, msg := range msgs {
+		if appender, supported := agent.Sessions.(memory.HistoryContentAppender); observeContent && supported {
+			result, err := appender.AppendHistoryContent(context.Background(), sessionKey, msg)
+			if !errors.Is(err, memory.ErrHistoryUnsupported) {
+				if err != nil {
+					lost = append(lost, err)
+					continue
+				}
+				if result.Entry.Message.Role == "" {
+					continue
+				}
+				content = append(content, result.Entry)
+				if result.Receipt != nil && result.Receipt.Order.Valid() {
+					committed = append(committed, *result.Receipt)
+				} else {
+					unproven++
+				}
+				written++
+				ingested = append(ingested, result.Entry.Message)
+				continue
+			}
+		}
 		var appendErr error
 		hasReceipt := false
 		if receiptStore, ok := agent.Sessions.(session.HistoryReceiptStore); ok {
@@ -400,6 +423,9 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	}
 	// A failed member does not discard later successful writes (a,c when b
 	// fails). Deliver exact receipts before ingestion can enqueue network work.
+	if len(content) > 0 {
+		al.notifySessionHistoryContent(sessionKey, content)
+	}
 	if len(committed) > 0 {
 		al.notifySessionHistoryReceipts(sessionKey, committed)
 	}
