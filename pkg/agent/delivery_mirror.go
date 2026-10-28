@@ -10,6 +10,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -357,13 +358,52 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 // única cópia (resultado de subagente numa conversa web, nota de um /stop).
 func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
 	var lost []error
+	var committed []memory.CommittedHistoryMessage
+	var ingested []providers.Message
 	written := 0
+	unproven := 0
 	for _, msg := range msgs {
-		if err := appendToSession(agent.Sessions, sessionKey, msg); err != nil {
-			lost = append(lost, err)
+		var appendErr error
+		hasReceipt := false
+		if receiptStore, ok := agent.Sessions.(session.HistoryReceiptStore); ok {
+			receipt, receiptErr := receiptStore.AppendHistoryReceipt(context.Background(), sessionKey, msg)
+			appendErr = receiptErr
+			if receiptErr == nil && receipt.Order.Valid() {
+				committed = append(committed, receipt)
+				hasReceipt = true
+			} else if receiptErr == nil {
+				if receipt.Message.Role == "" {
+					continue // Filtered transient thought: no commit or notification.
+				}
+				appendErr = memory.ErrHistoryOrderUnavailable
+			}
+			if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
+				errors.Is(receiptErr, memory.ErrHistoryOwnershipUnavailable) ||
+				errors.Is(receiptErr, memory.ErrHistoryReceiptUnavailable) {
+				// Receipt eligibility failed before this message's write began.
+				// Keep the legacy persistence/notification contract; never retry
+				// a failed or uncertain commit through this fallback.
+				appendErr = appendToSession(agent.Sessions, sessionKey, msg)
+			}
+		} else {
+			appendErr = appendToSession(agent.Sessions, sessionKey, msg)
+		}
+		if appendErr != nil {
+			lost = append(lost, appendErr)
 			continue
 		}
 		written++
+		if !hasReceipt {
+			unproven++
+		}
+		ingested = append(ingested, msg)
+	}
+	// A failed member does not discard later successful writes (a,c when b
+	// fails). Deliver exact receipts before ingestion can enqueue network work.
+	if len(committed) > 0 {
+		al.notifySessionHistoryReceipts(sessionKey, committed)
+	}
+	for _, msg := range ingested {
 		if al.contextManager == nil {
 			continue
 		}
@@ -399,6 +439,11 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	// What got written is in the history even when other messages of the
 	// batch were lost; whoever keeps a copy of it must hear so.
 	if written > 0 {
+		if unproven > 0 {
+			// No raw input is labeled a receipt. The legacy notification remains
+			// useful for source amendment after Save/checked persistence only.
+			al.notifySessionHistoryReceipts(sessionKey, nil)
+		}
 		al.notifySessionHistoryChanged(sessionKey)
 	}
 	return errors.Join(lost...)

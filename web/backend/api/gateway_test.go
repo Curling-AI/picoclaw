@@ -323,9 +323,22 @@ func TestStartGatewayLocked_UsesReloadedConfigForBootSignature(t *testing.T) {
 		if cmd != nil && cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-		if cmd != nil {
-			_ = cmd.Wait()
+		if cmd == nil {
+			return
 		}
+		// startGatewayLocked's watcher owns Wait. Observe its synchronized
+		// completion rather than reaping the same command concurrently.
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			gateway.mu.Lock()
+			reaped := gateway.cmd != cmd
+			gateway.mu.Unlock()
+			if reaped {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Error("gateway exit watcher did not finish reaping its child")
 	})
 
 	updatedCfg, err := config.LoadConfig(configPath)

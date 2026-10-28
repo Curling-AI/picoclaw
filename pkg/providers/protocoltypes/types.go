@@ -179,6 +179,9 @@ type Attachment struct {
 }
 
 type Message struct {
+	// HistoryID belongs to persistence; provider request encoders never receive it.
+	HistoryID        string         `json:"-"`
+	HistoryRunID     string         `json:"-"`
 	Role             string         `json:"role"`
 	Content          string         `json:"content"`
 	ModelName        string         `json:"model_name,omitempty"`
@@ -209,6 +212,11 @@ type Message struct {
 	// joined so an elision keeps them without searching the content. Internal
 	// to the agent runtime. (seucaranguejo fork — see agent/self_delivery.go)
 	JoinedSends string `json:"-"`
+
+	// Ordering evidence is private storage provenance, never provider JSON.
+	HistoryOrderVersion uint8  `json:"-"`
+	HistoryStreamID     string `json:"-"`
+	HistorySequence     uint64 `json:"-"`
 }
 
 // Delivery describes where and when a mirrored delivery happened.

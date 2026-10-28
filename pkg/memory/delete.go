@@ -11,9 +11,15 @@ import (
 	"time"
 )
 
-// DeleteSession removes a session from disk: its meta, its transcript, the
-// files of the legacy keys its meta names as aliases, and their cache entries.
-// Deleting a session that does not exist is not an error.
+// DeleteSession removes a session from disk: its meta, its transcript, its
+// history journal and recovery marker, the files of the legacy keys its meta
+// names as aliases, and what is kept of them in memory. Deleting a session that
+// does not exist is not an error.
+//
+// It is the owner's delete, not an automatic prune: a write in flight is
+// resolved first, so its journal cannot republish the session, but a history
+// that still needs recovery does not hold the delete back (as in the web
+// backend's CheckHistoryDeletion).
 //
 // It holds the session's lock, so an append in flight finishes before the files
 // go, and one that follows starts a new session instead of continuing a
@@ -36,7 +42,7 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 	var errs []error
 	for _, alias := range s.legacyAliases(sessionKey) {
 		unlock := s.lockSessionPair(sessionKey, alias)
-		if err := s.removeSessionFiles(sanitizeKey(alias)); err != nil {
+		if err := s.deleteSessionFilesLocked(alias); err != nil {
 			errs = append(errs, err)
 		}
 		unlock()
@@ -50,9 +56,36 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
-	if err := s.removeSessionFiles(sanitizeKey(sessionKey)); err != nil {
+	if err := s.deleteSessionFilesLocked(sessionKey); err != nil {
 		return fmt.Errorf("memory: delete session: %w", err)
 	}
+	return nil
+}
+
+// deleteSessionFilesLocked removes every file of a session the owner deleted.
+// The caller holds the session's lock. The cache stays fenced while the files
+// go, so a removal that fails halfway is read back from disk, not from memory.
+func (s *JSONLStore) deleteSessionFilesLocked(key string) error {
+	if err := s.recoverHistoryWrite(key); err != nil {
+		return err
+	}
+	s.markHistoryPending(key)
+	// The meta goes first: while it exists the session is still listable.
+	for _, path := range []string{
+		s.metaPath(key), s.jsonlPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key),
+		s.historyRecoveryRequiredPath(key), s.historyOrderWitnessPath(key),
+	} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	sanitized := sanitizeKey(key)
+	s.metaMu.Lock()
+	delete(s.metaCache, sanitized)
+	delete(s.historyPending, sanitized)
+	delete(s.historyMarkers, sanitized)
+	delete(s.historyWitnesses, sanitized)
+	s.metaMu.Unlock()
 	return nil
 }
 
@@ -138,7 +171,8 @@ func (s *JSONLStore) PruneEmptySessions(
 var ErrKeepSession = errors.New("memory: session kept by the caller")
 
 func isEmptyMeta(meta SessionMeta) bool {
-	return meta.Count == 0 && meta.Skip == 0 && strings.TrimSpace(meta.Summary) == ""
+	return meta.Count == 0 && meta.Skip == 0 && strings.TrimSpace(meta.Summary) == "" &&
+		!meta.HistoryRecoveryRequired
 }
 
 // pruneIfEmpty decides again, under the session's lock and from the files
@@ -172,8 +206,30 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	case !errors.Is(err, os.ErrNotExist):
 		return false, fmt.Errorf("memory: prune empty sessions: stat transcript: %w", err)
 	}
+	journaled, lastJournal, err := s.historyJournalState(key)
+	if err != nil {
+		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
+	}
+	if journaled {
+		return false, nil
+	}
+	if lastJournal.After(lastWrite) {
+		lastWrite = lastJournal
+	}
 	if !lastWrite.Before(cutoff) {
 		return false, nil
+	}
+	// The removal below is guarded like every automatic prune; the hook must
+	// not run for a session the guard would keep.
+	cached, err := s.readMeta(key)
+	if err == nil {
+		err = s.guardHistoryMutation(key, cached)
+	}
+	if errors.Is(err, ErrHistoryRecoveryRequired) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 
 	if beforeRemove != nil {
@@ -181,10 +237,34 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 		}
 	}
-	if err := s.removeSessionFiles(sanitizeKey(key)); err != nil {
+	if err := s.removeSessionFilesLocked(sanitizeKey(key)); err != nil {
 		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 	return true, nil
+}
+
+// historyJournalState reports whether a session has a history write to recover
+// (its journal, decision or recovery marker on disk), and the last time its
+// order witness was written. A session with a write to recover is not empty
+// whatever its meta says.
+func (s *JSONLStore) historyJournalState(key string) (bool, time.Time, error) {
+	for _, path := range []string{s.historyRecoveryPath(key), s.historyDecisionPath(key), s.historyRecoveryRequiredPath(key)} {
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, time.Time{}, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, time.Time{}, err
+		}
+	}
+	info, err := os.Stat(s.historyOrderWitnessPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, time.Time{}, nil
+	}
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return false, info.ModTime(), nil
 }
 
 // readMetaFile reads a session's meta from disk, bypassing the cache, with the

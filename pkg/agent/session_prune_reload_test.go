@@ -21,10 +21,10 @@ type emptySessionPruner interface {
 	) ([]string, error)
 }
 
-// A config reload replaces the agent's session store with a new one on the
-// same directory, and a sweep started on the old store keeps running. A message
-// that reaches the new store while the sweep is removing that session must
-// survive it.
+// A sweep started before a config reload keeps running after it. A message
+// that reaches the reloaded agent while the sweep is removing that session must
+// survive it, so the reload keeps the store, and with it the lock the sweep
+// holds.
 func TestPruneEmptySessions_AMessageThroughTheReloadedStoreSurvivesTheSweep(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
@@ -57,8 +57,8 @@ func TestPruneEmptySessions_AMessageThroughTheReloadedStoreSurvivesTheSweep(t *t
 			t.Errorf("ReloadProviderAndConfig: %v", err)
 		}
 		reloaded := al.GetRegistry().GetDefaultAgent().Sessions
-		if reloaded == old {
-			t.Error("the reload kept the old session store")
+		if reloaded != old {
+			t.Error("the reload opened a second session store on the directory")
 		}
 		go func() {
 			reloaded.AddMessage(key, "user", "olá")
@@ -81,5 +81,40 @@ func TestPruneEmptySessions_AMessageThroughTheReloadedStoreSurvivesTheSweep(t *t
 
 	if got := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(key); len(got) != 1 {
 		t.Fatalf("history = %v; the message written during the sweep is gone", got)
+	}
+}
+
+// A turn that started before a config reload still writes through the store it
+// was given. A delete through the reloaded agent must stick: with a second
+// store, the old one's cached meta came back with that write, summary and all.
+func TestReload_ADeleteSticksForWritesThroughTheStoreFromBefore(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &countingReplyProvider{})
+	t.Cleanup(al.Close)
+	const key = "agent:main:whatsapp:direct:42"
+	before := al.GetRegistry().GetDefaultAgent().Sessions
+	before.AddMessage(key, "user", "hello")
+	before.SetSummary(key, "greetings")
+	before.ListSessions()
+
+	if err := al.ReloadProviderAndConfig(context.Background(), &countingReplyProvider{}, cfg); err != nil {
+		t.Fatalf("ReloadProviderAndConfig: %v", err)
+	}
+	after := al.GetRegistry().GetDefaultAgent().Sessions
+	deleter, ok := after.(interface{ DeleteSession(key string) error })
+	if !ok {
+		t.Fatal("the session store cannot delete")
+	}
+	if err := deleter.DeleteSession(key); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	before.AddMessage(key, "user", "again")
+
+	if got := after.GetSummary(key); got != "" {
+		t.Errorf("summary = %q, the deleted conversation's came back", got)
+	}
+	if got := after.GetHistory(key); len(got) != 1 {
+		t.Errorf("history = %v, want only the message written after the delete", got)
 	}
 }
