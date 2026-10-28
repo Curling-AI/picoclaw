@@ -6,6 +6,47 @@ import (
 	"github.com/sipeed/picoclaw/pkg/memory"
 )
 
+// SetSessionHistoryContentInputObserver observes accepted content before
+// ingestion, independently of order or prefix qualification. Entries contain no
+// Ref or receipt binding. Consumers use the key/nonempty batch as a wake-up and
+// obtain a strict current frame before publishing any identity or read state.
+// Register this instead of a qualified observer when only a wake-up is needed;
+// registration never initializes a source.
+func (al *AgentLoop) SetSessionHistoryContentInputObserver(observer func(string, []memory.ContentEntry)) {
+	al.sessionHistoryObserverMu.Lock()
+	defer al.sessionHistoryObserverMu.Unlock()
+	al.sessionHistoryContentInputObserver = observer
+}
+
+func (al *AgentLoop) observesSessionHistoryContentInput() bool {
+	al.sessionHistoryObserverMu.RLock()
+	defer al.sessionHistoryObserverMu.RUnlock()
+	return al.sessionHistoryContentInputObserver != nil
+}
+
+func (al *AgentLoop) notifySessionHistoryContentInputs(key string, entries []memory.ContentEntry) error {
+	al.sessionHistoryObserverMu.RLock()
+	observer := al.sessionHistoryContentInputObserver
+	al.sessionHistoryObserverMu.RUnlock()
+	if observer == nil {
+		return nil
+	}
+	stripped := make([]memory.ContentEntry, len(entries))
+	for i, entry := range entries {
+		stripped[i] = memory.ContentEntry{Message: entry.Message}
+	}
+	data, err := json.Marshal(stripped)
+	if err != nil {
+		return err
+	}
+	var detached []memory.ContentEntry
+	if err = json.Unmarshal(data, &detached); err != nil {
+		return err
+	}
+	observer(key, detached)
+	return nil
+}
+
 // SetSessionHistoryContentCommitObserver observes each append's exact entry and
 // state interval before ingestion or asynchronous work. Intervening appends
 // remain gaps between results; the callback must not merge their state tokens.

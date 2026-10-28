@@ -14,6 +14,9 @@ func (s *JSONLStore) readContentMutationMeta(key string) (SessionMeta, error) {
 	if err != nil {
 		return SessionMeta{}, err
 	}
+	if err = s.hydrateContentStorage(context.Background(), key, &meta, false, true); err != nil {
+		return SessionMeta{}, err
+	}
 	state := meta.ContentIdentity
 	witness, present, err := s.readContentDomain(key)
 	if err != nil {

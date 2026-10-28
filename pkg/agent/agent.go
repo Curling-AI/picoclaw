@@ -78,6 +78,7 @@ type AgentLoop struct {
 	sessionHistoryReceiptObserver       func(string, []memory.CommittedHistoryMessage)
 	sessionHistoryContentObserver       func(string, []memory.ContentEntry)
 	sessionHistoryContentCommitObserver func(string, []memory.ContentAppendResult)
+	sessionHistoryContentInputObserver  func(string, []memory.ContentEntry)
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}

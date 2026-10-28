@@ -11,6 +11,14 @@ import (
 )
 
 func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, error) {
+	return openContentArtifactMode(dir, name, create, false)
+}
+
+func openContentArtifactWritable(dir, name string) (*os.File, *os.File, error) {
+	return openContentArtifactMode(dir, name, false, true)
+}
+
+func openContentArtifactMode(dir, name string, create, writable bool) (*os.File, *os.File, error) {
 	if filepath.Base(name) != name || name == "." || name == ".." {
 		return nil, nil, ErrContentIdentityUnavailable
 	}
@@ -20,6 +28,9 @@ func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, err
 	}
 	parent := os.NewFile(uintptr(parentFD), dir)
 	flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+	if writable {
+		flags = unix.O_RDWR | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+	}
 	if create {
 		flags = unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW | unix.O_CLOEXEC
 	}
@@ -39,7 +50,7 @@ func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, err
 	return file, parent, nil
 }
 
-func removeContentArtifact(dir, name string) error {
+func removeContentArtifact(dir, name string, beforeSync ...func() error) error {
 	file, parent, err := openContentArtifact(dir, name, false)
 	if err != nil {
 		return err
@@ -60,6 +71,11 @@ func removeContentArtifact(dir, name string) error {
 	}
 	if err = unix.Unlinkat(int(parent.Fd()), name, 0); err != nil {
 		return err
+	}
+	for _, check := range beforeSync {
+		if err = check(); err != nil {
+			return err
+		}
 	}
 	return parent.Sync()
 }

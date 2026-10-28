@@ -5,9 +5,23 @@ import (
 	"encoding/json"
 )
 
+// The disk projection is separate from the in-memory state clone. Expanded
+// vectors stay intact for qualified operations and never leak into disk2 WAL.
+func (meta SessionMeta) MarshalJSON() ([]byte, error) {
+	type metadata SessionMeta
+	return json.Marshal(struct {
+		*metadata
+		Identity any `json:"content_identity,omitempty"`
+	}{
+		metadata: (*metadata)(&meta), Identity: contentIdentityWire(meta.ContentIdentity),
+	})
+}
+
 // UnmarshalJSON preserves a null identity as evidence of lost continuity. A
 // later ordinary write must not erase that evidence through pointer omitempty.
 func (meta *SessionMeta) UnmarshalJSON(data []byte) error {
+	meta.ContentIdentity = nil
+	meta.summaryCheckpoint = ""
 	type metadata SessionMeta
 	decoded := struct {
 		*metadata
@@ -23,5 +37,6 @@ func (meta *SessionMeta) UnmarshalJSON(data []byte) error {
 		meta.ContentIdentity = &contentIdentityState{Unavailable: true}
 		return nil
 	}
-	return json.Unmarshal(decoded.Identity, &meta.ContentIdentity)
+	meta.ContentIdentity = decodeContentIdentity(decoded.Identity)
+	return nil
 }

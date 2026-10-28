@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/google/uuid"
@@ -64,14 +63,19 @@ type contentIdentityState struct {
 	Pending         *contentPending      `json:"pending,omitempty"`
 	Last            *contentAcknowledged `json:"last,omitempty"`
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
+	storage         *contentStorageState
+	opaque          json.RawMessage
 }
 
 type contentDomainWitness struct {
-	Version         uint8  `json:"version"`
-	Key             string `json:"key"`
-	DomainID        string `json:"domain"`
-	Checkpoint      string `json:"checkpoint,omitempty"`
-	OrderCheckpoint string `json:"orderCheckpoint,omitempty"`
+	Version         uint8                 `json:"version"`
+	Key             string                `json:"key"`
+	DomainID        string                `json:"domain"`
+	Checkpoint      string                `json:"checkpoint,omitempty"`
+	OrderCheckpoint string                `json:"orderCheckpoint,omitempty"`
+	DiskVersion     uint8                 `json:"diskVersion,omitempty"`
+	Storage         *contentStorageHeader `json:"storage,omitempty"`
+	Unavailable     bool                  `json:"unavailable,omitempty"`
 }
 
 type contentRawRow struct {
@@ -101,6 +105,8 @@ func cloneContentState(state *contentIdentityState) *contentIdentityState {
 	data, _ := json.Marshal(state)
 	var cloned contentIdentityState
 	_ = json.Unmarshal(data, &cloned)
+	cloned.storage = cloneContentStorage(state.storage)
+	cloned.opaque = cloneRawJSON(state.opaque)
 	return &cloned
 }
 
@@ -213,6 +219,14 @@ func (s *JSONLStore) readContentImage(ctx context.Context, key string) (contentI
 	if err != nil {
 		return contentImage{}, err
 	}
+	if err = s.hydrateContentStorage(ctx, key, &meta, true, true); err != nil {
+		if !onlyContentIdentityUnavailable(err) {
+			return contentImage{}, err
+		}
+		// Body reads survive missing/corrupt optional identity artifacts. The
+		// descriptor is retained; this is neither adoption nor a new baseline.
+		meta.ContentIdentity.Unavailable = true
+	}
 	return s.scanContentImage(ctx, key, meta, metaBytes, nil)
 }
 
@@ -229,6 +243,9 @@ func (s *JSONLStore) readContentAppendImage(
 ) (contentImage, error) {
 	if meta.Key != key {
 		return contentImage{}, ErrHistoryOwnershipUnavailable
+	}
+	if err := s.hydrateContentStorage(ctx, key, &meta, true, true); err != nil {
+		return contentImage{}, err
 	}
 	return s.scanContentImage(ctx, key, meta, nil, &offset)
 }
@@ -344,11 +361,25 @@ func (s *JSONLStore) readContentDomain(key string) (contentDomainWitness, bool, 
 		return contentDomainWitness{}, true, ErrContentIdentityUnavailable
 	}
 	var witness contentDomainWitness
-	if json.Unmarshal(data, &witness) != nil || witness.Key != key || !validHistoryStreamID(witness.DomainID) ||
+	if decodeContentWire(data, &witness) != nil || witness.Key != key || !validHistoryStreamID(witness.DomainID) ||
 		(witness.Version != ContentLineageVersion && witness.Version != contentCheckpointWitnessVersion) ||
 		(witness.Version == contentCheckpointWitnessVersion && (!validHistoryDigest(witness.Checkpoint) ||
 			(witness.OrderCheckpoint != "" && !validHistoryDigest(witness.OrderCheckpoint)))) {
 		return witness, true, ErrContentIdentityUnavailable
+	}
+	if witness.DiskVersion != 0 || witness.Storage != nil {
+		if witness.DiskVersion != contentStorageVersion || witness.Storage == nil ||
+			witness.Version != contentCheckpointWitnessVersion {
+			return witness, true, ErrContentIdentityUnavailable
+		}
+		state := &contentIdentityState{
+			DomainID: witness.DomainID, StateToken: witness.DomainID,
+			MutationVersion: contentMutationVersion,
+			storage:         &contentStorageState{Header: *witness.Storage},
+		}
+		if !validContentStorageHeader(state, key) {
+			return witness, true, ErrContentIdentityUnavailable
+		}
 	}
 	return witness, true, nil
 }
@@ -356,7 +387,7 @@ func (s *JSONLStore) readContentDomain(key string) (contentDomainWitness, bool, 
 func (s *JSONLStore) ensureContentDomain(key string, before, next SessionMeta) error {
 	state := next.ContentIdentity
 	if state == nil || state.Unavailable {
-		return nil
+		return s.advanceUnavailableContentCheckpoint(key, before, next, false)
 	}
 	witness, present, err := s.readContentDomain(key)
 	if err != nil {
@@ -366,7 +397,8 @@ func (s *JSONLStore) ensureContentDomain(key string, before, next SessionMeta) e
 		return nil
 	}
 	if present && before.ContentIdentity != nil && contentWitnessMatches(witness, before) &&
-		before.ContentIdentity.DomainID == state.DomainID && state.MutationVersion == contentMutationVersion {
+		before.ContentIdentity.DomainID == state.DomainID &&
+		(state.MutationVersion == contentMutationVersion || state.storage != nil) {
 		return s.writeContentCheckpoint(key, next)
 	}
 	// Only an explicit baseline or clear can create/retire a content domain.
@@ -386,7 +418,7 @@ func (s *JSONLStore) ensureContentDomain(key string, before, next SessionMeta) e
 func (s *JSONLStore) recoverContentDomain(key string, before, next SessionMeta) error {
 	state := next.ContentIdentity
 	if state == nil || state.Unavailable {
-		return nil
+		return s.advanceUnavailableContentCheckpoint(key, before, next, true)
 	}
 	if state.Version != ContentLineageVersion || !validHistoryStreamID(state.DomainID) ||
 		!validHistoryStreamID(state.StateToken) || !validContentMutationState(state, key) {
@@ -397,6 +429,12 @@ func (s *JSONLStore) recoverContentDomain(key string, before, next SessionMeta) 
 		return err
 	}
 	if err == nil && present {
+		if witness.Unavailable {
+			if contentCheckpointWitnessMatches(witness, next) {
+				return s.syncContentCheckpoint(key)
+			}
+			return ErrContentIdentityUnavailable
+		}
 		if contentWitnessMatches(witness, next) {
 			return s.syncContentCheckpoint(key)
 		}
@@ -651,7 +689,11 @@ func (s *JSONLStore) commitContentMetadata(
 	next.HistoryRecoveryRequired = next.HistoryRecoveryRequired || image.WriterRecovery
 	size := image.Bytes
 	next.HistoryBytes = &size
-	recovery := historyWriteRecovery{Meta: image.Meta, Next: next, Existed: image.Exists}
+	storage, err := s.prepareContentStorage(key, image.Meta, &next, false)
+	if err != nil {
+		return err
+	}
+	recovery := historyWriteRecovery{Meta: image.Meta, Next: next, Existed: image.Exists, Storage: storage}
 	if image.Exists {
 		recovery.AppendOffset = &size
 	}
@@ -690,14 +732,26 @@ func (s *JSONLStore) commitContentMetadata(
 		}
 		return errors.Join(err, recoveryErr)
 	}
+	s.retireContentStorageWrite(ctx, key, storage, true)
 	return nil
 }
 
 func contentCheckpointMatches(current, expected SessionMeta) bool {
-	if !reflect.DeepEqual(current.ContentIdentity, expected.ContentIdentity) {
+	if contentJSONDigest(
+		contentIdentityWire(current.ContentIdentity),
+	) != contentJSONDigest(
+		contentIdentityWire(expected.ContentIdentity),
+	) {
 		return false
 	}
 	if expected.ContentIdentity != nil {
+		if expected.ContentIdentity.Unavailable || len(expected.ContentIdentity.opaque) != 0 {
+			summary := expected.summaryCheckpoint
+			if summary == "" {
+				summary = contentDigest([]byte(expected.Summary))
+			}
+			return current.Skip == expected.Skip && contentDigest([]byte(current.Summary)) == summary
+		}
 		if expected.ContentIdentity.MutationVersion != 0 &&
 			((current.HistoryBytes == nil) != (expected.HistoryBytes == nil) ||
 				(current.HistoryBytes != nil && *current.HistoryBytes != *expected.HistoryBytes)) {

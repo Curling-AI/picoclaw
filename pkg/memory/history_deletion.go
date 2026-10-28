@@ -46,7 +46,21 @@ func (s *JSONLStore) DeleteSession(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
+	artifacts, floorImages, err := s.contentStorageForDeletion(ctx, key, meta)
+	if err != nil {
+		return err
+	}
+	images = append(images, floorImages...)
 	s.markHistoryPending(key)
+	// Keep every exact ownership descriptor until all payload unlinks and
+	// directory durability steps succeed. A failed attempt remains retryable
+	// after reopening; never rediscover an unrooted payload by its filename.
+	if err = s.deleteContentImages(key, images); err != nil {
+		return err
+	}
+	if err = s.deleteContentStorage(artifacts); err != nil {
+		return err
+	}
 	// Keep the established launcher deletion order: remove the listing before
 	// the payload, then retire every proof and journal belonging to this source.
 	for _, path := range []string{
@@ -56,9 +70,6 @@ func (s *JSONLStore) DeleteSession(ctx context.Context, key string) error {
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return removeErr
 		}
-	}
-	if err = s.deleteContentImages(key, images); err != nil {
-		return err
 	}
 	if meta.ContentIdentity != nil && meta.ContentIdentity.MutationVersion != 0 {
 		dir, openErr := os.Open(s.dir)

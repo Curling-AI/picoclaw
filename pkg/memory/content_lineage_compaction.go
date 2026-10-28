@@ -402,6 +402,9 @@ func (s *JSONLStore) finalizeContentArchiveAck(
 }
 
 func (s *JSONLStore) contentPendingGuard(meta SessionMeta) error {
+	if meta.ContentIdentity != nil && len(meta.ContentIdentity.opaque) != 0 {
+		return ErrContentIdentityUnavailable
+	}
 	if meta.ContentIdentity == nil || meta.ContentIdentity.Pending == nil {
 		return nil
 	}

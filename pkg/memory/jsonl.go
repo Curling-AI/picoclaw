@@ -64,7 +64,8 @@ type SessionMeta struct {
 	Scope                   json.RawMessage `json:"scope,omitempty"`
 	Aliases                 []string        `json:"aliases,omitempty"`
 
-	ContentIdentity *contentIdentityState `json:"content_identity,omitempty"`
+	ContentIdentity   *contentIdentityState `json:"content_identity,omitempty"`
+	summaryCheckpoint string
 
 	HistoryOrderVersion         uint8  `json:"history_order_version,omitempty"`
 	HistoryStreamID             string `json:"history_stream_id,omitempty"`
@@ -95,6 +96,8 @@ type JSONLStore struct {
 	contentCheckpointSyncFailure func(string, string) error
 	// Private fault boundary for NEW metadata durability recovery.
 	historyMetadataSyncFailure func(string, string) error
+	// Private boundary for immutable storage/index durability fault controls.
+	contentStorageFailure func(string, string) error
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
 	// This process is the only writer of the session directory, so a
@@ -194,7 +197,7 @@ func (s *JSONLStore) cachedMeta(sanitized string) (SessionMeta, bool) {
 func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
 	s.metaMu.Lock()
 	meta.HistoryRecoveryRequired = meta.HistoryRecoveryRequired || s.historyMarkers[sanitized].present
-	s.metaCache[sanitized] = copyMeta(meta)
+	s.metaCache[sanitized] = contentMetaForCache(meta)
 	s.metaMu.Unlock()
 }
 
@@ -914,6 +917,9 @@ func (s *JSONLStore) SetSummary(
 	if err != nil {
 		return err
 	}
+	if meta.ContentIdentity != nil && len(meta.ContentIdentity.opaque) != 0 {
+		return ErrContentIdentityUnavailable
+	}
 	before := copyMeta(meta)
 	now := time.Now()
 	if meta.CreatedAt.IsZero() {
@@ -954,6 +960,9 @@ func (s *JSONLStore) TruncateHistory(
 		}
 	}
 	if operationErr := s.checkContentGarbageCollection(ctx, sessionKey, meta); operationErr != nil {
+		return operationErr
+	}
+	if operationErr := s.hydrateContentStorage(ctx, sessionKey, &meta, true, true); operationErr != nil {
 		return operationErr
 	}
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {

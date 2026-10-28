@@ -54,6 +54,11 @@ func validContentMutationState(state *contentIdentityState, key string) bool {
 	if state.MutationVersion > contentMutationVersion {
 		return false
 	}
+	if state.storage != nil && !state.storage.SlotsLoaded {
+		// Capsules are validated wire metadata, not hydrated transition proof.
+		// Strict/replay callers hydrate before exposing vectors or an ACK.
+		return validContentStorageHeader(state, key)
+	}
 	if pending := state.Pending; pending != nil && pending.Mutation != nil {
 		mutation := pending.Mutation
 		if state.MutationVersion != contentMutationVersion || pending.Transition.Version != 0 ||

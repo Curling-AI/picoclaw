@@ -2,7 +2,6 @@ package memory
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -12,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/memory/testdata/lineagefixture"
 )
 
 func TestContentLineageCompactionOLDNEWFailuresRemainAtomic(t *testing.T) {
@@ -102,18 +102,11 @@ func TestContentLineageExpiredRetentionPreservesRowsAndAcceptsQualifiedRecovery(
 	}
 	key := "sk_v1_content_retention_expired"
 	_, _, transition := pendingContent(t, s, key)
-	meta, err := s.GetSessionMeta(t.Context(), key)
+	provenance, err := lineagefixture.LegacyArchiveDeadline(dir, key, time.Now().Add(-time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta.ContentIdentity.Pending.Transition.ExpiresAt = time.Now().Add(-time.Second)
-	data, err := json.Marshal(meta)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(s.metaPath(key), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	t.Log("pre-typed inline expiration fixture", provenance)
 	s, err = NewJSONLStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +128,21 @@ func TestContentLineageExpiredRetentionPreservesRowsAndAcceptsQualifiedRecovery(
 	retained, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil || !bytes.HasPrefix(retained, before) {
 		t.Fatal("expiration discarded the original source", err)
+	}
+	current, err := s.readRecoveryMeta(key)
+	if err != nil || current.ContentIdentity.storage == nil || current.ContentIdentity.storage.Header.Pending == nil ||
+		!current.ContentIdentity.storage.Header.Pending.ExpiresAt.Before(time.Now()) {
+		t.Fatal("expired migration lost the active disk2 retention fence", current, err)
+	}
+	if pending, readErr := s.ReadPendingHistoryCompaction(
+		t.Context(),
+		key,
+	); !errors.Is(
+		readErr,
+		ErrContentLineageExpired,
+	) ||
+		pending.MutationID != transition.MutationID {
+		t.Fatal("active disk2 expired retention became available", pending, readErr)
 	}
 	ack := ContentArchiveAck{
 		DomainID:        transition.DomainID,

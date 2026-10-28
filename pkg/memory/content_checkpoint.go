@@ -17,11 +17,11 @@ const contentCheckpointWitnessVersion = uint8(2)
 // and UpdatedAt are not content mutations and do not mint or invalidate proof.
 func contentCheckpointDigest(meta SessionMeta) string {
 	return contentJSONDigest(struct {
-		State *contentIdentityState `json:"state"`
-		Count int                   `json:"count"`
-		Skip  int                   `json:"skip"`
-		Bytes *int64                `json:"bytes"`
-	}{meta.ContentIdentity, meta.Count, meta.Skip, meta.HistoryBytes})
+		State any    `json:"state"`
+		Count int    `json:"count"`
+		Skip  int    `json:"skip"`
+		Bytes *int64 `json:"bytes"`
+	}{contentIdentityWire(meta.ContentIdentity), meta.Count, meta.Skip, meta.HistoryBytes})
 }
 
 // This is a separate, constant-size commitment, not an order reconstruction.
@@ -56,6 +56,9 @@ func (s *JSONLStore) contentOrderCheckpointAvailable(key string, meta SessionMet
 		return !protected, nil
 	}
 	if witness.Version == contentCheckpointWitnessVersion {
+		if witness.OrderCheckpoint == "" {
+			return !protected, nil
+		}
 		return witness.OrderCheckpoint != "" && witness.OrderCheckpoint == contentOrderCheckpointDigest(meta), nil
 	}
 	return !protected, nil
@@ -63,8 +66,26 @@ func (s *JSONLStore) contentOrderCheckpointAvailable(key string, meta SessionMet
 
 func contentWitnessMatches(witness contentDomainWitness, meta SessionMeta) bool {
 	state := meta.ContentIdentity
-	if state == nil || state.Unavailable || witness.DomainID != state.DomainID {
+	return state != nil && !state.Unavailable && !witness.Unavailable && contentCheckpointWitnessMatches(witness, meta)
+}
+
+// Representation matching does not attest identity. An owning NEW journal can
+// settle an unavailable disk2 floor while preserving every exact artifact root.
+func contentCheckpointWitnessMatches(witness contentDomainWitness, meta SessionMeta) bool {
+	state := meta.ContentIdentity
+	if state == nil || witness.DomainID != state.DomainID {
 		return false
+	}
+	if state.storage != nil && !state.storage.InlineTarget {
+		if witness.DiskVersion != contentStorageVersion || witness.Storage == nil ||
+			contentJSONDigest(witness.Storage) != contentJSONDigest(state.storage.Header) {
+			return false
+		}
+	} else if witness.DiskVersion != 0 || witness.Storage != nil {
+		return false
+	}
+	if state.storage != nil && !state.storage.InlineTarget {
+		return witness.Version == contentCheckpointWitnessVersion && witness.Checkpoint == contentCheckpointDigest(meta)
 	}
 	if state.MutationVersion == 0 {
 		return witness.Version == ContentLineageVersion && witness.Checkpoint == ""
@@ -74,14 +95,28 @@ func contentWitnessMatches(witness contentDomainWitness, meta SessionMeta) bool 
 }
 
 func (s *JSONLStore) writeContentCheckpoint(key string, meta SessionMeta) error {
+	return s.writeContentCheckpointAvailability(key, meta, false)
+}
+
+func (s *JSONLStore) writeContentCheckpointAvailability(key string, meta SessionMeta, unavailable bool) error {
 	state := meta.ContentIdentity
 	if state == nil || state.Unavailable || !validContentMutationState(state, key) {
 		return ErrContentIdentityUnavailable
 	}
+	if unavailable && state.storage == nil {
+		return ErrContentIdentityUnavailable
+	}
 	witness := contentDomainWitness{Version: ContentLineageVersion, Key: key, DomainID: state.DomainID}
-	if state.MutationVersion != 0 {
+	witness.Unavailable = unavailable
+	if state.storage != nil && !state.storage.InlineTarget {
+		header := cloneContentStorage(state.storage).Header
+		witness.DiskVersion, witness.Storage = contentStorageVersion, &header
+	}
+	if state.MutationVersion != 0 || (state.storage != nil && !state.storage.InlineTarget) {
 		witness.Version = contentCheckpointWitnessVersion
 		witness.Checkpoint = contentCheckpointDigest(meta)
+	}
+	if state.MutationVersion != 0 || (state.storage != nil && !state.storage.InlineTarget) {
 		marked, markerErr := s.hasHistoryRecoveryMarker(key)
 		if markerErr != nil {
 			return markerErr
@@ -100,6 +135,10 @@ func (s *JSONLStore) writeContentCheckpoint(key string, meta SessionMeta) error 
 			}
 		}
 	}
+	return s.writeContentDomainWitness(key, witness)
+}
+
+func (s *JSONLStore) writeContentDomainWitness(key string, witness contentDomainWitness) error {
 	data, err := json.Marshal(witness)
 	if err != nil {
 		return err
@@ -132,6 +171,39 @@ func (s *JSONLStore) writeContentCheckpoint(key string, meta SessionMeta) error 
 	// There is no direct-write fallback for a semantic checkpoint. An
 	// unsupported filesystem or an unsafe target must leave the journal fenced.
 	return replaceContentArtifact(dir, temporary, filepath.Base(s.contentDomainPath(key)))
+}
+
+// Losing content identity does not reconstruct or erase independent order.
+// Only this owning journal may advance an already-matching actual counter
+// commitment. The old content checkpoint and every root remain unchanged.
+func (s *JSONLStore) advanceUnavailableContentCheckpoint(key string, before, next SessionMeta, recovering bool) error {
+	witness, present, err := s.readContentDomain(key)
+	if onlyContentIdentityUnavailable(err) || !present {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if witness.DiskVersion != contentStorageVersion || witness.Storage == nil {
+		return nil
+	}
+	previous := witness
+	witness.Unavailable = true
+	marked, err := s.hasHistoryRecoveryMarker(key)
+	if err != nil {
+		return err
+	}
+	if witness.OrderCheckpoint != "" && !marked && !next.HistoryRecoveryRequired &&
+		next.HistoryOrderVersion == HistoryOrderVersion && witness.OrderCheckpoint == contentOrderCheckpointDigest(before) {
+		witness.OrderCheckpoint = contentOrderCheckpointDigest(next)
+	}
+	if previous.Unavailable != witness.Unavailable || previous.OrderCheckpoint != witness.OrderCheckpoint {
+		return s.writeContentDomainWitness(key, witness)
+	}
+	if recovering {
+		return s.syncContentCheckpoint(key)
+	}
+	return nil
 }
 
 // Matching legible bytes are not a completed durability phase. An owning NEW
@@ -180,7 +252,7 @@ func (s *JSONLStore) checkContentRecoveryCheckpoint(key string, before, next Ses
 		return err
 	}
 	if err == nil && present && witness.Version == contentCheckpointWitnessVersion &&
-		!contentWitnessMatches(witness, before) && !contentWitnessMatches(witness, next) {
+		!contentCheckpointWitnessMatches(witness, before) && !contentCheckpointWitnessMatches(witness, next) {
 		return ErrContentIdentityUnavailable
 	}
 	return nil
@@ -194,12 +266,14 @@ func (s *JSONLStore) restoreContentCheckpoint(key string, before, next SessionMe
 			return nil
 		}
 		if before.ContentIdentity.MutationVersion != 0 ||
-			(next.ContentIdentity != nil && next.ContentIdentity.MutationVersion != 0) {
+			before.ContentIdentity.storage != nil ||
+			(next.ContentIdentity != nil && (next.ContentIdentity.MutationVersion != 0 || next.ContentIdentity.storage != nil)) {
 			return s.writeContentCheckpoint(key, before)
 		}
 		return nil
 	}
-	if next.ContentIdentity == nil || next.ContentIdentity.MutationVersion == 0 {
+	if next.ContentIdentity == nil ||
+		(next.ContentIdentity.MutationVersion == 0 && next.ContentIdentity.storage == nil) {
 		return nil
 	}
 	witness, present, err := s.readContentDomain(key)

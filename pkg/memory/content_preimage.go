@@ -132,7 +132,7 @@ func (s *JSONLStore) retireContentPreimage(ctx context.Context, key string, imag
 		return err
 	}
 	name := contentPreimageName(key, image.ID)
-	if err = removeContentArtifact(s.dir, name); err != nil {
+	if err = s.removeOwnedContentArtifact(name); err != nil {
 		return fmt.Errorf("memory: retire content preimage: %w", err)
 	}
 	return nil
@@ -163,6 +163,9 @@ func (s *JSONLStore) contentImagesForDeletion(
 	if state == nil {
 		return nil, nil
 	}
+	if len(state.opaque) != 0 {
+		return nil, ErrContentIdentityUnavailable
+	}
 	images := make([]*contentPreimage, 0, 2)
 	if state.Pending != nil && state.Pending.Mutation != nil {
 		image := state.Pending.Mutation.Before.Image
@@ -189,7 +192,7 @@ func (s *JSONLStore) contentImagesForDeletion(
 
 func (s *JSONLStore) deleteContentImages(key string, images []*contentPreimage) error {
 	for _, image := range images {
-		if err := removeContentArtifact(s.dir, contentPreimageName(key, image.ID)); err != nil &&
+		if err := s.removeOwnedContentArtifact(contentPreimageName(key, image.ID)); err != nil &&
 			!errors.Is(err, os.ErrNotExist) {
 			return err
 		}

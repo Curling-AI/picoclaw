@@ -149,6 +149,13 @@ type HistoryContentAppender interface {
 	AppendHistoryContent(ctx context.Context, key string, message providers.Message) (ContentAppendResult, error)
 }
 
+// HistoryContentInputAppender accepts input and may return its independently
+// produced order receipt, but never a content Ref, binding or state interval.
+// It is an optional wake-up lane; subsequent proof uses a strict content frame.
+type HistoryContentInputAppender interface {
+	AppendHistoryContentInput(ctx context.Context, key string, message providers.Message) (ContentAppendResult, error)
+}
+
 // HistoryContentActivation distinguishes an explicitly initialized source from
 // an older caller that merely happens to implement the optional interfaces.
 // It inspects metadata/witness presence and refuses unsettled journals; it never

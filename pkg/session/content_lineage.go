@@ -148,3 +148,18 @@ func (b *JSONLBackend) AppendHistoryContent(
 	}
 	return store.AppendHistoryContent(ctx, key, message)
 }
+
+func (b *JSONLBackend) AppendHistoryContentInput(
+	ctx context.Context,
+	key string,
+	message providers.Message,
+) (memory.ContentAppendResult, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return memory.ContentAppendResult{}, ctx.Err()
+	}
+	store, ok := b.store.(memory.HistoryContentInputAppender)
+	if !ok {
+		return memory.ContentAppendResult{}, memory.ErrHistoryUnsupported
+	}
+	return store.AppendHistoryContentInput(ctx, key, message)
+}

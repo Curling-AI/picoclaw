@@ -14,7 +14,8 @@ func (s *JSONLStore) commitLogicalContentMetadata(
 	key string,
 	before, next SessionMeta,
 ) error {
-	if before.ContentIdentity == nil || before.ContentIdentity.MutationVersion == 0 {
+	if before.ContentIdentity == nil ||
+		(before.ContentIdentity.MutationVersion == 0 && before.ContentIdentity.storage == nil) {
 		return s.writeMeta(key, next)
 	}
 	if ctx == nil {
@@ -80,7 +81,11 @@ func (s *JSONLStore) contentAppendMetadata(
 	updatedAt := requested.UpdatedAt
 	requested = copyMeta(actual)
 	requested.UpdatedAt = updatedAt
-	requested.HistoryRecoveryRequired = true
+	protectedOrder := actual.ContentIdentity != nil && actual.ContentIdentity.MutationVersion != 0
+	orderCurrent := err == nil && present && witness.Version == contentCheckpointWitnessVersion &&
+		witness.OrderCheckpoint != "" && witness.OrderCheckpoint == contentOrderCheckpointDigest(actual)
+	requested.HistoryRecoveryRequired = actual.HistoryRecoveryRequired ||
+		((protectedOrder || witness.OrderCheckpoint != "") && !orderCurrent)
 	if requested.CreatedAt.IsZero() {
 		requested.CreatedAt = updatedAt
 	}

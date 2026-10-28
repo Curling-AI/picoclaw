@@ -55,34 +55,56 @@ func (s *JSONLStore) prepareContentAppend(
 	next *SessionMeta,
 	data []byte,
 	offset int64,
+	qualified bool,
 ) error {
 	if original.ContentIdentity == nil {
 		return nil
+	}
+	if qualified {
+		if err := s.hydrateContentStorage(context.Background(), key, &original, true, true); err != nil {
+			if !onlyContentIdentityUnavailable(err) {
+				return err
+			}
+			original.ContentIdentity.Unavailable = true
+		}
 	}
 	next.ContentIdentity = cloneContentState(original.ContentIdentity)
 	state := next.ContentIdentity
 	if state.Unavailable {
 		return nil
 	}
-	image, err := s.readContentAppendImage(context.Background(), key, offset, original)
-	if err != nil {
-		return err
-	}
 	witness, present, err := s.readContentDomain(key)
 	if err != nil && !isContentIdentityLoss(err) {
 		return err
 	}
-	if isContentIdentityLoss(err) || !present || !contentWitnessMatches(witness, original) || image.Bytes != offset ||
-		image.Count != original.Count ||
-		!validateContentRows(state, original, image.activeRows()) {
+	if isContentIdentityLoss(err) || !present || !contentWitnessMatches(witness, original) ||
+		state.Count != original.Count || state.Skip != original.Skip ||
+		next.Count-original.Count != bytes.Count(data, []byte{'\n'}) ||
+		(original.HistoryBytes != nil && *original.HistoryBytes != offset) {
 		state.Unavailable = true
 		return nil
+	}
+	if qualified {
+		image, readErr := s.readContentAppendImage(context.Background(), key, offset, original)
+		if readErr != nil {
+			return readErr
+		}
+		if image.Bytes != offset || image.Count != original.Count ||
+			!validateContentRows(state, original, image.activeRows()) {
+			state.Unavailable = true
+			return nil
+		}
 	}
 	appended, err := contentLocatorsForData(data, state.DomainID, original.Count, nil)
 	if err != nil {
 		return err
 	}
-	state.Rows = append(state.Rows, appended...)
+	if state.storage == nil || state.storage.RowsLoaded {
+		state.Rows = append(state.Rows, appended...)
+	}
+	if state.storage != nil {
+		state.storage.Appended = appended
+	}
 	state.StateToken = uuid.NewString()
 	state.Count = next.Count
 	state.Skip = next.Skip
@@ -159,6 +181,9 @@ func (s *JSONLStore) prepareContentPhysicalRewrite(ctx context.Context, key stri
 	if meta.ContentIdentity == nil {
 		return nil
 	}
+	if err := s.hydrateContentStorage(ctx, key, meta, true, true); err != nil {
+		return err
+	}
 	meta.ContentIdentity = cloneContentState(meta.ContentIdentity)
 	meta.ContentIdentity.StateToken = uuid.NewString()
 	// A physical rewrite is a concurrent mutation for strict CAS. Occurrence
@@ -198,6 +223,26 @@ func (s *JSONLStore) AppendHistoryContent(
 	ctx context.Context,
 	key string,
 	message providers.Message,
+) (ContentAppendResult, error) {
+	return s.appendHistoryContent(ctx, key, message, true)
+}
+
+// AppendHistoryContentInput accepts ordinary content without claiming to have
+// revalidated the existing prefix. A caller needing refs/intervals must use the
+// qualified AppendHistoryContent capability instead. This never initializes.
+func (s *JSONLStore) AppendHistoryContentInput(
+	ctx context.Context,
+	key string,
+	message providers.Message,
+) (ContentAppendResult, error) {
+	return s.appendHistoryContent(ctx, key, message, false)
+}
+
+func (s *JSONLStore) appendHistoryContent(
+	ctx context.Context,
+	key string,
+	message providers.Message,
+	qualified bool,
 ) (ContentAppendResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -249,7 +294,14 @@ func (s *JSONLStore) AppendHistoryContent(
 	}
 	message = detached
 	var outcome historyAppendOutcome
-	receipts, appendErr := s.appendHistoryMessagesOutcome(key, []providers.Message{message}, meta, false, &outcome)
+	receipts, appendErr := s.appendHistoryMessagesOutcome(
+		key,
+		[]providers.Message{message},
+		meta,
+		false,
+		qualified,
+		&outcome,
+	)
 	if !outcome.committed {
 		return ContentAppendResult{}, appendErr
 	}
@@ -262,16 +314,18 @@ func (s *JSONLStore) AppendHistoryContent(
 	if len(receipts) == 1 {
 		result.Receipt = &receipts[0]
 		result.Entry.Message = ordinaryContentMessage(receipts[0].Message)
-		result.Entry.ReceiptBinding = &ContentReceiptBinding{
-			SourceID: receipts[0].Message.HistoryID,
-			Order:    receipts[0].Order,
+		if qualified {
+			result.Entry.ReceiptBinding = &ContentReceiptBinding{
+				SourceID: receipts[0].Message.HistoryID,
+				Order:    receipts[0].Order,
+			}
 		}
 	}
 	// We still hold the writer's lock; this selects only this exact commit's
 	// locator. No callback or concurrent append can replace it with a later tail.
 	current := outcome.meta
 	before := meta.ContentIdentity
-	if state := current.ContentIdentity; state != nil && !state.Unavailable && len(state.Rows) > 0 &&
+	if state := current.ContentIdentity; qualified && state != nil && !state.Unavailable && len(state.Rows) > 0 &&
 		before != nil && !before.Unavailable && before.DomainID == state.DomainID &&
 		validHistoryStreamID(before.StateToken) && validHistoryStreamID(state.StateToken) &&
 		before.StateToken != state.StateToken {

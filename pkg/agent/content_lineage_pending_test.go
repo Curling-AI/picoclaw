@@ -3,7 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/memory"
+	"github.com/sipeed/picoclaw/pkg/memory/testdata/lineagefixture"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -27,18 +27,11 @@ func contentPendingLoop(t *testing.T, expired bool) (*AgentLoop, *memory.JSONLSt
 		t.Fatal(err)
 	}
 	if expired {
-		meta, err := store.GetSessionMeta(t.Context(), key)
+		provenance, err := lineagefixture.LegacyArchiveDeadline(dir, key, time.Now().Add(-time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
-		meta.ContentIdentity.Pending.Transition.ExpiresAt = time.Now().Add(-time.Second)
-		data, err := json.Marshal(meta)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = os.WriteFile(filepath.Join(dir, key+".meta.json"), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		t.Log("pre-typed inline expiration fixture", provenance)
 		store, err = memory.NewJSONLStore(dir)
 		if err != nil {
 			t.Fatal(err)

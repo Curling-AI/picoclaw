@@ -151,9 +151,20 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 	if err != nil {
 		return err
 	}
+	artifacts, floorImages, err := s.contentStorageForDeletion(context.Background(), meta.Key, meta)
+	if err != nil {
+		return err
+	}
+	images = append(images, floorImages...)
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
 	jsonlPath := filepath.Join(s.dir, sanitized+".jsonl")
 	s.markHistoryPending(sanitized)
+	if err := s.deleteContentImages(meta.Key, images); err != nil {
+		return err
+	}
+	if err := s.deleteContentStorage(artifacts); err != nil {
+		return err
+	}
 
 	// The meta goes first: while it exists the session is still listable, so
 	// removing it before the transcript avoids exposing a session whose
@@ -174,9 +185,6 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 		return err
 	}
 	if err := os.Remove(s.historyOrderWitnessPath(sanitized)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := s.deleteContentImages(meta.Key, images); err != nil {
 		return err
 	}
 

@@ -74,6 +74,13 @@ func (s *JSONLStore) recoverExpectedHistoryContentCommit(key string, next Sessio
 	if !historyNewCheckpointMatches(current, next) {
 		return false, errors.Join(recoveryErr, ErrContentStateChanged)
 	}
+	witness, present, witnessErr := s.readContentDomain(key)
+	if witnessErr != nil {
+		return true, errors.Join(recoveryErr, witnessErr)
+	}
+	if present && witness.Unavailable && contentCheckpointWitnessMatches(witness, current) {
+		return true, errors.Join(recoveryErr, ErrContentIdentityUnavailable)
+	}
 	if recoveryErr != nil {
 		log.Printf("memory: decided content mutation has pending operational recovery: %v", recoveryErr)
 		return true, recoveryErr

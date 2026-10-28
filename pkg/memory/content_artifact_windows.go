@@ -11,6 +11,14 @@ import (
 )
 
 func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, error) {
+	return openContentArtifactMode(dir, name, create, false)
+}
+
+func openContentArtifactWritable(dir, name string) (*os.File, *os.File, error) {
+	return openContentArtifactMode(dir, name, false, true)
+}
+
+func openContentArtifactMode(dir, name string, create, writable bool) (*os.File, *os.File, error) {
 	if filepath.Base(name) != name || name == "." || name == ".." {
 		return nil, nil, ErrContentIdentityUnavailable
 	}
@@ -25,6 +33,9 @@ func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, err
 		return nil, nil, err
 	}
 	access, disposition := uint32(windows.GENERIC_READ), uint32(windows.OPEN_EXISTING)
+	if writable {
+		access = windows.GENERIC_READ | windows.GENERIC_WRITE
+	}
 	if create {
 		access, disposition = windows.GENERIC_WRITE, windows.CREATE_NEW
 	}
@@ -47,13 +58,20 @@ func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, err
 	return file, parent, nil
 }
 
-func removeContentArtifact(dir, name string) error {
+func removeContentArtifact(dir, name string, beforeSync ...func() error) error {
 	file, parent, err := openContentArtifact(dir, name, false)
 	if err != nil {
 		return err
 	}
 	if err = file.Close(); err == nil {
 		err = os.Remove(filepath.Join(dir, name))
+	}
+	if err == nil {
+		for _, check := range beforeSync {
+			if err = check(); err != nil {
+				break
+			}
+		}
 	}
 	if err == nil {
 		err = parent.Sync()
