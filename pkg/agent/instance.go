@@ -111,6 +111,20 @@ func NewAgentInstance(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 ) *AgentInstance {
+	return newAgentInstance(agentCfg, defaults, cfg, provider, nil)
+}
+
+// openSessionStores gives an agent being built the session store already open
+// on its sessions directory, or nil to open one (see AgentLoop.openSessionStores).
+type openSessionStores func(dir string) session.SessionStore
+
+func newAgentInstance(
+	agentCfg *config.AgentConfig,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	open openSessionStores,
+) *AgentInstance {
 	if cfg != nil {
 		// Keep the subprocess isolation runtime aligned with the latest loaded config
 		// before any tools or providers start spawning child processes.
@@ -180,7 +194,13 @@ func NewAgentInstance(
 	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
-	sessions := initSessionStore(sessionsDir)
+	var sessions session.SessionStore
+	if open != nil {
+		sessions = open(sessionsDir)
+	}
+	if sessions == nil {
+		sessions = initSessionStore(sessionsDir)
+	}
 
 	mcpDiscoveryActive := agentHasDiscoverableMCPServers(cfg, agentMCPServerAllowlist)
 	contextBuilder := NewContextBuilder(workspace).

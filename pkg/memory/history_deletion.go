@@ -7,10 +7,11 @@ import (
 	"strings"
 )
 
-// DeleteSession applies explicit owner intent to this single-writer source.
+// deleteSessionFilesLocked applies explicit owner intent to one physical source.
 // Recover the source's own journal before deleting anything; automatic pruning
 // and unqualified history replacements retain their stricter retention guards.
-func (s *JSONLStore) DeleteSession(ctx context.Context, key string) error {
+// The caller holds the source lock, including the pair lock used for aliases.
+func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -20,9 +21,6 @@ func (s *JSONLStore) DeleteSession(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
 	if err := s.recoverHistoryWrite(key); err != nil {
 		return err
 	}

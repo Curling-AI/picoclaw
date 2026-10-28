@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -433,6 +434,24 @@ type turnEventScope struct {
 // ReloadProviderAndConfig atomically swaps the provider and config with proper synchronization.
 // It uses a context to allow timeout control from the caller.
 // Returns an error if the reload fails or context is canceled.
+// openSessionStores lets the registry a reload builds keep the session stores
+// the current agents have open, by directory. A second store on the same
+// directory is a second writer, with locks, a meta cache and history writer
+// state of its own: work still running on the old store (a sweep, a turn) would
+// not exclude writes through the new one, and a meta one store had cached would
+// outlive a delete through the other.
+func (al *AgentLoop) openSessionStores() openSessionStores {
+	open := make(map[string]session.SessionStore)
+	if current := al.GetRegistry(); current != nil {
+		for _, id := range current.ListAgentIDs() {
+			if agent, ok := current.GetAgent(id); ok && agent.Sessions != nil {
+				open[filepath.Clean(filepath.Join(agent.Workspace, "sessions"))] = agent.Sessions
+			}
+		}
+	}
+	return func(dir string) session.SessionStore { return open[filepath.Clean(dir)] }
+}
+
 func (al *AgentLoop) ReloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
@@ -456,7 +475,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				registry = nil
 			}
 		}()
-		registry = NewAgentRegistry(cfg, provider)
+		registry = newAgentRegistry(cfg, provider, al.openSessionStores())
 	}()
 	if registry == nil {
 		if err := ctx.Err(); err != nil {
