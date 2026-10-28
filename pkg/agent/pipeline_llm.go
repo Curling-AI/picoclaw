@@ -170,6 +170,14 @@ const maxDegenerateResponseRetries = 1
 const degenerateResponseNudge = "[System] Your last reply got stuck repeating the same phrase over and over " +
 	"instead of answering, and was discarded. Answer the question once, in your own words, and stop."
 
+// reasoningCapNudge goes with the retry of a call that spent its whole output
+// limit thinking. Resent unchanged, the request rerolls the same loop: prod,
+// 2026-10-28, two calls of 32768 reasoning tokens in a row on GLM, the second
+// a cycle of the same few hundred lines.
+const reasoningCapNudge = "[System] Your last reply spent your whole output limit on internal reasoning and " +
+	"never got to the answer, so nothing reached the user. Keep your reasoning short this time: do not enumerate " +
+	"or brainstorm long lists in it, and write the answer to the user."
+
 // announcesUndeliveredCall is the condition of the guard that keeps a promise
 // of a tool call out of the answer: only before the first tool of the turn,
 // with tools offered and no interruption. (seucaranguejo fork)
@@ -1140,6 +1148,13 @@ func (p *Pipeline) CallLLM(
 			exec.emptyResponseRetries++
 			cancelConfiguredStreamingLLM(turnCtx, exec)
 			p.reviveDiscoveredTools(ts, exec, iteration)
+			outputCapHit := responseHitOutputCap(exec.response, ts.agent.MaxTokens)
+			if outputCapHit {
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+					Role:    "user",
+					Content: reasoningCapNudge,
+				})
+			}
 			logger.WarnCF("agent", "LLM returned empty response (no content, no tool calls); retrying", map[string]any{
 				"agent_id":               ts.agent.ID,
 				"iteration":              iteration,
@@ -1147,6 +1162,7 @@ func (p *Pipeline) CallLLM(
 				"has_reasoning":          exec.response.ReasoningContent != "" || exec.response.Reasoning != "",
 				"finish_reason":          exec.response.FinishReason,
 				"finish_reason_reported": !exec.response.FinishReasonMissing,
+				"output_cap_hit":         outputCapHit,
 				"completion_tokens":      responseCompletionTokens(exec.response),
 				"request_id":             exec.response.ProviderRequestID,
 				"upstream_id":            exec.response.UpstreamID,
@@ -1159,10 +1175,30 @@ func (p *Pipeline) CallLLM(
 		// the synthetic error message, salvage the thinking as the reply.
 		// Providers surface it either as reasoning_content (DeepSeek-style)
 		// or reasoning (OpenRouter/AI-Gateway-style); check both.
+		//
+		// Not when the call stopped at the output limit: that thinking was cut
+		// mid-thought and is no answer. In prod (2026-10-28) it went out as a
+		// 73k-character loop of the same list, after a 20-minute turn.
 		if responseContent == "" && ts.channel != "pico" {
-			if exec.response.ReasoningContent != "" {
+			switch {
+			case responseHitOutputCap(exec.response, ts.agent.MaxTokens):
+				logger.WarnCF(
+					"agent",
+					"LLM spent its output limit without answering; not using its reasoning as the reply",
+					map[string]any{
+						"agent_id":          ts.agent.ID,
+						"iteration":         iteration,
+						"finish_reason":     exec.response.FinishReason,
+						"completion_tokens": responseCompletionTokens(exec.response),
+						"reasoning_chars":   len(responseReasoningContent(exec.response)),
+						"request_id":        exec.response.ProviderRequestID,
+						"upstream_id":       exec.response.UpstreamID,
+						"resolved_provider": exec.response.ResolvedProvider,
+					},
+				)
+			case exec.response.ReasoningContent != "":
 				responseContent = exec.response.ReasoningContent
-			} else if exec.response.Reasoning != "" {
+			case exec.response.Reasoning != "":
 				responseContent = exec.response.Reasoning
 			}
 		}
@@ -1344,6 +1380,9 @@ func (p *Pipeline) CallLLM(
 	if exec.truncatedToolCallRetries > 0 {
 		exec.truncatedToolCallRetries = 0
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, truncatedToolCallNudge)
+	}
+	if exec.emptyResponseRetries > 0 {
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, reasoningCapNudge)
 	}
 	exec.interruptedStreamRetries = 0
 	if exec.danglingColonRetries > 0 {
