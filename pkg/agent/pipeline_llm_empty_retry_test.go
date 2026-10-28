@@ -5,10 +5,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // emptyThenContentProvider returns an empty (no content, no tool calls)
@@ -318,6 +321,115 @@ func TestReasoningCapNudgeIsDroppedAfterARealToolCall(t *testing.T) {
 	}
 	if provider.callCarried(3, reasoningCapNudgeMarker) {
 		t.Error("the call after the tool ran must not carry the output-cap nudge")
+	}
+}
+
+// blockingScriptedProvider holds call blockAt until release is closed, so a
+// test can steer while that call is in flight.
+type blockingScriptedProvider struct {
+	scriptedProvider
+	blockAt int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingScriptedProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	options map[string]any,
+) (*providers.LLMResponse, error) {
+	if p.calls()+1 == p.blockAt {
+		close(p.started)
+		<-p.release
+	}
+	return p.scriptedProvider.Chat(ctx, messages, tools, model, options)
+}
+
+// The nudged retry answers while the user steers: the turn goes on with the new
+// message, and the next call must not say the answer never reached them.
+func TestReasoningCapNudgeIsDroppedWhenTheRetryAnswersAndTheUserSteers(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	provider := &blockingScriptedProvider{
+		scriptedProvider: scriptedProvider{script: []providers.LLMResponse{
+			reasoningAtCap(),
+			{Content: "an answer the user was reading"},
+			{Content: "answer to the follow-up"},
+		}},
+		blockAt: 2,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	sessionKey := session.BuildMainSessionKey(routing.DefaultAgentID)
+
+	type result struct {
+		resp string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := al.ProcessDirectWithChannel(context.Background(), "hello", sessionKey, "test", "chat1")
+		done <- result{resp, err}
+	}()
+
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for the nudged retry")
+	}
+	if err := al.Steer(providers.Message{Role: "user", Content: "follow-up"}); err != nil {
+		t.Fatalf("Steer: %v", err)
+	}
+	close(provider.release)
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("ProcessDirectWithChannel: %v", r.err)
+		}
+		if r.resp != "answer to the follow-up" {
+			t.Errorf("response = %q, want the answer to the follow-up", r.resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for the turn")
+	}
+	if got := provider.calls(); got != 3 {
+		t.Fatalf("provider calls = %d, want 3", got)
+	}
+	if !provider.callCarried(2, reasoningCapNudgeMarker) {
+		t.Error("the retry must carry the output-cap nudge")
+	}
+	if !provider.callCarried(3, "follow-up") {
+		t.Error("the call after steering must carry the follow-up")
+	}
+	if provider.callCarried(3, reasoningCapNudgeMarker) {
+		t.Error("the call after steering must not carry the output-cap nudge")
+	}
+}
+
+// Same when the nudged retry comes back with text that another guard retries.
+func TestReasoningCapNudgeIsDroppedWhenAnotherGuardRetriesTheAnswer(t *testing.T) {
+	al, provider := newScriptedLoop(t,
+		reasoningAtCap(),
+		providers.LLMResponse{Content: truncatedToolCallTail},
+		providers.LLMResponse{Content: "patch applied"},
+	)
+
+	resp, err := al.ProcessDirect(context.Background(), "hello", "reasoning-cap-guard-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != "patch applied" {
+		t.Errorf("response = %q, want %q", resp, "patch applied")
+	}
+	if !provider.callCarried(3, "tool call written out as text") {
+		t.Error("the third call must carry the truncated-tool-call nudge")
+	}
+	if provider.callCarried(3, reasoningCapNudgeMarker) {
+		t.Error("the third call must not carry the output-cap nudge")
 	}
 }
 

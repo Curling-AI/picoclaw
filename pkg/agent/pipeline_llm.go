@@ -1035,6 +1035,13 @@ func (p *Pipeline) CallLLM(
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
 
+	// The output-cap nudge says nothing reached the user. Once a call brings back
+	// visible text or a tool call that is no longer true, and the turn can still
+	// send another call (steering, or a retry from one of the guards below).
+	if exec.emptyResponseRetries > 0 && (exec.response.Content != "" || len(exec.response.ToolCalls) > 0) {
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, reasoningCapNudge)
+	}
+
 	// A completion that ends in the same block over and over is a generation
 	// loop: the model stopped answering and spent the rest of its budget on one
 	// phrase. Reported on greenhouse (2026-09-07) as a wall of "princípios de
@@ -1380,9 +1387,6 @@ func (p *Pipeline) CallLLM(
 	if exec.truncatedToolCallRetries > 0 {
 		exec.truncatedToolCallRetries = 0
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, truncatedToolCallNudge)
-	}
-	if exec.emptyResponseRetries > 0 {
-		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, reasoningCapNudge)
 	}
 	exec.interruptedStreamRetries = 0
 	if exec.danglingColonRetries > 0 {
