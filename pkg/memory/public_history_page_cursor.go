@@ -1,13 +1,17 @@
 package memory
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 
 	"github.com/google/uuid"
 )
+
+var ErrPublicHistoryCursorMalformed = errors.New("public history cursor format invalid")
 
 const (
 	publicHistoryCursorBytes = 512
@@ -40,18 +44,15 @@ func readPublicHistoryCursor(request PublicHistoryPageRequest, meta SessionMeta,
 	if request.Cursor == "" {
 		return cursor, nil
 	}
-	if len(request.Cursor) > publicHistoryCursorBytes {
-		return cursor, ErrHistoryCursor
+	previous, err := decodePublicHistoryCursor(request.Cursor)
+	if err != nil {
+		return cursor, err
 	}
-	data, err := base64.RawURLEncoding.DecodeString(request.Cursor)
-	if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Version != 1 ||
-		cursor.Key != publicHistoryKeyDigest(request.Key) || cursor.Generation != meta.PublicHistoryGeneration ||
-		cursor.Revision == 0 || cursor.Revision > meta.PublicHistoryRevision || cursor.Count < 0 ||
+	cursor = previous
+	if cursor.Key != publicHistoryKeyDigest(request.Key) || cursor.Generation != meta.PublicHistoryGeneration ||
+		cursor.Revision > meta.PublicHistoryRevision ||
 		cursor.Count > meta.PublicHistoryCount || cursor.Bytes < 0 || cursor.Bytes > meta.PublicHistoryBytes ||
-		cursor.Position < 0 || cursor.Position > cursor.Count ||
-		(cursor.Direction != publicPageBefore && cursor.Direction != publicPageAfter) ||
-		(cursor.Direction == publicPageBefore && cursor.Position == 0) ||
-		(cursor.Direction == publicPageAfter && cursor.Position == cursor.Count) {
+		cursor.Position > cursor.Count {
 		return cursor, ErrHistoryCursor
 	}
 	if cursor.Count == 0 {
@@ -63,6 +64,42 @@ func readPublicHistoryCursor(request PublicHistoryPageRequest, meta SessionMeta,
 	last, err := index.record(cursor.Count - 1)
 	if err != nil || last.Offset+last.Length != cursor.Bytes || publicIndexRecordDigest(last) != cursor.Digest {
 		return cursor, ErrHistoryCursor
+	}
+	return cursor, nil
+}
+
+// ValidatePublicHistoryPageCursor validates only the issued versioned shape.
+// Source generation/frontier compatibility is checked separately under its lock.
+func ValidatePublicHistoryPageCursor(encoded string) error {
+	_, err := decodePublicHistoryCursor(encoded)
+	return err
+}
+
+func decodePublicHistoryCursor(encoded string) (publicHistoryCursor, error) {
+	var cursor publicHistoryCursor
+	if len(encoded) == 0 || len(encoded) > publicHistoryCursorBytes {
+		return cursor, ErrPublicHistoryCursorMalformed
+	}
+	data, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || json.Unmarshal(data, &cursor) != nil {
+		return cursor, ErrPublicHistoryCursorMalformed
+	}
+	canonical, err := json.Marshal(cursor)
+	// Issued opaque tokens have one canonical, complete representation. This
+	// rejects null, omitted/unknown/duplicate fields and object-shape ambiguity.
+	if err != nil || !bytes.Equal(data, canonical) {
+		return cursor, ErrPublicHistoryCursorMalformed
+	}
+	key, keyErr := base64.RawURLEncoding.DecodeString(cursor.Key)
+	digest, digestErr := hex.DecodeString(cursor.Digest)
+	if cursor.Version != 1 || keyErr != nil || len(key) != sha256.Size || uuid.Validate(cursor.Generation) != nil ||
+		cursor.Revision == 0 || cursor.Revision > uint64(maxHistoryPosition) || cursor.Count <= 0 || cursor.Count > maxHistoryPosition ||
+		cursor.Bytes <= 0 || cursor.Bytes > maxHistoryPosition || digestErr != nil || len(digest) != sha256.Size ||
+		cursor.Position < 0 || cursor.Position > cursor.Count ||
+		(cursor.Direction != publicPageBefore && cursor.Direction != publicPageAfter) ||
+		(cursor.Direction == publicPageBefore && cursor.Position == 0) ||
+		(cursor.Direction == publicPageAfter && cursor.Position == cursor.Count) {
+		return cursor, ErrPublicHistoryCursorMalformed
 	}
 	return cursor, nil
 }

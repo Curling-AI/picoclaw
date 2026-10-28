@@ -47,6 +47,14 @@ type PublicHistoryPage struct {
 }
 
 func (s *JSONLStore) ReadPublicHistoryPage(ctx context.Context, request PublicHistoryPageRequest) (_ PublicHistoryPage, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return PublicHistoryPage{}, err
+	}
+	if request.Cursor != "" {
+		if err := ValidatePublicHistoryPageCursor(request.Cursor); err != nil {
+			return PublicHistoryPage{}, err
+		}
+	}
 	canonical := strings.TrimSpace(request.Key)
 	if canonical == "" || canonical != request.Key {
 		return PublicHistoryPage{}, ErrHistoryCursor
