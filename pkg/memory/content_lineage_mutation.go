@@ -61,6 +61,9 @@ func (s *JSONLStore) prepareContentAppend(
 		return nil
 	}
 	if qualified {
+		// Qualification may hydrate or fence this local state. The owning journal's
+		// OLD checkpoint must remain an exact snapshot of the metadata on disk.
+		original.ContentIdentity = cloneContentState(original.ContentIdentity)
 		if err := s.hydrateContentStorage(context.Background(), key, &original, true, true); err != nil {
 			if !onlyContentIdentityUnavailable(err) {
 				return err
@@ -314,7 +317,10 @@ func (s *JSONLStore) appendHistoryContent(
 	if len(receipts) == 1 {
 		result.Receipt = &receipts[0]
 		result.Entry.Message = ordinaryContentMessage(receipts[0].Message)
-		if qualified {
+		// An independently committed Order can survive content proof loss.
+		// Do not turn it into a qualified content binding for a fenced domain.
+		identity := outcome.meta.ContentIdentity
+		if qualified && (identity == nil || (!identity.Unavailable && len(identity.opaque) == 0)) {
 			result.Entry.ReceiptBinding = &ContentReceiptBinding{
 				SourceID: receipts[0].Message.HistoryID,
 				Order:    receipts[0].Order,

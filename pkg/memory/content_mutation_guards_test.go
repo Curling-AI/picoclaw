@@ -264,14 +264,39 @@ func TestContentMutationCheckpointRejectsMetadataOnlyRollback(t *testing.T) {
 				!bytes.Equal(witness, witnessAfter) {
 				t.Fatal("getter repaired a rollback", err, witnessErr)
 			}
+			// These mutations changed content metadata only: the persisted
+			// independent stream/counter and its witness are still exact. A
+			// fresh strict Order reader must establish that before the append.
+			fresh, err := NewJSONLStore(s.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			priorReceipts, err := fresh.ReadHistoryWithReceipts(t.Context(), key)
+			if err != nil || len(priorReceipts) != 4 || !priorReceipts[3].Order.Valid() {
+				t.Fatal("fixture did not preserve independent Order proof", priorReceipts, err)
+			}
 			appended, err := s.AppendHistoryContent(
 				t.Context(),
 				key,
 				providers.Message{Role: "assistant", Content: "durable without reattestation"},
 			)
-			if err != nil || appended.Entry.Ref != nil || appended.Receipt != nil ||
-				appended.Entry.ReceiptBinding != nil || appended.Entry.Message.Content == "" {
+			if err != nil || appended.Entry.Ref != nil || appended.Entry.ReceiptBinding != nil ||
+				appended.DomainID != "" || appended.BeforeState != "" || appended.AfterState != "" || appended.Entry.Message.Content == "" {
 				t.Fatal("rollback blocked ordinary content or invented proof", appended, err)
+			}
+			if appended.Receipt == nil || !appended.Receipt.Order.Valid() ||
+				appended.Receipt.Order.StreamID != priorReceipts[3].Order.StreamID ||
+				appended.Receipt.Order.Sequence != priorReceipts[3].Order.Sequence+1 {
+				t.Fatal("append fabricated or dropped independently known Order", appended)
+			}
+			fresh, err = NewJSONLStore(s.dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, err := fresh.ReadHistoryWithReceipts(t.Context(), key)
+			if err != nil || len(actual) != 5 || actual[4].Order != appended.Receipt.Order ||
+				actual[4].Message.HistoryID != appended.Receipt.Message.HistoryID || actual[4].Message.Content != appended.Entry.Message.Content {
+				t.Fatal("returned Order was not the exact newly durable occurrence", actual, err)
 			}
 			messages, err := s.GetHistory(t.Context(), key)
 			if err != nil || len(messages) != 5 || messages[4].Content != "durable without reattestation" {

@@ -48,7 +48,7 @@ func (s *JSONLStore) DeleteSession(ctx context.Context, sessionKey string) error
 	var errs []error
 	for _, alias := range s.legacyAliases(sessionKey) {
 		unlock := s.lockSessionPair(sessionKey, alias)
-		if err := s.deleteSessionFilesLocked(ctx, alias); err != nil {
+		if err := s.deleteSessionFilesLocked(ctx, alias, true); err != nil {
 			errs = append(errs, err)
 		}
 		unlock()
@@ -125,8 +125,25 @@ func (s *JSONLStore) PruneEmptySessions(
 
 	var removed []string
 	var errs []error
+	// Metadata may already be durably gone when a later cleanup phase fails.
+	// Its exact prior authorization, not a new emptiness/hook decision, remains
+	// discoverable in the existing journal namespace for a warm retry.
+	pending, discoveryErr := s.pendingHistoryDeletions("empty")
+	if discoveryErr != nil {
+		return nil, discoveryErr
+	}
+	seen := make(map[string]bool)
+	for _, key := range pending {
+		seen[sanitizeKey(key)] = true
+		done, err := s.pruneIfEmpty(key, cutoff, beforeRemove)
+		if err != nil {
+			errs = append(errs, err)
+		} else if done {
+			removed = append(removed, key)
+		}
+	}
 	for _, meta := range s.ListSessionMetas() {
-		if !isEmptyMeta(meta) {
+		if seen[sanitizeKey(meta.Key)] || !isEmptyMeta(meta) {
 			continue
 		}
 		done, err := s.pruneIfEmpty(meta.Key, cutoff, beforeRemove)
@@ -161,6 +178,9 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	l := s.sessionLock(key)
 	l.Lock()
 	defer l.Unlock()
+	if resumed, err := s.resumeHistoryDeletion(key); resumed || err != nil {
+		return resumed && err == nil, err
+	}
 
 	meta, lastWrite, err := s.readMetaFile(key)
 	if errors.Is(err, os.ErrNotExist) {
@@ -216,7 +236,7 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 		}
 	}
-	if err := s.removeSessionFilesLocked(sanitizeKey(key)); err != nil {
+	if err := s.removeSessionFilesLocked(sanitizeKey(key), "empty"); err != nil {
 		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 	return true, nil

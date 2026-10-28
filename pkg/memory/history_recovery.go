@@ -217,7 +217,12 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 func (s *JSONLStore) beginHistoryWrite(key string, recovery historyWriteRecovery) error {
 	// NEW is only a commit fingerprint; recovery preserves its actual disk
 	// metadata. Only OLD needs a summary backup, which can be large.
-	recovery.NextSummaryDigest = contentDigest([]byte(recovery.Next.Summary))
+	// Legacy metadata-only summary/truncation changes remain valid after an
+	// append journal. Semantic checkpoints bind those changes independently.
+	if state := recovery.Next.ContentIdentity; state != nil &&
+		(state.MutationVersion != 0 || state.storage != nil) {
+		recovery.NextSummaryDigest = contentDigest([]byte(recovery.Next.Summary))
+	}
 	recovery.Next.Summary = ""
 	data, err := json.Marshal(recovery)
 	if err != nil {
@@ -298,6 +303,13 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 	s.markHistoryPending(key)
 	if readErr != nil {
 		return historyWriteUnknown, fmt.Errorf("memory: read history recovery: %w", readErr)
+	}
+	var variant historyDeletionRecord
+	if operationErr := json.Unmarshal(data, &variant); operationErr != nil {
+		return historyWriteUnknown, fmt.Errorf("memory: decode history recovery: %w", operationErr)
+	}
+	if variant.Deletion != nil {
+		return historyWriteOld, s.recoverHistoryDeletion(key, data)
 	}
 	_, metaErr := os.Stat(s.metaPath(key))
 	_, dataErr := os.Stat(s.jsonlPath(key))

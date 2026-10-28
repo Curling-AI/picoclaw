@@ -64,12 +64,12 @@ func (s *JSONLStore) readHistoryContentMutation(
 	key, mutationID, intentDigest string,
 	onlyPending, latest bool,
 ) (ContentMutationResult, error) {
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentMutationResult{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentMutationResult{}, err
+	}
 	meta, err := s.readContentMutationMeta(key)
 	if err != nil {
 		return ContentMutationResult{}, err
@@ -108,12 +108,12 @@ func (s *JSONLStore) ReadHistoryContentMutationFrame(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentFrame{}, err
+	}
 	meta, err := s.readContentMutationMeta(key)
 	if err != nil {
 		return ContentFrame{}, err

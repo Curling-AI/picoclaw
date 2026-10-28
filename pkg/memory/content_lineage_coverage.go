@@ -126,12 +126,12 @@ func (s *JSONLStore) AcknowledgeHistoryCompactionCoverage(
 	if len(metadata) > maxContentTransitionMetadata {
 		return ErrContentLineageCapacity
 	}
-	if err = s.canonicalContentKey(ctx, key); err != nil {
-		return err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err = s.canonicalContentKey(ctx, key); err != nil {
+		return err
+	}
 	image, _, err := s.contentMutationImage(ctx, key)
 	if err != nil {
 		return err

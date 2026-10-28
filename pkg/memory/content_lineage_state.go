@@ -581,12 +581,12 @@ func (s *JSONLStore) ReadHistoryContentFrame(ctx context.Context, key string) (C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentFrame{}, err
+	}
 	image, err := s.readContentImage(ctx, key)
 	if err != nil {
 		return ContentFrame{}, err
@@ -601,12 +601,12 @@ func (s *JSONLStore) InitializeHistoryContentIdentity(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentFrame{}, err
+	}
 	// This operation is a writer: it may settle its own prior OLD/NEW journal.
 	writer, err := s.readMeta(key)
 	if err != nil {

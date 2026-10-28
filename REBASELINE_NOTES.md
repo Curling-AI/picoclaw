@@ -117,12 +117,34 @@ required syncs is narrowly classified as cleanup: retain/log the fence and keep
 the already qualified receipt. Do not extend that disposition to failed syncs,
 uncertain decisions or joined operational causes.
 
+Preserve private disk format 2's small metadata/cache/checkpoint headers,
+appendable record-chain locator index and immutable Pending/Last blobs. The
+ordinary accepted-input capability withholds content proof and extends only new
+index bytes; qualified readers and destructive operations still verify the full
+physical prefix. Metadata, append journals and the warm cache must not expand
+those vectors again. Pure getters do not migrate. Explicit inline downconversion
+targets semantic writer `dfd1c2d`, preserving operation/ACK/ref/order evidence;
+older V7 binaries remain unsupported. Keep the optional input observer's early
+durable wake-up separate from qualified observers and genuine receipt delivery.
+
+Deletion's bounded variant of the existing history journal retains exact typed
+artifact roots, file fingerprints and expected absences until every payload and
+source unlink is durable. The authorization journal retires last. Warm cron and
+empty sweeps discover that prior intent even after metadata disappeared; they do
+not reuse a normal append journal as authorization or repeat an already passed
+empty hook. Preserve unsafe/unowned evidence and reject replacement inodes or
+newly appeared files. The canonical metadata retains its alias list until every
+owned legacy physical alias finishes deletion, including a retry with only its
+own witness left. This does not make unresolved public aliases physical owners
+or create shared directory locks/cache absent from this fork's current source.
+
 The producer's `messageutil.ProjectLegacyPublic` predicate is still a separate
 implementation from the currently published consumer's copy. The consumer pin,
 error propagation and projection alignment are a separately validated follow-up;
-an unpublished composition is not delivery evidence. The source still validates
-the full physical prefix and writes inline locators/Pending/Last on append. The
-outstanding write-amplification finding is not resolved by this semantic change.
+an unpublished composition is not delivery evidence. Strict content readers can
+still scan complete prefixes, including asynchronous consumer work. Measure all
+data-API reads/writes and observer drain separately from the accepted append's
+latency; local figures do not establish EFS or end-to-end constant-time behavior.
 
 ### Earlier capture overrides
 

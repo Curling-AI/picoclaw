@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 )
 
-// The disk projection is separate from the in-memory state clone. Expanded
+// MarshalJSON keeps the disk projection separate from the in-memory state clone. Expanded
 // vectors stay intact for qualified operations and never leak into disk2 WAL.
 func (meta SessionMeta) MarshalJSON() ([]byte, error) {
 	type metadata SessionMeta

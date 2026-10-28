@@ -90,7 +90,7 @@ func contentIdentityWire(state *contentIdentityState) any {
 		return nil
 	}
 	if len(state.opaque) != 0 {
-		return json.RawMessage(state.opaque)
+		return state.opaque
 	}
 	if state.storage == nil || state.storage.InlineTarget {
 		return state
@@ -214,7 +214,8 @@ func validContentStorageHeader(state *contentIdentityState, key string) bool {
 			h.Generation,
 			"rows",
 		) || h.Index.Algorithm != contentIndexAlgorithm ||
-		h.Index.Records < 0 || h.Index.Start < 0 || h.Index.Count < 0 || h.Index.Start > h.Index.Records || h.Index.Count > h.Index.Records-h.Index.Start {
+		h.Index.Records < 0 || int64(h.Index.Records) > h.Index.File.Bytes ||
+		h.Index.Start < 0 || h.Index.Count < 0 || h.Index.Start > h.Index.Records || h.Index.Count > h.Index.Records-h.Index.Start {
 		return false
 	}
 	for _, entry := range []struct {

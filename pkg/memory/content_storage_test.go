@@ -239,3 +239,39 @@ func TestContentStorageUnknownFormatPreservesOpaqueDescriptorsOnOrdinaryWrite(t 
 		t.Fatal("unknown ownership roots were destroyed", err)
 	}
 }
+
+func TestContentStorageUnverifiedIndexCountCannotDriveAllocation(t *testing.T) {
+	s, key, _ := typedMutationSource(t)
+	meta, err := s.readRecoveryMeta(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.ContentIdentity.storage.Header.Index.Count = int(^uint(0) >> 2)
+	meta.ContentIdentity.storage.Header.Index.Records = meta.ContentIdentity.storage.Header.Index.Count
+	meta.ContentIdentity.storage.Header.Index.Start = 0
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(s.metaPath(key), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	witness, err := os.ReadFile(s.contentDomainPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if value := recover(); value != nil {
+			t.Fatalf("unproved index count caused allocation panic: %v", value)
+		}
+	}()
+	frame, err := s.ReadHistoryContentFrame(t.Context(), key)
+	if err != nil || frame.IdentityStatus != ContentIdentityUnavailable || len(frame.Entries) != 4 {
+		t.Fatal("corrupt optional index granted proof or hid durable content", frame, err)
+	}
+	after, err := os.ReadFile(s.metaPath(key))
+	floorAfter, floorErr := os.ReadFile(s.contentDomainPath(key))
+	if err != nil || floorErr != nil || !bytes.Equal(data, after) || !bytes.Equal(witness, floorAfter) {
+		t.Fatal("getter repaired corrupt index metadata", err, floorErr)
+	}
+}

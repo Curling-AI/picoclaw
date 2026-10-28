@@ -9,7 +9,10 @@ import (
 	"testing"
 )
 
-func deletionRetrySource(t *testing.T, inline, pending bool) (*JSONLStore, string, []*contentPreimage, []contentArtifactDescriptor) {
+func deletionRetrySource(
+	t *testing.T,
+	inline, pending bool,
+) (*JSONLStore, string, []*contentPreimage, []contentArtifactDescriptor) {
 	t.Helper()
 	s, key, frame := typedMutationSource(t)
 	result, err := s.CommitHistoryContentMutation(t.Context(), key, typedPrefixPlan(frame, 2))
@@ -61,7 +64,9 @@ func TestContentStorageDeleteRetainsRootsAcrossUnlinkFailureAndRestart(t *testin
 					if inline && nth > 1 {
 						continue
 					}
-					name := map[bool]string{true: "inline", false: "disk2"}[inline] + map[bool]string{true: "-prune", false: "-owner"}[prune] + "-" + phase + "-" + strconv.Itoa(nth)
+					name := map[bool]string{true: "inline", false: "disk2"}[inline] + map[bool]string{true: "-prune", false: "-owner"}[prune] + "-" + phase + "-" + strconv.Itoa(
+						nth,
+					)
 					t.Run(name, func(t *testing.T) {
 						s, key, images, files := deletionRetrySource(t, inline, !prune)
 						seen := 0
@@ -95,7 +100,12 @@ func TestContentStorageDeleteRetainsRootsAcrossUnlinkFailureAndRestart(t *testin
 							t.Fatal("restart/retry could not complete exact rooted cleanup", err)
 						}
 						for _, image := range images {
-							if _, err = os.Lstat(filepath.Join(s.dir, contentPreimageName(key, image.ID))); !errors.Is(err, os.ErrNotExist) {
+							if _, err = os.Lstat(
+								filepath.Join(s.dir, contentPreimageName(key, image.ID)),
+							); !errors.Is(
+								err,
+								os.ErrNotExist,
+							) {
 								t.Fatal("successful delete stranded owned private content", err)
 							}
 						}

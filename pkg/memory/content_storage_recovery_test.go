@@ -94,12 +94,12 @@ func TestContentStorageNEWProofLossKeepsInputAndFencesIdentityWithoutBlockingLat
 	index := old.ContentIdentity.storage.Header.Index
 	indexPath := filepath.Join(s.dir, index.File.name())
 	s.writeFile = func(path string, data []byte, mode os.FileMode) error {
-		if err := fileutil.WriteFileAtomic(path, data, mode); err != nil {
-			return err
+		if writeErr := fileutil.WriteFileAtomic(path, data, mode); writeErr != nil {
+			return writeErr
 		}
 		if path == s.metaPath(key) {
-			if err := os.Remove(indexPath); err != nil {
-				return err
+			if removeErr := os.Remove(indexPath); removeErr != nil {
+				return removeErr
 			}
 			return errors.New("lost reply after NEW metadata and identity artifact loss")
 		}

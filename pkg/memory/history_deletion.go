@@ -11,7 +11,7 @@ import (
 // Recover the source's own journal before deleting anything; automatic pruning
 // and unqualified history replacements retain their stricter retention guards.
 // The caller holds the source lock, including the pair lock used for aliases.
-func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string) error {
+func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, ownedAlias ...bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -24,13 +24,44 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string) e
 	if err := s.recoverHistoryWrite(key); err != nil {
 		return err
 	}
+	// A prior legacy delete may already have removed this alias's exact files.
+	// Its canonical owner intentionally still names the alias until every
+	// removal succeeds; that reference must not turn a physical no-op retry
+	// into an attempt to resolve/delete the canonical source itself.
+	absent := true
+	for _, path := range s.historyDeletionSourcePaths(key) {
+		if _, err := os.Lstat(path); err == nil {
+			absent = false
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if absent {
+		s.forgetDeletedHistory(key, false)
+		return nil
+	}
 	legacy, err := s.ownedContentNeverInitialized(ctx, key)
 	if err != nil {
 		return err
 	}
 	if !legacy {
-		if _, err = s.contentIdentityActiveLocked(ctx, key); err != nil {
-			return err
+		if len(ownedAlias) > 0 && ownedAlias[0] {
+			// The canonical owner's exact Aliases entry authorized this physical
+			// legacy source under the promotion pair lock. Do not resolve it back
+			// to that canonical owner when a failed legacy unlink left only its
+			// own witness. Any existing physical metadata must still name key.
+			own, present, readErr := s.readContentActivationMetadata(key)
+			if readErr != nil {
+				return readErr
+			}
+			if present && own.Key != "" && own.Key != key {
+				return ErrHistoryOwnershipUnavailable
+			}
+		} else {
+			if _, err = s.contentIdentityActiveLocked(ctx, key); err != nil {
+				return err
+			}
 		}
 	}
 	meta, err := s.readRecoveryMeta(key)
@@ -49,6 +80,12 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string) e
 		return err
 	}
 	images = append(images, floorImages...)
+	if len(images)+len(artifacts) > 0 {
+		if err = s.beginHistoryDeletion(ctx, key, "owner", images, artifacts); err != nil {
+			return err
+		}
+		return s.recoverHistoryWrite(key)
+	}
 	s.markHistoryPending(key)
 	// Keep every exact ownership descriptor until all payload unlinks and
 	// directory durability steps succeed. A failed attempt remains retryable

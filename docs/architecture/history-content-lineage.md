@@ -125,11 +125,24 @@ owner-requested DELETE still resolves its journal and deletes the source, retiri
 its domain. Old ACKs/plans cannot recreate it or bind a newly created source.
 `JSONLBackend.DeleteSession` exposes this intent to the gateway's optional hard
 delete interface instead of replacing history and summary independently. The
-source's writer lock covers journal recovery and deletion. An unresolved journal
-or ownership failure is returned before clearing the content or summary; callers
-must propagate that failure. Automatic pruning retains its separate stricter
-guards.
+source's writer lock covers journal recovery and deletion. Preflight ownership
+or unresolved-write failures are returned before removal. Once exact private
+artifacts are verified, a bounded deletion variant of the existing
+`.jsonl.commit.json` journal records their descriptors, original file identities,
+digests and expected absences without copying message bodies. That record is
+file- and directory-synced before the first unlink. Remaining files are checked
+against it before a retry removes anything; a replacement inode, changed bytes,
+unsafe link or newly appeared file fails closed. Private payloads retire before
+the listing/transcript, and the authorization journal retires last. An I/O
+failure can interrupt this authorized cleanup; callers receive the failure and
+the journal remains discoverable after metadata removal and across writer
+restart. The cron and empty-session sweeps can finish their prior authorization
+without repeating the first GC decision or an already successful empty-session
+hook. A normal append journal is never deletion authority. Automatic pruning
+retains its separate stricter guards before creating a cleanup authorization.
 The deployment's existing single-writer requirement still applies to deletion.
+File-identity checks do not promise automatic replay after a filesystem identity
+changes, such as a restore to another volume; ambiguous evidence is preserved.
 
 The optional `HistoryContentArchiveCoverage` capability negotiates coverage
 version 1 and a locally configured projection policy. It keeps `Archived` refs
@@ -139,17 +152,52 @@ immutable raw preimage through a trusted local classifier, never one supplied
 by RPC. The coverage digest also binds the exact archive transaction. The v5
 all-archived ACK remains strict and cannot confirm an excluded subset.
 
-## Current append cost
+## External storage and append qualification
 
-An initialized append still validates the complete committed physical JSONL
-prefix and serializes its active locators in metadata and the OLD/NEW journal.
-Both costs grow with retained content. The adapter's message/byte transport
-budgets do not bound the physical prefix, including logically dropped rows.
-This implementation does not yet provide constant-time append. Replacing the
-scan with size/count/tail checks alone would miss a same-size edit to an earlier
-row, so that shortcut must not claim equivalent identity proof. Any later
-representation change needs matching recovery, rollback, compaction and explicit
-deletion qualification.
+Private disk format 2 keeps small headers in metadata, the current checkpoint
+and the ordinary cache. Locators live in a source-owned appendable `.idx` file;
+Pending/Last are immutable `.blob` records. Their names do not match legacy
+session JSON discovery. The public lineage and mutation wire versions stay 1,
+and the original semantic discriminator remains separate from the disk format.
+Unsupported formats retain their opaque evidence and cannot initialize a new
+domain or recover a counter by scanning retained rows.
+
+`AppendHistoryContentInput` returns a detached accepted body and, only when
+independently known, its genuine producer receipt. It returns no content ref,
+binding, domain or before/after interval. Its index append extends an expected
+`sha256-record-chain-v1` commitment from new locator bytes; extent checks are a
+write boundary, not proof that the previous prefix was reread. Metadata and the
+OLD/NEW journal retain descriptors and the exact index delta rather than expanded
+vectors or rewritten Pending/Last payloads. Recovery can truncate only its own
+authorized suffix, preserving unowned complete rows.
+
+Explicit `AppendHistoryContent`, frame readers and destructive proof boundaries
+still validate the complete committed JSONL/index prefixes and exact locators.
+A same-size edit to an earlier row therefore cannot receive known content proof
+or authorize a cut. Unverified record counts cannot size an allocation; readers
+validate count/extent coherence and grow only from actual decoded records. The
+public adapter budgets do not become an artificial physical-prefix/ref cap.
+
+The append lane's smaller storage work does not establish constant-time
+end-to-end operation. A mounted consumer can still schedule full strict reads
+and contend on the same source lock; measurements must include that asynchronous
+work and all metadata, journal, index, blob and checkpoint bytes. Local APFS
+measurements do not establish EFS cost or deployment performance.
+
+Within the same owning store, content readers and checked mutation/ACK entry
+points acquire the source lock before inspecting its journal or ownership
+checkpoint. They wait for an active append's settled result instead of treating
+its temporary journal as an unresolved recovery. A journal left unresolved
+after the writer returns still fences pure reads without automatic recovery.
+
+Pure getters neither migrate nor rewrite a format. The first owning mutation
+can migrate a fully qualified inline source without changing its domain, refs,
+state, frozen operation or independent order. Explicit
+`PrepareHistoryContentInlineRollback` performs the reverse conversion for the
+mutation-aware inline baseline `dfd1c2d`; it does not support older V7 writers.
+Both directions preserve complete Pending/Last and exact application ACK replay.
+Missing, corrupt or opaque required provenance refuses conversion and preserves
+the files.
 
 `messageutil.ProjectLegacyPublic` implements the producer's public-session
 predicate. The currently published consumer still has its own copy; the
@@ -177,6 +225,14 @@ intervals. The callback receives its own detached message/ref/receipt snapshot
 before the v5 observer and ingestion can schedule asynchronous work. The three
 state fields stay empty together when content identity is unavailable, while
 independently valid producer order keeps its existing receipt contract.
+
+The optional `SetSessionHistoryContentInputObserver` selects the accepted-input
+wake-up lane. Its payload never qualifies the old prefix, and a consumer must
+read a strict frame when it needs refs. A qualified subscriber deliberately
+keeps the qualified append lane; mixed registrations observe one append rather
+than persisting the input twice. Non-checked fallback storage confirms its Save
+before publishing a hint, and failed Save excludes only the unconfirmed members
+of a mixed batch. Capability registration does not initialize content identity.
 
 The message inside the wrapper clears `HistoryID`, `HistoryRunID` and all three
 order fields. Its complete persisted delivery origin, creation time, delivery

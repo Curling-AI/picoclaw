@@ -59,9 +59,30 @@ func openContentArtifactMode(dir, name string, create, writable bool) (*os.File,
 }
 
 func removeContentArtifact(dir, name string, beforeSync ...func() error) error {
+	return removeContentArtifactIdentity(dir, name, nil, beforeSync...)
+}
+
+func contentArtifactFileIdentity(file *os.File) (contentFileIdentity, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return contentFileIdentity{}, err
+	}
+	return contentFileIdentity{
+		Volume: uint64(info.VolumeSerialNumber),
+		File:   uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
+	}, nil
+}
+
+func removeContentArtifactIdentity(dir, name string, expected *contentFileIdentity, beforeSync ...func() error) error {
 	file, parent, err := openContentArtifact(dir, name, false)
 	if err != nil {
 		return err
+	}
+	if expected != nil {
+		actual, identityErr := contentArtifactFileIdentity(file)
+		if identityErr != nil || actual != *expected {
+			return errors.Join(ErrContentIdentityUnavailable, identityErr, file.Close(), parent.Close())
+		}
 	}
 	if err = file.Close(); err == nil {
 		err = os.Remove(filepath.Join(dir, name))

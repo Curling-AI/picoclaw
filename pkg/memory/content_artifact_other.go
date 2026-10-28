@@ -21,6 +21,14 @@ func openContentArtifact(dir, name string, create bool) (*os.File, *os.File, err
 
 func removeContentArtifact(_, _ string, _ ...func() error) error { return ErrHistoryUnsupported }
 
+func contentArtifactFileIdentity(_ *os.File) (contentFileIdentity, error) {
+	return contentFileIdentity{}, ErrHistoryUnsupported
+}
+
+func removeContentArtifactIdentity(_, _ string, _ *contentFileIdentity, _ ...func() error) error {
+	return ErrHistoryUnsupported
+}
+
 func openContentArtifactWritable(_, _ string) (*os.File, *os.File, error) {
 	return nil, nil, ErrHistoryUnsupported
 }

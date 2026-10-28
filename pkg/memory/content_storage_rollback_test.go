@@ -81,9 +81,13 @@ func TestContentStorageInlineRollbackPreservesAllSemanticState(t *testing.T) {
 					t.Fatal("conversion changed logical content or live bindings", frame, after, err)
 				}
 				afterMeta, err := s.readRecoveryMeta(key)
-				if err != nil || afterMeta.ContentIdentity.storage != nil || afterMeta.ContentIdentity.MutationVersion != contentMutationVersion ||
-					afterMeta.HistorySequence != meta.HistorySequence || afterMeta.HistoryStreamID != meta.HistoryStreamID ||
-					afterMeta.Summary != meta.Summary || afterMeta.Count != meta.Count || afterMeta.Skip != meta.Skip {
+				if err != nil || afterMeta.ContentIdentity.storage != nil ||
+					afterMeta.ContentIdentity.MutationVersion != contentMutationVersion ||
+					afterMeta.HistorySequence != meta.HistorySequence ||
+					afterMeta.HistoryStreamID != meta.HistoryStreamID ||
+					afterMeta.Summary != meta.Summary ||
+					afterMeta.Count != meta.Count ||
+					afterMeta.Skip != meta.Skip {
 					t.Fatal("conversion reset semantic/Order state", afterMeta, err)
 				}
 				bodyAfter, err := os.ReadFile(s.jsonlPath(key))
@@ -123,7 +127,16 @@ func TestContentStorageInlineRollbackPreservesAllSemanticState(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					expected := contentRollbackExpectation{key, after, plan, result, ack, afterMeta.HistorySequence, afterMeta.HistoryStreamID, afterMeta.HistoryRecoveryRequired}
+					expected := contentRollbackExpectation{
+						key,
+						after,
+						plan,
+						result,
+						ack,
+						afterMeta.HistorySequence,
+						afterMeta.HistoryStreamID,
+						afterMeta.HistoryRecoveryRequired,
+					}
 					data, _ := json.MarshalIndent(expected, "", "  ")
 					if err = os.WriteFile(filepath.Join(dst, "expected.fixture"), data, 0o600); err != nil {
 						t.Fatal(err)
@@ -148,8 +161,8 @@ func TestContentStorageInlineRollbackOLDNEWKeepsOneAuthoritativeFormat(t *testin
 			s.writeFile = func(path string, data []byte, mode os.FileMode) error {
 				if path == s.metaPath(key) {
 					if newDecision {
-						if err := fileutil.WriteFileAtomic(path, data, mode); err != nil {
-							return err
+						if writeErr := fileutil.WriteFileAtomic(path, data, mode); writeErr != nil {
+							return writeErr
 						}
 					}
 					return errors.New("lost conversion metadata reply")

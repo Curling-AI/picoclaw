@@ -85,7 +85,7 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 			continue
 		}
 		info, ierr := entry.Info()
-		if ierr != nil || !info.ModTime().Before(cutoff) {
+		if ierr != nil || (suffix != ".jsonl.commit.json" && !info.ModTime().Before(cutoff)) {
 			continue
 		}
 		sanitized := strings.TrimSuffix(entry.Name(), suffix)
@@ -105,6 +105,9 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 }
 
 func (s *JSONLStore) pruneSessionFilesLocked(sanitized string, cutoff time.Time) (bool, error) {
+	if resumed, err := s.resumeHistoryDeletion(sanitized); resumed || err != nil {
+		return resumed && err == nil, err
+	}
 	for _, path := range []string{
 		s.metaPath(sanitized), s.jsonlPath(sanitized), s.historyRecoveryPath(sanitized), s.historyDecisionPath(sanitized),
 		s.historyOrderWitnessPath(sanitized),
@@ -133,7 +136,10 @@ func (s *JSONLStore) removeSessionFiles(sanitized string) error {
 	return s.removeSessionFilesLocked(sanitized)
 }
 
-func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
+func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...string) error {
+	if resumed, err := s.resumeHistoryDeletion(sanitized); resumed || err != nil {
+		return err
+	}
 	meta, err := s.readMeta(sanitized)
 	if err != nil {
 		return err
@@ -156,6 +162,16 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 		return err
 	}
 	images = append(images, floorImages...)
+	if len(images)+len(artifacts) > 0 {
+		origin := "retention"
+		if len(purpose) > 0 {
+			origin = purpose[0]
+		}
+		if err = s.beginHistoryDeletion(context.Background(), meta.Key, origin, images, artifacts); err != nil {
+			return err
+		}
+		return s.recoverHistoryWrite(meta.Key)
+	}
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
 	jsonlPath := filepath.Join(s.dir, sanitized+".jsonl")
 	s.markHistoryPending(sanitized)

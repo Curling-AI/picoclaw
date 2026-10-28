@@ -97,12 +97,12 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentTransition{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentTransition{}, err
+	}
 	image, frame, err := s.contentMutationImage(ctx, key)
 	if err != nil {
 		return ContentTransition{}, err
@@ -214,12 +214,12 @@ func (s *JSONLStore) ReadPendingHistoryCompaction(ctx context.Context, key strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentTransition{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentTransition{}, err
+	}
 	image, err := s.readContentImage(ctx, key)
 	if err != nil {
 		return ContentTransition{}, err
@@ -252,12 +252,12 @@ func (s *JSONLStore) ReadHistoryCompactionFrame(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ContentFrame{}, err
+	}
 	image, err := s.readContentImage(ctx, key)
 	if err != nil {
 		return ContentFrame{}, err
@@ -342,12 +342,12 @@ func (s *JSONLStore) AcknowledgeHistoryCompaction(ctx context.Context, key strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return err
-	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return err
+	}
 	image, _, err := s.contentMutationImage(ctx, key)
 	if err != nil {
 		return err

@@ -212,6 +212,10 @@ func classifyContentStorageDecode(err error) error {
 }
 
 func (s *JSONLStore) readContentIndex(ctx context.Context, index contentIndexDescriptor) ([]contentLocator, error) {
+	if index.Records < 0 || index.File.Bytes < 0 || int64(index.Records) > index.File.Bytes ||
+		index.Start < 0 || index.Count < 0 || index.Start > index.Records || index.Count > index.Records-index.Start {
+		return nil, ErrContentIdentityUnavailable
+	}
 	if err := s.failContentStorage(index.File.name(), "read"); err != nil {
 		return nil, err
 	}
@@ -234,7 +238,9 @@ func (s *JSONLStore) readContentIndex(ctx context.Context, index contentIndexDes
 	scanner.Buffer(make([]byte, 0, 4096), maxLineSize)
 	scanner.Split(scanCommittedHistoryLine)
 	root := contentIndexGenesis(index.File)
-	rows := make([]contentLocator, 0, index.Count)
+	// Count is untrusted until the full stream's digest/extent is checked.
+	// Grow only from actual decoded records, never allocate its claimed size.
+	rows := make([]contentLocator, 0)
 	count := 0
 	var size int64
 	for scanner.Scan() {

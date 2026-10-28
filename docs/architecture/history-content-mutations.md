@@ -70,7 +70,7 @@ give a caller without a command ID an exactly-once promise. A second edit waits
 for ApplicationACK; the controller discovers the real pending pair instead of
 inferring it from a later getter and SQL.
 
-The inline semantic writer stores a current checkpoint digest in a versioned
+The semantic writer stores a current checkpoint digest in a versioned
 external content-domain witness. Summary, Pending, Last and ACK changes update
 the metadata and witness in the same OLD/NEW journal, even when JSONL bytes stay
 equal. Metadata-only rollback therefore withholds identity rather than forgetting
@@ -108,9 +108,19 @@ an intervening append, before changing their retained suffix. A physical danglin
 content witness remains activation evidence; it is never a never-initialized
 source or permission to invent known proof.
 
-This semantic baseline understands all mutation kinds. Older V7 writers do not
-understand its records and are not a supported rollback target. An external
-index representation or downconversion is a separate storage change and must
-preserve these semantics before it can be claimed compatible. Full physical
-prefix validation remains in place; this change does not resolve the outstanding
-write-amplification work by claiming constant-time reads.
+Private disk format 2 retains small headers and exact index deltas in ordinary
+metadata/journals, with appendable locator indexes and immutable Pending/Last
+capsules. Public mutation/lineage versions remain 1. An accepted-input wake-up
+never attests a prefix: strict mutation, frame and destructive boundaries still
+validate complete physical evidence. Independent Order can remain genuine after
+content-only checkpoint loss, but no content ref, binding or state interval is
+issued for that unavailable domain. Lost Order itself still withholds receipts.
+
+`PrepareHistoryContentInlineRollback` explicitly converts a fully qualified
+source to the mutation-aware inline writer `dfd1c2d`, preserving exact pending
+payloads and closed ACK replay before changing writers. Missing or opaque
+provenance refuses conversion. Older V7 writers do not understand these semantic
+records and remain unsupported. Neither the external index nor a smaller
+ordinary append cost establishes constant-time qualified reads or end-to-end
+consumer work. See [content lineage](history-content-lineage.md) for storage,
+owner deletion and observer boundaries.

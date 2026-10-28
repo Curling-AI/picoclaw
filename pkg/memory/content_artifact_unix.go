@@ -51,6 +51,18 @@ func openContentArtifactMode(dir, name string, create, writable bool) (*os.File,
 }
 
 func removeContentArtifact(dir, name string, beforeSync ...func() error) error {
+	return removeContentArtifactIdentity(dir, name, nil, beforeSync...)
+}
+
+func contentArtifactFileIdentity(file *os.File) (contentFileIdentity, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return contentFileIdentity{}, err
+	}
+	return contentFileIdentity{Volume: uint64(stat.Dev), File: stat.Ino}, nil
+}
+
+func removeContentArtifactIdentity(dir, name string, expected *contentFileIdentity, beforeSync ...func() error) error {
 	file, parent, err := openContentArtifact(dir, name, false)
 	if err != nil {
 		return err
@@ -67,6 +79,9 @@ func removeContentArtifact(dir, name string, beforeSync ...func() error) error {
 	}
 	if opened.Dev != current.Dev || opened.Ino != current.Ino || current.Nlink != 1 ||
 		current.Mode&unix.S_IFMT != unix.S_IFREG {
+		return ErrContentIdentityUnavailable
+	}
+	if expected != nil && *expected != (contentFileIdentity{Volume: uint64(opened.Dev), File: opened.Ino}) {
 		return ErrContentIdentityUnavailable
 	}
 	if err = unix.Unlinkat(int(parent.Fd()), name, 0); err != nil {
