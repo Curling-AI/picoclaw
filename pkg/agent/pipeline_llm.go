@@ -1035,10 +1035,10 @@ func (p *Pipeline) CallLLM(
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
 
-	// The output-cap nudge says nothing reached the user. Once a call brings back
-	// visible text or a tool call that is no longer true, and the turn can still
-	// send another call (steering, or a retry from one of the guards below).
-	if exec.emptyResponseRetries > 0 && (exec.response.Content != "" || len(exec.response.ToolCalls) > 0) {
+	// The output-cap nudge rides on the one empty-response retry only. Whatever
+	// that retry brought back, "your last reply" now means another reply, and the
+	// turn can still send more calls (steering, or a retry from a guard below).
+	if exec.emptyResponseRetries > 0 {
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, reasoningCapNudge)
 	}
 

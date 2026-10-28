@@ -347,66 +347,77 @@ func (p *blockingScriptedProvider) Chat(
 	return p.scriptedProvider.Chat(ctx, messages, tools, model, options)
 }
 
-// The nudged retry answers while the user steers: the turn goes on with the new
-// message, and the next call must not say the answer never reached them.
-func TestReasoningCapNudgeIsDroppedWhenTheRetryAnswersAndTheUserSteers(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = t.TempDir()
-	provider := &blockingScriptedProvider{
-		scriptedProvider: scriptedProvider{script: []providers.LLMResponse{
-			reasoningAtCap(),
-			{Content: "an answer the user was reading"},
-			{Content: "answer to the follow-up"},
-		}},
-		blockAt: 2,
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
-	sessionKey := session.BuildMainSessionKey(routing.DefaultAgentID)
+// The user steers while the nudged retry is in flight: the turn goes on with the
+// new message, and the next call must not repeat that nothing reached them,
+// whether the retry answered or hit the limit again.
+func TestReasoningCapNudgeIsDroppedWhenTheUserSteersAfterTheRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		retry providers.LLMResponse
+	}{
+		{name: "retry answers", retry: providers.LLMResponse{Content: "an answer the user was reading"}},
+		{name: "retry hits the limit again", retry: reasoningAtCap()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Agents.Defaults.Workspace = t.TempDir()
+			provider := &blockingScriptedProvider{
+				scriptedProvider: scriptedProvider{script: []providers.LLMResponse{
+					reasoningAtCap(),
+					tc.retry,
+					{Content: "answer to the follow-up"},
+				}},
+				blockAt: 2,
+				started: make(chan struct{}),
+				release: make(chan struct{}),
+			}
+			al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+			sessionKey := session.BuildMainSessionKey(routing.DefaultAgentID)
 
-	type result struct {
-		resp string
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() {
-		resp, err := al.ProcessDirectWithChannel(context.Background(), "hello", sessionKey, "test", "chat1")
-		done <- result{resp, err}
-	}()
+			type result struct {
+				resp string
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				resp, err := al.ProcessDirectWithChannel(context.Background(), "hello", sessionKey, "test", "chat1")
+				done <- result{resp, err}
+			}()
 
-	select {
-	case <-provider.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for the nudged retry")
-	}
-	if err := al.Steer(providers.Message{Role: "user", Content: "follow-up"}); err != nil {
-		t.Fatalf("Steer: %v", err)
-	}
-	close(provider.release)
+			select {
+			case <-provider.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timeout waiting for the nudged retry")
+			}
+			if err := al.Steer(providers.Message{Role: "user", Content: "follow-up"}); err != nil {
+				t.Fatalf("Steer: %v", err)
+			}
+			close(provider.release)
 
-	select {
-	case r := <-done:
-		if r.err != nil {
-			t.Fatalf("ProcessDirectWithChannel: %v", r.err)
-		}
-		if r.resp != "answer to the follow-up" {
-			t.Errorf("response = %q, want the answer to the follow-up", r.resp)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout waiting for the turn")
-	}
-	if got := provider.calls(); got != 3 {
-		t.Fatalf("provider calls = %d, want 3", got)
-	}
-	if !provider.callCarried(2, reasoningCapNudgeMarker) {
-		t.Error("the retry must carry the output-cap nudge")
-	}
-	if !provider.callCarried(3, "follow-up") {
-		t.Error("the call after steering must carry the follow-up")
-	}
-	if provider.callCarried(3, reasoningCapNudgeMarker) {
-		t.Error("the call after steering must not carry the output-cap nudge")
+			select {
+			case r := <-done:
+				if r.err != nil {
+					t.Fatalf("ProcessDirectWithChannel: %v", r.err)
+				}
+				if r.resp != "answer to the follow-up" {
+					t.Errorf("response = %q, want the answer to the follow-up", r.resp)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timeout waiting for the turn")
+			}
+			if got := provider.calls(); got != 3 {
+				t.Fatalf("provider calls = %d, want 3", got)
+			}
+			if !provider.callCarried(2, reasoningCapNudgeMarker) {
+				t.Error("the retry must carry the output-cap nudge")
+			}
+			if !provider.callCarried(3, "follow-up") {
+				t.Error("the call after steering must carry the follow-up")
+			}
+			if provider.callCarried(3, reasoningCapNudgeMarker) {
+				t.Error("the call after steering must not carry the output-cap nudge")
+			}
+		})
 	}
 }
 
@@ -449,6 +460,13 @@ func TestEmptyReplyBelowOutputCapIsSalvagedWithoutNudge(t *testing.T) {
 	}
 	if resp != "the salvaged thinking" {
 		t.Errorf("response = %q, want the salvaged reasoning", resp)
+	}
+	if got := provider.calls(); got != 1+maxEmptyResponseRetries {
+		t.Fatalf(
+			"provider calls = %d, want %d (callCarried below is vacuous otherwise)",
+			got,
+			1+maxEmptyResponseRetries,
+		)
 	}
 	if provider.callCarried(2, reasoningCapNudgeMarker) {
 		t.Error("a retry below the output limit must not carry the output-cap nudge")
