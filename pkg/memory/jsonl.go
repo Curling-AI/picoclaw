@@ -43,6 +43,13 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
+	PublicHistoryVersion    int             `json:"public_history_version,omitempty"`
+	PublicHistoryGeneration string          `json:"public_history_generation,omitempty"`
+	PublicHistoryRevision   uint64          `json:"public_history_revision,omitempty"`
+	PublicHistoryBytes      int64           `json:"public_history_bytes,omitempty"`
+	PublicHistoryCount      int64           `json:"public_history_count,omitempty"`
+	PublicHistoryDigest     string          `json:"public_history_digest,omitempty"`
+	PublicHistoryComplete   bool            `json:"public_history_complete,omitempty"`
 	HistoryEpoch            int64           `json:"history_epoch,omitempty"`
 	HistoryFileEpoch        int64           `json:"history_file_epoch,omitempty"`
 	HistoryGeneration       string          `json:"history_generation,omitempty"`

@@ -191,6 +191,10 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 			meta.HistoryTip = message.HistoryID
 		}
 	}
+	publicChange, publicErr := s.preparePublicAppend(key, original, &meta, messages)
+	if publicErr != nil {
+		return nil, publicErr
+	}
 	end := offset + int64(len(data))
 	meta.HistoryBytes = &end
 	if err = s.prepareContentAppend(key, original, &meta, data, offset, qualifyContent); err != nil {
@@ -201,7 +205,7 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 		return nil, err
 	}
 	if commitErr := s.beginHistoryWrite(key, historyWriteRecovery{
-		Meta: original, Next: meta, AppendOffset: &offset, Storage: storage,
+		Meta: original, Next: meta, AppendOffset: &offset, Storage: storage, Public: publicChange.Recovery,
 	}); commitErr != nil {
 		if errors.Is(commitErr, ErrHistoryReceiptUnavailable) {
 			meta = appendMeta
@@ -238,6 +242,9 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 	}
 	if err == nil {
 		err = s.appendContentStorageWrite(storage)
+	}
+	if err == nil {
+		err = s.writePublicChange(key, publicChange)
 	}
 	if err == nil {
 		err = s.writeMeta(key, meta)
@@ -473,6 +480,10 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	if err != nil {
 		return err
 	}
+	publicChange, publicErr := s.preparePublicRewrite(key, original, &meta, messages)
+	if publicErr != nil {
+		return publicErr
+	}
 	size := int64(len(data))
 	meta.HistoryBytes = &size
 	if err = s.prepareContentRewrite(key, original, &meta, data); err != nil {
@@ -484,14 +495,17 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	}
 	if commitErr := s.beginHistoryWrite(
 		key,
-		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed, Storage: storage},
+		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed, Storage: storage, Public: publicChange.Recovery},
 	); commitErr != nil {
 		return commitErr
 	}
 	if writeErr := s.writeSessionFile(s.jsonlPath(key), data, 0o644); writeErr != nil {
 		return errors.Join(writeErr, s.recoverFailedHistoryWrite(key))
 	}
-	err = s.writeMeta(key, meta)
+	err = s.writePublicChange(key, publicChange)
+	if err == nil {
+		err = s.writeMeta(key, meta)
+	}
 	if err == nil {
 		err = s.ensureContentDomain(key, original, meta)
 	}

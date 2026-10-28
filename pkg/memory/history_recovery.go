@@ -151,6 +151,7 @@ func (s *JSONLStore) applyHistoryRecoveryMarker(key string, meta *SessionMeta, m
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
+	Public *publicHistoryRecovery `json:"public,omitempty"`
 	Meta              SessionMeta          `json:"meta"`
 	Next              SessionMeta          `json:"next"`
 	AppendOffset      *int64               `json:"appendOffset,omitempty"`
@@ -405,6 +406,9 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		if err != nil {
 			return decision, err
 		}
+		if operationErr := s.restorePublicHistory(key, recovery.Public); operationErr != nil {
+			return decision, operationErr
+		}
 		if operationErr := s.writeMeta(key, recovery.Meta); operationErr != nil {
 			return decision, operationErr
 		}
@@ -465,7 +469,10 @@ func historyNewCheckpointMatches(current, next SessionMeta) bool {
 }
 
 func historyCheckpointMatches(current, expected SessionMeta) bool {
-	return contentCheckpointMatches(current, expected) && current.HistoryGeneration == expected.HistoryGeneration &&
+	return contentCheckpointMatches(current, expected) && current.PublicHistoryDigest == expected.PublicHistoryDigest && current.PublicHistoryVersion == expected.PublicHistoryVersion &&
+		current.PublicHistoryGeneration == expected.PublicHistoryGeneration && current.PublicHistoryRevision == expected.PublicHistoryRevision &&
+		current.PublicHistoryBytes == expected.PublicHistoryBytes && current.PublicHistoryCount == expected.PublicHistoryCount &&
+		current.PublicHistoryComplete == expected.PublicHistoryComplete && current.HistoryGeneration == expected.HistoryGeneration &&
 		current.HistoryFileGeneration == expected.HistoryFileGeneration &&
 		current.HistoryTip == expected.HistoryTip && current.Count == expected.Count &&
 		current.HistoryPrefix == expected.HistoryPrefix &&
