@@ -95,6 +95,16 @@ ordinary appends. A qualified recovery may replay and confirm the retained
 operation after the deadline; no loop silently waits for an ACK while deleting
 its only durable source.
 
+If independent content proof is unavailable, `JSONLBackend.Save` uses the
+optional `CompactForSessionSave` primitive to retain the physical rows without
+invalidating the durable reply, domain, ACK or order evidence. Explicit
+`Compact` still reports its proof refusal. The frame and pending APIs continue
+to expose unavailable proof and refuse replacement initialization. Only a
+proof-only refusal permits this session-save maintenance no-op; filesystem,
+unresolved journal, ownership, cancellation and mixed operational errors remain
+errors. This availability rule does not make an older writer compatible with
+a future storage format or preserve unknown format fields.
+
 ## Qualified archive confirmation
 
 `AcknowledgeHistoryCompaction` requires the same domain, mutation UUID, before

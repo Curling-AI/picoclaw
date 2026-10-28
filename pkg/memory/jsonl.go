@@ -1007,8 +1007,25 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 // It is safe to call at any time; if there is nothing to compact
 // (skip == 0) the method returns immediately.
 func (s *JSONLStore) Compact(
-	_ context.Context, sessionKey string,
+	ctx context.Context, sessionKey string,
 ) error {
+	return s.compact(ctx, sessionKey, false)
+}
+
+// CompactForSessionSave performs optional maintenance after content was already
+// fsynced. Unlike explicit Compact, unavailable independent proof may retain the
+// physical rows without invalidating that completed content write.
+func (s *JSONLStore) CompactForSessionSave(ctx context.Context, sessionKey string) error {
+	return s.compact(ctx, sessionKey, true)
+}
+
+func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOptional bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
@@ -1052,7 +1069,19 @@ func (s *JSONLStore) Compact(
 		}
 	}
 
-	if err = s.prepareContentPhysicalRewrite(context.Background(), sessionKey, &meta); err != nil {
+	if err = s.prepareContentPhysicalRewrite(ctx, sessionKey, &meta); err != nil {
+		if proofOptional && onlyContentIdentityUnavailable(err) {
+			// No independent proof permits physical GC. The ordinary content
+			// is already durable; retain it without converting Save into a
+			// failed turn. Recheck real ownership/journal errors separately.
+			if journalErr := s.checkContentJournalSettled(sessionKey); journalErr != nil {
+				return journalErr
+			}
+			if _, ownershipErr := s.contentIdentityActiveLocked(ctx, sessionKey); ownershipErr != nil {
+				return ownershipErr
+			}
+			return nil
+		}
 		return err
 	}
 	retainedPrefix, err := unchangedPhysicalPrefix(s.jsonlPath(sessionKey), meta.Skip, len(active))

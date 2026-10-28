@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,36 @@ const contentArchiveDeadline = 45 * time.Second
 // remain payload, under the existing adapter's content budget; they do not
 // steal capacity from a valid legacy content window.
 const maxContentTransitionMetadata = 1 << 20
+
+// Only the proof's exact leaf may turn optional physical GC into a no-op.
+// errors.Is alone also matches joins that contain an actual I/O or recovery
+// failure; those failures must remain visible to the persistence caller.
+func onlyContentIdentityUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.(type) {
+	case *os.PathError, *os.LinkError, *os.SyscallError:
+		return false
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		causes := wrapped.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !onlyContentIdentityUnavailable(cause) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return onlyContentIdentityUnavailable(wrapped.Unwrap())
+	default:
+		return err == ErrContentIdentityUnavailable
+	}
+}
 
 func contentPendingMetadataSize(pending *contentPending) (int, error) {
 	metadata := *pending

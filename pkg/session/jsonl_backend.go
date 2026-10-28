@@ -193,6 +193,11 @@ func (b *JSONLBackend) TruncateHistory(key string, keepLast int) {
 // space from logically truncated messages (no-op when there are none).
 func (b *JSONLBackend) Save(key string) error {
 	key = b.resolveSessionKey(key)
+	if store, ok := b.store.(interface {
+		CompactForSessionSave(ctx context.Context, sessionKey string) error
+	}); ok {
+		return store.CompactForSessionSave(context.Background(), key)
+	}
 	return b.store.Compact(context.Background(), key)
 }
 
