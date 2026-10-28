@@ -151,8 +151,10 @@ row, so that shortcut must not claim equivalent identity proof. Any later
 representation change needs matching recovery, rollback, compaction and explicit
 deletion qualification.
 
-`messageutil.ProjectLegacyPublic` shares the existing public-session predicate
-with the consumer. Sender provenance is classified before stripping the sender
+`messageutil.ProjectLegacyPublic` implements the producer's public-session
+predicate. The currently published consumer still has its own copy; the
+consumer follow-up must qualify their alignment before claiming shared use.
+Sender provenance is classified before stripping the sender
 prefix: a tagged person's literal `[System]` message remains public. Internal
 steering and unsupported roles receive separate exclusion reasons without
 copying their bodies to coverage metadata or a new content store. The 1 MiB

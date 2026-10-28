@@ -91,6 +91,10 @@ type JSONLStore struct {
 	writeFile func(string, []byte, os.FileMode) error
 	// Optional private seam for deterministic origin-reader I/O failures.
 	openHistoryFile func(string) (*os.File, error)
+	// Private fault boundary for file/directory checkpoint sync recovery.
+	contentCheckpointSyncFailure func(string, string) error
+	// Private fault boundary for NEW metadata durability recovery.
+	historyMetadataSyncFailure func(string, string) error
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
 	// This process is the only writer of the session directory, so a
@@ -281,6 +285,14 @@ func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 	}
 	if err := s.writeSessionFile(s.metaPath(key), data, 0o644); err != nil {
 		return err
+	}
+	// The shared utility supports a direct-write fallback and best-effort
+	// directory sync. An opted-in content checkpoint requires both phases;
+	// never-initialized legacy sources retain their existing storage contract.
+	if meta.ContentIdentity != nil {
+		if err := s.syncHistoryMetadata(key); err != nil {
+			return err
+		}
 	}
 	s.storeCachedMeta(sanitizeKey(key), meta)
 	return nil
@@ -892,7 +904,7 @@ func (s *JSONLStore) GetSummary(
 }
 
 func (s *JSONLStore) SetSummary(
-	_ context.Context, sessionKey, summary string,
+	ctx context.Context, sessionKey, summary string,
 ) error {
 	l := s.sessionLock(sessionKey)
 	l.Lock()
@@ -902,6 +914,7 @@ func (s *JSONLStore) SetSummary(
 	if err != nil {
 		return err
 	}
+	before := copyMeta(meta)
 	now := time.Now()
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = now
@@ -910,12 +923,15 @@ func (s *JSONLStore) SetSummary(
 	s.contentSummaryChanged(&meta)
 	meta.UpdatedAt = now
 
-	return s.writeMeta(sessionKey, meta)
+	return s.commitLogicalContentMetadata(ctx, sessionKey, before, meta)
 }
 
 func (s *JSONLStore) TruncateHistory(
-	_ context.Context, sessionKey string, keepLast int,
+	ctx context.Context, sessionKey string, keepLast int,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
@@ -924,7 +940,20 @@ func (s *JSONLStore) TruncateHistory(
 	if err != nil {
 		return err
 	}
+	before := copyMeta(meta)
 	if operationErr := s.contentPendingGuard(meta); operationErr != nil {
+		return operationErr
+	}
+	// This legacy suffix cut is still destructive even without an intervening
+	// append. Validate an active source at the cut; a stat/tail check cannot
+	// attest a same-size change to an earlier row. Never-initialized sources
+	// retain their legacy behavior without scanning unrelated owners.
+	if meta.ContentIdentity != nil {
+		if operationErr := s.canonicalContentKey(ctx, sessionKey); operationErr != nil {
+			return operationErr
+		}
+	}
+	if operationErr := s.checkContentGarbageCollection(ctx, sessionKey, meta); operationErr != nil {
 		return operationErr
 	}
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
@@ -969,7 +998,7 @@ func (s *JSONLStore) TruncateHistory(
 	}
 	meta.UpdatedAt = time.Now()
 
-	return s.writeMeta(sessionKey, meta)
+	return s.commitLogicalContentMetadata(ctx, sessionKey, before, meta)
 }
 
 func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history []providers.Message) error {

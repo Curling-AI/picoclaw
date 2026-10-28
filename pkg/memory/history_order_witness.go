@@ -106,6 +106,14 @@ func (s *JSONLStore) probeHistoryOrderWitness(key string, meta *SessionMeta) err
 	if meta.HistoryRecoveryRequired {
 		return ErrHistoryReceiptUnavailable
 	}
+	current, err := s.contentOrderCheckpointAvailable(key, *meta)
+	if err != nil {
+		return err
+	}
+	if !current {
+		meta.HistoryRecoveryRequired = true
+		return errors.Join(ErrHistoryReceiptUnavailable, s.markHistoryRecoveryRequired(key, meta))
+	}
 	state, err := s.readHistoryOrderWitness(key, true)
 	if err != nil {
 		return err

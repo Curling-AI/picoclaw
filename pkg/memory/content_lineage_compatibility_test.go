@@ -85,6 +85,16 @@ func TestContentLineageExplicitEditAndEditBackNeverReuseRevision(t *testing.T) {
 	}
 	plan = ContentEditPlan{DomainID: edited.DomainID, BeforeState: edited.StateToken, Entries: edited.Entries}
 	plan.Entries[0].Message.Content = "same"
+	if _, err = s.CommitHistoryContentEdit(t.Context(), key, plan); !errors.Is(err, ErrContentLineagePending) {
+		t.Fatal("dependent edit replaced an unapplied preimage", err)
+	}
+	pending, err := s.ReadLatestHistoryContentMutation(t.Context(), key)
+	if err != nil || pending.Status != ContentMutationPending || pending.Transition.Kind != ContentMutationEdit {
+		t.Fatal("legacy checked-edit signature did not retain a real typed pair", pending, err)
+	}
+	if err = s.AcknowledgeHistoryContentMutation(t.Context(), key, typedAppliedAck(pending.Transition)); err != nil {
+		t.Fatal(err)
+	}
 	back, err := s.CommitHistoryContentEdit(t.Context(), key, plan)
 	if err != nil || back.Entries[0].Ref.OccurrenceID != first.OccurrenceID ||
 		back.Entries[0].Ref.RevisionID == first.RevisionID ||

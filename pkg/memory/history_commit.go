@@ -35,7 +35,21 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	meta SessionMeta,
 	requireReceipt bool,
 ) ([]CommittedHistoryMessage, error) {
+	return s.appendHistoryMessagesOutcome(key, messages, meta, requireReceipt, nil)
+}
+
+func (s *JSONLStore) appendHistoryMessagesOutcome(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	requireReceipt bool,
+	outcome *historyAppendOutcome,
+) ([]CommittedHistoryMessage, error) {
 	original, err := s.readMeta(key)
+	if err != nil {
+		return nil, err
+	}
+	original, meta, err = s.contentAppendMetadata(key, original, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +206,7 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 				// The failed witness phase recovered OLD before this input's
 				// bytes. Retry once with the durable content-only fence; that
 				// branch neither allocates order nor activates a witness.
-				return s.appendHistoryMessagesFor(key, messages, meta, false)
+				return s.appendHistoryMessagesOutcome(key, messages, meta, false, outcome)
 			}
 		}
 		return nil, commitErr
@@ -220,17 +234,37 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 		err = s.writeMeta(key, meta)
 	}
 	if err == nil {
-		err = s.ensureContentDomain(key, original.ContentIdentity, meta.ContentIdentity)
+		err = s.ensureContentDomain(key, original, meta)
 	}
 	if err == nil {
 		err = s.finishHistoryWrite(key)
 	}
 	if err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, meta)
 		if !committed {
 			return nil, errors.Join(err, recoveryErr)
 		}
+		if outcome != nil {
+			outcome.committed, outcome.meta = true, copyMeta(meta)
+		}
+		if recoveryErr != nil && !onlyHistoryCleanupError(recoveryErr) {
+			return nil, historyCommittedError(errors.Join(err, recoveryErr))
+		}
+		// The input is decided independently from order. Revalidate the live
+		// witness before returning any pre-write receipt after recovery.
+		if proofErr := s.prepareContentMutationOrderFence(key, &meta); proofErr != nil {
+			return nil, historyCommittedError(proofErr)
+		}
+		if meta.HistoryRecoveryRequired {
+			receipts = nil
+			if requireReceipt {
+				return nil, historyCommittedError(ErrHistoryOrderUnavailable)
+			}
+		}
 		return receipts, nil
+	}
+	if outcome != nil {
+		outcome.committed, outcome.meta = true, copyMeta(meta)
 	}
 	return receipts, nil
 }
@@ -385,6 +419,15 @@ func scanCommittedHistoryLine(data []byte, atEOF bool) (int, []byte, error) {
 }
 
 func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Message, meta SessionMeta) error {
+	return s.commitHistoryRewriteFor(key, messages, meta, false)
+}
+
+func (s *JSONLStore) commitHistoryRewriteFor(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	contentOnly bool,
+) error {
 	original, err := s.readMeta(key)
 	if err != nil {
 		return err
@@ -436,14 +479,27 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 	}
 	err = s.writeMeta(key, meta)
 	if err == nil {
-		err = s.ensureContentDomain(key, original.ContentIdentity, meta.ContentIdentity)
+		err = s.ensureContentDomain(key, original, meta)
+	}
+	if err == nil && contentOnly {
+		orderMeta := copyMeta(meta)
+		err = s.prepareContentMutationOrderFence(key, &orderMeta)
 	}
 	if err == nil {
 		err = s.finishHistoryWrite(key)
 	}
 	if err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
+		var committed bool
+		var recoveryErr error
+		if contentOnly {
+			committed, recoveryErr = s.recoverExpectedHistoryContentCommit(key, meta)
+		} else {
+			committed, recoveryErr = s.recoverExpectedHistoryCommit(key, meta)
+		}
 		if committed {
+			if contentOnly {
+				return recoveryErr
+			}
 			return nil
 		}
 		return errors.Join(err, recoveryErr)

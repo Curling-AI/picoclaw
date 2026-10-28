@@ -255,7 +255,7 @@ func (s *JSONLStore) finishHistoryWrite(key string, cleanup ...string) error {
 	for _, path := range append([]string{s.historyRecoveryPath(key)}, cleanup...) {
 		if operationErr := os.Remove(path); operationErr != nil && !errors.Is(operationErr, os.ErrNotExist) {
 			s.markHistoryPending(key)
-			return fmt.Errorf("memory: remove history recovery: %w", operationErr)
+			return &historyCleanupError{cause: fmt.Errorf("memory: remove history recovery: %w", operationErr)}
 		}
 	}
 	s.metaMu.Lock()
@@ -329,6 +329,9 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 			return historyWriteUnknown, operationErr
 		}
 	}
+	if err = s.checkContentRecoveryCheckpoint(key, recovery.Meta, recovery.Next); err != nil {
+		return decision, err
+	}
 	if decision == historyWriteNew {
 		if currentErr != nil {
 			return decision, currentErr
@@ -336,10 +339,17 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		if !historyNewCheckpointMatches(current, recovery.Next) {
 			return decision, errors.New("memory: decided NEW metadata no longer matches its checkpoint")
 		}
+		// Readable NEW metadata can follow a failed file/directory sync. Retry
+		// the actual durability phases before retiring its authoritative journal.
+		if recovery.Meta.ContentIdentity != nil || recovery.Next.ContentIdentity != nil {
+			if operationErr := s.syncHistoryMetadata(key); operationErr != nil {
+				return decision, operationErr
+			}
+		}
 		if operationErr := s.recoverContentDomain(
 			key,
-			recovery.Meta.ContentIdentity,
-			current.ContentIdentity,
+			recovery.Meta,
+			current,
 		); operationErr != nil {
 			return decision, operationErr
 		}
@@ -354,6 +364,9 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 			return decision, err
 		}
 		if operationErr := s.writeMeta(key, recovery.Meta); operationErr != nil {
+			return decision, operationErr
+		}
+		if operationErr := s.restoreContentCheckpoint(key, recovery.Meta, recovery.Next); operationErr != nil {
 			return decision, operationErr
 		}
 	}

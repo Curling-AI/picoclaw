@@ -39,27 +39,33 @@ func (s *JSONLStore) HistoryContentIdentityActive(ctx context.Context, key strin
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	legacy, err := s.ownedContentNeverInitialized(ctx, key)
+	if err != nil || legacy {
+		return false, err
+	}
+	return s.contentIdentityActiveLocked(ctx, key)
+}
+
+// This is only a negative activation probe for an already resolved physical
+// legacy source. It proves no alias ownership and cannot authorize checked
+// append, initialization or mutation. The exact own checkpoint, absent content
+// witness and settled own journal preserve the existing legacy owner operation
+// even if an unrelated metadata file is unreadable.
+func (s *JSONLStore) ownedContentNeverInitialized(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if err := s.checkContentJournalSettled(key); err != nil {
 		return false, err
 	}
 	meta, present, err := s.readContentActivationMetadata(key)
-	if err != nil {
+	if err != nil || !present || meta.Key != key || len(meta.Identity) != 0 {
 		return false, err
 	}
-	if present && meta.Key == key && len(meta.Identity) == 0 {
-		// The legacy caller already resolved this source. Its own exact-key
-		// checkpoint, without any identity/witness/journal, proves only that
-		// this physical source never opted in. Do not require an unrelated
-		// metadata directory scan to retain that existing legacy behavior.
-		// Qualified reads/activation and typed append still use the separate
-		// strict ownership preflight below; this negative probe proves no alias.
-		if _, statErr := os.Stat(s.contentDomainPath(key)); errors.Is(statErr, os.ErrNotExist) {
-			return false, ctx.Err()
-		} else if statErr != nil {
-			return false, statErr
-		}
+	if _, err = os.Lstat(s.contentDomainPath(key)); errors.Is(err, os.ErrNotExist) {
+		return true, ctx.Err()
 	}
-	return s.contentIdentityActiveLocked(ctx, key)
+	return false, err
 }
 
 // The caller holds this physical source's lock. Writers use the same metadata
@@ -107,7 +113,7 @@ func (s *JSONLStore) contentIdentityActiveLocked(ctx context.Context, key string
 			}
 		}
 	}
-	_, err = os.Stat(s.contentDomainPath(key))
+	_, err = os.Lstat(s.contentDomainPath(key))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}

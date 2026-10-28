@@ -368,10 +368,14 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	for _, msg := range msgs {
 		if appender, supported := agent.Sessions.(memory.HistoryContentAppender); observeContent && supported {
 			result, err := appender.AppendHistoryContent(context.Background(), sessionKey, msg)
-			if !errors.Is(err, memory.ErrHistoryUnsupported) {
+			if errors.Is(err, memory.ErrHistoryInputCommitted) || !errors.Is(err, memory.ErrHistoryUnsupported) {
 				if err != nil {
-					lost = append(lost, err)
-					continue
+					if errors.Is(err, memory.ErrHistoryInputCommitted) && result.Entry.Message.Role != "" {
+						warnCommittedHistoryRecovery(sessionKey, err)
+					} else {
+						lost = append(lost, err)
+						continue
+					}
 				}
 				if result.Entry.Message.Role == "" {
 					continue
@@ -402,7 +406,10 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 				}
 				appendErr = memory.ErrHistoryOrderUnavailable
 			}
-			if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
+			if errors.Is(receiptErr, memory.ErrHistoryInputCommitted) {
+				warnCommittedHistoryRecovery(sessionKey, receiptErr)
+				appendErr = nil
+			} else if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
 				errors.Is(receiptErr, memory.ErrHistoryOwnershipUnavailable) ||
 				errors.Is(receiptErr, memory.ErrHistoryReceiptUnavailable) {
 				// Receipt eligibility failed before this message's write began.
@@ -412,6 +419,10 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 			}
 		} else {
 			appendErr = appendToSession(agent.Sessions, sessionKey, msg)
+		}
+		if errors.Is(appendErr, memory.ErrHistoryInputCommitted) {
+			warnCommittedHistoryRecovery(sessionKey, appendErr)
+			appendErr = nil
 		}
 		if appendErr != nil {
 			lost = append(lost, appendErr)
@@ -482,6 +493,15 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 		al.notifySessionHistoryChanged(sessionKey)
 	}
 	return errors.Join(lost...)
+}
+
+// The source exposes the I/O cause, but this member is already in history.
+// Report recovery separately instead of inviting the delivery caller to append
+// it again. There is no receipt or extra read confirmation for this outcome.
+func warnCommittedHistoryRecovery(sessionKey string, err error) {
+	logger.WarnCF("agent", "History input committed with pending operational recovery", map[string]any{
+		"session_key": sessionKey, "error": err.Error(),
+	})
 }
 
 // appendToSession appends msg and reports a failed write when the store can

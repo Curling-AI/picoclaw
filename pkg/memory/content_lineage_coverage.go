@@ -138,7 +138,7 @@ func (s *JSONLStore) AcknowledgeHistoryCompactionCoverage(
 	}
 	state := image.Meta.ContentIdentity
 	if state.Pending == nil {
-		if state.Last == nil {
+		if state.Last == nil || state.Last.Mutation != nil {
 			return ErrContentArchiveAck
 		}
 		normalized, _, normalizeErr := normalizeContentCoverage(ack, state.Last.Transition)
@@ -146,6 +146,9 @@ func (s *JSONLStore) AcknowledgeHistoryCompactionCoverage(
 			return ErrContentArchiveAck
 		}
 		return nil
+	}
+	if state.Pending.Mutation != nil {
+		return ErrContentArchiveAck
 	}
 	transition := state.Pending.Transition
 	normalized, coverage, err := normalizeContentCoverage(ack, transition)

@@ -50,6 +50,11 @@ func onlyContentIdentityUnavailable(err error) bool {
 func contentPendingMetadataSize(pending *contentPending) (int, error) {
 	metadata := *pending
 	metadata.Before.Summary, metadata.After.Summary = "", ""
+	if pending.Mutation != nil {
+		mutation := *pending.Mutation
+		mutation.Before.Summary, mutation.After.Summary = "", ""
+		metadata.Mutation = &mutation
+	}
 	data, err := json.Marshal(metadata)
 	return len(data), err
 }
@@ -103,6 +108,9 @@ func (s *JSONLStore) CommitHistoryCompaction(
 		return ContentTransition{}, err
 	}
 	state := image.Meta.ContentIdentity
+	if state.Pending != nil && state.Pending.Mutation != nil {
+		return ContentTransition{}, ErrContentMutationPendingKind
+	}
 	digest := contentJSONDigest(plan)
 	if state.Pending != nil && state.Pending.Transition.MutationID == plan.MutationID {
 		if state.Pending.PlanDigest != digest {
@@ -110,7 +118,10 @@ func (s *JSONLStore) CommitHistoryCompaction(
 		}
 		return state.Pending.Transition, nil
 	}
-	if state.Last != nil && state.Last.Transition.MutationID == plan.MutationID {
+	if state.Last != nil && state.Last.Mutation != nil && state.Last.Mutation.Transition.MutationID == plan.MutationID {
+		return ContentTransition{}, ErrContentStateChanged
+	}
+	if state.Last != nil && state.Last.Mutation == nil && state.Last.Transition.MutationID == plan.MutationID {
 		if state.Last.PlanDigest != digest {
 			return ContentTransition{}, ErrContentStateChanged
 		}
@@ -223,6 +234,9 @@ func (s *JSONLStore) ReadPendingHistoryCompaction(ctx context.Context, key strin
 	if image.Meta.ContentIdentity.Pending == nil {
 		return ContentTransition{}, nil
 	}
+	if image.Meta.ContentIdentity.Pending.Mutation != nil {
+		return ContentTransition{}, ErrContentMutationPendingKind
+	}
 	transition := image.Meta.ContentIdentity.Pending.Transition
 	if time.Now().After(transition.ExpiresAt) {
 		return transition, ErrContentLineageExpired
@@ -257,6 +271,9 @@ func (s *JSONLStore) ReadHistoryCompactionFrame(
 	}
 	state := image.Meta.ContentIdentity
 	pending := state.Pending
+	if pending != nil && pending.Mutation != nil {
+		return ContentFrame{}, ErrContentMutationPendingKind
+	}
 	if pending == nil || pending.Transition.MutationID != mutation {
 		return ContentFrame{}, ErrContentArchiveAck
 	}
@@ -272,6 +289,9 @@ func (s *JSONLStore) contentCompactionSnapshot(
 ) (ContentFrame, error) {
 	state := image.Meta.ContentIdentity
 	transition := pending.Transition
+	if pending.Mutation != nil {
+		return ContentFrame{}, ErrContentMutationPendingKind
+	}
 	if transition.Version != ContentLineageVersion || transition.CanonicalKey != key ||
 		transition.DomainID != state.DomainID || uuid.Validate(transition.MutationID) != nil ||
 		!validHistoryStreamID(transition.BeforeState) || !validHistoryStreamID(transition.AfterState) {
@@ -335,9 +355,12 @@ func (s *JSONLStore) AcknowledgeHistoryCompaction(ctx context.Context, key strin
 	state := image.Meta.ContentIdentity
 	digest := contentJSONDigest(ack)
 	if state.Pending == nil {
-		if state.Last != nil && state.Last.AckDigest == digest {
+		if state.Last != nil && state.Last.Mutation == nil && state.Last.AckDigest == digest {
 			return nil
 		}
+		return ErrContentArchiveAck
+	}
+	if state.Pending.Mutation != nil {
 		return ErrContentArchiveAck
 	}
 	transition := state.Pending.Transition
@@ -369,14 +392,24 @@ func (s *JSONLStore) finalizeContentArchiveAck(
 	next.ContentIdentity.Pending = nil
 	// ACK changes retention only. Its own atomic metadata commit does not mint a
 	// content revision, receipt, read watermark or substitute the current tail.
-	return s.commitContentMetadata(ctx, key, image, next)
+	if err := s.commitContentMetadata(ctx, key, image, next); err != nil {
+		return err
+	}
+	if state.Last != nil && state.Last.Mutation != nil {
+		s.retireAppliedContentImages(ctx, key, state.Last.Mutation.Retired)
+	}
+	return nil
 }
 
 func (s *JSONLStore) contentPendingGuard(meta SessionMeta) error {
 	if meta.ContentIdentity == nil || meta.ContentIdentity.Pending == nil {
 		return nil
 	}
-	if time.Now().After(meta.ContentIdentity.Pending.Transition.ExpiresAt) {
+	return contentPendingError(meta.ContentIdentity.Pending)
+}
+
+func contentPendingError(pending *contentPending) error {
+	if time.Now().After(pendingContentDeadline(pending)) {
 		return ErrContentLineageExpired
 	}
 	return ErrContentLineagePending

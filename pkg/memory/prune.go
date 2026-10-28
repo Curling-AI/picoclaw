@@ -138,13 +138,17 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.contentPendingGuard(meta); err != nil {
-		return err
+	if operationErr := s.contentPendingGuard(meta); operationErr != nil {
+		return operationErr
 	}
-	if err := s.guardHistoryMutation(sanitized, meta); err != nil {
-		return err
+	if operationErr := s.guardHistoryMutation(sanitized, meta); operationErr != nil {
+		return operationErr
 	}
-	if err := s.checkContentGarbageCollection(context.Background(), meta.Key, meta); err != nil {
+	if operationErr := s.checkContentGarbageCollection(context.Background(), meta.Key, meta); operationErr != nil {
+		return operationErr
+	}
+	images, err := s.contentImagesForDeletion(context.Background(), meta.Key, meta)
+	if err != nil {
 		return err
 	}
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
@@ -170,6 +174,9 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string) error {
 		return err
 	}
 	if err := os.Remove(s.historyOrderWitnessPath(sanitized)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := s.deleteContentImages(meta.Key, images); err != nil {
 		return err
 	}
 

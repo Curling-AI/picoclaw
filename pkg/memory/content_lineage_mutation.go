@@ -72,7 +72,7 @@ func (s *JSONLStore) prepareContentAppend(
 	if err != nil && !isContentIdentityLoss(err) {
 		return err
 	}
-	if isContentIdentityLoss(err) || !present || witness.DomainID != state.DomainID || image.Bytes != offset ||
+	if isContentIdentityLoss(err) || !present || !contentWitnessMatches(witness, original) || image.Bytes != offset ||
 		image.Count != original.Count ||
 		!validateContentRows(state, original, image.activeRows()) {
 		state.Unavailable = true
@@ -119,13 +119,14 @@ func (s *JSONLStore) prepareContentRewrite(key string, original SessionMeta, nex
 	// Only an explicit unqualified legacy clear retires it here.
 	if len(data) == 0 && !prepared {
 		next.ContentIdentity = &contentIdentityState{
-			Version:       ContentLineageVersion,
-			DomainID:      uuid.NewString(),
-			StateToken:    uuid.NewString(),
-			SummaryDigest: contentDigest([]byte(next.Summary)),
-			Skip:          next.Skip,
-			Count:         next.Count,
-			Rows:          []contentLocator{},
+			Version:         ContentLineageVersion,
+			MutationVersion: original.ContentIdentity.MutationVersion,
+			DomainID:        uuid.NewString(),
+			StateToken:      uuid.NewString(),
+			SummaryDigest:   contentDigest([]byte(next.Summary)),
+			Skip:            next.Skip,
+			Count:           next.Count,
+			Rows:            []contentLocator{},
 		}
 		return nil
 	}
@@ -236,11 +237,28 @@ func (s *JSONLStore) AppendHistoryContent(
 	if runID := providers.HistoryRun(ctx); runID != "" {
 		message.HistoryRunID = runID
 	}
-	receipts, err := s.appendHistoryMessagesFor(key, []providers.Message{message}, meta, false)
+	// Detach before writing, including the body returned with a confirmed NEW
+	// outcome whose operational recovery phase remains pending.
+	encoded, err := json.Marshal(message)
 	if err != nil {
 		return ContentAppendResult{}, err
 	}
+	var detached providers.Message
+	if err = json.Unmarshal(encoded, &detached); err != nil {
+		return ContentAppendResult{}, err
+	}
+	message = detached
+	var outcome historyAppendOutcome
+	receipts, appendErr := s.appendHistoryMessagesOutcome(key, []providers.Message{message}, meta, false, &outcome)
+	if !outcome.committed {
+		return ContentAppendResult{}, appendErr
+	}
 	result := ContentAppendResult{Entry: ContentEntry{Message: ordinaryContentMessage(message)}}
+	// A pending operational phase cannot mint a receipt or locator. Preserve
+	// the accepted body alongside its distinct, non-retryable commit error.
+	if appendErr != nil {
+		return result, appendErr
+	}
 	if len(receipts) == 1 {
 		result.Receipt = &receipts[0]
 		result.Entry.Message = ordinaryContentMessage(receipts[0].Message)
@@ -251,10 +269,7 @@ func (s *JSONLStore) AppendHistoryContent(
 	}
 	// We still hold the writer's lock; this selects only this exact commit's
 	// locator. No callback or concurrent append can replace it with a later tail.
-	current, err := s.readMeta(key)
-	if err != nil {
-		return ContentAppendResult{}, err
-	}
+	current := outcome.meta
 	before := meta.ContentIdentity
 	if state := current.ContentIdentity; state != nil && !state.Unavailable && len(state.Rows) > 0 &&
 		before != nil && !before.Unavailable && before.DomainID == state.DomainID &&
@@ -266,109 +281,27 @@ func (s *JSONLStore) AppendHistoryContent(
 		result.BeforeState = before.StateToken
 		result.AfterState = state.StateToken
 	}
-	// Detach all persisted nested fields from the caller before any observer
-	// can enqueue work or a later caller edit can mutate this exact result.
-	data, err := json.Marshal(result.Entry.Message)
-	if err != nil {
-		return ContentAppendResult{}, err
-	}
-	var committed providers.Message
-	if err = json.Unmarshal(data, &committed); err != nil {
-		return ContentAppendResult{}, err
-	}
-	result.Entry.Message = committed
 	return result, nil
 }
 
+// CommitHistoryContentEdit preserves the checked-edit signature introduced by
+// this capability. Its source-owned operation is discoverable by the consumer;
+// another dependent edit waits for ApplicationACK. Callers without a command ID
+// gain no new exactly-once guarantee from the generated local operation UUID.
 func (s *JSONLStore) CommitHistoryContentEdit(
 	ctx context.Context,
 	key string,
 	plan ContentEditPlan,
 ) (ContentFrame, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	image, frame, err := s.contentMutationImage(ctx, key)
+	result, err := s.CommitHistoryContentMutation(ctx, key, ContentMutationPlan{
+		MutationID: uuid.NewString(), IntentDigest: contentJSONDigest(plan),
+		DomainID: plan.DomainID, BeforeState: plan.BeforeState, Kind: ContentMutationEdit,
+		Edit: &ContentMutationEditIntent{Entries: plan.Entries, Summary: plan.Summary},
+	})
 	if err != nil {
 		return ContentFrame{}, err
 	}
-	if frame.DomainID != plan.DomainID || frame.StateToken != plan.BeforeState {
-		return ContentFrame{}, ErrContentStateChanged
-	}
-	if err = s.contentPendingGuard(image.Meta); err != nil {
-		return ContentFrame{}, err
-	}
-	if len(plan.Entries) != len(frame.Entries) {
-		return ContentFrame{}, ErrContentStateChanged
-	}
-	meta := copyMeta(image.Meta)
-	meta.Summary = plan.Summary
-	prepared := make([]providers.Message, len(plan.Entries))
-	refs := make([]contentLocator, len(plan.Entries))
-	active := image.activeRows()
-	for i, entry := range plan.Entries {
-		if entry.Ref == nil || *entry.Ref != *frame.Entries[i].Ref {
-			return ContentFrame{}, ErrContentStateChanged
-		}
-		ref := *entry.Ref
-		// Compare revisions only after the caller supplied the exact ref. Equality
-		// never selects which duplicate occurrence the caller intended to edit.
-		if contentJSONDigest(ordinaryContentMessage(entry.Message)) != contentJSONDigest(frame.Entries[i].Message) {
-			ref.RevisionID = uuid.NewString()
-		}
-		refs[i] = contentLocator{Ref: ref}
-		prepared[i] = entry.Message
-		var raw historyRecord
-		if json.Unmarshal(active[i].Raw, &raw) != nil {
-			return ContentFrame{}, ErrContentIdentityUnavailable
-		}
-		prepared[i].HistoryID = raw.ID
-		prepared[i].HistoryRunID = raw.RunID
-		order, orderErr := decodedHistoryOrder(active[i].Raw)
-		if orderErr == nil {
-			prepared[i] = messageWithHistoryOrder(prepared[i], order)
-		} else if !isHistoryProofError(orderErr) {
-			return ContentFrame{}, orderErr
-		}
-		prepared[i] = prepareHistoryMessage(prepared[i], time.Now(), providers.HistoryRun(ctx))
-	}
-	if err = s.prepareReplacementHistoryOrder(key, prepared, &meta); err != nil {
-		return ContentFrame{}, err
-	}
-	ensureHistoryGeneration(&meta, key)
-	meta.HistoryParentGeneration = meta.HistoryGeneration
-	meta.HistoryRetainedUntil = meta.HistoryPrefix
-	meta.HistoryPrefix += int64(meta.Skip)
-	resetHistoryGeneration(&meta)
-	meta.Skip = 0
-	meta.Count = len(prepared)
-	meta.UpdatedAt = time.Now()
-	meta.HistoryDigest, err = historyDigest(prepared)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	if len(prepared) > 0 {
-		meta.HistoryTip = prepared[len(prepared)-1].HistoryID
-	}
-	meta.ContentIdentity.Rows = refs
-	meta.ContentIdentity.StateToken = uuid.NewString()
-	meta.ContentIdentity.SummaryDigest = contentDigest([]byte(meta.Summary))
-	meta.ContentIdentity.Skip = 0
-	meta.ContentIdentity.Count = meta.Count
-	if err = s.commitHistoryRewrite(key, prepared, meta); err != nil {
-		return ContentFrame{}, err
-	}
-	actual, err := s.readContentImage(ctx, key)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	return s.frameForContentImage(ctx, key, actual)
+	return s.ReadHistoryContentMutationFrame(ctx, key, result.Transition.MutationID, ContentAfter)
 }
 
 var (

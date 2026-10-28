@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -33,38 +34,44 @@ type contentSnapshot struct {
 	Summary    string           `json:"summary"`
 	Skip       int              `json:"skip"`
 	Rows       []contentLocator `json:"rows"`
+	Image      *contentPreimage `json:"image,omitempty"`
 }
 
 type contentPending struct {
-	Transition ContentTransition `json:"transition"`
-	PlanDigest string            `json:"planDigest"`
-	Before     contentSnapshot   `json:"before"`
-	After      contentSnapshot   `json:"after"`
+	Transition ContentTransition       `json:"transition"`
+	PlanDigest string                  `json:"planDigest"`
+	Before     contentSnapshot         `json:"before"`
+	After      contentSnapshot         `json:"after"`
+	Mutation   *contentMutationPending `json:"mutation,omitempty"`
 }
 
 type contentAcknowledged struct {
-	Transition ContentTransition `json:"transition"`
-	PlanDigest string            `json:"planDigest"`
-	AckDigest  string            `json:"ackDigest"`
+	Transition ContentTransition            `json:"transition"`
+	PlanDigest string                       `json:"planDigest"`
+	AckDigest  string                       `json:"ackDigest"`
+	Mutation   *contentMutationAcknowledged `json:"mutation,omitempty"`
 }
 
 type contentIdentityState struct {
-	Version       uint8                `json:"version"`
-	DomainID      string               `json:"domain"`
-	StateToken    string               `json:"state"`
-	SummaryDigest string               `json:"summaryDigest"`
-	Skip          int                  `json:"skip"`
-	Count         int                  `json:"count"`
-	Rows          []contentLocator     `json:"rows"`
-	Unavailable   bool                 `json:"unavailable,omitempty"`
-	Pending       *contentPending      `json:"pending,omitempty"`
-	Last          *contentAcknowledged `json:"last,omitempty"`
+	Version         uint8                `json:"version"`
+	DomainID        string               `json:"domain"`
+	StateToken      string               `json:"state"`
+	SummaryDigest   string               `json:"summaryDigest"`
+	Skip            int                  `json:"skip"`
+	Count           int                  `json:"count"`
+	Rows            []contentLocator     `json:"rows"`
+	Unavailable     bool                 `json:"unavailable,omitempty"`
+	Pending         *contentPending      `json:"pending,omitempty"`
+	Last            *contentAcknowledged `json:"last,omitempty"`
+	MutationVersion uint8                `json:"mutationVersion,omitempty"`
 }
 
 type contentDomainWitness struct {
-	Version  uint8  `json:"version"`
-	Key      string `json:"key"`
-	DomainID string `json:"domain"`
+	Version         uint8  `json:"version"`
+	Key             string `json:"key"`
+	DomainID        string `json:"domain"`
+	Checkpoint      string `json:"checkpoint,omitempty"`
+	OrderCheckpoint string `json:"orderCheckpoint,omitempty"`
 }
 
 type contentRawRow struct {
@@ -321,51 +328,68 @@ func (image contentImage) activeRows() []contentRawRow {
 }
 
 func (s *JSONLStore) readContentDomain(key string) (contentDomainWitness, bool, error) {
-	data, err := os.ReadFile(s.contentDomainPath(key))
+	file, dir, err := openContentArtifact(s.dir, filepath.Base(s.contentDomainPath(key)), false)
 	if errors.Is(err, os.ErrNotExist) {
 		return contentDomainWitness{}, false, nil
 	}
 	if err != nil {
-		return contentDomainWitness{}, false, err
+		return contentDomainWitness{}, true, err
+	}
+	defer closeContentArtifact(file, dir)
+	data, err := io.ReadAll(io.LimitReader(file, maxContentTransitionMetadata+1))
+	if err != nil {
+		return contentDomainWitness{}, true, err
+	}
+	if len(data) > maxContentTransitionMetadata {
+		return contentDomainWitness{}, true, ErrContentIdentityUnavailable
 	}
 	var witness contentDomainWitness
-	if json.Unmarshal(data, &witness) != nil || witness.Version != ContentLineageVersion || witness.Key != key ||
-		!validHistoryStreamID(witness.DomainID) {
+	if json.Unmarshal(data, &witness) != nil || witness.Key != key || !validHistoryStreamID(witness.DomainID) ||
+		(witness.Version != ContentLineageVersion && witness.Version != contentCheckpointWitnessVersion) ||
+		(witness.Version == contentCheckpointWitnessVersion && (!validHistoryDigest(witness.Checkpoint) ||
+			(witness.OrderCheckpoint != "" && !validHistoryDigest(witness.OrderCheckpoint)))) {
 		return witness, true, ErrContentIdentityUnavailable
 	}
 	return witness, true, nil
 }
 
-func (s *JSONLStore) ensureContentDomain(key string, before, next *contentIdentityState) error {
-	if next == nil || next.Unavailable {
+func (s *JSONLStore) ensureContentDomain(key string, before, next SessionMeta) error {
+	state := next.ContentIdentity
+	if state == nil || state.Unavailable {
 		return nil
 	}
 	witness, present, err := s.readContentDomain(key)
 	if err != nil {
 		return err
 	}
-	if present && witness.DomainID == next.DomainID {
+	if present && contentWitnessMatches(witness, next) {
 		return nil
 	}
+	if present && before.ContentIdentity != nil && contentWitnessMatches(witness, before) &&
+		before.ContentIdentity.DomainID == state.DomainID && state.MutationVersion == contentMutationVersion {
+		return s.writeContentCheckpoint(key, next)
+	}
 	// Only an explicit baseline or clear can create/retire a content domain.
-	if before != nil && (before.DomainID == next.DomainID || len(next.Rows) != 0 || next.Pending != nil) {
+	if before.ContentIdentity != nil && (before.ContentIdentity.DomainID == state.DomainID ||
+		len(state.Rows) != 0 || state.Pending != nil) {
 		return ErrContentIdentityUnavailable
 	}
-	if present && (before == nil || witness.DomainID != before.DomainID) {
+	if present && (before.ContentIdentity == nil || witness.DomainID != before.ContentIdentity.DomainID) {
 		return ErrContentIdentityUnavailable
 	}
-	return s.writeContentDomain(key, next.DomainID)
+	return s.writeContentCheckpoint(key, next)
 }
 
 // Called only after an owning journal has durably selected and verified NEW.
 // It may finish its own interrupted witness write. Without that journal, a
 // missing/torn witness remains identity loss, never an automatic new domain.
-func (s *JSONLStore) recoverContentDomain(key string, before, next *contentIdentityState) error {
-	if next == nil || next.Unavailable {
+func (s *JSONLStore) recoverContentDomain(key string, before, next SessionMeta) error {
+	state := next.ContentIdentity
+	if state == nil || state.Unavailable {
 		return nil
 	}
-	if next.Version != ContentLineageVersion || !validHistoryStreamID(next.DomainID) ||
-		!validHistoryStreamID(next.StateToken) {
+	if state.Version != ContentLineageVersion || !validHistoryStreamID(state.DomainID) ||
+		!validHistoryStreamID(state.StateToken) || !validContentMutationState(state, key) {
 		return ErrContentIdentityUnavailable
 	}
 	witness, present, err := s.readContentDomain(key)
@@ -373,29 +397,19 @@ func (s *JSONLStore) recoverContentDomain(key string, before, next *contentIdent
 		return err
 	}
 	if err == nil && present {
-		if witness.DomainID == next.DomainID {
-			return nil
+		if contentWitnessMatches(witness, next) {
+			return s.syncContentCheckpoint(key)
 		}
-		if before == nil || witness.DomainID != before.DomainID {
+		if before.ContentIdentity == nil || witness.DomainID != before.ContentIdentity.DomainID {
 			return ErrContentIdentityUnavailable
 		}
 	}
-	return s.writeContentDomain(key, next.DomainID)
-}
-
-func (s *JSONLStore) writeContentDomain(key, domainID string) error {
-	data, err := json.Marshal(contentDomainWitness{Version: ContentLineageVersion, Key: key, DomainID: domainID})
-	if err != nil {
-		return err
-	}
-	if err = s.writeSessionFile(s.contentDomainPath(key), data, 0o600); err != nil {
-		return err
-	}
-	return s.syncHistoryFile(s.contentDomainPath(key))
+	return s.writeContentCheckpoint(key, next)
 }
 
 func validateContentRows(state *contentIdentityState, meta SessionMeta, rows []contentRawRow) bool {
 	if state == nil || state.Unavailable || state.Version != ContentLineageVersion ||
+		!validContentMutationState(state, meta.Key) ||
 		!validHistoryStreamID(state.DomainID) ||
 		!validHistoryStreamID(state.StateToken) ||
 		state.Skip != meta.Skip ||
@@ -439,7 +453,7 @@ func (s *JSONLStore) frameForContentImage(ctx context.Context, key string, image
 	if state != nil || present {
 		frame.IdentityStatus = ContentIdentityUnavailable
 	}
-	known := err == nil && present && state != nil && witness.DomainID == state.DomainID &&
+	known := err == nil && present && state != nil && contentWitnessMatches(witness, image.Meta) &&
 		image.Count == image.Meta.Count &&
 		validateContentRows(state, image.Meta, active)
 	if known {
@@ -491,6 +505,10 @@ func (s *JSONLStore) contentReceiptEligibility(key string, image contentImage) (
 		*meta.HistoryBytes != image.Bytes ||
 		meta.Count != image.Count {
 		return false, nil
+	}
+	orderCurrent, err := s.contentOrderCheckpointAvailable(key, meta)
+	if err != nil || !orderCurrent {
+		return false, err
 	}
 	data, err := os.ReadFile(s.historyOrderWitnessPath(key))
 	if errors.Is(err, os.ErrNotExist) {
@@ -652,16 +670,27 @@ func (s *JSONLStore) commitContentMetadata(
 		}
 	}
 	if err := s.writeMeta(key, next); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
 		if committed {
 			return recoveryErr
 		}
 		return errors.Join(err, recoveryErr)
 	}
-	if err := s.ensureContentDomain(key, image.Meta.ContentIdentity, next.ContentIdentity); err != nil {
-		return err
+	if err := s.ensureContentDomain(key, image.Meta, next); err != nil {
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		if committed {
+			return recoveryErr
+		}
+		return errors.Join(err, recoveryErr)
 	}
-	return s.finishHistoryWrite(key)
+	if err := s.finishHistoryWrite(key); err != nil {
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		if committed {
+			return recoveryErr
+		}
+		return errors.Join(err, recoveryErr)
+	}
+	return nil
 }
 
 func contentCheckpointMatches(current, expected SessionMeta) bool {
@@ -669,6 +698,11 @@ func contentCheckpointMatches(current, expected SessionMeta) bool {
 		return false
 	}
 	if expected.ContentIdentity != nil {
+		if expected.ContentIdentity.MutationVersion != 0 &&
+			((current.HistoryBytes == nil) != (expected.HistoryBytes == nil) ||
+				(current.HistoryBytes != nil && *current.HistoryBytes != *expected.HistoryBytes)) {
+			return false
+		}
 		return current.Skip == expected.ContentIdentity.Skip &&
 			contentDigest([]byte(current.Summary)) == expected.ContentIdentity.SummaryDigest
 	}

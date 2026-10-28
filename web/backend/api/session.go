@@ -973,24 +973,11 @@ func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 	removed := false
 	if ref, err := h.findPicoJSONLSession(dir, sessionID); err == nil {
-		if err := memory.CheckHistoryDeletion(dir, ref.Key); err != nil {
-			http.Error(w, "failed to resolve session history", http.StatusInternalServerError)
+		if err := memory.DeleteJSONLSession(r.Context(), dir, ref.Key); err != nil {
+			http.Error(w, "failed to delete session", http.StatusInternalServerError)
 			return
 		}
-		base := filepath.Join(dir, sanitizeSessionKey(ref.Key))
-		for _, path := range []string{
-			base + ".jsonl", base + ".meta.json", base + ".jsonl.commit.json", base + ".jsonl.commit.decision",
-			base + ".jsonl.recovery-required", base + ".jsonl.content-domain", base + ".jsonl.order-witness",
-		} {
-			if err := os.Remove(path); err != nil {
-				if os.IsNotExist(err) {
-					continue
-				}
-				http.Error(w, "failed to delete session", http.StatusInternalServerError)
-				return
-			}
-			removed = true
-		}
+		removed = true
 	}
 
 	if legacyRef, err := h.findLegacyPicoSession(dir, sessionID); err == nil {
