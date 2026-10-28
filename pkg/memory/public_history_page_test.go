@@ -237,3 +237,77 @@ func TestPublicHistoryIndexRollsBackWithItsConfirmedSource(t *testing.T) {
 		t.Fatalf("index did not follow OLD recovery: %+v %v", after, err)
 	}
 }
+
+func TestPublicHistoryPageKeepsViewAcrossModelCompactionButRejectsEdits(t *testing.T) {
+	store, key := pagedStore(t, 80)
+	page, err := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := PublicHistoryPageRequest{Key: key, Cursor: page.OlderCursor}
+	before, err := store.ReadPublicHistoryPage(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.TruncateHistory(t.Context(), key, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Compact(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.ReadPublicHistoryPage(t.Context(), request)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("model compaction changed confirmed public coverage", err)
+	}
+	model, err := store.GetHistory(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model[len(model)-1].Content = "edited confirmed answer"
+	if err := store.SetHistory(t.Context(), key, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadPublicHistoryPage(t.Context(), request); !errors.Is(err, ErrHistoryCursor) {
+		t.Fatalf("edited view accepted old cursor: %v", err)
+	}
+}
+
+func TestPublicHistoryPageRejectsWarmMetadataAndSourceCorruption(t *testing.T) {
+	for _, scenario := range []string{"metadata", "source"} {
+		t.Run(scenario, func(t *testing.T) {
+			store, key := pagedStore(t, 80)
+			if _, err := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key}); err != nil {
+				t.Fatal(err)
+			}
+			path := store.publicHistoryPath(key)
+			var data []byte
+			if scenario == "metadata" {
+				meta := mustPublicMeta(t, store, key)
+				meta.PublicHistoryRevision++
+				var err error
+				data, err = json.Marshal(meta)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path = store.metaPath(key)
+			} else {
+				var err error
+				data, err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				position := strings.Index(string(data), "synthetic-79")
+				if position < 0 {
+					t.Fatal("missing corruption target")
+				}
+				data[position] = 'S'
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key}); !errors.Is(err, ErrPublicHistoryCoverage) {
+				t.Fatalf("corruption became successful/fallback history: %v", err)
+			}
+		})
+	}
+}
