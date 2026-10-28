@@ -3,8 +3,10 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -25,6 +27,18 @@ type metaAwareStore interface {
 
 type aliasPromotingStore interface {
 	PromoteAliasHistory(ctx context.Context, sessionKey string, scope json.RawMessage, aliases []string) (bool, error)
+}
+
+type sessionDeletingStore interface {
+	DeleteSession(ctx context.Context, sessionKey string) error
+}
+
+type emptySessionPruningStore interface {
+	PruneEmptySessions(
+		minIdle time.Duration,
+		now time.Time,
+		beforeRemove func(meta memory.SessionMeta) error,
+	) ([]string, error)
 }
 
 // MetadataAwareSessionStore exposes structured session metadata operations.
@@ -204,6 +218,37 @@ func (b *JSONLBackend) Close() error {
 // ListSessions returns all known session keys.
 func (b *JSONLBackend) ListSessions() []string {
 	return b.store.ListSessions()
+}
+
+// DeleteSession removes a session from the store, so it leaves every listing.
+// Emptying its history and summary is not enough: the session stays listed with
+// no messages, and each listing keeps paying for it. An alias deletes the
+// session it belongs to, as every other operation resolves it.
+//
+// Unlike the fire-and-forget writes above it returns the error, because a
+// caller that believes the session is gone must not be told so when it is not.
+func (b *JSONLBackend) DeleteSession(key string) error {
+	deleter, ok := b.store.(sessionDeletingStore)
+	if !ok {
+		return errors.New("session: the store cannot delete sessions")
+	}
+	return deleter.DeleteSession(context.Background(), b.resolveSessionKey(key))
+}
+
+// PruneEmptySessions deletes the sessions that hold nothing and have not been
+// written to for minIdle, and returns the keys it removed (see
+// memory.JSONLStore.PruneEmptySessions for the criterion). beforeRemove runs
+// for each session before its files go.
+func (b *JSONLBackend) PruneEmptySessions(
+	minIdle time.Duration,
+	now time.Time,
+	beforeRemove func(meta memory.SessionMeta) error,
+) ([]string, error) {
+	pruner, ok := b.store.(emptySessionPruningStore)
+	if !ok {
+		return nil, errors.New("session: the store cannot prune empty sessions")
+	}
+	return pruner.PruneEmptySessions(minIdle, now, beforeRemove)
 }
 
 // ListSessionRecords returns per-session metadata straight from the persisted

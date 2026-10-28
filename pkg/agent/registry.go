@@ -24,6 +24,14 @@ func NewAgentRegistry(
 	cfg *config.Config,
 	provider providers.LLMProvider,
 ) *AgentRegistry {
+	return newAgentRegistry(cfg, provider, nil)
+}
+
+func newAgentRegistry(
+	cfg *config.Config,
+	provider providers.LLMProvider,
+	open openSessionStores,
+) *AgentRegistry {
 	registry := &AgentRegistry{
 		cfg:      cfg,
 		agents:   make(map[string]*AgentInstance),
@@ -36,14 +44,14 @@ func NewAgentRegistry(
 			ID:      "main",
 			Default: true,
 		}
-		instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider)
+		instance := newAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider, open)
 		registry.agents["main"] = instance
 		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
 	} else {
 		for i := range agentConfigs {
 			ac := &agentConfigs[i]
 			id := routing.NormalizeAgentID(ac.ID)
-			instance := NewAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider)
+			instance := newAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider, open)
 			registry.agents[id] = instance
 			logger.InfoCF("agent", "Registered agent",
 				map[string]any{
