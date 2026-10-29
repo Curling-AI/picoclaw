@@ -109,41 +109,49 @@ func TestSerializeMessages_WithMedia(t *testing.T) {
 	}
 }
 
+// O Vercel AI Gateway recusa input_audio ("Invalid input") e aceita o áudio
+// como parte file com o data URL inteiro em file_data (spike da MST-351).
 func TestSerializeMessages_WithAudioMedia(t *testing.T) {
-	messages := []Message{
-		{Role: "user", Content: "transcribe this", Media: []string{"data:audio/ogg;base64,abc123"}},
+	for _, tc := range []struct{ url, filename string }{
+		{"data:audio/ogg;base64,abc123", "audio.ogg"},
+		{"data:audio/mpeg;base64,abc123", "audio.mp3"},
+		{"data:audio/mp4;base64,abc123", "audio.m4a"},
+	} {
+		t.Run(tc.filename, func(t *testing.T) {
+			result := SerializeMessages([]Message{{Role: "user", Content: "transcribe this", Media: []string{tc.url}}})
+			data, _ := json.Marshal(result)
+			var msgs []map[string]any
+			if err := json.Unmarshal(data, &msgs); err != nil {
+				t.Fatal(err)
+			}
+			content, ok := msgs[0]["content"].([]any)
+			if !ok || len(content) != 2 {
+				t.Fatalf("content = %#v, want the text and the audio", msgs[0]["content"])
+			}
+			part, _ := content[1].(map[string]any)
+			if part["type"] != "file" {
+				t.Fatalf("audio part type = %v, want file", part["type"])
+			}
+			if _, has := part["input_audio"]; has {
+				t.Error("input_audio still sent")
+			}
+			file, _ := part["file"].(map[string]any)
+			if file["filename"] != tc.filename || file["file_data"] != tc.url {
+				t.Fatalf("file = %#v, want filename %q and the whole data URL", file, tc.filename)
+			}
+		})
 	}
-	result := SerializeMessages(messages)
+}
 
+func TestSerializeMessages_DropsAnEmptyAudio(t *testing.T) {
+	result := SerializeMessages([]Message{{Role: "user", Content: "x", Media: []string{"data:audio/ogg;base64,"}}})
 	data, _ := json.Marshal(result)
 	var msgs []map[string]any
-	json.Unmarshal(data, &msgs)
-
-	content, ok := msgs[0]["content"].([]any)
-	if !ok {
-		t.Fatalf("expected array content for media message, got %T", msgs[0]["content"])
+	if err := json.Unmarshal(data, &msgs); err != nil {
+		t.Fatal(err)
 	}
-	if len(content) != 2 {
-		t.Fatalf("expected 2 content parts, got %d", len(content))
-	}
-
-	audioPart, ok := content[1].(map[string]any)
-	if !ok {
-		t.Fatalf("expected audio content part to be an object, got %T", content[1])
-	}
-	if audioPart["type"] != "input_audio" {
-		t.Fatalf("audio part type = %v, want input_audio", audioPart["type"])
-	}
-
-	inputAudio, ok := audioPart["input_audio"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected input_audio object, got %T", audioPart["input_audio"])
-	}
-	if inputAudio["format"] != "ogg" {
-		t.Fatalf("audio format = %v, want ogg", inputAudio["format"])
-	}
-	if inputAudio["data"] != "abc123" {
-		t.Fatalf("audio data = %v, want abc123", inputAudio["data"])
+	if content, _ := msgs[0]["content"].([]any); len(content) != 1 {
+		t.Fatalf("content = %#v, want only the text", msgs[0]["content"])
 	}
 }
 

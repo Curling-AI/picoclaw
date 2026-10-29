@@ -154,12 +154,16 @@ func SerializeMessages(messages []Message) []any {
 				continue
 			}
 
-			if format, data, ok := ParseDataAudioURL(mediaURL); ok {
+			if _, _, ok := ParseDataAudioURL(mediaURL); ok {
+				// O Vercel AI Gateway recusa input_audio ("Invalid input",
+				// MST-351) e aceita o áudio como parte file, com o data URL
+				// inteiro. Só o transcritor manda bytes de áudio: no turno o
+				// modelo vê o caminho do arquivo. (seucaranguejo fork)
 				parts = append(parts, map[string]any{
-					"type": "input_audio",
-					"input_audio": map[string]any{
-						"data":   data,
-						"format": format,
+					"type": "file",
+					"file": map[string]any{
+						"filename":  audioFilename(mediaURL),
+						"file_data": mediaURL,
 					},
 				})
 			}
@@ -259,6 +263,18 @@ func ParseDataAudioURL(mediaURL string) (format, data string, ok bool) {
 		return "", "", false
 	}
 	return format, data, true
+}
+
+// audioFilename names an audio file part by its data URL's MIME type.
+func audioFilename(mediaURL string) string {
+	mime, _, _ := strings.Cut(strings.TrimPrefix(mediaURL, "data:"), ";")
+	switch mime {
+	case "audio/mpeg":
+		return "audio.mp3"
+	case "audio/mp4":
+		return "audio.m4a"
+	}
+	return "audio." + strings.TrimPrefix(mime, "audio/")
 }
 
 // --- Response parsing ---
