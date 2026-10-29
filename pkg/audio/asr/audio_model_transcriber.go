@@ -48,22 +48,31 @@ func NewAudioModelTranscriber(modelCfg *config.ModelConfig) *AudioModelTranscrib
 }
 
 func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath string) (*TranscriptionResponse, error) {
+	// (seucaranguejo fork) Nenhum log deste arquivo leva a fala nem o nome do
+	// arquivo: os logs INFO do pod chegam ao Datadog. Só tamanho, formato e modelo.
 	logger.InfoCF("voice", "Starting audio model transcription", map[string]any{
-		"audio_file": audioFilePath,
-		"model":      t.modelID,
+		"model": t.modelID,
 	})
 
 	audioBytes, err := os.ReadFile(audioFilePath)
 	if err != nil {
-		logger.ErrorCF("voice", "Failed to read audio file", map[string]any{"path": audioFilePath, "error": err})
+		logger.ErrorCF("voice", "Failed to read audio file", map[string]any{"error": err})
 		return nil, fmt.Errorf("failed to read audio file: %w", err)
+	}
+
+	// (seucaranguejo fork) Arquivo vazio vira data URL sem dados, que o
+	// serializador descarta; o modelo inventaria a resposta e a cobraria.
+	if len(audioBytes) == 0 {
+		logger.ErrorCF("voice", "Audio file is empty", map[string]any{"model": t.modelID})
+		return nil, fmt.Errorf("audio file is empty")
 	}
 
 	format, err := utils.AudioFormat(audioFilePath)
 	if err != nil {
-		logger.ErrorCF("voice", "Failed to detect audio format", map[string]any{"path": audioFilePath, "error": err})
+		logger.ErrorCF("voice", "Failed to detect audio format", map[string]any{"error": err})
 		return nil, err
 	}
+	logger.InfoCF("voice", "Audio format detected", map[string]any{"format": format})
 
 	resp, err := t.provider.Chat(ctx, []providers.Message{
 		{
@@ -83,8 +92,7 @@ func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath st
 
 	text := strings.TrimSpace(resp.Content)
 	logger.InfoCF("voice", "Audio model transcription completed successfully", map[string]any{
-		"text_length":           len(text),
-		"transcription_preview": utils.Truncate(text, 50),
+		"text_length": len(text),
 	})
 
 	return &TranscriptionResponse{Text: text}, nil
