@@ -64,6 +64,9 @@ type SessionMeta struct {
 	Scope                   json.RawMessage `json:"scope,omitempty"`
 	Aliases                 []string        `json:"aliases,omitempty"`
 
+	ContentIdentity   *contentIdentityState `json:"content_identity,omitempty"`
+	summaryCheckpoint string
+
 	HistoryOrderVersion         uint8  `json:"history_order_version,omitempty"`
 	HistoryStreamID             string `json:"history_stream_id,omitempty"`
 	HistorySequence             uint64 `json:"history_sequence,omitempty"`
@@ -89,6 +92,12 @@ type JSONLStore struct {
 	writeFile func(string, []byte, os.FileMode) error
 	// Optional private seam for deterministic origin-reader I/O failures.
 	openHistoryFile func(string) (*os.File, error)
+	// Private fault boundary for file/directory checkpoint sync recovery.
+	contentCheckpointSyncFailure func(string, string) error
+	// Private fault boundary for NEW metadata durability recovery.
+	historyMetadataSyncFailure func(string, string) error
+	// Private boundary for immutable storage/index durability fault controls.
+	contentStorageFailure func(string, string) error
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
 	// This process is the only writer of the session directory, so a
@@ -163,6 +172,7 @@ func sanitizeKey(key string) string {
 // corrupted by caller mutations (and vice versa).
 func copyMeta(m SessionMeta) SessionMeta {
 	m.Scope = cloneRawJSON(m.Scope)
+	m.ContentIdentity = cloneContentState(m.ContentIdentity)
 	if m.HistoryBytes != nil {
 		size := *m.HistoryBytes
 		m.HistoryBytes = &size
@@ -187,7 +197,7 @@ func (s *JSONLStore) cachedMeta(sanitized string) (SessionMeta, bool) {
 func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
 	s.metaMu.Lock()
 	meta.HistoryRecoveryRequired = meta.HistoryRecoveryRequired || s.historyMarkers[sanitized].present
-	s.metaCache[sanitized] = copyMeta(meta)
+	s.metaCache[sanitized] = contentMetaForCache(meta)
 	s.metaMu.Unlock()
 }
 
@@ -278,6 +288,14 @@ func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 	}
 	if err := s.writeSessionFile(s.metaPath(key), data, 0o644); err != nil {
 		return err
+	}
+	// The shared utility supports a direct-write fallback and best-effort
+	// directory sync. An opted-in content checkpoint requires both phases;
+	// never-initialized legacy sources retain their existing storage contract.
+	if meta.ContentIdentity != nil {
+		if err := s.syncHistoryMetadata(key); err != nil {
+			return err
+		}
 	}
 	s.storeCachedMeta(sanitizeKey(key), meta)
 	return nil
@@ -889,7 +907,7 @@ func (s *JSONLStore) GetSummary(
 }
 
 func (s *JSONLStore) SetSummary(
-	_ context.Context, sessionKey, summary string,
+	ctx context.Context, sessionKey, summary string,
 ) error {
 	l := s.sessionLock(sessionKey)
 	l.Lock()
@@ -899,19 +917,27 @@ func (s *JSONLStore) SetSummary(
 	if err != nil {
 		return err
 	}
+	if meta.ContentIdentity != nil && len(meta.ContentIdentity.opaque) != 0 {
+		return ErrContentIdentityUnavailable
+	}
+	before := copyMeta(meta)
 	now := time.Now()
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = now
 	}
 	meta.Summary = summary
+	s.contentSummaryChanged(&meta)
 	meta.UpdatedAt = now
 
-	return s.writeMeta(sessionKey, meta)
+	return s.commitLogicalContentMetadata(ctx, sessionKey, before, meta)
 }
 
 func (s *JSONLStore) TruncateHistory(
-	_ context.Context, sessionKey string, keepLast int,
+	ctx context.Context, sessionKey string, keepLast int,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
@@ -919,6 +945,25 @@ func (s *JSONLStore) TruncateHistory(
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
+	}
+	before := copyMeta(meta)
+	if operationErr := s.contentPendingGuard(meta); operationErr != nil {
+		return operationErr
+	}
+	// This legacy suffix cut is still destructive even without an intervening
+	// append. Validate an active source at the cut; a stat/tail check cannot
+	// attest a same-size change to an earlier row. Never-initialized sources
+	// retain their legacy behavior without scanning unrelated owners.
+	if meta.ContentIdentity != nil {
+		if operationErr := s.canonicalContentKey(ctx, sessionKey); operationErr != nil {
+			return operationErr
+		}
+	}
+	if operationErr := s.checkContentGarbageCollection(ctx, sessionKey, meta); operationErr != nil {
+		return operationErr
+	}
+	if operationErr := s.hydrateContentStorage(ctx, sessionKey, &meta, true, true); operationErr != nil {
+		return operationErr
 	}
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
@@ -950,9 +995,19 @@ func (s *JSONLStore) TruncateHistory(
 		activeRawLines := retainedRawLines[activeStart:]
 		meta.Skip = activeRawLines[activeRetainedCount-keepLast-1]
 	}
+	if state := meta.ContentIdentity; state != nil && !state.Unavailable {
+		kept := state.Rows[:0]
+		for _, row := range state.Rows {
+			if row.Line > meta.Skip {
+				kept = append(kept, row)
+			}
+		}
+		state.Rows = kept
+		s.contentSummaryChanged(&meta)
+	}
 	meta.UpdatedAt = time.Now()
 
-	return s.writeMeta(sessionKey, meta)
+	return s.commitLogicalContentMetadata(ctx, sessionKey, before, meta)
 }
 
 func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history []providers.Message) error {
@@ -990,8 +1045,25 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 // It is safe to call at any time; if there is nothing to compact
 // (skip == 0) the method returns immediately.
 func (s *JSONLStore) Compact(
-	_ context.Context, sessionKey string,
+	ctx context.Context, sessionKey string,
 ) error {
+	return s.compact(ctx, sessionKey, false)
+}
+
+// CompactForSessionSave performs optional maintenance after content was already
+// fsynced. Unlike explicit Compact, unavailable independent proof may retain the
+// physical rows without invalidating that completed content write.
+func (s *JSONLStore) CompactForSessionSave(ctx context.Context, sessionKey string) error {
+	return s.compact(ctx, sessionKey, true)
+}
+
+func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOptional bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
@@ -1002,6 +1074,13 @@ func (s *JSONLStore) Compact(
 	}
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
+	}
+	if meta.ContentIdentity != nil && meta.ContentIdentity.Pending != nil {
+		// Save uses Compact after an ordinary durable turn. A delayed archive
+		// confirmation retains the physical prefix but must not turn that
+		// already-persisted reply into a failed or empty response. Its overdue
+		// status remains observable through ReadPendingHistoryCompaction.
+		return nil
 	}
 	if meta.Skip == 0 {
 		return nil
@@ -1028,6 +1107,21 @@ func (s *JSONLStore) Compact(
 		}
 	}
 
+	if err = s.prepareContentPhysicalRewrite(ctx, sessionKey, &meta); err != nil {
+		if proofOptional && onlyContentIdentityUnavailable(err) {
+			// No independent proof permits physical GC. The ordinary content
+			// is already durable; retain it without converting Save into a
+			// failed turn. Recheck real ownership/journal errors separately.
+			if journalErr := s.checkContentJournalSettled(sessionKey); journalErr != nil {
+				return journalErr
+			}
+			if _, ownershipErr := s.contentIdentityActiveLocked(ctx, sessionKey); ownershipErr != nil {
+				return ownershipErr
+			}
+			return nil
+		}
+		return err
+	}
 	retainedPrefix, err := unchangedPhysicalPrefix(s.jsonlPath(sessionKey), meta.Skip, len(active))
 	if err != nil {
 		return err

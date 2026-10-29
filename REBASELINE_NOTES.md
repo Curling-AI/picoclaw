@@ -74,10 +74,84 @@ Product doesn't use it, but kept in the fork. Needs re-wiring onto upstream's ev
 
 ## Preserved history capture overrides (MAPP-289)
 
+### Content lineage and checked mutations (MAPP-249)
+
+These are fork overrides of six upstream files, not changes to accept from
+upstream during the next rebaseline:
+
+| Upstream file | Behavior to preserve |
+| --- | --- |
+| `pkg/agent/context_legacy.go` | Read the explicitly activated content view before summary work. Pending compaction or a typed mutation blocks dependent summarization **before** any provider call; qualified compaction uses the exact observed state and refs. Never infer edit direction from a current getter. |
+| `pkg/memory/jsonl.go` | Retain `SessionMeta.ContentIdentity`, source-owned occurrence/revision refs, the guards on `SetSummary`/`TruncateHistory`, and independent order recovery. Active `TruncateHistory` validates the full frame at the cut, even without an intervening append. `Compact` remains strict when proof is unavailable. `CompactForSessionSave` only skips optional physical GC for pure proof loss; both preserve all bytes while Pending awaits ACK, even after its deadline. Real I/O, ownership and unresolved journal errors remain explicit. An opted-in metadata checkpoint requires file and directory sync rather than relying on the shared utility's direct-write fallback. |
+| `pkg/agent/event_payloads.go` | Keep the independent, detached content and content-commit observer payloads, including each append's exact domain/before/after interval. Frozen mutation frames carry no receipt binding; missing binding is not itself an order-recovery decision. |
+| `pkg/agent/agent.go` | Preserve the public observer registration methods (`SetSessionHistoryContentObserver` and `SetSessionHistoryContentCommitObserver`) and the separate receipt observer. Capture exact commits before callbacks/ingestion can enqueue other writes; an old ref or application ACK never becomes read proof. |
+| `pkg/session/jsonl_backend.go` | `Save` prefers `CompactForSessionSave` while leaving the fallback capability optional. `DeleteSession` returns the source owner's complete deletion result and cannot fall back to partial `SetHistory`/`SetSummary` clear. Keep the optional lineage/mutation delegation methods alongside this backend; interface presence never initializes a legacy source. |
+| `web/backend/api/session.go` | Owner HTTP DELETE reuses `memory.DeleteJSONLSession` for the complete source lifecycle, including exact owned preimages, journals, witnesses and cache retirement. A refusal returns an error before clearing the summary/body; an old fixed unlink list would leak mutation payloads. |
+
+Also preserve the fork helpers used by those overrides: checked `edit` and
+`retain_prefix` keep a source-owned frozen Before/After pair and stable command
+ID/intent/plan digest; source NEW retries replay that operation rather than
+cutting a second time. Application ACK is distinct from archive, coverage and
+user-read ACKs. Last is bounded and closed; its absence is not evidence that an
+old command never executed. The external current checkpoint binds logical
+summary/Pending/ACK changes even when transcript bytes stay equal. Existing V7
+writers do not understand this semantic baseline and are not a supported
+rollback target.
+
+In `pkg/agent/delivery_mirror.go`, keep the confirmed-input outcome separate
+from proof and recovery: `ErrHistoryInputCommitted` exposes the operational cause
+without inviting receipt fallback or a second append. An accepted unproved body
+is retained/notified once; no new receipt is invented. Normal turn appends log
+their source errors rather than reconstructing order. Owner deletion of a
+never-initialized legacy source may use its exact own Key, absent content
+witness and settled journal as a negative activation probe; strict append,
+initialization and active-source ownership still validate aliases and reject
+ambiguous or unreadable ownership metadata. Never turn that negative probe into
+a general directory-scan bypass.
+
+Physical content-witness presence uses `Lstat`: a dangling symlink remains
+activation evidence and cannot silently select the never-initialized path. That
+presence grants no known identity/order proof; strict reads still reject unsafe
+artifacts. A final journal-unlink failure after the durable NEW decision and all
+required syncs is narrowly classified as cleanup: retain/log the fence and keep
+the already qualified receipt. Do not extend that disposition to failed syncs,
+uncertain decisions or joined operational causes.
+
+Preserve private disk format 2's small metadata/cache/checkpoint headers,
+appendable record-chain locator index and immutable Pending/Last blobs. The
+ordinary accepted-input capability withholds content proof and extends only new
+index bytes; qualified readers and destructive operations still verify the full
+physical prefix. Metadata, append journals and the warm cache must not expand
+those vectors again. Pure getters do not migrate. Explicit inline downconversion
+targets semantic writer `dfd1c2d`, preserving operation/ACK/ref/order evidence;
+older V7 binaries remain unsupported. Keep the optional input observer's early
+durable wake-up separate from qualified observers and genuine receipt delivery.
+
+Deletion's bounded variant of the existing history journal retains exact typed
+artifact roots, file fingerprints and expected absences until every payload and
+source unlink is durable. The authorization journal retires last. Warm cron and
+empty sweeps discover that prior intent even after metadata disappeared; they do
+not reuse a normal append journal as authorization or repeat an already passed
+empty hook. Preserve unsafe/unowned evidence and reject replacement inodes or
+newly appeared files. The canonical metadata retains its alias list until every
+owned legacy physical alias finishes deletion, including a retry with only its
+own witness left. This does not make unresolved public aliases physical owners
+or create shared directory locks/cache absent from this fork's current source.
+
+The producer's `messageutil.ProjectLegacyPublic` predicate is still a separate
+implementation from the currently published consumer's copy. The consumer pin,
+error propagation and projection alignment are a separately validated follow-up;
+an unpublished composition is not delivery evidence. Strict content readers can
+still scan complete prefixes, including asynchronous consumer work. Measure all
+data-API reads/writes and observer drain separately from the accepted append's
+latency; local figures do not establish EFS or end-to-end constant-time behavior.
+
+### Earlier capture overrides
+
 - `pkg/memory/jsonl.go`, `history_*.go`, `migration.go`, and `prune.go`: private occurrence/run IDs, generation lineage, bounded cursor pages, and the committed `HistoryBytes` boundary. Append journals retain OLD metadata/offset; rewrites also retain the previous raw JSONL because `WriteFileAtomic` can partially fail through its direct-write fallback. Recovery records an OLD/NEW decision before rollback; unknown metadata and cleanup failures fence only the affected key. Startup, metadata caching, alias promotion, listing and pruning must preserve that isolation and use the same sanitized-key lock. Deletion removes the journal, decision, recovery marker and `.jsonl.order-witness` and evicts owned caches; this is not a cross-process deletion transaction.
 - `pkg/providers/protocoltypes/types.go`, `pkg/session/jsonl_backend.go`, and agent history-write call sites: preserve private history provenance through internal reads/writes without adding it to the public provider DTO. Epoch and byte-count fields remain part of the existing capture consumer contract.
 - `pkg/agent/context_legacy.go`: forced compression uses `TruncateHistory` only at a safe turn boundary. With a single protected turn and no safe boundary it returns without mutating persisted history; prompt fitting can trim model context in memory. Preserve this override when reconciling upstream compression changes.
-- MAPP-249 producer order: preserve `AppendHistoryReceipt`/`ReadHistoryWithReceipts`, the exact synchronous receipt observer, persistent stream/highwater and legacy-origin evidence, and strict receipt validation. Recovery-aware content mutations retain the fence: preserve stored proofs only for unchanged occurrences, assign none to edited/new content, and detect missing continuity before truncation or clear can hide it. Keep provider content reads tolerant of private proof metadata without inventing order. See [the private history-order contract](docs/architecture/history-order.md), including explicit recovery and startup/reconnect reconciliation when persistence has no live receipt.
+- MAPP-249 producer order: preserve `AppendHistoryReceipt`/`ReadHistoryWithReceipts`, the exact synchronous receipt observer, persistent stream/highwater and legacy-origin evidence, and strict receipt validation. Recovery-aware content mutations retain the fence: unchanged message cores keep their genuine order, changed cores receive a genuinely allocated new source sequence only while proof is healthy, and proof loss never assigns or reconstructs order. Detect missing continuity before truncation or clear can hide it. Keep provider content reads tolerant of private proof metadata without inventing order. See [the private history-order contract](docs/architecture/history-order.md), including explicit recovery and startup/reconnect reconciliation when persistence has no live receipt.
 - `web/backend/api/session.go` and the English/Chinese session architecture docs describe the same transcript, metadata, journal and decision lifecycle. Preserve the published `SetDeliveryConversationKept` API and main ancestry when updating this fork's consumer pin.
 - An unowned complete tail must survive append and its rollback. `HistoryRecoveryRequired` and the durable `.jsonl.recovery-required` marker keep pages/cursors fenced without stopping ordinary content lifecycle: `SetHistory`, `TruncateHistory`, `Compact`/`Save`, explicit clear and alias promotion retain the marker. If either side of alias promotion requires recovery, both sources retain the latch before content is copied; the original transcript is preserved. Automatic pruning remains blocked. An explicit owner-requested launcher DELETE resolves its own pending journal before removing the source, metadata and recovery files; the owning writer retires its deleted caches on the next mutation. A deliberate truncation/clear is a content operation, not an implicit recovery or order attestation; only an own OLD/NEW journal authorizes rollback of complete rows.
 - Upstream touchpoints include `readMeta`, `writeMeta`, the content mutators and alias promotion. Preserve the fork's warm metadata cache (`e84a00f7`): latch state is write-through, with filesystem checks on cold metadata reads and proof/deletion boundaries. Cold full `readMeta` and proof boundaries also validate `.jsonl.order-witness`; identity-only Key/Aliases selection does not inspect a non-owner's witness or cache partial metadata. A transient witness READ error remains explicit and retryable; confirmed proof loss and a failed first witness WRITE/SYNC retain the durable recovery fence. The owner-requested launcher DELETE removes the witness last, and the next metadata upsert/append retires the corresponding warm witness cache only after confirming both transcript and metadata are absent. A surviving witness or recovery marker still fences proof. Ordinary warm reads and listing keep cache hits; metadata upsert checks source presence before reusing a warm checkpoint so confirmed paired deletion cannot republish retired offsets. This write-boundary I/O preserves the ambiguous-source guard rather than inferring paired deletion from append's exclusive create. The upstream `TestTruncateHistory_StaleMetaCount` still reconciles the physical row count before retaining the requested suffix; do not invert that correction to block agent turns. Keep the marker across rewrites and rollback; legacy binaries do not enforce it while running, and deployment must prevent overlapping directory writers.

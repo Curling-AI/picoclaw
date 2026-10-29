@@ -359,25 +359,71 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
 	var lost []error
 	var committed []memory.CommittedHistoryMessage
+	var content []memory.ContentEntry
+	var contentCommits []memory.ContentAppendResult
+	var inputs []memory.ContentEntry
+	var inputConfirmed []bool
 	var ingested []providers.Message
+	var ingestConfirmed []bool
 	written := 0
 	unproven := 0
+	confirmedWrites, confirmedUnproven, pendingSave := 0, 0, 0
+	_, checkedPersistence := agent.Sessions.(session.CheckedAppender)
+	observeContent := al.observesSessionHistoryContent()
+	observeInput := al.observesSessionHistoryContentInput()
 	for _, msg := range msgs {
+		if observeContent || observeInput {
+			result, err := appendObservedHistoryContent(agent.Sessions, sessionKey, msg, observeContent)
+			if errors.Is(err, memory.ErrHistoryInputCommitted) || !errors.Is(err, memory.ErrHistoryUnsupported) {
+				if err != nil {
+					if errors.Is(err, memory.ErrHistoryInputCommitted) && result.Entry.Message.Role != "" {
+						warnCommittedHistoryRecovery(sessionKey, err)
+					} else {
+						lost = append(lost, err)
+						continue
+					}
+				}
+				if result.Entry.Message.Role == "" {
+					continue
+				}
+				content = append(content, result.Entry)
+				contentCommits = append(contentCommits, result)
+				inputs = append(inputs, result.Entry)
+				inputConfirmed = append(inputConfirmed, true)
+				if result.Receipt != nil && result.Receipt.Order.Valid() {
+					committed = append(committed, *result.Receipt)
+				} else {
+					unproven++
+					confirmedUnproven++
+				}
+				written++
+				confirmedWrites++
+				ingested = append(ingested, result.Entry.Message)
+				ingestConfirmed = append(ingestConfirmed, true)
+				continue
+			}
+		}
 		var appendErr error
 		hasReceipt := false
+		durable := checkedPersistence
 		if receiptStore, ok := agent.Sessions.(session.HistoryReceiptStore); ok {
 			receipt, receiptErr := receiptStore.AppendHistoryReceipt(context.Background(), sessionKey, msg)
 			appendErr = receiptErr
 			if receiptErr == nil && receipt.Order.Valid() {
 				committed = append(committed, receipt)
 				hasReceipt = true
+				durable = true
 			} else if receiptErr == nil {
 				if receipt.Message.Role == "" {
 					continue // Filtered transient thought: no commit or notification.
 				}
 				appendErr = memory.ErrHistoryOrderUnavailable
 			}
-			if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
+			if errors.Is(receiptErr, memory.ErrHistoryInputCommitted) {
+				warnCommittedHistoryRecovery(sessionKey, receiptErr)
+				appendErr = nil
+				durable = true
+			} else if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
 				errors.Is(receiptErr, memory.ErrHistoryOwnershipUnavailable) ||
 				errors.Is(receiptErr, memory.ErrHistoryReceiptUnavailable) {
 				// Receipt eligibility failed before this message's write began.
@@ -388,18 +434,79 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 		} else {
 			appendErr = appendToSession(agent.Sessions, sessionKey, msg)
 		}
+		if errors.Is(appendErr, memory.ErrHistoryInputCommitted) {
+			warnCommittedHistoryRecovery(sessionKey, appendErr)
+			appendErr = nil
+			durable = true
+		}
 		if appendErr != nil {
 			lost = append(lost, appendErr)
 			continue
 		}
 		written++
+		if durable {
+			confirmedWrites++
+		} else {
+			pendingSave++
+		}
 		if !hasReceipt {
 			unproven++
+			if durable {
+				confirmedUnproven++
+			}
 		}
 		ingested = append(ingested, msg)
+		ingestConfirmed = append(ingestConfirmed, durable)
+		if observeInput {
+			inputs = append(inputs, memory.ContentEntry{Message: msg})
+			inputConfirmed = append(inputConfirmed, durable)
+		}
+	}
+	// A non-Checked JSON fallback may still exist only in RAM. Persist once
+	// before promising an accepted input or allowing ingestion to block. A
+	// failed Save cannot hide the other members already confirmed by a durable
+	// append/receipt capability.
+	savedBeforeIngest := false
+	if observeInput && pendingSave > 0 {
+		savedBeforeIngest = true
+		if saveErr := agent.Sessions.Save(sessionKey); saveErr != nil {
+			lost = append(lost, saveErr)
+			written, unproven = confirmedWrites, confirmedUnproven
+			retainedInputs := inputs[:0]
+			for i, input := range inputs {
+				if inputConfirmed[i] {
+					retainedInputs = append(retainedInputs, input)
+				}
+			}
+			inputs = retainedInputs
+			retainedMessages := ingested[:0]
+			for i, message := range ingested {
+				if ingestConfirmed[i] {
+					retainedMessages = append(retainedMessages, message)
+				}
+			}
+			ingested = retainedMessages
+		}
+	}
+	if len(inputs) > 0 {
+		if err := al.notifySessionHistoryContentInputs(sessionKey, inputs); err != nil {
+			logger.WarnCF("agent", "Could not retain accepted history wake-up", map[string]any{
+				"session_key": sessionKey, "error": err.Error(),
+			})
+		}
 	}
 	// A failed member does not discard later successful writes (a,c when b
 	// fails). Deliver exact receipts before ingestion can enqueue network work.
+	if observeContent && len(contentCommits) > 0 {
+		if err := al.notifySessionHistoryContentCommits(sessionKey, contentCommits); err != nil {
+			logger.WarnCF("agent", "Could not snapshot committed history for observer", map[string]any{
+				"session_key": sessionKey, "error": err.Error(),
+			})
+		}
+	}
+	if observeContent && len(content) > 0 {
+		al.notifySessionHistoryContent(sessionKey, content)
+	}
 	if len(committed) > 0 {
 		al.notifySessionHistoryReceipts(sessionKey, committed)
 	}
@@ -426,14 +533,14 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	// O backend JSON (fallback quando o JSONL não sobe) só persiste no Save; no
 	// JSONL cada mensagem já foi gravada e o Save só compacta, como no fim de
 	// todo turno: lá uma falha do Save não perde o que o append confirmou.
-	if err := agent.Sessions.Save(sessionKey); err != nil {
+	if err := saveMirroredOnce(agent.Sessions, sessionKey, savedBeforeIngest); err != nil {
 		logger.WarnCF("agent", "Failed to save mirrored delivery", map[string]any{
 			"session_key": sessionKey,
 			"error":       err.Error(),
 		})
-		if _, checked := agent.Sessions.(session.CheckedAppender); !checked {
+		if pendingSave > 0 {
 			lost = append(lost, err)
-			written = 0
+			written, unproven = confirmedWrites, confirmedUnproven
 		}
 	}
 	// What got written is in the history even when other messages of the
@@ -447,6 +554,42 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 		al.notifySessionHistoryChanged(sessionKey)
 	}
 	return errors.Join(lost...)
+}
+
+func saveMirroredOnce(store session.SessionStore, key string, alreadySaved bool) error {
+	if alreadySaved {
+		return nil
+	}
+	return store.Save(key)
+}
+
+func appendObservedHistoryContent(
+	store session.SessionStore,
+	key string,
+	message providers.Message,
+	qualified bool,
+) (memory.ContentAppendResult, error) {
+	if !qualified {
+		if appender, ok := store.(memory.HistoryContentInputAppender); ok {
+			result, err := appender.AppendHistoryContentInput(context.Background(), key, message)
+			if errors.Is(err, memory.ErrHistoryInputCommitted) || !errors.Is(err, memory.ErrHistoryUnsupported) {
+				return result, err
+			}
+		}
+	}
+	if appender, ok := store.(memory.HistoryContentAppender); ok {
+		return appender.AppendHistoryContent(context.Background(), key, message)
+	}
+	return memory.ContentAppendResult{}, memory.ErrHistoryUnsupported
+}
+
+// The source exposes the I/O cause, but this member is already in history.
+// Report recovery separately instead of inviting the delivery caller to append
+// it again. There is no receipt or extra read confirmation for this outcome.
+func warnCommittedHistoryRecovery(sessionKey string, err error) {
+	logger.WarnCF("agent", "History input committed with pending operational recovery", map[string]any{
+		"session_key": sessionKey, "error": err.Error(),
+	})
 }
 
 // appendToSession appends msg and reports a failed write when the store can

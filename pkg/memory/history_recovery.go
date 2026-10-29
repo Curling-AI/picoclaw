@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -150,11 +151,13 @@ func (s *JSONLStore) applyHistoryRecoveryMarker(key string, meta *SessionMeta, m
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
-	Meta         SessionMeta `json:"meta"`
-	Next         SessionMeta `json:"next"`
-	AppendOffset *int64      `json:"appendOffset,omitempty"`
-	Data         []byte      `json:"data,omitempty"`
-	Existed      bool        `json:"existed,omitempty"`
+	Meta              SessionMeta          `json:"meta"`
+	Next              SessionMeta          `json:"next"`
+	AppendOffset      *int64               `json:"appendOffset,omitempty"`
+	Data              []byte               `json:"data,omitempty"`
+	Existed           bool                 `json:"existed,omitempty"`
+	NextSummaryDigest string               `json:"nextSummaryDigest,omitempty"`
+	Storage           *contentStorageWrite `json:"contentStorage,omitempty"`
 }
 
 type historyWriteDecision string
@@ -214,6 +217,12 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 func (s *JSONLStore) beginHistoryWrite(key string, recovery historyWriteRecovery) error {
 	// NEW is only a commit fingerprint; recovery preserves its actual disk
 	// metadata. Only OLD needs a summary backup, which can be large.
+	// Legacy metadata-only summary/truncation changes remain valid after an
+	// append journal. Semantic checkpoints bind those changes independently.
+	if state := recovery.Next.ContentIdentity; state != nil &&
+		(state.MutationVersion != 0 || state.storage != nil) {
+		recovery.NextSummaryDigest = contentDigest([]byte(recovery.Next.Summary))
+	}
 	recovery.Next.Summary = ""
 	data, err := json.Marshal(recovery)
 	if err != nil {
@@ -255,7 +264,7 @@ func (s *JSONLStore) finishHistoryWrite(key string, cleanup ...string) error {
 	for _, path := range append([]string{s.historyRecoveryPath(key)}, cleanup...) {
 		if operationErr := os.Remove(path); operationErr != nil && !errors.Is(operationErr, os.ErrNotExist) {
 			s.markHistoryPending(key)
-			return fmt.Errorf("memory: remove history recovery: %w", operationErr)
+			return &historyCleanupError{cause: fmt.Errorf("memory: remove history recovery: %w", operationErr)}
 		}
 	}
 	s.metaMu.Lock()
@@ -295,6 +304,13 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 	if readErr != nil {
 		return historyWriteUnknown, fmt.Errorf("memory: read history recovery: %w", readErr)
 	}
+	var variant historyDeletionRecord
+	if operationErr := json.Unmarshal(data, &variant); operationErr != nil {
+		return historyWriteUnknown, fmt.Errorf("memory: decode history recovery: %w", operationErr)
+	}
+	if variant.Deletion != nil {
+		return historyWriteOld, s.recoverHistoryDeletion(key, data)
+	}
 	_, metaErr := os.Stat(s.metaPath(key))
 	_, dataErr := os.Stat(s.jsonlPath(key))
 	if errors.Is(metaErr, os.ErrNotExist) && errors.Is(dataErr, os.ErrNotExist) {
@@ -305,15 +321,20 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 	if operationErr := json.Unmarshal(data, &recovery); operationErr != nil {
 		return historyWriteUnknown, fmt.Errorf("memory: decode history recovery: %w", operationErr)
 	}
+	recovery.Next.summaryCheckpoint = recovery.NextSummaryDigest
 	if recovery.Meta.Key == "" ||
 		filepath.Base(s.historyRecoveryPath(recovery.Meta.Key)) != filepath.Base(s.historyRecoveryPath(key)) {
 		return historyWriteUnknown, errors.New("invalid history recovery key")
 	}
 	if recovery.Next.HistoryBytes == nil || *recovery.Next.HistoryBytes < 0 ||
+		(recovery.NextSummaryDigest != "" && !validHistoryDigest(recovery.NextSummaryDigest)) ||
 		recovery.Next.HistoryFileGeneration == "" || recovery.Next.Count < 0 ||
 		recovery.Next.Skip < 0 || recovery.Next.Skip > recovery.Next.Count ||
 		(recovery.AppendOffset != nil && (*recovery.AppendOffset < 0 || *recovery.AppendOffset > *recovery.Next.HistoryBytes)) {
 		return historyWriteUnknown, errors.New("invalid history recovery checkpoint")
+	}
+	if !validContentStorageWrite(key, recovery) {
+		return historyWriteUnknown, errors.New("invalid content storage recovery checkpoint")
 	}
 	current, currentErr := s.readRecoveryMeta(key)
 	decision, err := s.loadHistoryDecision(key, data)
@@ -329,6 +350,9 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 			return historyWriteUnknown, operationErr
 		}
 	}
+	if err = s.checkContentRecoveryCheckpoint(key, recovery.Meta, recovery.Next); err != nil {
+		return decision, err
+	}
 	if decision == historyWriteNew {
 		if currentErr != nil {
 			return decision, currentErr
@@ -336,8 +360,43 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		if !historyNewCheckpointMatches(current, recovery.Next) {
 			return decision, errors.New("memory: decided NEW metadata no longer matches its checkpoint")
 		}
+		if operationErr := s.recoverContentStorageNew(
+			context.Background(),
+			key,
+			current,
+			recovery.Storage,
+		); operationErr != nil {
+			if !onlyContentIdentityUnavailable(operationErr) {
+				return decision, operationErr
+			}
+			// NEW input is decided. Losing optional identity artifacts closes
+			// proof in the external floor, without reconstructing them or
+			// keeping ordinary transcript writes permanently fenced.
+			if operationErr = s.writeContentCheckpointAvailability(key, current, true); operationErr != nil {
+				return decision, operationErr
+			}
+			// No artifact retirement after proof-loss recovery.
+			recovery.Storage = nil
+		}
+		// Readable NEW metadata can follow a failed file/directory sync. Retry
+		// the actual durability phases before retiring its authoritative journal.
+		if recovery.Meta.ContentIdentity != nil || recovery.Next.ContentIdentity != nil {
+			if operationErr := s.syncHistoryMetadata(key); operationErr != nil {
+				return decision, operationErr
+			}
+		}
+		if operationErr := s.recoverContentDomain(
+			key,
+			recovery.Meta,
+			current,
+		); operationErr != nil {
+			return decision, operationErr
+		}
 		s.storeCachedMeta(sanitizeKey(key), current)
 	} else {
+		if operationErr := s.recoverContentStorageOld(recovery.Storage); operationErr != nil {
+			return decision, operationErr
+		}
 		if recovery.AppendOffset != nil {
 			err = s.rollbackHistoryAppend(key, *recovery.AppendOffset)
 		} else {
@@ -349,8 +408,15 @@ func (s *JSONLStore) recoverHistoryWriteFor(key string, mode historyRecoveryMode
 		if operationErr := s.writeMeta(key, recovery.Meta); operationErr != nil {
 			return decision, operationErr
 		}
+		if operationErr := s.restoreContentCheckpoint(key, recovery.Meta, recovery.Next); operationErr != nil {
+			return decision, operationErr
+		}
 	}
-	return decision, s.finishHistoryWrite(key, s.historyDecisionPath(key))
+	if operationErr := s.finishHistoryWrite(key, s.historyDecisionPath(key)); operationErr != nil {
+		return decision, operationErr
+	}
+	s.retireContentStorageWrite(context.Background(), key, recovery.Storage, decision == historyWriteNew)
+	return decision, nil
 }
 
 func (s *JSONLStore) readRecoveryMeta(key string) (SessionMeta, error) {
@@ -393,12 +459,13 @@ func chooseHistoryDecision(
 }
 
 func historyNewCheckpointMatches(current, next SessionMeta) bool {
-	return historyCheckpointMatches(current, next) && current.Skip >= next.Skip && current.Skip <= current.Count &&
+	return (next.summaryCheckpoint == "" || contentDigest([]byte(current.Summary)) == next.summaryCheckpoint) &&
+		historyCheckpointMatches(current, next) && current.Skip >= next.Skip && current.Skip <= current.Count &&
 		(current.HistoryBytes == nil || *current.HistoryBytes == *next.HistoryBytes)
 }
 
 func historyCheckpointMatches(current, expected SessionMeta) bool {
-	return current.HistoryGeneration == expected.HistoryGeneration &&
+	return contentCheckpointMatches(current, expected) && current.HistoryGeneration == expected.HistoryGeneration &&
 		current.HistoryFileGeneration == expected.HistoryFileGeneration &&
 		current.HistoryTip == expected.HistoryTip && current.Count == expected.Count &&
 		current.HistoryPrefix == expected.HistoryPrefix &&

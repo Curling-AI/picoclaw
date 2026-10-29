@@ -3,6 +3,7 @@ package memory
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -35,7 +36,22 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	meta SessionMeta,
 	requireReceipt bool,
 ) ([]CommittedHistoryMessage, error) {
+	return s.appendHistoryMessagesOutcome(key, messages, meta, requireReceipt, false, nil)
+}
+
+func (s *JSONLStore) appendHistoryMessagesOutcome(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	requireReceipt bool,
+	qualifyContent bool,
+	outcome *historyAppendOutcome,
+) ([]CommittedHistoryMessage, error) {
 	original, err := s.readMeta(key)
+	if err != nil {
+		return nil, err
+	}
+	original, meta, err = s.contentAppendMetadata(key, original, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -177,8 +193,15 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 	}
 	end := offset + int64(len(data))
 	meta.HistoryBytes = &end
+	if err = s.prepareContentAppend(key, original, &meta, data, offset, qualifyContent); err != nil {
+		return nil, err
+	}
+	storage, err := s.prepareContentStorage(key, original, &meta, true)
+	if err != nil {
+		return nil, err
+	}
 	if commitErr := s.beginHistoryWrite(key, historyWriteRecovery{
-		Meta: original, Next: meta, AppendOffset: &offset,
+		Meta: original, Next: meta, AppendOffset: &offset, Storage: storage,
 	}); commitErr != nil {
 		if errors.Is(commitErr, ErrHistoryReceiptUnavailable) {
 			meta = appendMeta
@@ -189,7 +212,7 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 				// The failed witness phase recovered OLD before this input's
 				// bytes. Retry once with the durable content-only fence; that
 				// branch neither allocates order nor activates a witness.
-				return s.appendHistoryMessagesFor(key, messages, meta, false)
+				return s.appendHistoryMessagesOutcome(key, messages, meta, false, qualifyContent, outcome)
 			}
 		}
 		return nil, commitErr
@@ -214,18 +237,45 @@ func (s *JSONLStore) appendHistoryMessagesFor(
 		err = closeErr
 	}
 	if err == nil {
+		err = s.appendContentStorageWrite(storage)
+	}
+	if err == nil {
 		err = s.writeMeta(key, meta)
+	}
+	if err == nil {
+		err = s.ensureContentDomain(key, original, meta)
 	}
 	if err == nil {
 		err = s.finishHistoryWrite(key)
 	}
 	if err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, meta)
 		if !committed {
 			return nil, errors.Join(err, recoveryErr)
 		}
+		if outcome != nil {
+			outcome.committed, outcome.meta = true, copyMeta(meta)
+		}
+		if recoveryErr != nil && !onlyHistoryCleanupError(recoveryErr) {
+			return nil, historyCommittedError(errors.Join(err, recoveryErr))
+		}
+		// The input is decided independently from order. Revalidate the live
+		// witness before returning any pre-write receipt after recovery.
+		if proofErr := s.prepareContentMutationOrderFence(key, &meta); proofErr != nil {
+			return nil, historyCommittedError(proofErr)
+		}
+		if meta.HistoryRecoveryRequired {
+			receipts = nil
+			if requireReceipt {
+				return nil, historyCommittedError(ErrHistoryOrderUnavailable)
+			}
+		}
 		return receipts, nil
 	}
+	if outcome != nil {
+		outcome.committed, outcome.meta = true, copyMeta(meta)
+	}
+	s.retireContentStorageWrite(context.Background(), key, storage, true)
 	return receipts, nil
 }
 
@@ -379,6 +429,15 @@ func scanCommittedHistoryLine(data []byte, atEOF bool) (int, []byte, error) {
 }
 
 func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Message, meta SessionMeta) error {
+	return s.commitHistoryRewriteFor(key, messages, meta, false)
+}
+
+func (s *JSONLStore) commitHistoryRewriteFor(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	contentOnly bool,
+) error {
 	original, err := s.readMeta(key)
 	if err != nil {
 		return err
@@ -416,9 +475,16 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 	}
 	size := int64(len(data))
 	meta.HistoryBytes = &size
+	if err = s.prepareContentRewrite(key, original, &meta, data); err != nil {
+		return err
+	}
+	storage, err := s.prepareContentStorage(key, original, &meta, false)
+	if err != nil {
+		return err
+	}
 	if commitErr := s.beginHistoryWrite(
 		key,
-		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed},
+		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed, Storage: storage},
 	); commitErr != nil {
 		return commitErr
 	}
@@ -427,15 +493,32 @@ func (s *JSONLStore) commitHistoryRewrite(key string, messages []providers.Messa
 	}
 	err = s.writeMeta(key, meta)
 	if err == nil {
+		err = s.ensureContentDomain(key, original, meta)
+	}
+	if err == nil && contentOnly {
+		orderMeta := copyMeta(meta)
+		err = s.prepareContentMutationOrderFence(key, &orderMeta)
+	}
+	if err == nil {
 		err = s.finishHistoryWrite(key)
 	}
 	if err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryCommit(key, meta)
+		var committed bool
+		var recoveryErr error
+		if contentOnly {
+			committed, recoveryErr = s.recoverExpectedHistoryContentCommit(key, meta)
+		} else {
+			committed, recoveryErr = s.recoverExpectedHistoryCommit(key, meta)
+		}
 		if committed {
+			if contentOnly {
+				return recoveryErr
+			}
 			return nil
 		}
 		return errors.Join(err, recoveryErr)
 	}
+	s.retireContentStorageWrite(context.Background(), key, storage, true)
 	return nil
 }
 

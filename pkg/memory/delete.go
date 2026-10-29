@@ -34,15 +34,21 @@ import (
 // Clearing a session (empty history, empty summary) is not a delete: the meta
 // and the transcript stay, and the session stays in every listing with no
 // messages, where each listing keeps paying for it.
-func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
-	if strings.TrimSpace(sessionKey) == "" {
-		return errors.New("memory: delete session: empty key")
+func (s *JSONLStore) DeleteSession(ctx context.Context, sessionKey string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(sessionKey) != sessionKey {
+		return ErrHistoryOwnershipUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	var errs []error
 	for _, alias := range s.legacyAliases(sessionKey) {
 		unlock := s.lockSessionPair(sessionKey, alias)
-		if err := s.deleteSessionFilesLocked(alias); err != nil {
+		if err := s.deleteSessionFilesLocked(ctx, alias, true); err != nil {
 			errs = append(errs, err)
 		}
 		unlock()
@@ -56,36 +62,9 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
-	if err := s.deleteSessionFilesLocked(sessionKey); err != nil {
+	if err := s.deleteSessionFilesLocked(ctx, sessionKey); err != nil {
 		return fmt.Errorf("memory: delete session: %w", err)
 	}
-	return nil
-}
-
-// deleteSessionFilesLocked removes every file of a session the owner deleted.
-// The caller holds the session's lock. The cache stays fenced while the files
-// go, so a removal that fails halfway is read back from disk, not from memory.
-func (s *JSONLStore) deleteSessionFilesLocked(key string) error {
-	if err := s.recoverHistoryWrite(key); err != nil {
-		return err
-	}
-	s.markHistoryPending(key)
-	// The meta goes first: while it exists the session is still listable.
-	for _, path := range []string{
-		s.metaPath(key), s.jsonlPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key),
-		s.historyRecoveryRequiredPath(key), s.historyOrderWitnessPath(key),
-	} {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	sanitized := sanitizeKey(key)
-	s.metaMu.Lock()
-	delete(s.metaCache, sanitized)
-	delete(s.historyPending, sanitized)
-	delete(s.historyMarkers, sanitized)
-	delete(s.historyWitnesses, sanitized)
-	s.metaMu.Unlock()
 	return nil
 }
 
@@ -146,8 +125,25 @@ func (s *JSONLStore) PruneEmptySessions(
 
 	var removed []string
 	var errs []error
+	// Metadata may already be durably gone when a later cleanup phase fails.
+	// Its exact prior authorization, not a new emptiness/hook decision, remains
+	// discoverable in the existing journal namespace for a warm retry.
+	pending, discoveryErr := s.pendingHistoryDeletions("empty")
+	if discoveryErr != nil {
+		return nil, discoveryErr
+	}
+	seen := make(map[string]bool)
+	for _, key := range pending {
+		seen[sanitizeKey(key)] = true
+		done, err := s.pruneIfEmpty(key, cutoff, beforeRemove)
+		if err != nil {
+			errs = append(errs, err)
+		} else if done {
+			removed = append(removed, key)
+		}
+	}
 	for _, meta := range s.ListSessionMetas() {
-		if !isEmptyMeta(meta) {
+		if seen[sanitizeKey(meta.Key)] || !isEmptyMeta(meta) {
 			continue
 		}
 		done, err := s.pruneIfEmpty(meta.Key, cutoff, beforeRemove)
@@ -182,6 +178,9 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	l := s.sessionLock(key)
 	l.Lock()
 	defer l.Unlock()
+	if resumed, err := s.resumeHistoryDeletion(key); resumed || err != nil {
+		return resumed && err == nil, err
+	}
 
 	meta, lastWrite, err := s.readMetaFile(key)
 	if errors.Is(err, os.ErrNotExist) {
@@ -237,7 +236,7 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 		}
 	}
-	if err := s.removeSessionFilesLocked(sanitizeKey(key)); err != nil {
+	if err := s.removeSessionFilesLocked(sanitizeKey(key), "empty"); err != nil {
 		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 	return true, nil

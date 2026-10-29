@@ -74,9 +74,12 @@ type AgentLoop struct {
 	mirror deliveryMirror
 	mu     sync.RWMutex
 
-	sessionHistoryObserverMu      sync.RWMutex
-	sessionHistoryObserver        func(string)
-	sessionHistoryReceiptObserver func(string, []memory.CommittedHistoryMessage)
+	sessionHistoryObserverMu            sync.RWMutex
+	sessionHistoryObserver              func(string)
+	sessionHistoryReceiptObserver       func(string, []memory.CommittedHistoryMessage)
+	sessionHistoryContentObserver       func(string, []memory.ContentEntry)
+	sessionHistoryContentCommitObserver func(string, []memory.ContentAppendResult)
+	sessionHistoryContentInputObserver  func(string, []memory.ContentEntry)
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}

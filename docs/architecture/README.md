@@ -6,6 +6,7 @@ Internal architecture notes for major runtime mechanisms and subsystem design.
 - [SubTurn Mechanism](subturn.md): sub-agent coordination, concurrency control, and lifecycle handling.
 - [Session System](session-system.md): session scope allocation, JSONL persistence, alias compatibility, and migration. ([ZH](session-system.zh.md))
 - [Committed History Order](history-order.md): persistent producer receipts, revision order, legacy origin, and out-of-turn observers.
+- [Content Identity and Compaction](history-content-lineage.md): optional occurrence/revision refs, atomic compaction and qualified archive confirmation.
 - [Routing System](routing-system.md): agent dispatch, session policy selection, and light/heavy model routing. ([ZH](routing-system.zh.md))
 - [Runtime Events](runtime-events.md): runtime event envelope, centralized event logging, filters, and examples. ([ZH](runtime-events.zh.md))
 - [Agent Self-Evolution](agent-self-evolution.md): learning records, draft generation, application modes, and state layout.
