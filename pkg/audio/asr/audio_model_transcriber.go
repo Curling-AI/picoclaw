@@ -3,8 +3,11 @@ package asr
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -56,8 +59,18 @@ func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath st
 
 	audioBytes, err := os.ReadFile(audioFilePath)
 	if err != nil {
-		logger.ErrorCF("voice", "Failed to read audio file", map[string]any{"error": err})
-		return nil, fmt.Errorf("failed to read audio file: %w", err)
+		// (seucaranguejo fork) *fs.PathError carrega o caminho inteiro, que em
+		// upload web inclui o nome original do arquivo do usuário. Log e erro
+		// devolvido (logado de novo em agent_transcribe) levam só op e causa.
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			logger.ErrorCF("voice", "Failed to read audio file", map[string]any{
+				"error": pathErr.Op + ": " + pathErr.Err.Error(),
+			})
+			return nil, fmt.Errorf("failed to read audio file: %w", pathErr.Err)
+		}
+		logger.ErrorCF("voice", "Failed to read audio file", map[string]any{"error": "unknown read error"})
+		return nil, errors.New("failed to read audio file")
 	}
 
 	// (seucaranguejo fork) Arquivo vazio vira data URL sem dados, que o
@@ -69,8 +82,11 @@ func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath st
 
 	format, err := utils.AudioFormat(audioFilePath)
 	if err != nil {
-		logger.ErrorCF("voice", "Failed to detect audio format", map[string]any{"error": err})
-		return nil, err
+		// (seucaranguejo fork) O erro de utils.AudioFormat cita o caminho
+		// inteiro; aqui só a extensão vai ao log e ao chamador.
+		ext := filepath.Ext(audioFilePath)
+		logger.ErrorCF("voice", "Unsupported audio format", map[string]any{"extension": ext})
+		return nil, fmt.Errorf("unsupported audio format %q", ext)
 	}
 	logger.InfoCF("voice", "Audio format detected", map[string]any{"format": format})
 
