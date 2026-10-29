@@ -63,7 +63,21 @@ type SessionMeta struct {
 // GetHistory ignores lines before that offset. This keeps all writes
 // append-only, which is both fast and crash-safe.
 type JSONLStore struct {
-	dir   string
+	dir string
+	// The locks and the meta cache belong to the directory, not to the store
+	// (see sharedDirState).
+	*dirState
+}
+
+// dirState is what every store open on one session directory shares.
+//
+// A config reload opens a new store on the directory of the old one while work
+// started on the old store (a sweep, a turn) may still be running. With locks
+// of their own, that work did not exclude a write through the new store, and a
+// sweep removed a message written after it checked the session. With caches of
+// their own, a meta one store had cached outlived a delete through the other,
+// and its next write brought back the summary, scope and aliases.
+type dirState struct {
 	locks [numLockShards]sync.Mutex
 
 	// metaCache holds the decoded .meta.json per sanitized session key.
@@ -74,6 +88,26 @@ type JSONLStore struct {
 	// seconds; with the cache it costs one ReadDir.
 	metaMu    sync.RWMutex
 	metaCache map[string]SessionMeta
+	// metaRemovals counts the entries removed from metaCache. A listing fills
+	// the cache without the session's lock, and a meta it read before a
+	// removal must not come back after it.
+	metaRemovals uint64
+}
+
+// dirStates holds the state of each session directory, one per directory, so
+// memory stays bounded by the directories rather than by the stores opened.
+var dirStates sync.Map // canonical dir -> *dirState
+
+func sharedDirState(dir string) *dirState {
+	key := filepath.Clean(dir)
+	if abs, err := filepath.Abs(key); err == nil {
+		key = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(key); err == nil {
+		key = resolved
+	}
+	state, _ := dirStates.LoadOrStore(key, &dirState{metaCache: make(map[string]SessionMeta)})
+	return state.(*dirState)
 }
 
 // NewJSONLStore creates a new JSONL-backed store rooted at dir.
@@ -82,7 +116,7 @@ func NewJSONLStore(dir string) (*JSONLStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory: create directory: %w", err)
 	}
-	return &JSONLStore{dir: dir, metaCache: make(map[string]SessionMeta)}, nil
+	return &JSONLStore{dir: dir, dirState: sharedDirState(dir)}, nil
 }
 
 // sessionLock returns a mutex for the given session key.
@@ -143,6 +177,28 @@ func (s *JSONLStore) storeCachedMeta(sanitized string, meta SessionMeta) {
 	s.metaMu.Lock()
 	s.metaCache[sanitized] = copyMeta(meta)
 	s.metaMu.Unlock()
+}
+
+func (s *JSONLStore) metaRemovalCount() uint64 {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	return s.metaRemovals
+}
+
+// fillCachedMeta caches a meta read without the session's lock, unless the
+// cache changed since the read began (removals is metaRemovalCount from
+// before it): a removal means the meta may belong to a deleted session, and an
+// entry already there was written after the read.
+func (s *JSONLStore) fillCachedMeta(sanitized string, meta SessionMeta, removals uint64) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	if s.metaRemovals != removals {
+		return
+	}
+	if _, cached := s.metaCache[sanitized]; cached {
+		return
+	}
+	s.metaCache[sanitized] = copyMeta(meta)
 }
 
 // readMeta loads the metadata file for a session.
@@ -920,6 +976,7 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 			}
 			continue
 		}
+		removals := s.metaRemovalCount()
 		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
 			continue
@@ -929,7 +986,7 @@ func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 			continue
 		}
 		if meta.Key != "" {
-			s.storeCachedMeta(sanitized, meta)
+			s.fillCachedMeta(sanitized, meta, removals)
 			metas = append(metas, meta)
 		}
 	}

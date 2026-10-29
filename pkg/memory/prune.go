@@ -90,10 +90,18 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 
 // removeSessionFiles deletes both files of a session addressed by its already
 // sanitized name and drops it from the meta cache, so a later listing cannot
-// resurrect it from memory.
+// resurrect it from memory. The cache entry goes even when a removal fails: the
+// disk is what the next read trusts, and a meta left in memory after its file
+// went would hand its count and summary to the next write.
 func (s *JSONLStore) removeSessionFiles(sanitized string) error {
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
 	jsonlPath := filepath.Join(s.dir, sanitized+".jsonl")
+	defer func() {
+		s.metaMu.Lock()
+		delete(s.metaCache, sanitized)
+		s.metaRemovals++
+		s.metaMu.Unlock()
+	}()
 
 	// The meta goes first: while it exists the session is still listable, so
 	// removing it before the transcript avoids exposing a session whose
@@ -104,9 +112,5 @@ func (s *JSONLStore) removeSessionFiles(sanitized string) error {
 	if err := os.Remove(jsonlPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-
-	s.metaMu.Lock()
-	delete(s.metaCache, sanitized)
-	s.metaMu.Unlock()
 	return nil
 }

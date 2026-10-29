@@ -447,6 +447,54 @@ func TestProcessSystemMessage_ResultOfAGoneConversationIsDropped(t *testing.T) {
 	}
 }
 
+// Deleting removes the meta too, and with it the scope (channel and person)
+// the result would have been delivered with. The result of a task that outlives
+// the conversation is dropped before it asks for that scope: nothing of the
+// conversation comes back, not its history, not its meta, not a session in main.
+func TestProcessSystemMessage_ResultOfADeletedConversationIsDropped(t *testing.T) {
+	provider := &countingReplyProvider{}
+	al, _, sessions := newSystemMessageTestLoop(t, provider)
+	scopes, ok := sessions.(session.MetadataAwareSessionStore)
+	if !ok {
+		t.Fatal("the session store keeps no scope")
+	}
+	scopes.EnsureSessionMetadata(conversationSession, &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "telegram",
+		Values:  map[string]string{"chat": "direct:123"},
+	}, nil)
+	deleter, ok := sessions.(interface{ DeleteSession(key string) error })
+	if !ok {
+		t.Fatal("the session store cannot delete")
+	}
+	if err := deleter.DeleteSession(conversationSession); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	mainKey := session.BuildMainSessionKey(al.registry.GetDefaultAgent().ID)
+	msg := spawnResultMessage(conversationSession)
+	msg.Context.ChatID, msg.ChatID = "telegram:123", "telegram:123"
+
+	if _, err := al.processSystemMessage(context.Background(), msg); err != nil {
+		t.Fatalf("processSystemMessage: %v", err)
+	}
+
+	if provider.count() != 0 {
+		t.Fatalf("a turn ran for the result (%d model calls)", provider.count())
+	}
+	if got := scopes.GetSessionScope(conversationSession); got != nil {
+		t.Fatalf("the deleted conversation got a scope back: %+v", got)
+	}
+	for _, key := range []string{conversationSession, mainKey} {
+		if got := len(sessions.GetHistory(key)); got != 0 {
+			t.Fatalf("%q has %d messages", key, got)
+		}
+	}
+	if keys := sessions.ListSessions(); len(keys) != 0 {
+		t.Fatalf("sessions = %v, want none", keys)
+	}
+}
+
 // A result released when its turn ended can still be on the
 // inbound queue when the user clears the conversation. It must not reach
 // main as a turn of its own.
