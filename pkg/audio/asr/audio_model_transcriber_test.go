@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -196,7 +198,7 @@ func TestAudioModelTranscriberTranscribe(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for unsupported audio format, got nil")
 		}
-		if got := err.Error(); got != `unsupported audio format for "`+badPath+`"` {
+		if got := err.Error(); got != `unsupported audio format "`+filepath.Ext(badPath)+`"` {
 			t.Fatalf("error = %q, want unsupported format error", got)
 		}
 	})
@@ -249,4 +251,40 @@ func TestAudioModelTranscriberRejectsEmptyFile(t *testing.T) {
 	if called {
 		t.Fatal("provider was called for an empty file")
 	}
+}
+
+func TestAudioModelTranscriberErrorsOmitFilePath(t *testing.T) {
+	tr := &AudioModelTranscriber{
+		provider: &fakeLLMProvider{},
+		modelID:  "m",
+		prompt:   defaultTranscriptionPrompt,
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		audioPath := filepath.Join(t.TempDir(), "consulta-fulana.ogg")
+		_, err := tr.Transcribe(context.Background(), audioPath)
+		if err == nil {
+			t.Fatal("Transcribe() error = nil, want error")
+		}
+		if strings.Contains(err.Error(), "consulta-fulana") {
+			t.Fatalf("error leaks the file name: %q", err.Error())
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("errors.Is(err, fs.ErrNotExist) = false for %v", err)
+		}
+	})
+
+	t.Run("unsupported format", func(t *testing.T) {
+		audioPath := filepath.Join(t.TempDir(), "consulta-fulana.xyz")
+		if err := os.WriteFile(audioPath, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := tr.Transcribe(context.Background(), audioPath)
+		if err == nil {
+			t.Fatal("Transcribe() error = nil, want error")
+		}
+		if strings.Contains(err.Error(), "consulta-fulana") {
+			t.Fatalf("error leaks the file name: %q", err.Error())
+		}
+	})
 }
