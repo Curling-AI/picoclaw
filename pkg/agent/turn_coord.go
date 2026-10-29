@@ -12,6 +12,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -31,6 +32,7 @@ func (al *AgentLoop) runTurn(
 
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
+	turnCtx = protocoltypes.WithTurnID(turnCtx, ts.turnID)
 	turnCtx = WithAgentLoop(turnCtx, al)
 	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
