@@ -690,6 +690,9 @@ func TestParseDataAudioURL(t *testing.T) {
 	}{
 		{"valid mp3", "data:audio/mp3;base64,SGVsbG8=", "mp3", "SGVsbG8=", true},
 		{"valid wav", "data:audio/wav;base64,AAAA", "wav", "AAAA", true},
+		// MIME subtypes que não são o nome do formato voltam ao nome (MST-351).
+		{"mpeg is mp3", "data:audio/mpeg;base64,QQ==", "mp3", "QQ==", true},
+		{"mp4 is m4a", "data:audio/mp4;base64,QQ==", "m4a", "QQ==", true},
 		{"not audio", "data:image/png;base64,abc", "", "", false},
 		{"no comma", "data:audio/mp3;base64", "", "", false},
 		{"empty data", "data:audio/mp3;base64,", "", "", false},

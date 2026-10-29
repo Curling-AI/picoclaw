@@ -16,7 +16,23 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
-var audioExtensions = []string{".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma"}
+var audioExtensions = []string{".mp3", ".wav", ".ogg", ".opus", ".oga", ".m4a", ".flac", ".aac", ".wma"}
+
+// audioMIMETypes é o MIME de cada AudioFormat. O áudio vai ao modelo como
+// parte `file`, cujo data URL diz o tipo; .opus e .oga são Ogg Opus, o áudio
+// de voz do WhatsApp e do Telegram. (seucaranguejo fork)
+var audioMIMETypes = map[string]string{
+	"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "opus": "audio/ogg", "oga": "audio/ogg",
+	"m4a": "audio/mp4", "flac": "audio/flac", "aac": "audio/aac", "wma": "audio/x-ms-wma",
+}
+
+// AudioMIMEType returns the MIME type of an AudioFormat result.
+func AudioMIMEType(format string) string {
+	if mime, ok := audioMIMETypes[format]; ok {
+		return mime
+	}
+	return "audio/" + format
+}
 
 func AudioFormat(path string) (string, error) {
 	ext := strings.ToLower(filepath.Ext(path))
