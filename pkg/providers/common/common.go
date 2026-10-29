@@ -265,7 +265,7 @@ func ParseDataAudioURL(mediaURL string) (format, data string, ok bool) {
 	return format, data, true
 }
 
-// audioFilename names an audio file part by its data URL's MIME type.
+// audioFilename names an audio file part by its data URL's MIME type. (seucaranguejo fork)
 func audioFilename(mediaURL string) string {
 	mime, _, _ := strings.Cut(strings.TrimPrefix(mediaURL, "data:"), ";")
 	switch mime {

@@ -26,7 +26,7 @@ var audioMIMETypes = map[string]string{
 	"m4a": "audio/mp4", "flac": "audio/flac", "aac": "audio/aac", "wma": "audio/x-ms-wma",
 }
 
-// AudioMIMEType returns the MIME type of an AudioFormat result.
+// AudioMIMEType returns the MIME type of an AudioFormat result. (seucaranguejo fork)
 func AudioMIMEType(format string) string {
 	if mime, ok := audioMIMETypes[format]; ok {
 		return mime

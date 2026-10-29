@@ -226,3 +226,27 @@ func TestAudioModelTranscriberSendsTheMIMEType(t *testing.T) {
 		t.Fatalf("media = %q, want %q", media, want)
 	}
 }
+
+func TestAudioModelTranscriberRejectsEmptyFile(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "empty.ogg")
+	if err := os.WriteFile(audioPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	tr := &AudioModelTranscriber{
+		provider: &fakeLLMProvider{chatFunc: func(
+			context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
+		) (*providers.LLMResponse, error) {
+			called = true
+			return &providers.LLMResponse{Content: "invented"}, nil
+		}},
+		modelID: "m",
+		prompt:  defaultTranscriptionPrompt,
+	}
+	if _, err := tr.Transcribe(context.Background(), audioPath); err == nil {
+		t.Fatal("Transcribe() error = nil, want error for empty file")
+	}
+	if called {
+		t.Fatal("provider was called for an empty file")
+	}
+}
