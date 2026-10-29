@@ -201,3 +201,28 @@ func TestAudioModelTranscriberTranscribe(t *testing.T) {
 		}
 	})
 }
+
+// O data URL leva o MIME real: mp3 é audio/mpeg (MST-351).
+func TestAudioModelTranscriberSendsTheMIMEType(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "clip.mp3")
+	if err := os.WriteFile(audioPath, []byte("fake-mp3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var media string
+	tr := &AudioModelTranscriber{
+		provider: &fakeLLMProvider{chatFunc: func(
+			_ context.Context, messages []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any,
+		) (*providers.LLMResponse, error) {
+			media = messages[0].Media[0]
+			return &providers.LLMResponse{Content: "ok"}, nil
+		}},
+		modelID: "maestro-transcribe",
+		prompt:  defaultTranscriptionPrompt,
+	}
+	if _, err := tr.Transcribe(context.Background(), audioPath); err != nil {
+		t.Fatal(err)
+	}
+	if want := "data:audio/mpeg;base64," + base64.StdEncoding.EncodeToString([]byte("fake-mp3")); media != want {
+		t.Fatalf("media = %q, want %q", media, want)
+	}
+}

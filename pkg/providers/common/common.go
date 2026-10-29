@@ -233,6 +233,8 @@ func serializeToolCalls(toolCalls []ToolCall) []openaiToolCall {
 }
 
 // ParseDataAudioURL extracts the format and base64 data from a data:audio/... URL.
+// MIME subtypes that differ from the format name map back to it (mpeg -> mp3,
+// mp4 -> m4a), so input_audio keeps the names providers expect. (seucaranguejo fork)
 func ParseDataAudioURL(mediaURL string) (format, data string, ok bool) {
 	if !strings.HasPrefix(mediaURL, "data:audio/") {
 		return "", "", false
@@ -246,6 +248,12 @@ func ParseDataAudioURL(mediaURL string) (format, data string, ok bool) {
 
 	format, _, _ = strings.Cut(meta, ";")
 	format = strings.TrimSpace(format)
+	switch format {
+	case "mpeg":
+		format = "mp3"
+	case "mp4":
+		format = "m4a"
+	}
 	data = strings.TrimSpace(data)
 	if format == "" || data == "" {
 		return "", "", false
