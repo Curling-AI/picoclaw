@@ -100,6 +100,10 @@ const idleProbeTimeout = 10 * time.Second
 // The bound keeps a burst of due jobs from stampeding the LLM provider.
 const maxConcurrentJobs = 4
 
+// missedRunGrace is how late a run may still fire when the service starts after
+// its minute (a pod woken for it booted late). Older runs are stale: skipped.
+const missedRunGrace = time.Hour
+
 type CronService struct {
 	storePath        string
 	store            *CronStore
@@ -502,10 +506,35 @@ func (cs *CronService) recomputeNextRuns() {
 	now := time.Now().UnixMilli()
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
-		if job.Enabled {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		if !job.Enabled {
+			continue
 		}
+		if late, ok := missedRun(job.State, now); ok {
+			if late <= missedRunGrace {
+				// The past-due NextRunAtMS stays: checkJobs fires it on the
+				// first tick and only then computes the next occurrence.
+				log.Printf("[cron] job '%s' missed its run by %s; running it now", job.Name, late.Round(time.Second))
+				continue
+			}
+			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
+				job.Name, late.Round(time.Second), missedRunGrace)
+		}
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
 	}
+}
+
+// missedRun reports how late the stored run is when it is due and never ran.
+//
+// checkJobs clears NextRunAtMS and saves before executing, so a run that
+// started — even one cut short by a restart — is never repeated here.
+func missedRun(state CronJobState, nowMS int64) (time.Duration, bool) {
+	if state.NextRunAtMS == nil || *state.NextRunAtMS > nowMS {
+		return 0, false
+	}
+	if state.LastRunAtMS != nil && *state.LastRunAtMS >= *state.NextRunAtMS {
+		return 0, false
+	}
+	return time.Duration(nowMS-*state.NextRunAtMS) * time.Millisecond, true
 }
 
 func (cs *CronService) getNextWakeMS() *int64 {
