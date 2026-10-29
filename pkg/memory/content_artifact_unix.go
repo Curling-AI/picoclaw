@@ -54,12 +54,18 @@ func removeContentArtifact(dir, name string, beforeSync ...func() error) error {
 	return removeContentArtifactIdentity(dir, name, nil, beforeSync...)
 }
 
+// contentDeviceIdentity preserves the existing uint64 representation across
+// Unix device fields with signed or unsigned platform-specific integer types.
+func contentDeviceIdentity[T ~int32 | ~uint32 | ~uint64](device T) uint64 {
+	return uint64(device)
+}
+
 func contentArtifactFileIdentity(file *os.File) (contentFileIdentity, error) {
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return contentFileIdentity{}, err
 	}
-	return contentFileIdentity{Volume: uint64(stat.Dev), File: stat.Ino}, nil
+	return contentFileIdentity{Volume: contentDeviceIdentity(stat.Dev), File: stat.Ino}, nil
 }
 
 func removeContentArtifactIdentity(dir, name string, expected *contentFileIdentity, beforeSync ...func() error) error {
@@ -81,7 +87,8 @@ func removeContentArtifactIdentity(dir, name string, expected *contentFileIdenti
 		current.Mode&unix.S_IFMT != unix.S_IFREG {
 		return ErrContentIdentityUnavailable
 	}
-	if expected != nil && *expected != (contentFileIdentity{Volume: uint64(opened.Dev), File: opened.Ino}) {
+	if expected != nil &&
+		*expected != (contentFileIdentity{Volume: contentDeviceIdentity(opened.Dev), File: opened.Ino}) {
 		return ErrContentIdentityUnavailable
 	}
 	if err = unix.Unlinkat(int(parent.Fd()), name, 0); err != nil {
