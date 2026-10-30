@@ -91,6 +91,13 @@ func transcriberFromModelConfig(modelCfg *config.ModelConfig) Transcriber {
 	if modelCfg == nil {
 		return nil
 	}
+	_, modelID := providers.ExtractProtocol(modelCfg)
+	if modelID == hulkTranscriptionModel {
+		if transcriber := NewHulkTranscriber(modelCfg); transcriber != nil {
+			return transcriber
+		}
+		return nil
+	}
 
 	if isElevenLabsTranscriptionModel(modelCfg) {
 		_, modelID := providers.ExtractProtocol(modelCfg)
