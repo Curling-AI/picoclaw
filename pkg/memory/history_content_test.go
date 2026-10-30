@@ -59,9 +59,9 @@ func TestCheckedContentSurvivesProofLossWithoutRestoringProof(t *testing.T) {
 				},
 				Media: []string{"artifact://fixture"},
 			}
-			receipt, err := store.AppendHistoryReceipt(t.Context(), key, input)
-			if err != nil {
-				t.Fatal(err)
+			receipt, appendErr := store.AppendHistoryReceipt(t.Context(), key, input)
+			if appendErr != nil {
+				t.Fatal(appendErr)
 			}
 			expectedDelivery := *input.Delivery
 			expectedDelivery.ID = receipt.Message.Delivery.ID
