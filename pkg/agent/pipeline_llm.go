@@ -97,9 +97,12 @@ func promptCacheScopeForSession(sessionKey string) string {
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
 // Returns Control indicating what the coordinator should do next.
-// maxEmptyResponseRetries caps same-turn retries for empty (no content, no
-// tool calls) LLM responses. One retry recovers the transient reasoning-only
-// glitch; more would just stall visibly silent turns.
+// maxEmptyResponseRetries caps retries in a row for empty (no content, no tool
+// calls) LLM responses. One retry recovers the transient reasoning-only glitch;
+// more would just stall visibly silent turns. The count starts over once the
+// model emits a real call: a provider's content filter can fire more than once
+// on a long turn, and a turn-wide budget of one ended it on the second
+// (prod, 2026-10-29).
 const maxEmptyResponseRetries = 1
 
 // largeToolCount is where a turn's tools array is worth a warning: several
@@ -1183,15 +1186,17 @@ func (p *Pipeline) CallLLM(
 		// Providers surface it either as reasoning_content (DeepSeek-style)
 		// or reasoning (OpenRouter/AI-Gateway-style); check both.
 		//
-		// Not when the call stopped at the output limit: that thinking was cut
-		// mid-thought and is no answer. In prod (2026-10-28) it went out as a
-		// 73k-character loop of the same list, after a 20-minute turn.
+		// Not when the call stopped at the output limit or the provider's content
+		// filter: that thinking was cut mid-thought and is no answer. In prod
+		// (2026-10-28) it went out as a 73k-character loop of the same list, after
+		// a 20-minute turn; on 2026-10-29, as half a sentence in English.
 		if responseContent == "" && ts.channel != "pico" {
 			switch {
-			case responseHitOutputCap(exec.response, ts.agent.MaxTokens):
+			case responseHitOutputCap(exec.response, ts.agent.MaxTokens),
+				exec.response.FinishReason == "content_filter":
 				logger.WarnCF(
 					"agent",
-					"LLM spent its output limit without answering; not using its reasoning as the reply",
+					"LLM was cut off without answering; not using its reasoning as the reply",
 					map[string]any{
 						"agent_id":          ts.agent.ID,
 						"iteration":         iteration,
@@ -1350,6 +1355,8 @@ func (p *Pipeline) CallLLM(
 				"agent_id":      ts.agent.ID,
 				"iteration":     iteration,
 				"content_chars": len(exec.finalContent),
+				"finish_reason": exec.response.FinishReason,
+				"request_id":    exec.response.ProviderRequestID,
 			})
 		return ControlBreak, nil
 	}
@@ -1389,6 +1396,7 @@ func (p *Pipeline) CallLLM(
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, truncatedToolCallNudge)
 	}
 	exec.interruptedStreamRetries = 0
+	exec.emptyResponseRetries = 0
 	if exec.danglingColonRetries > 0 {
 		exec.danglingColonRetries = 0
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, exec.danglingColonNudge)
