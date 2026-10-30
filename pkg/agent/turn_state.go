@@ -983,11 +983,12 @@ func (ts *turnState) restoreSession(agent *AgentInstance) (bool, error) {
 	summary := ts.restorePointSummary
 	ts.mu.RUnlock()
 
-	if err := ts.replaceHistory(agent.Sessions, history); err != nil {
+	err := ts.replaceHistory(agent.Sessions, history)
+	if err != nil && !errors.Is(err, memory.ErrHistoryInputCommitted) {
 		return false, err
 	}
 	agent.Sessions.SetSummary(ts.sessionKey, summary)
-	return true, agent.Sessions.Save(ts.sessionKey)
+	return true, errors.Join(err, agent.Sessions.Save(ts.sessionKey))
 }
 
 func matchingTurnMessageTail(history, persisted []providers.Message) int {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,15 +20,19 @@ import (
 
 type rollbackOutcomeBackend struct {
 	*restoreFrameBackend
-	replaceError error
-	saveError    error
+	replaceError       error
+	saveError          error
+	appliedBeforeError bool
 }
 
 func (b *rollbackOutcomeBackend) SetHistoryContext(ctx context.Context, key string, history []providers.Message) error {
-	if b.replaceError != nil {
+	if b.replaceError != nil && !b.appliedBeforeError {
 		return b.replaceError
 	}
-	return b.JSONLBackend.SetHistoryContext(ctx, key, history)
+	if err := b.JSONLBackend.SetHistoryContext(ctx, key, history); err != nil {
+		return err
+	}
+	return b.replaceError
 }
 
 func (b *rollbackOutcomeBackend) Save(key string) error {
@@ -39,7 +44,7 @@ func (b *rollbackOutcomeBackend) Save(key string) error {
 
 func TestSelfDeliveryAbortAccountsForActualHistoryReplacement(t *testing.T) {
 	for _, hardAbort := range []bool{false, true} {
-		for _, outcome := range []string{"no snapshot", "partial record before capture", "replacement failed", "save failed after replacement", "restored"} {
+		for _, outcome := range []string{"no snapshot", "partial record before capture", "replacement failed", "replacement applied with error", "save failed after replacement", "restored"} {
 			name := outcome + "/abort"
 			if hardAbort {
 				name = outcome + "/hard abort"
@@ -58,6 +63,7 @@ func TestSelfDeliveryAbortAccountsForActualHistoryReplacement(t *testing.T) {
 				}
 				agent.Sessions = backend
 				backend.AddMessage(key, "user", "before this turn")
+				backend.SetSummary(key, "canonical summary before turn")
 				if outcome == "no snapshot" {
 					backend.frameError = errors.New("frame capture unavailable")
 				}
@@ -96,9 +102,13 @@ func TestSelfDeliveryAbortAccountsForActualHistoryReplacement(t *testing.T) {
 					t.Fatal("fixture did not commit delivery identity", before)
 				}
 				original := before[1].Delivery.ID
+				backend.SetSummary(key, "summary during turn")
 				switch outcome {
 				case "replacement failed":
 					backend.replaceError = errors.New("replacement failed before write")
+				case "replacement applied with error":
+					backend.appliedBeforeError = true
+					backend.replaceError = errors.Join(memory.ErrHistoryInputCommitted, syscall.EIO)
 				case "save failed after replacement":
 					backend.saveError = errors.New("save failed after replacement")
 				}
@@ -108,15 +118,27 @@ func TestSelfDeliveryAbortAccountsForActualHistoryReplacement(t *testing.T) {
 					}
 				}
 				_, abortErr := loop.abortTurn(ts)
-				wantError := outcome == "replacement failed" || outcome == "save failed after replacement"
+				wantError := outcome == "replacement failed" || outcome == "replacement applied with error" ||
+					outcome == "save failed after replacement"
 				if (abortErr != nil) != wantError {
 					t.Errorf("abort result=%v, want error=%v", abortErr, wantError)
+				}
+				if outcome == "replacement applied with error" && !errors.Is(abortErr, syscall.EIO) {
+					t.Error("applied rewrite lost original operational error", abortErr)
 				}
 				backend.replaceError = nil
 				backend.saveError = nil
 				loop.clearActiveTurn(ts)
 				loop.flushMirroredDeliveries(key)
 				after := backend.GetHistory(key)
+				wantSummary := "canonical summary before turn"
+				if outcome == "no snapshot" || outcome == "partial record before capture" ||
+					outcome == "replacement failed" {
+					wantSummary = "summary during turn"
+				}
+				if actual := backend.GetSummary(key); actual != wantSummary {
+					t.Error("rollback summary did not follow applied history", actual, wantSummary)
+				}
 				if len(after) != 2 || after[1].Content != msg.Content || after[1].Delivery == nil ||
 					uuid.Validate(after[1].Delivery.ID) != nil {
 					t.Fatalf("abort/close/flush lost or duplicated a delivery: %+v", after)

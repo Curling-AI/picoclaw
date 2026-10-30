@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -587,7 +588,8 @@ func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
 	}
 	history := ts.session.GetHistory(sessionKey)
 	if historyLength < len(history) {
-		if err := ts.replaceHistory(ts.session, history[:historyLength]); err != nil {
+		if err := ts.replaceHistory(ts.session, history[:historyLength]); err != nil &&
+			!errors.Is(err, memory.ErrHistoryInputCommitted) {
 			return
 		}
 		// Only a confirmed cut releases the sends for the turn's final flush.
