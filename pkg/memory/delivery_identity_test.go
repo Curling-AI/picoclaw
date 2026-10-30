@@ -302,7 +302,7 @@ func TestSkippedDeliveryIdentityDoesNotDecodeDiscardedBody(t *testing.T) {
 		{`{"delivery":null}`, ""},
 		{`{broken`, ""},
 	} {
-		if actual := skippedDeliveryID([]byte(test.raw)); actual != test.want {
+		if actual := physicalDeliveryIDFromRow([]byte(test.raw)); actual != test.want {
 			t.Fatal(
 				"skipped delivery metadata decoded discarded content or accepted malformed identity",
 				actual,

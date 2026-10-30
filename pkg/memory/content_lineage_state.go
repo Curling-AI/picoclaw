@@ -85,14 +85,15 @@ type contentRawRow struct {
 }
 
 type contentImage struct {
-	Meta           SessionMeta
-	MetaBytes      []byte
-	Rows           []contentRawRow
-	Count          int
-	Bytes          int64
-	Exists         bool
-	Observation    string
-	WriterRecovery bool
+	Meta             SessionMeta
+	MetaBytes        []byte
+	Rows             []contentRawRow
+	DeliveryIDCounts map[string]int
+	Count            int
+	Bytes            int64
+	Exists           bool
+	Observation      string
+	WriterRecovery   bool
 }
 
 func contentDigest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
@@ -261,7 +262,7 @@ func (s *JSONLStore) scanContentImage(
 	if err := ctx.Err(); err != nil {
 		return contentImage{}, err
 	}
-	image := contentImage{Meta: meta, MetaBytes: metaBytes}
+	image := contentImage{Meta: meta, MetaBytes: metaBytes, DeliveryIDCounts: make(map[string]int)}
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		if prefix != nil || !emptyHistoryContent(meta) {
@@ -302,6 +303,9 @@ func (s *JSONLStore) scanContentImage(
 			continue
 		}
 		image.Count++
+		if id := physicalDeliveryIDFromRow(raw); id != "" {
+			image.DeliveryIDCounts[id]++
+		}
 		var message providers.Message
 		if json.Unmarshal(raw, &message) != nil || messageutil.IsTransientAssistantThoughtMessage(message) {
 			continue
@@ -500,7 +504,7 @@ func (s *JSONLStore) frameForContentImage(ctx context.Context, key string, image
 		frame.DomainID = state.DomainID
 		frame.StateToken = state.StateToken
 	}
-	deliveryCounts := contentDeliveryIDCounts(image.Rows)
+	deliveryCounts := image.DeliveryIDCounts
 	for i, row := range active {
 		frame.Entries[i] = ContentEntry{Message: checkedDeliveryIdentity(row.Message, deliveryCounts)}
 		if known {

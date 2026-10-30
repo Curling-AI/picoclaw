@@ -33,18 +33,8 @@ func checkedDeliveryIdentity(message providers.Message, counts map[string]int) p
 	return message
 }
 
-func contentDeliveryIDCounts(rows []contentRawRow) map[string]int {
-	counts := make(map[string]int)
-	for _, row := range rows {
-		if row.Message.Delivery != nil {
-			counts[row.Message.Delivery.ID]++
-		}
-	}
-	return counts
-}
-
-// Skipped bodies need only an identity scan, without allocating their content or parts.
-func skippedDeliveryID(data []byte) string {
+// Physical identity is collected independently of body validity or visibility.
+func physicalDeliveryIDFromRow(data []byte) string {
 	var row struct {
 		Delivery struct {
 			ID string `json:"id"`

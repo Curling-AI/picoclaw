@@ -747,10 +747,10 @@ func decodeHistoryMessages(
 			continue
 		}
 		lineNum++
+		if id := physicalDeliveryIDFromRow(line); id != "" {
+			deliveryCounts[id]++
+		}
 		if lineNum <= skip {
-			if id := skippedDeliveryID(line); id != "" {
-				deliveryCounts[id]++
-			}
 			continue
 		}
 		var msg providers.Message
@@ -765,9 +765,6 @@ func decodeHistoryMessages(
 		}
 		if messageutil.IsTransientAssistantThoughtMessage(msg) {
 			continue
-		}
-		if msg.Delivery != nil {
-			deliveryCounts[msg.Delivery.ID]++
 		}
 		msg.HistoryID = decodedHistoryID(line, filepath.Base(path), int64(lineNum-1))
 		msg.HistoryRunID = decodedHistoryRunID(line)

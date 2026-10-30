@@ -616,10 +616,10 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 			continue
 		}
 		line++
+		if id := physicalDeliveryIDFromRow(data); id != "" {
+			deliveryCounts[id]++
+		}
 		if line <= skip {
-			if id := skippedDeliveryID(data); id != "" {
-				deliveryCounts[id]++
-			}
 			continue
 		}
 		fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration &&
@@ -655,9 +655,6 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 		}
 		if messageutil.IsTransientAssistantThoughtMessage(message) {
 			continue
-		}
-		if message.Delivery != nil {
-			deliveryCounts[message.Delivery.ID]++
 		}
 		message.HistoryID = decodedHistoryID(data, filepath.Base(file.Name()), int64(line-1))
 		message.HistoryRunID = decodedHistoryRunID(data)

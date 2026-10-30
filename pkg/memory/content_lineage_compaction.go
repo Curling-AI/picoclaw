@@ -323,7 +323,7 @@ func (s *JSONLStore) contentCompactionSnapshot(
 		Summary:        snapshot.Summary,
 		Entries:        make([]ContentEntry, len(snapshot.Rows)),
 	}
-	deliveryCounts := contentDeliveryIDCounts(image.Rows)
+	deliveryCounts := image.DeliveryIDCounts
 	for i, locator := range snapshot.Rows {
 		if err := ctx.Err(); err != nil {
 			return ContentFrame{}, err
