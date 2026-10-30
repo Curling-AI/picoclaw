@@ -333,8 +333,12 @@ type turnState struct {
 	userMessage string
 	media       []string
 
-	phase        TurnPhase
-	iteration    int
+	phase     TurnPhase
+	iteration int
+	// budgetStart is the iteration the turn last read a message the person
+	// sent: the cap counts from there, so a request that joins the work gets
+	// the whole budget. (seucaranguejo fork)
+	budgetStart  int
 	startedAt    time.Time
 	finalContent string
 
@@ -591,7 +595,24 @@ func (ts *turnState) currentIteration() int {
 // fallback replaces the reply the retry was meant to fix.
 func (ts *turnState) atIterationCap(iteration int) bool {
 	maxIter := ts.maxIterations()
-	return maxIter > 0 && iteration >= maxIter
+	return maxIter > 0 && ts.budgetUsed(iteration) >= maxIter
+}
+
+// restartBudget gives the turn its whole budget again, counting iteration as
+// the first: the turn just read a message the person sent. (seucaranguejo
+// fork)
+func (ts *turnState) restartBudget(iteration int) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.budgetStart = iteration - 1
+}
+
+// budgetUsed is how many iterations up to iteration count against the cap:
+// the ones since the person's latest message. (seucaranguejo fork)
+func (ts *turnState) budgetUsed(iteration int) int {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return iteration - ts.budgetStart
 }
 
 func (ts *turnState) maxIterations() int {

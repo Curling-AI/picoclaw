@@ -367,16 +367,16 @@ toolLoop:
 						return finishToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:])
 					}
 
+					// A message the person sent joins the work: the rest of the
+					// batch still runs, and the message is read right after it.
+					// (seucaranguejo fork)
 					if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 						exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 					}
 
 					skipReason := ""
 					skipMessage := ""
-					if len(exec.pendingMessages) > 0 {
-						skipReason = "queued user steering message"
-						skipMessage = "Skipped due to queued user message."
-					} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
+					if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
 						skipReason = "graceful interrupt requested"
 						skipMessage = "Skipped due to graceful interrupt."
 					}
@@ -818,16 +818,17 @@ toolLoop:
 			}
 		}
 
+		// A message the person sent joins the work: the rest of the batch still
+		// runs, and the message is read right after it. Skipped, the calls the
+		// model made for the earlier request were lost, and it did not always
+		// make them again. (seucaranguejo fork)
 		if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 		}
 
 		skipReason := ""
 		skipMessage := ""
-		if len(exec.pendingMessages) > 0 {
-			skipReason = "queued user steering message"
-			skipMessage = "Skipped due to queued user message."
-		} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
+		if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
 			skipReason = "graceful interrupt requested"
 			skipMessage = "Skipped due to graceful interrupt."
 		}
