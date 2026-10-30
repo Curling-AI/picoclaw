@@ -494,3 +494,74 @@ func TestVisibleReplyAtOutputCapIsDeliveredUntouched(t *testing.T) {
 		t.Errorf("provider calls = %d, want 1", got)
 	}
 }
+
+// reasoningFiltered is the shape of the prod failure (2026-10-29): the provider
+// ended the stream with content_filter after thinking only, the thinking cut
+// mid-sentence.
+func reasoningFiltered() providers.LLMResponse {
+	return providers.LLMResponse{
+		ReasoningContent: "I should continue with my pending work: I was about to",
+		FinishReason:     "content_filter",
+		Usage:            &providers.UsageInfo{CompletionTokens: 112},
+	}
+}
+
+func TestFilteredReasoningIsRetriedAndNeverSalvaged(t *testing.T) {
+	al, provider := newScriptedLoop(t, reasoningFiltered(), reasoningFiltered())
+
+	resp, err := al.ProcessDirect(context.Background(), "hello", "reasoning-filtered-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != defaultResponse {
+		t.Errorf("response = %q, want the fallback instead of the cut thinking", resp)
+	}
+	if got := provider.calls(); got != 1+maxEmptyResponseRetries {
+		t.Errorf("provider calls = %d, want %d", got, 1+maxEmptyResponseRetries)
+	}
+	assertRoles(t, directSessionHistory(t, al), "user")
+}
+
+// On a long research turn the filter fired at iteration 6 and again at 11. A
+// budget of one retry per turn made the second one end the turn.
+func TestEmptyResponseRetryStartsOverAfterARealToolCall(t *testing.T) {
+	al, provider := newScriptedLoop(t,
+		reasoningFiltered(),
+		readFileCall("call_1"),
+		reasoningFiltered(),
+		providers.LLMResponse{Content: "done"},
+	)
+
+	resp, err := al.ProcessDirect(context.Background(), "hello", "empty-retry-restart-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != "done" {
+		t.Errorf("response = %q, want %q", resp, "done")
+	}
+	if got := provider.calls(); got != 4 {
+		t.Errorf("provider calls = %d, want 4", got)
+	}
+}
+
+// Retries in a row stay capped even when a turn has already recovered once.
+func TestEmptyResponseRetryIsCappedInARowAfterAToolCall(t *testing.T) {
+	al, provider := newScriptedLoop(t,
+		reasoningFiltered(),
+		readFileCall("call_1"),
+		reasoningFiltered(),
+		reasoningFiltered(),
+		providers.LLMResponse{Content: "never reached"},
+	)
+
+	resp, err := al.ProcessDirect(context.Background(), "hello", "empty-retry-in-a-row-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != defaultResponse {
+		t.Errorf("response = %q, want the fallback", resp)
+	}
+	if got := provider.calls(); got != 4 {
+		t.Errorf("provider calls = %d, want 4", got)
+	}
+}
