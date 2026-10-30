@@ -276,7 +276,7 @@ func (s *JSONLStore) appendHistoryContent(
 	meta.UpdatedAt = now
 	ensureHistoryGeneration(&meta, key)
 	suppliedID := uuid.Validate(message.HistoryID) == nil
-	message = prepareHistoryMessage(message, now, providers.HistoryRun(ctx))
+	message = newDeliveryOccurrence(prepareHistoryMessage(message, now, providers.HistoryRun(ctx)))
 	if suppliedID {
 		// Append always creates an occurrence, even if a caller accidentally
 		// submits a persistence ID obtained from another message or domain.

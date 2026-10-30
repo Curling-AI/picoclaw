@@ -240,3 +240,24 @@ time, media and tool metadata remain available to the internal adapter. New refs
 and transition metadata never become provider messages or public session DTOs.
 This capability supplies no public history/recovery endpoint or new SQL content
 store; transport negotiation and archive confirmation belong to its consumer.
+
+## Delivery occurrence identity
+
+`Message.Delivery.ID` (`delivery.id`) is an optional canonical nonzero UUID for
+one newly appended durable delivery. `AddFullMessage`, `AppendHistoryReceipt`,
+`AppendHistoryContent` and `AppendHistoryContentInput` create a fresh UUID even
+when the caller resubmits an earlier message with the same body, time or ID.
+Internal commit recovery preserves that UUID. Marshaling, reads and `SetHistory`
+do not create or backfill it; rewrites retain the ID carried by the occurrence.
+
+Canonical content reads and content frames validate its spelling and uniqueness
+across the session's physical rows, including logically skipped rows. Missing,
+invalid or duplicate IDs remove only this identity authority, preserving readable
+body and `Delivery.Origin`. They neither restore lost ContentRef lineage nor
+establish Order, stream continuity, counters or receipt eligibility. Legacy
+history with no delivery identity remains readable without being reattested.
+
+Bounded `ReadHistoryPage` omits `delivery.id`: it cannot validate uniqueness
+across the canonical transcript within its existing I/O bound. Consumers needing
+that identity must use the checked content/frame APIs above. Existing page
+cursors and Order checks are unchanged.

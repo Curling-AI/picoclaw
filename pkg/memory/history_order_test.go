@@ -874,7 +874,11 @@ func TestHistoryReceiptFollowsJournalCommitDecision(t *testing.T) {
 		t.Run(fmt.Sprint(committed), func(t *testing.T) {
 			s := newTestStore(t)
 			key := "agent:main:receipt-failure"
-			first, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "user", Content: "first"})
+			first, err := s.AppendHistoryReceipt(
+				t.Context(),
+				key,
+				providers.Message{Role: "user", Content: "first", Delivery: &providers.Delivery{Origin: "cron:first"}},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -893,7 +897,11 @@ func TestHistoryReceiptFollowsJournalCommitDecision(t *testing.T) {
 			attempt, err := s.AppendHistoryReceipt(
 				t.Context(),
 				key,
-				providers.Message{Role: "assistant", Content: "attempt"},
+				providers.Message{
+					Role:     "assistant",
+					Content:  "attempt",
+					Delivery: &providers.Delivery{Origin: "cron:attempt"},
+				},
 			)
 			if committed && (err != nil || !attempt.Order.Valid() || attempt.Order.Sequence != 2) {
 				t.Fatal("confirmed NEW state did not return its exact receipt", attempt, err)
@@ -910,8 +918,13 @@ func TestHistoryReceiptFollowsJournalCommitDecision(t *testing.T) {
 			if committed {
 				wantCount, wantSequence = 2, 3
 			}
-			if err != nil || len(read) != wantCount || read[0].Order != first.Order {
+			if err != nil || len(read) != wantCount || read[0].Order != first.Order ||
+				deliveryID(t, read[0].Message) != deliveryID(t, first.Message) {
 				t.Fatal("recovery changed the authoritative receipt prefix", read, err)
+			}
+			if committed &&
+				(deliveryID(t, read[1].Message) != deliveryID(t, attempt.Message) || !validDeliveryID(deliveryID(t, attempt.Message))) {
+				t.Fatal("NEW recovery reminted the accepted delivery", read, attempt)
 			}
 			next, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "next"})
 			if err != nil || next.Order.Sequence != wantSequence || next.Order.StreamID != first.Order.StreamID {

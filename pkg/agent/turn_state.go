@@ -1001,6 +1001,7 @@ func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	msg.JoinedSends = ""
 	if msg.Delivery != nil {
 		delivery := *msg.Delivery
+		delivery.ID = "" // Persistence identity is absent from the turn's input copy.
 		delivery.At = delivery.At.UTC().Round(0)
 		msg.Delivery = &delivery
 	}

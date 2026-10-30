@@ -95,7 +95,8 @@ type contentImage struct {
 	WriterRecovery bool
 }
 
-func contentDigest(data []byte) string   { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+func contentDigest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+
 func contentJSONDigest(value any) string { data, _ := json.Marshal(value); return contentDigest(data) }
 
 func cloneContentState(state *contentIdentityState) *contentIdentityState {
@@ -499,8 +500,9 @@ func (s *JSONLStore) frameForContentImage(ctx context.Context, key string, image
 		frame.DomainID = state.DomainID
 		frame.StateToken = state.StateToken
 	}
+	deliveryCounts := contentDeliveryIDCounts(image.Rows)
 	for i, row := range active {
-		frame.Entries[i] = ContentEntry{Message: row.Message}
+		frame.Entries[i] = ContentEntry{Message: checkedDeliveryIdentity(row.Message, deliveryCounts)}
 		if known {
 			ref := state.Rows[i].Ref
 			frame.Entries[i].Ref = &ref

@@ -59,8 +59,14 @@ func TestCheckedContentSurvivesProofLossWithoutRestoringProof(t *testing.T) {
 				},
 				Media: []string{"artifact://fixture"},
 			}
-			if _, err := store.AppendHistoryReceipt(t.Context(), key, input); err != nil {
+			receipt, err := store.AppendHistoryReceipt(t.Context(), key, input)
+			if err != nil {
 				t.Fatal(err)
+			}
+			expectedDelivery := *input.Delivery
+			expectedDelivery.ID = receipt.Message.Delivery.ID
+			if !validDeliveryID(expectedDelivery.ID) {
+				t.Fatal("new delivery has no occurrence identity", receipt)
 			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
@@ -96,7 +102,7 @@ func TestCheckedContentSurvivesProofLossWithoutRestoringProof(t *testing.T) {
 				history[0].CreatedAt == nil || !history[0].CreatedAt.Equal(at) ||
 				!reflect.DeepEqual(
 					history[0].Delivery,
-					input.Delivery,
+					&expectedDelivery,
 				) || !reflect.DeepEqual(history[0].Media, input.Media) {
 				t.Fatal("proof loss hid ordinary content or delivery metadata", history, err)
 			}

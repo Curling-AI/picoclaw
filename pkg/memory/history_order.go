@@ -471,7 +471,7 @@ func (s *JSONLStore) AppendHistoryReceipt(
 		return CommittedHistoryMessage{}, witnessErr
 	}
 	now := time.Now()
-	message := prepareHistoryMessage(input, now, providers.HistoryRun(ctx))
+	message := newDeliveryOccurrence(prepareHistoryMessage(input, now, providers.HistoryRun(ctx)))
 	if uuid.Validate(input.HistoryID) == nil {
 		// Append is a new occurrence, not idempotency or transcript editing.
 		// Revisions that retain identity go through SetHistory instead.
@@ -607,6 +607,7 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 	scanner.Split(scanCommittedHistoryLine)
 	messages := []providers.Message{}
 	line := 0
+	deliveryCounts := make(map[string]int)
 	var byteEnd int64
 	for (unboundLegacy || line < meta.Count) && scanner.Scan() {
 		data := scanner.Bytes()
@@ -615,13 +616,17 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 			continue
 		}
 		line++
+		var message providers.Message
+		decodeErr := json.Unmarshal(data, &message)
+		if decodeErr == nil && !messageutil.IsTransientAssistantThoughtMessage(message) && message.Delivery != nil {
+			deliveryCounts[message.Delivery.ID]++
+		}
 		if line <= skip {
 			continue
 		}
 		fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration &&
 			byteEnd <= meta.HistoryLegacyBytes
-		var message providers.Message
-		if json.Unmarshal(data, &message) != nil {
+		if decodeErr != nil {
 			if meta.HistoryOrderVersion != 0 && !fromFence {
 				return nil, 0, ErrHistoryOrderUnavailable
 			}
@@ -661,6 +666,9 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 	}
 	if !unboundLegacy && line != meta.Count {
 		return nil, 0, ErrHistoryCursor
+	}
+	for index, message := range messages {
+		messages[index] = checkedDeliveryIdentity(message, deliveryCounts)
 	}
 	return messages, byteEnd, nil
 }

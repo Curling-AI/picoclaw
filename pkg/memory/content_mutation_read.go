@@ -177,6 +177,7 @@ func frozenContentMutationFrame(
 		DomainID: domain, StateToken: snapshot.StateToken, Summary: snapshot.Summary,
 		Entries: make([]ContentEntry, len(snapshot.Rows)),
 	}
+	deliveryCounts := contentDeliveryIDCounts(rows)
 	for i, locator := range snapshot.Rows {
 		if err := ctx.Err(); err != nil {
 			return ContentFrame{}, err
@@ -189,7 +190,10 @@ func frozenContentMutationFrame(
 		ref := locator.Ref
 		// This frozen pair carries no live ReceiptBinding, including for an
 		// unchanged core that still has genuine evidence in the current source.
-		frame.Entries[i] = ContentEntry{Message: ordinaryContentMessage(row.Message), Ref: &ref}
+		frame.Entries[i] = ContentEntry{
+			Message: checkedDeliveryIdentity(ordinaryContentMessage(row.Message), deliveryCounts),
+			Ref:     &ref,
+		}
 	}
 	return frame, nil
 }
