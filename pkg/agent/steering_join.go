@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -70,7 +71,18 @@ func (al *AgentLoop) joinPersonMessage(
 	}
 	pubCtx, cancel := context.WithTimeout(turnCtx, 3*time.Second)
 	defer cancel()
-	_ = al.bus.PublishOutbound(pubCtx, outboundMessageForTurnWithOptions(ts, msg.Content, outboundTurnMessageOptions{
-		kind: messageKindSteeringRead,
-	}))
+	if err := al.bus.PublishOutbound(
+		pubCtx,
+		outboundMessageForTurnWithOptions(ts, msg.Content, outboundTurnMessageOptions{
+			kind: messageKindSteeringRead,
+		}),
+	); err != nil {
+		// The turn goes on; the screen just does not learn where the message was read.
+		logger.WarnCF("agent", "Steering read not announced", map[string]any{
+			"session_key": ts.sessionKey,
+			"chat_id":     ts.chatID,
+			"turn_id":     ts.turnID,
+			"error":       err.Error(),
+		})
+	}
 }

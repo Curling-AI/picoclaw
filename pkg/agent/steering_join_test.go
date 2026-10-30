@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -156,9 +155,22 @@ func TestSteeringReadIsAnnouncedWhereTheMessageLands(t *testing.T) {
 	); err != nil {
 		t.Fatalf("ProcessDirectWithChannel: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Everything the turn published is in the channel by now: stop the reader,
+	// then take what it had not reached yet.
 	stop()
 	<-collected
+	for drained := false; !drained; {
+		select {
+		case out := <-msgBus.OutboundChan():
+			kind := out.Context.Raw[metadataKeyMessageKind]
+			kinds = append(kinds, kind)
+			if kind == messageKindSteeringRead {
+				read = append(read, out.Content)
+			}
+		default:
+			drained = true
+		}
+	}
 
 	at := slices.Index(kinds, messageKindSteeringRead)
 	if len(read) != 1 || read[0] != "and what is 37 x 41?" {
