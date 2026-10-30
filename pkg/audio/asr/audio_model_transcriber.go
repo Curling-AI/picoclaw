@@ -95,7 +95,11 @@ func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath st
 			Role:    "user",
 			Content: t.prompt,
 			Media: []string{
-				fmt.Sprintf("data:%s;base64,%s", utils.AudioMIMEType(format), base64.StdEncoding.EncodeToString(audioBytes)),
+				fmt.Sprintf(
+					"data:%s;base64,%s",
+					utils.AudioMIMEType(format),
+					base64.StdEncoding.EncodeToString(audioBytes),
+				),
 			},
 		},
 	}, nil, t.modelID, map[string]any{
