@@ -527,23 +527,27 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 
 func (s *JSONLStore) recoverExpectedHistoryCommit(key string, next SessionMeta, expectedData []byte) (bool, error) {
 	decision, recoveryErr := s.recoverHistoryWriteFor(key, historyFailedWrite)
-	if decision == historyWriteOld || (decision != historyWriteNew && recoveryErr == nil) {
+	decidedNew := decision == historyWriteNew
+	if decision == historyWriteOld || (!decidedNew && recoveryErr == nil) {
 		return false, recoveryErr
 	}
 	// Confirm the owning content write against its exact checkpoint; a later
 	// independent witness failure cannot turn that applied write into OLD.
 	current, readErr := s.readRecoveryMeta(key)
 	if readErr != nil {
-		return false, errors.Join(recoveryErr, readErr)
+		return decidedNew, errors.Join(recoveryErr, readErr)
 	}
 	if !historyNewCheckpointMatches(current, next) {
 		return false, errors.Join(recoveryErr, ErrHistoryOrderUnavailable)
 	}
 	actual, exists, sourceErr := s.readRawJSONL(key)
-	if sourceErr != nil || !exists || !bytes.Equal(actual, expectedData) {
-		return false, errors.Join(recoveryErr, sourceErr, ErrContentStateChanged)
+	if sourceErr != nil {
+		return decidedNew, errors.Join(recoveryErr, sourceErr)
 	}
-	if decision != historyWriteNew {
+	if !exists || !bytes.Equal(actual, expectedData) {
+		return false, errors.Join(recoveryErr, ErrContentStateChanged)
+	}
+	if !decidedNew {
 		return true, errors.Join(ErrHistoryInputCommitted, recoveryErr)
 	}
 	if current.HistoryOrderVersion != 0 && !current.HistoryRecoveryRequired {

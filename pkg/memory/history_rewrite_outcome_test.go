@@ -262,3 +262,145 @@ func TestHistoryRewritePendingNEWCannotConfirmAnotherInput(t *testing.T) {
 		})
 	}
 }
+
+func TestHistoryWriteObservationFailureRetainsOnlyDecidedNEW(t *testing.T) {
+	cases := []struct {
+		name        string
+		decided     bool
+		appendInput bool
+		observation string
+	}{
+		{"unknown metadata rewrite", false, false, "metadata"},
+		{"unknown JSONL rewrite", false, false, "JSONL"},
+		{"NEW metadata rewrite", true, false, "metadata"},
+		{"NEW JSONL rewrite", true, false, "JSONL"},
+		{"unknown metadata append", false, true, "metadata"},
+		{"NEW metadata append", true, true, "metadata"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			key := "sk_v1_decided_new_observation"
+			for _, text := range []string{"retained", "removed by rollback"} {
+				if _, err := s.AppendHistoryReceipt(
+					t.Context(),
+					key,
+					providers.Message{Role: "user", Content: text},
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := s.ReadHistoryWithReceipts(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := s.jsonlPath(key)
+			if tc.observation == "metadata" {
+				target = s.metaPath(key)
+			}
+			backup := target + ".read-failure-backup"
+			poisoned := false
+			var written []CommittedHistoryMessage
+			s.writeFile = func(path string, data []byte, mode os.FileMode) error {
+				if path == s.historyDecisionPath(key) {
+					if !poisoned {
+						raw, sourceErr := os.ReadFile(s.jsonlPath(key))
+						if sourceErr != nil {
+							return sourceErr
+						}
+						var decodeErr error
+						written, decodeErr = committedHistoryMessages(raw)
+						if decodeErr != nil {
+							return decodeErr
+						}
+						if moveErr := os.Rename(target, backup); moveErr != nil {
+							return moveErr
+						}
+						if mkdirErr := os.Mkdir(target, 0o700); mkdirErr != nil {
+							return mkdirErr
+						}
+						poisoned = true
+					}
+					if !tc.decided {
+						return syscall.EIO
+					}
+				}
+				if writeErr := fileutil.WriteFileAtomic(path, data, mode); writeErr != nil {
+					return writeErr
+				}
+				if path == s.metaPath(key) {
+					return syscall.EIO
+				}
+				return nil
+			}
+			if tc.appendInput {
+				err = s.AddFullMessage(
+					t.Context(),
+					key,
+					providers.Message{
+						Role:     "assistant",
+						Content:  "one new durable delivery",
+						Delivery: &providers.Delivery{Origin: "cron:observation"},
+					},
+				)
+			} else {
+				err = s.SetHistory(t.Context(), key, []providers.Message{before[0].Message})
+			}
+			if !poisoned {
+				t.Fatal("fixture did not reach post-NEW observation")
+			}
+			if !errors.Is(err, syscall.EIO) || errors.Is(err, ErrHistoryInputCommitted) != tc.decided {
+				t.Errorf("observation failure forgot known NEW or invented unknown NEW: %v", err)
+			}
+			var pathErr *os.PathError
+			if (!tc.appendInput || tc.decided) &&
+				(!errors.As(err, &pathErr) || pathErr.Path != target || pathErr.Op != "read") {
+				t.Error("lost later observation cause", err)
+			}
+			_, journalErr := os.Stat(s.historyRecoveryPath(key))
+			if tc.decided && !errors.Is(journalErr, os.ErrNotExist) {
+				t.Error("fixture did not finish the decided NEW journal", journalErr)
+			}
+			if !tc.decided && journalErr != nil {
+				t.Error("unknown outcome discarded its authoritative journal", journalErr)
+			}
+			visible, receiptErr := s.ReadHistoryWithReceipts(t.Context(), key)
+			if tc.decided && tc.observation == "metadata" {
+				if receiptErr == nil && !reflect.DeepEqual(visible, written) {
+					t.Error("warm known checkpoint invented receipt identity", visible, written)
+				}
+				cold, coldErr := NewJSONLStore(s.dir)
+				if coldErr != nil {
+					t.Fatal(coldErr)
+				}
+				if _, coldErr = cold.ReadHistoryWithReceipts(t.Context(), key); coldErr == nil {
+					t.Error("cold source without metadata emitted order proof")
+				}
+			} else if receiptErr == nil {
+				t.Error("unavailable source emitted order proof")
+			}
+			s.writeFile = nil
+			if removeErr := os.Remove(target); removeErr != nil {
+				t.Fatal(removeErr)
+			}
+			if restoreErr := os.Rename(backup, target); restoreErr != nil {
+				t.Fatal(restoreErr)
+			}
+			fresh, restartErr := NewJSONLStore(s.dir)
+			if restartErr != nil {
+				t.Fatal(restartErr)
+			}
+			actual, readErr := fresh.ReadHistoryWithReceipts(t.Context(), key)
+			if readErr != nil || !reflect.DeepEqual(actual, written) {
+				t.Fatal("observation recovery changed durable IDs, body or order proof", actual, written, readErr)
+			}
+			retained := before[:1]
+			if tc.appendInput {
+				retained = before
+			}
+			if !reflect.DeepEqual(actual[:len(retained)], retained) {
+				t.Fatal("observation failure reattested retained messages", actual, retained)
+			}
+		})
+	}
+}
