@@ -508,11 +508,14 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 		if contentOnly {
 			committed, recoveryErr = s.recoverExpectedHistoryContentCommit(key, meta)
 		} else {
-			committed, recoveryErr = s.recoverExpectedHistoryCommit(key, meta)
+			committed, recoveryErr = s.recoverExpectedHistoryCommit(key, meta, data)
 		}
 		if committed {
 			if contentOnly {
 				return recoveryErr
+			}
+			if recoveryErr != nil && !onlyHistoryCleanupError(recoveryErr) {
+				return historyCommittedError(errors.Join(err, recoveryErr))
 			}
 			return nil
 		}
@@ -522,31 +525,40 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	return nil
 }
 
-func (s *JSONLStore) recoverExpectedHistoryCommit(key string, next SessionMeta) (bool, error) {
+func (s *JSONLStore) recoverExpectedHistoryCommit(key string, next SessionMeta, expectedData []byte) (bool, error) {
 	decision, recoveryErr := s.recoverHistoryWriteFor(key, historyFailedWrite)
-	if decision != historyWriteNew {
+	decidedNew := decision == historyWriteNew
+	if decision == historyWriteOld || (!decidedNew && recoveryErr == nil) {
 		return false, recoveryErr
 	}
-	// A durable NEW decision can also accompany unreadable/mismatched metadata.
-	// Confirm this operation's exact checkpoint before acknowledging a receipt;
-	// cleanup errors retain their fence and do not turn a committed write into
-	// a caller retry and a second occurrence.
+	// Confirm the owning content write against its exact checkpoint; a later
+	// independent witness failure cannot turn that applied write into OLD.
 	current, readErr := s.readRecoveryMeta(key)
 	if readErr != nil {
-		return false, errors.Join(recoveryErr, readErr)
+		return decidedNew, errors.Join(recoveryErr, readErr)
 	}
 	if !historyNewCheckpointMatches(current, next) {
 		return false, errors.Join(recoveryErr, ErrHistoryOrderUnavailable)
+	}
+	actual, exists, sourceErr := s.readRawJSONL(key)
+	if sourceErr != nil {
+		return decidedNew, errors.Join(recoveryErr, sourceErr)
+	}
+	if !exists || !bytes.Equal(actual, expectedData) {
+		return false, errors.Join(recoveryErr, ErrContentStateChanged)
+	}
+	if !decidedNew {
+		return true, errors.Join(ErrHistoryInputCommitted, recoveryErr)
 	}
 	if current.HistoryOrderVersion != 0 && !current.HistoryRecoveryRequired {
 		if witnessErr := s.probeHistoryOrderWitness(key, &current); witnessErr != nil {
 			// The input may already be durable. Do not expose the pre-write
 			// sentinel here: mirrored delivery must not retry this occurrence.
-			return false, fmt.Errorf(
-				"%w: committed history witness unavailable: %v",
+			return true, errors.Join(recoveryErr, fmt.Errorf(
+				"%w: committed history witness unavailable: %w",
 				ErrHistoryOrderUnavailable,
 				witnessErr,
-			)
+			))
 		}
 	}
 	if recoveryErr != nil {

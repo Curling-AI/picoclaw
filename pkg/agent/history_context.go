@@ -33,20 +33,22 @@ func (ts *turnState) appendHistoryMessage(message providers.Message) {
 	ts.agent.Sessions.AddFullMessage(ts.sessionKey, message)
 }
 
-func (ts *turnState) replaceHistory(store session.SessionStore, messages []providers.Message) {
+func (ts *turnState) replaceHistory(store session.SessionStore, messages []providers.Message) error {
 	if writer, ok := store.(contextHistoryReplacer); ok {
-		if err := writer.SetHistoryContext(
+		err := writer.SetHistoryContext(
 			providers.WithHistoryRun(context.Background(), ts.historyRunID),
 			ts.sessionKey,
 			messages,
-		); err != nil {
+		)
+		if err != nil {
 			logger.WarnCF(
 				"agent",
 				"Turn history replacement failed",
 				map[string]any{"operation": "replace_turn_history", "error": err.Error()},
 			)
 		}
-		return
+		return err
 	}
 	store.SetHistory(ts.sessionKey, messages)
+	return nil
 }

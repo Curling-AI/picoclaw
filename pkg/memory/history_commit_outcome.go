@@ -5,9 +5,9 @@ import (
 	"fmt"
 )
 
-// ErrHistoryInputCommitted means this exact input reached source NEW, but an
-// operational recovery phase is still pending. It must not trigger a second
-// append or a legacy receipt fallback. Unwrap retains the actual I/O cause.
+// ErrHistoryInputCommitted means this exact history mutation reached source NEW,
+// but operational recovery is still pending. Do not replay the applied input or
+// fall back to legacy receipts. Unwrap retains the actual I/O cause.
 var ErrHistoryInputCommitted = errors.New("memory: history input committed with pending recovery")
 
 // This is an outcome of the owning append, not a later getter of its tail.

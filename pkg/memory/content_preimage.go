@@ -205,35 +205,40 @@ func contentPreimageMatchesImage(key string, image contentImage, data []byte) bo
 		contentJSONDigest([]any{key, image.MetaBytes, contentDigest(data), image.Bytes}) == image.Observation
 }
 
-func contentRowsFromPreimage(ctx context.Context, data []byte) ([]contentRawRow, error) {
+func contentImageFromPreimage(ctx context.Context, data []byte) (contentImage, error) {
 	// Reuse the same newline/invalid/thought rules without writing a temporary
 	// transcript or assigning any private history origin to frozen content.
-	return scanContentRows(ctx, bytes.NewReader(data))
+	return scanContentPreimage(ctx, bytes.NewReader(data))
 }
 
-func scanContentRows(ctx context.Context, reader io.Reader) ([]contentRawRow, error) {
+func scanContentPreimage(ctx context.Context, reader io.Reader) (contentImage, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	scanner.Split(scanCommittedHistoryLine)
-	rows := make([]contentRawRow, 0)
-	line := 0
+	image := contentImage{Rows: []contentRawRow{}, DeliveryIDCounts: make(map[string]int)}
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return contentImage{}, err
 		}
 		raw := bytes.TrimRight(scanner.Bytes(), "\r\n")
 		if len(raw) == 0 {
 			continue
 		}
-		line++
+		image.Count++
+		if id := physicalDeliveryIDFromRow(raw); id != "" {
+			image.DeliveryIDCounts[id]++
+		}
 		var message providers.Message
 		if json.Unmarshal(raw, &message) != nil || messageutil.IsTransientAssistantThoughtMessage(message) {
 			continue
 		}
-		rows = append(rows, contentRawRow{Line: line, Raw: bytes.Clone(raw), Message: ordinaryContentMessage(message)})
+		image.Rows = append(
+			image.Rows,
+			contentRawRow{Line: image.Count, Raw: bytes.Clone(raw), Message: ordinaryContentMessage(message)},
+		)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return contentImage{}, err
 	}
-	return rows, ctx.Err()
+	return image, ctx.Err()
 }

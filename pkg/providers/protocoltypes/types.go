@@ -221,6 +221,8 @@ type Message struct {
 
 // Delivery describes where and when a mirrored delivery happened.
 type Delivery struct {
+	// ID identifies one durable append, independently of order or message content.
+	ID string `json:"id,omitempty"`
 	// Origin is the session key of the turn that delivered the message.
 	Origin string `json:"origin,omitempty"`
 	// At is when it reached the chat. CreatedAt is when it was written to the

@@ -323,6 +323,7 @@ func (s *JSONLStore) contentCompactionSnapshot(
 		Summary:        snapshot.Summary,
 		Entries:        make([]ContentEntry, len(snapshot.Rows)),
 	}
+	deliveryCounts := image.DeliveryIDCounts
 	for i, locator := range snapshot.Rows {
 		if err := ctx.Err(); err != nil {
 			return ContentFrame{}, err
@@ -333,7 +334,7 @@ func (s *JSONLStore) contentCompactionSnapshot(
 			return ContentFrame{}, ErrContentIdentityUnavailable
 		}
 		ref := locator.Ref
-		result.Entries[i] = ContentEntry{Message: row.Message, Ref: &ref}
+		result.Entries[i] = ContentEntry{Message: checkedDeliveryIdentity(row.Message, deliveryCounts), Ref: &ref}
 	}
 	return result, nil
 }

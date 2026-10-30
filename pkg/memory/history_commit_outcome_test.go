@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"syscall"
@@ -125,7 +126,11 @@ func TestContentMutationAppendNEWKeepsOperationalErrorAndAcceptedBody(t *testing
 				}
 				return fileutil.WriteFileAtomic(path, data, mode)
 			}
-			message := providers.Message{Role: "assistant", Content: "the one accepted body"}
+			message := providers.Message{
+				Role:     "assistant",
+				Content:  "the one accepted body",
+				Delivery: &providers.Delivery{Origin: "cron:committed"},
+			}
 			var result ContentAppendResult
 			if typed {
 				result, err = s.AppendHistoryContent(t.Context(), key, message)
@@ -148,6 +153,15 @@ func TestContentMutationAppendNEWKeepsOperationalErrorAndAcceptedBody(t *testing
 			if readErr != nil || bytes.Count(data, []byte(message.Content)) != 1 {
 				t.Fatal("operational error lost or repeated the accepted input", string(data), readErr)
 			}
+			var accepted providers.Message
+			rows := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+			if decodeErr := json.Unmarshal(rows[len(rows)-1], &accepted); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			acceptedID := deliveryID(t, accepted)
+			if !validDeliveryID(acceptedID) || (typed && deliveryID(t, result.Entry.Message) != acceptedID) {
+				t.Fatal("confirmed NEW lost its durable delivery identity", acceptedID, result)
+			}
 			if _, readErr = s.ReadHistoryContentFrame(
 				t.Context(),
 				key,
@@ -162,7 +176,8 @@ func TestContentMutationAppendNEWKeepsOperationalErrorAndAcceptedBody(t *testing
 				t.Fatal(readErr)
 			}
 			history, readErr := s.GetHistory(t.Context(), key)
-			if readErr != nil || len(history) != 5 || history[4].Content != message.Content {
+			if readErr != nil || len(history) != 5 || history[4].Content != message.Content ||
+				deliveryID(t, history[4]) != acceptedID {
 				t.Fatal("repair did not retain the single committed input", history, readErr)
 			}
 		})

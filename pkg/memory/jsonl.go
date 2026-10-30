@@ -696,9 +696,8 @@ func (s *JSONLStore) restoreRawJSONL(sessionKey string, data []byte, existed boo
 	return nil
 }
 
-// readMessages reads valid JSON lines from a .jsonl file, skipping
-// the first `skip` lines without unmarshaling them. This avoids the
-// cost of json.Unmarshal on logically truncated messages.
+// readMessages reads valid JSON lines from a .jsonl file, retaining the
+// messages after `skip` while checking delivery uniqueness across all rows.
 // Malformed trailing lines (e.g. from a crash) are silently skipped.
 func readMessages(path string, skip int) ([]providers.Message, error) {
 	return readHistoryMessages(path, skip, false)
@@ -738,6 +737,7 @@ func decodeHistoryMessages(
 	scanner.Split(scanCommittedHistoryLine)
 
 	lineNum := 0
+	deliveryCounts := make(map[string]int)
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -747,6 +747,9 @@ func decodeHistoryMessages(
 			continue
 		}
 		lineNum++
+		if id := physicalDeliveryIDFromRow(line); id != "" {
+			deliveryCounts[id]++
+		}
 		if lineNum <= skip {
 			continue
 		}
@@ -784,6 +787,9 @@ func decodeHistoryMessages(
 
 	if msgs == nil {
 		msgs = []providers.Message{}
+	}
+	for index, message := range msgs {
+		msgs[index] = checkedDeliveryIdentity(message, deliveryCounts)
 	}
 	return msgs, nil
 }
@@ -856,7 +862,7 @@ func (s *JSONLStore) addMsg(ctx context.Context, sessionKey string, msg provider
 
 	now := time.Now()
 
-	message := prepareHistoryMessage(msg, now, providers.HistoryRun(ctx))
+	message := newDeliveryOccurrence(prepareHistoryMessage(msg, now, providers.HistoryRun(ctx)))
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
@@ -882,8 +888,7 @@ func (s *JSONLStore) GetHistory(
 		return nil, err
 	}
 
-	// Pass meta.Skip so readMessages skips those lines without
-	// unmarshaling them — avoids wasted CPU on truncated messages.
+	// Keep the active window while validating delivery identity across the source.
 	msgs, err := readProviderMessages(s.jsonlPath(sessionKey), meta.Skip)
 	if err != nil {
 		return nil, err

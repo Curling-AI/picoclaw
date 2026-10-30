@@ -441,7 +441,7 @@ func TestSessionHistoryRecoveryKeepsRealTurnsAndRollbackAvailable(t *testing.T) 
 				t.Fatal(err)
 			}
 			ts := &turnState{sessionKey: key, restorePointHistory: before}
-			if err := ts.restoreSession(agent); err != nil {
+			if _, err := ts.restoreSession(agent); err != nil {
 				t.Fatal("turn rollback could not save content", err)
 			}
 			after := backend.GetHistory(key)

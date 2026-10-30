@@ -142,7 +142,7 @@ func (s *JSONLStore) ReadHistoryContentMutationFrame(
 		return ContentFrame{}, ErrContentIdentityUnavailable
 	}
 	var snapshot contentSnapshot
-	var rows []contentRawRow
+	frozenImage := image
 	switch side {
 	case ContentBefore:
 		snapshot = pending.Before
@@ -150,26 +150,26 @@ func (s *JSONLStore) ReadHistoryContentMutationFrame(
 		if readErr != nil {
 			return ContentFrame{}, readErr
 		}
-		rows, err = contentRowsFromPreimage(ctx, data)
+		frozenImage, err = contentImageFromPreimage(ctx, data)
 		if err != nil {
 			return ContentFrame{}, err
 		}
 	case ContentAfter:
-		snapshot, rows = pending.After, image.Rows
+		snapshot = pending.After
 	default:
 		return ContentFrame{}, ErrContentStateChanged
 	}
-	return frozenContentMutationFrame(ctx, key, meta.ContentIdentity.DomainID, snapshot, rows)
+	return frozenContentMutationFrame(ctx, key, meta.ContentIdentity.DomainID, snapshot, frozenImage)
 }
 
 func frozenContentMutationFrame(
 	ctx context.Context,
 	key, domain string,
 	snapshot contentSnapshot,
-	rows []contentRawRow,
+	image contentImage,
 ) (ContentFrame, error) {
-	byLine := make(map[int]contentRawRow, len(rows))
-	for _, row := range rows {
+	byLine := make(map[int]contentRawRow, len(image.Rows))
+	for _, row := range image.Rows {
 		byLine[row.Line] = row
 	}
 	frame := ContentFrame{
@@ -177,6 +177,7 @@ func frozenContentMutationFrame(
 		DomainID: domain, StateToken: snapshot.StateToken, Summary: snapshot.Summary,
 		Entries: make([]ContentEntry, len(snapshot.Rows)),
 	}
+	deliveryCounts := image.DeliveryIDCounts
 	for i, locator := range snapshot.Rows {
 		if err := ctx.Err(); err != nil {
 			return ContentFrame{}, err
@@ -189,7 +190,10 @@ func frozenContentMutationFrame(
 		ref := locator.Ref
 		// This frozen pair carries no live ReceiptBinding, including for an
 		// unchanged core that still has genuine evidence in the current source.
-		frame.Entries[i] = ContentEntry{Message: ordinaryContentMessage(row.Message), Ref: &ref}
+		frame.Entries[i] = ContentEntry{
+			Message: checkedDeliveryIdentity(ordinaryContentMessage(row.Message), deliveryCounts),
+			Ref:     &ref,
+		}
 	}
 	return frame, nil
 }

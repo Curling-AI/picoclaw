@@ -69,7 +69,7 @@ func (s *JSONLStore) recoverExpectedHistoryContentCommit(key string, next Sessio
 	}
 	current, readErr := s.readRecoveryMeta(key)
 	if readErr != nil {
-		return false, errors.Join(recoveryErr, readErr)
+		return true, errors.Join(recoveryErr, readErr)
 	}
 	if !historyNewCheckpointMatches(current, next) {
 		return false, errors.Join(recoveryErr, ErrContentStateChanged)

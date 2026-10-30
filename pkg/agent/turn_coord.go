@@ -396,7 +396,11 @@ func (al *AgentLoop) runTurn(
 func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
 	ts.setPhase(TurnPhaseAborted)
 	if !ts.opts.NoHistory {
-		if err := ts.restoreSession(ts.agent); err != nil {
+		restored, err := ts.restoreSession(ts.agent)
+		if restored {
+			al.forgetWrittenSelfDeliveries(ts)
+		}
+		if err != nil {
 			al.emitEvent(
 				runtimeevents.KindAgentError,
 				ts.eventMeta("abortTurn", "turn.error"),
@@ -407,9 +411,6 @@ func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
 			)
 			return turnResult{}, err
 		}
-		// The restore took what the turn's scripts sent; the turn's end queues
-		// them again. (seucaranguejo fork — see self_delivery.go)
-		al.forgetWrittenSelfDeliveries(ts)
 	}
 	return turnResult{status: TurnEndStatusAborted}, nil
 }

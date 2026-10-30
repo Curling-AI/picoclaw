@@ -263,6 +263,12 @@ func readSourcePage(ctx context.Context, file *os.File, state sourcePageState) (
 		}
 		message.HistoryID = decodedHistoryID(line, filepath.Base(file.Name()), cursor.Line)
 		message.HistoryRunID = decodedHistoryRunID(line)
+		// A bounded page cannot qualify delivery identity across the canonical source.
+		if message.Delivery != nil {
+			delivery := *message.Delivery
+			delivery.ID = ""
+			message.Delivery = &delivery
+		}
 		entry := HistoryEntry{ID: message.HistoryID, Position: meta.HistoryPrefix + cursor.Line, Message: message}
 		encoded, err := json.Marshal(entry)
 		if err != nil {
