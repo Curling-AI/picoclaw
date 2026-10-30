@@ -13,6 +13,18 @@ import (
 // way a pod that slept finds its store on wake.
 func startWithStoredJob(t *testing.T, job CronJob) (*CronService, func() int) {
 	t.Helper()
+	path := writeStore(t, job)
+	runs, count := countRuns()
+	cs := NewCronService(path, runs)
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(cs.Stop)
+	return cs, count
+}
+
+func writeStore(t *testing.T, job CronJob) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "cron", "jobs.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -24,24 +36,23 @@ func startWithStoredJob(t *testing.T, job CronJob) (*CronService, func() int) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return path
+}
 
+// countRuns returns a job handler and the number of times it was called.
+func countRuns() (JobHandler, func() int) {
 	var mu sync.Mutex
 	runs := 0
-	cs := NewCronService(path, func(*CronJob) (string, error) {
-		mu.Lock()
-		runs++
-		mu.Unlock()
-		return "ok", nil
-	})
-	if err := cs.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(cs.Stop)
-	return cs, func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return runs
-	}
+	return func(*CronJob) (string, error) {
+			mu.Lock()
+			runs++
+			mu.Unlock()
+			return "ok", nil
+		}, func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return runs
+		}
 }
 
 func dailyJob(next, last time.Time) CronJob {
@@ -98,6 +109,32 @@ func TestStart_RunsAMissedOccurrenceWithinTheGrace(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if got := runs(); got != 1 {
 		t.Errorf("runs = %d, want exactly one catch-up", got)
+	}
+}
+
+// Two gateways booting together over one jobs.json (a rollout) must replay a
+// missed occurrence once between them.
+func TestStart_ConcurrentServicesReplayAMissedOccurrenceOnce(t *testing.T) {
+	now := time.Now()
+	path := writeStore(t, dailyJob(now.Add(-5*time.Minute), now.Add(-24*time.Hour)))
+	runs, count := countRuns()
+
+	var start sync.WaitGroup
+	for range 2 {
+		cs := NewCronService(path, runs)
+		t.Cleanup(cs.Stop)
+		start.Go(func() {
+			if err := cs.Start(); err != nil {
+				t.Errorf("Start: %v", err)
+			}
+		})
+	}
+	start.Wait()
+
+	waitForRuns(t, count, 1)
+	time.Sleep(200 * time.Millisecond)
+	if got := count(); got != 1 {
+		t.Errorf("runs = %d, want one replay across both services", got)
 	}
 }
 

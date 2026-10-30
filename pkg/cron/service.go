@@ -209,13 +209,9 @@ func (cs *CronService) Start() error {
 		return nil
 	}
 
-	if err := cs.loadStore(); err != nil {
-		return fmt.Errorf("failed to load store: %w", err)
-	}
-
-	cs.recomputeNextRuns()
-	if err := cs.saveStoreUnsafe(); err != nil {
-		return fmt.Errorf("failed to save store: %w", err)
+	missed, err := cs.loadAndClaimMissedRuns()
+	if err != nil {
+		return err
 	}
 
 	cs.stopChan = make(chan struct{})
@@ -224,8 +220,29 @@ func (cs *CronService) Start() error {
 	}
 	cs.running = true
 	go cs.runLoop(cs.stopChan)
+	cs.dispatch(missed)
 
 	return nil
+}
+
+// loadAndClaimMissedRuns holds the store lock from read to write so a second
+// process starting over the same jobs.json (a rollout) reads the claim and
+// does not replay the same missed occurrence.
+func (cs *CronService) loadAndClaimMissedRuns() ([]string, error) {
+	unlock, err := lockStore(cs.storePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock store: %w", err)
+	}
+	defer unlock()
+
+	if err := cs.loadStore(); err != nil {
+		return nil, fmt.Errorf("failed to load store: %w", err)
+	}
+	missed := cs.recomputeNextRuns()
+	if err := cs.saveStoreUnsafe(); err != nil {
+		return nil, fmt.Errorf("failed to save store: %w", err)
+	}
+	return missed, nil
 }
 
 func (cs *CronService) Stop() {
@@ -326,11 +343,15 @@ func (cs *CronService) checkJobs() {
 
 	cs.mu.Unlock()
 
-	// Execute jobs outside the lock, each in its own goroutine so the
-	// scheduler loop keeps ticking while jobs run. Self-overlap of a single
-	// job is impossible by construction: its NextRunAtMS is cleared above and
-	// only recomputed after executeJobByID completes.
-	for _, jobID := range dueJobIDs {
+	cs.dispatch(dueJobIDs)
+}
+
+// dispatch runs jobs whose NextRunAtMS was already cleared and saved, each in
+// its own goroutine so the scheduler loop keeps ticking while jobs run.
+// Self-overlap of a single job is impossible by construction: its NextRunAtMS
+// is only recomputed after executeJob completes.
+func (cs *CronService) dispatch(jobIDs []string) {
+	for _, jobID := range jobIDs {
 		go func(id string) {
 			cs.execSlots <- struct{}{}
 			defer func() { <-cs.execSlots }()
@@ -502,8 +523,11 @@ func (cs *CronService) notify() {
 	}
 }
 
-func (cs *CronService) recomputeNextRuns() {
+// recomputeNextRuns returns the missed runs it claimed for the caller to
+// dispatch once the claim is saved.
+func (cs *CronService) recomputeNextRuns() []string {
 	now := time.Now().UnixMilli()
+	var missed []string
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
 		if !job.Enabled {
@@ -511,9 +535,11 @@ func (cs *CronService) recomputeNextRuns() {
 		}
 		if late, ok := missedRun(job.State, now); ok {
 			if late <= missedRunGrace {
-				// The past-due NextRunAtMS stays: checkJobs fires it on the
-				// first tick and only then computes the next occurrence.
+				// Claimed like checkJobs does: cleared, and only recomputed
+				// after the run, so a process reading it next skips it.
 				log.Printf("[cron] job '%s' missed its run by %s; running it now", job.Name, late.Round(time.Second))
+				job.State.NextRunAtMS = nil
+				missed = append(missed, job.ID)
 				continue
 			}
 			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
@@ -521,6 +547,7 @@ func (cs *CronService) recomputeNextRuns() {
 		}
 		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
 	}
+	return missed
 }
 
 // missedRun reports how late the stored run is when it is due and never ran.
