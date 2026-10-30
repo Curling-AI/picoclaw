@@ -211,7 +211,7 @@ func TestRestorePointFrameFailurePreservesDurableHistory(t *testing.T) {
 			loop.activeTurnStates.Store(key, ts)
 			defer loop.activeTurnStates.Delete(key)
 			loop.rollBackAbortedTurn(key, ts)
-			if err := ts.restoreSession(agent); err != nil {
+			if _, err := ts.restoreSession(agent); err != nil {
 				t.Fatal(err)
 			}
 			if after := backend.GetHistory(key); !reflect.DeepEqual(after, before) {
@@ -238,7 +238,7 @@ func TestRestorePointValidEmptyHistoryStillRollsBack(t *testing.T) {
 	loop.activeTurnStates.Store(key, ts)
 	defer loop.activeTurnStates.Delete(key)
 	loop.rollBackAbortedTurn(key, ts)
-	if err := ts.restoreSession(agent); err != nil {
+	if _, err := ts.restoreSession(agent); err != nil {
 		t.Fatal(err)
 	}
 	if after := agent.Sessions.GetHistory(key); len(after) != 0 {
@@ -301,7 +301,7 @@ func TestRestorePointCaptureRecoveryUpdatesAbortBoundary(t *testing.T) {
 	loop.activeTurnStates.Store(key, ts)
 	defer loop.activeTurnStates.Delete(key)
 	loop.rollBackAbortedTurn(key, ts)
-	if restoreErr := ts.restoreSession(agent); restoreErr != nil {
+	if _, restoreErr := ts.restoreSession(agent); restoreErr != nil {
 		t.Fatal(restoreErr)
 	}
 	after, err := backend.ReadHistoryWithReceipts(t.Context(), key)

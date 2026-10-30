@@ -972,19 +972,22 @@ func (ts *turnState) ingestMessage(ctx context.Context, al *AgentLoop, msg provi
 	}
 }
 
-func (ts *turnState) restoreSession(agent *AgentInstance) error {
+// The bool confirms history replacement even when the later Save fails.
+func (ts *turnState) restoreSession(agent *AgentInstance) (bool, error) {
 	ts.mu.RLock()
 	if ts.restorePointHistory == nil {
 		ts.mu.RUnlock()
-		return nil
+		return false, nil
 	}
 	history := append([]providers.Message(nil), ts.restorePointHistory...)
 	summary := ts.restorePointSummary
 	ts.mu.RUnlock()
 
-	ts.replaceHistory(agent.Sessions, history)
+	if err := ts.replaceHistory(agent.Sessions, history); err != nil {
+		return false, err
+	}
 	agent.Sessions.SetSummary(ts.sessionKey, summary)
-	return agent.Sessions.Save(ts.sessionKey)
+	return true, agent.Sessions.Save(ts.sessionKey)
 }
 
 func matchingTurnMessageTail(history, persisted []providers.Message) int {

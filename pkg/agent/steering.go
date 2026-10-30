@@ -587,11 +587,12 @@ func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
 	}
 	history := ts.session.GetHistory(sessionKey)
 	if historyLength < len(history) {
-		ts.replaceHistory(ts.session, history[:historyLength])
+		if err := ts.replaceHistory(ts.session, history[:historyLength]); err != nil {
+			return
+		}
+		// Only a confirmed cut releases the sends for the turn's final flush.
+		ts.selfWritten = 0
 	}
-	// The cut takes what the turn's scripts sent; the turn's end queues them
-	// again. (seucaranguejo fork — see self_delivery.go)
-	ts.selfWritten = 0
 }
 
 // ====================== Follow-Up Injection ======================
