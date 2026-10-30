@@ -236,3 +236,28 @@ func TestTranscribeAudioInMessage_TranscribedAudioBecomesVoiceText(t *testing.T)
 		t.Fatalf("got content %q media %v", msg.Content, msg.Media)
 	}
 }
+
+func TestSetTranscriber_ConcurrentWithTurn(t *testing.T) {
+	al := &AgentLoop{cfg: &config.Config{}}
+	fake := &fixedTranscriber{text: "olá"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			if i%2 == 0 {
+				al.SetTranscriber(fake)
+			} else {
+				al.SetTranscriber(nil)
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_ = al.currentTranscriber()
+		}
+	}
+}
