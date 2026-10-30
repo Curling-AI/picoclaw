@@ -190,6 +190,12 @@ func (t *CronTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Job ID (for get/update/remove/enable/disable)",
 			},
+			"connectors": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"maxItems":    cron.MaxConnectors,
+				"description": "Canonical connector IDs this task uses. Record only: it neither grants nor removes access. For update, omit to keep the list, pass [] to clear it, or pass a list to replace it.",
+			},
 		},
 		"required": []string{"action"},
 	}
@@ -293,6 +299,12 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		}
 	}
 
+	// Validate before creating: an error after AddJob makes the agent retry and duplicate the job.
+	connectors, _, errResult := connectorsPatch(args)
+	if errResult != nil {
+		return errResult
+	}
+
 	job, err := t.cronService.AddJob(
 		utils.AutomationName(name, message),
 		schedule,
@@ -308,6 +320,10 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 	needsUpdate := false
 	if command != "" {
 		job.Payload.Command = command
+		needsUpdate = true
+	}
+	if len(connectors) > 0 {
+		job.Payload.Connectors = connectors
 		needsUpdate = true
 	}
 	if needsUpdate {
@@ -458,6 +474,15 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 		patches++
 	}
 
+	connectors, connectorsPresent, errResult := connectorsPatch(args)
+	if errResult != nil {
+		return errResult
+	}
+	if connectorsPresent {
+		job.Payload.Connectors = connectors
+		patches++
+	}
+
 	if patches == 0 {
 		return ErrorResult("at least one update field is required")
 	}
@@ -527,6 +552,30 @@ func optionalString(args map[string]any, key string) (string, bool, *ToolResult)
 		return "", false, ErrorResult(fmt.Sprintf("%s must be a string", key))
 	}
 	return text, true, nil
+}
+
+func connectorsPatch(args map[string]any) ([]string, bool, *ToolResult) {
+	value, present := args["connectors"]
+	if !present {
+		return nil, false, nil
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return nil, false, ErrorResult("connectors must be an array of strings")
+	}
+	names := make([]string, 0, len(values))
+	for _, item := range values {
+		name, ok := item.(string)
+		if !ok {
+			return nil, false, ErrorResult("connectors must be an array of strings")
+		}
+		names = append(names, name)
+	}
+	connectors, err := cron.NormalizeConnectors(names)
+	if err != nil {
+		return nil, false, ErrorResult(err.Error())
+	}
+	return connectors, true, nil
 }
 
 func schedulePatch(args map[string]any) (cron.CronSchedule, bool, *ToolResult) {

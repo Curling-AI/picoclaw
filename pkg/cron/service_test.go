@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -160,6 +161,79 @@ func TestCronService_GetJobReturnsCopy(t *testing.T) {
 	}
 	if again.State.NextRunAtMS == nil || *again.State.NextRunAtMS != nextRun {
 		t.Fatalf("GetJob should not alias state pointers, got %+v", again.State)
+	}
+}
+
+func TestCronService_GetJobDoesNotShareConnectors(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: int64Ptr(60_000)}, "msg", "ch", "to")
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+	job.Payload.Connectors = []string{"gmail"}
+	if err := cs.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob failed: %v", err)
+	}
+
+	got, _ := cs.GetJob(job.ID)
+	got.Payload.Connectors[0] = "mutated"
+
+	again, _ := cs.GetJob(job.ID)
+	if again.Payload.Connectors[0] != "gmail" {
+		t.Fatalf("GetJob shares the connector list with the store: %v", again.Payload.Connectors)
+	}
+}
+
+func TestCronService_ConnectorsSurviveLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	cs := NewCronService(path, func(*CronJob) (string, error) { return "ok", nil })
+
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: int64Ptr(60_000)}, "msg", "ch", "to")
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+	job.Payload.Connectors = []string{"gmail", "slack"}
+	if err := cs.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob failed: %v", err)
+	}
+
+	assertKept := func(step string, service *CronService) {
+		t.Helper()
+		got, ok := service.GetJob(job.ID)
+		if !ok || !slices.Equal(got.Payload.Connectors, []string{"gmail", "slack"}) {
+			t.Fatalf("%s lost the connectors: %+v", step, got)
+		}
+	}
+	if _, err := cs.EnableJob(job.ID, false); err != nil {
+		t.Fatalf("EnableJob(false) failed: %v", err)
+	}
+	assertKept("disable", cs)
+	if _, err := cs.EnableJob(job.ID, true); err != nil {
+		t.Fatalf("EnableJob(true) failed: %v", err)
+	}
+	assertKept("enable", cs)
+	cs.executeJob(job.ID, Manual)
+	assertKept("run", cs)
+	assertKept("reload", NewCronService(path, nil))
+}
+
+func TestCronService_StoreWithoutConnectorsLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	stored := `{"version":1,"jobs":[{"id":"old","name":"Old","enabled":true,` +
+		`"schedule":{"kind":"every","everyMs":60000},` +
+		`"payload":{"kind":"agent_turn","message":"msg"},"state":{}}]}`
+	if err := os.WriteFile(path, []byte(stored), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := NewCronService(path, nil).GetJob("old")
+	if !ok {
+		t.Fatal("job from the older store is missing")
+	}
+	if got.Payload.Connectors != nil {
+		t.Fatalf("older store grew connectors: %v", got.Payload.Connectors)
 	}
 }
 

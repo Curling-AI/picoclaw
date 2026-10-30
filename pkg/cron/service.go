@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -42,6 +43,9 @@ type CronPayload struct {
 	LoopSlug  string `json:"loop_slug,omitempty"`
 	RoundKind string `json:"round_kind,omitempty"`
 	GoalID    string `json:"goal_id,omitempty"`
+	// Connectors lists the canonical connector IDs this job uses. Record only:
+	// it neither grants nor removes access when the job runs.
+	Connectors []string `json:"connectors,omitempty"`
 }
 
 type CronJobState struct {
@@ -775,6 +779,7 @@ func cloneCronJob(job CronJob) CronJob {
 		lastRunAtMS := *job.State.LastRunAtMS
 		clone.State.LastRunAtMS = &lastRunAtMS
 	}
+	clone.Payload.Connectors = slices.Clone(job.Payload.Connectors)
 	return clone
 }
 
