@@ -572,7 +572,11 @@ func (al *AgentLoop) HardAbort(sessionKey string) error {
 // delivery stripe, so such a write lands either behind the turn (queued, written
 // when it ends) or after this cut.
 func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
-	if ts.session == nil {
+	ts.mu.RLock()
+	hasRestorePoint := ts.restorePointHistory != nil
+	historyLength := len(ts.restorePointHistory)
+	ts.mu.RUnlock()
+	if ts.session == nil || !hasRestorePoint {
 		return
 	}
 	stripe := al.mirror.stripe(sessionKey)
@@ -582,8 +586,8 @@ func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
 		return
 	}
 	history := ts.session.GetHistory(sessionKey)
-	if ts.initialHistoryLength < len(history) {
-		ts.replaceHistory(ts.session, history[:ts.initialHistoryLength])
+	if historyLength < len(history) {
+		ts.replaceHistory(ts.session, history[:historyLength])
 	}
 	// The cut takes what the turn's scripts sent; the turn's end queues them
 	// again. (seucaranguejo fork — see self_delivery.go)

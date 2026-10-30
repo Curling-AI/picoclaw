@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -369,7 +371,7 @@ type turnState struct {
 	backgroundFailed     bool
 	backgroundHandedOver bool
 
-	restorePointHistory []providers.Message
+	restorePointHistory []providers.Message // nil until a reliable snapshot has been captured.
 	restorePointSummary string
 	persistedMessages   []providers.Message
 	// savedToolOutputs are the full outputs this turn saved; see
@@ -446,10 +448,8 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 	// Bind session store and capture initial history length for rollback logic
 	if agent != nil && agent.Sessions != nil {
 		ts.session = agent.Sessions
-		history := agent.Sessions.GetHistory(opts.Dispatch.SessionKey)
-		ts.initialHistoryLength = len(history)
-		ts.restorePointHistory = append([]providers.Message(nil), history...)
-		ts.restorePointSummary = agent.Sessions.GetSummary(opts.Dispatch.SessionKey)
+		ts.refreshRestorePointFromSession(agent)
+		ts.initialHistoryLength = len(ts.restorePointHistory)
 	}
 
 	return ts
@@ -878,7 +878,7 @@ func (ts *turnState) eventMeta(source, tracePath string) HookMeta {
 func (ts *turnState) captureRestorePoint(history []providers.Message, summary string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.restorePointHistory = append([]providers.Message(nil), history...)
+	ts.restorePointHistory = append([]providers.Message{}, history...)
 	ts.restorePointSummary = summary
 }
 
@@ -913,8 +913,17 @@ func (ts *turnState) persistedMessagesSnapshot() []providers.Message {
 }
 
 func (ts *turnState) refreshRestorePointFromSession(agent *AgentInstance) {
-	history := agent.Sessions.GetHistory(ts.sessionKey)
-	summary := agent.Sessions.GetSummary(ts.sessionKey)
+	if agent == nil || agent.Sessions == nil {
+		return
+	}
+	history, summary, err := readRestorePoint(agent.Sessions, ts.sessionKey)
+	if err != nil {
+		logger.WarnCF("agent", "Cannot capture session restore point", map[string]any{
+			"session_key": ts.sessionKey,
+			"error":       err.Error(),
+		})
+		return
+	}
 
 	persisted := ts.persistedMessagesSnapshot()
 
@@ -923,6 +932,27 @@ func (ts *turnState) refreshRestorePointFromSession(agent *AgentInstance) {
 	}
 
 	ts.captureRestorePoint(history, summary)
+}
+
+func readRestorePoint(store session.SessionStore, key string) ([]providers.Message, string, error) {
+	if reader, ok := store.(memory.HistoryContentLineage); ok {
+		canonical := key
+		if resolver, supported := store.(interface{ ResolveSessionKey(key string) string }); supported {
+			canonical = resolver.ResolveSessionKey(key)
+		}
+		frame, err := reader.ReadHistoryContentFrame(context.Background(), canonical)
+		if !errors.Is(err, memory.ErrHistoryUnsupported) {
+			if err != nil {
+				return nil, "", err
+			}
+			history := make([]providers.Message, len(frame.Entries))
+			for i, entry := range frame.Entries {
+				history[i] = entry.Message
+			}
+			return history, frame.Summary, nil
+		}
+	}
+	return store.GetHistory(key), store.GetSummary(key), nil
 }
 
 // ingestMessage calls the ContextManager's Ingest method for a persisted message.
@@ -944,6 +974,10 @@ func (ts *turnState) ingestMessage(ctx context.Context, al *AgentLoop, msg provi
 
 func (ts *turnState) restoreSession(agent *AgentInstance) error {
 	ts.mu.RLock()
+	if ts.restorePointHistory == nil {
+		ts.mu.RUnlock()
+		return nil
+	}
 	history := append([]providers.Message(nil), ts.restorePointHistory...)
 	summary := ts.restorePointSummary
 	ts.mu.RUnlock()

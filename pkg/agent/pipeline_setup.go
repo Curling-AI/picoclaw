@@ -29,7 +29,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 			summary = resp.Summary
 		}
 	}
-	ts.captureRestorePoint(history, summary)
+	ts.refreshRestorePointFromSession(ts.agent)
 
 	contextualSkills := ts.activeSkills
 	if ts.agent.ContextBuilder != nil {

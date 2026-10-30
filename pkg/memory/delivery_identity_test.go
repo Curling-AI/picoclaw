@@ -3,6 +3,7 @@ package memory
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -309,5 +310,47 @@ func TestSkippedDeliveryIdentityDoesNotDecodeDiscardedBody(t *testing.T) {
 				test.want,
 			)
 		}
+	}
+}
+
+func TestDeliveryIdentityUnqualifiedReplacementCannotBorrowStoredOccurrence(t *testing.T) {
+	for _, retainOrigin := range []bool{false, true} {
+		t.Run(fmt.Sprint(retainOrigin), func(t *testing.T) {
+			store := newTestStore(t)
+			key := "sk_v1_unqualified_delivery_replacement"
+			at := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+			if appendErr := store.AddFullMessage(
+				t.Context(),
+				key,
+				providers.Message{
+					Role:      "assistant",
+					Content:   "same",
+					CreatedAt: &at,
+					Delivery:  &providers.Delivery{Origin: "cron:original", At: at},
+				},
+			); appendErr != nil {
+				t.Fatal(appendErr)
+			}
+			replacement := providers.Message{Role: "assistant", Content: "same", CreatedAt: &at}
+			if retainOrigin {
+				replacement.Delivery = &providers.Delivery{Origin: "cron:original", At: at}
+			}
+			if replaceErr := store.SetHistory(t.Context(), key, []providers.Message{replacement}); replaceErr != nil {
+				t.Fatal(replaceErr)
+			}
+			history, readErr := store.ReadHistoryContent(t.Context(), key)
+			if readErr != nil || len(history) != 1 || history[0].Content != "same" ||
+				history[0].Delivery != nil && history[0].Delivery.ID != "" {
+				t.Fatal(
+					"unqualified replacement borrowed an occurrence from matching body/time/position",
+					history,
+					readErr,
+				)
+			}
+			if retainOrigin &&
+				(history[0].Delivery == nil || history[0].Delivery.Origin != "cron:original" || !history[0].Delivery.At.Equal(at)) {
+				t.Fatal("unqualified replacement lost explicit delivery metadata", history)
+			}
+		})
 	}
 }
