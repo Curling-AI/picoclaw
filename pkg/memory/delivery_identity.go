@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"encoding/json"
+
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -39,4 +41,17 @@ func contentDeliveryIDCounts(rows []contentRawRow) map[string]int {
 		}
 	}
 	return counts
+}
+
+// Skipped bodies need only an identity scan, without allocating their content or parts.
+func skippedDeliveryID(data []byte) string {
+	var row struct {
+		Delivery struct {
+			ID string `json:"id"`
+		} `json:"delivery"`
+	}
+	if json.Unmarshal(data, &row) != nil {
+		return ""
+	}
+	return row.Delivery.ID
 }

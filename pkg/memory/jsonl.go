@@ -747,6 +747,12 @@ func decodeHistoryMessages(
 			continue
 		}
 		lineNum++
+		if lineNum <= skip {
+			if id := skippedDeliveryID(line); id != "" {
+				deliveryCounts[id]++
+			}
+			continue
+		}
 		var msg providers.Message
 		if err := json.Unmarshal(line, &msg); err != nil {
 			// Corrupt line — likely a partial write from a crash.
@@ -762,9 +768,6 @@ func decodeHistoryMessages(
 		}
 		if msg.Delivery != nil {
 			deliveryCounts[msg.Delivery.ID]++
-		}
-		if lineNum <= skip {
-			continue
 		}
 		msg.HistoryID = decodedHistoryID(line, filepath.Base(path), int64(lineNum-1))
 		msg.HistoryRunID = decodedHistoryRunID(line)

@@ -616,17 +616,16 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 			continue
 		}
 		line++
-		var message providers.Message
-		decodeErr := json.Unmarshal(data, &message)
-		if decodeErr == nil && !messageutil.IsTransientAssistantThoughtMessage(message) && message.Delivery != nil {
-			deliveryCounts[message.Delivery.ID]++
-		}
 		if line <= skip {
+			if id := skippedDeliveryID(data); id != "" {
+				deliveryCounts[id]++
+			}
 			continue
 		}
 		fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration &&
 			byteEnd <= meta.HistoryLegacyBytes
-		if decodeErr != nil {
+		var message providers.Message
+		if json.Unmarshal(data, &message) != nil {
 			if meta.HistoryOrderVersion != 0 && !fromFence {
 				return nil, 0, ErrHistoryOrderUnavailable
 			}
@@ -656,6 +655,9 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 		}
 		if messageutil.IsTransientAssistantThoughtMessage(message) {
 			continue
+		}
+		if message.Delivery != nil {
+			deliveryCounts[message.Delivery.ID]++
 		}
 		message.HistoryID = decodedHistoryID(data, filepath.Base(file.Name()), int64(line-1))
 		message.HistoryRunID = decodedHistoryRunID(data)

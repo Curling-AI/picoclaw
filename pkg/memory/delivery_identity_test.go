@@ -293,3 +293,21 @@ func TestDeliveryIdentityDuplicateDoesNotInvalidateOrder(t *testing.T) {
 		t.Fatal("duplicate identity gained authority or invalidated independent Order", receipts, err)
 	}
 }
+
+func TestSkippedDeliveryIdentityDoesNotDecodeDiscardedBody(t *testing.T) {
+	const id = "550e8400-e29b-41d4-a716-446655440000"
+	for _, test := range []struct{ raw, want string }{
+		{`{"delivery":{"id":"` + id + `"},"content":37,"tool_calls":false}`, id},
+		{`{"delivery":{"id":37},"content":"ignored"}`, ""},
+		{`{"delivery":null}`, ""},
+		{`{broken`, ""},
+	} {
+		if actual := skippedDeliveryID([]byte(test.raw)); actual != test.want {
+			t.Fatal(
+				"skipped delivery metadata decoded discarded content or accepted malformed identity",
+				actual,
+				test.want,
+			)
+		}
+	}
+}
