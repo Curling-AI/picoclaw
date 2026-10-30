@@ -117,7 +117,7 @@ func (al *AgentLoop) runTurn(
 	// durante o turno, então basta resolver uma vez. (seucaranguejo fork)
 	maxIter := ts.maxIterations()
 
-	for ts.currentIteration() < maxIter || len(exec.pendingMessages) > 0 || func() bool {
+	for ts.budgetUsed(ts.currentIteration()) < maxIter || len(exec.pendingMessages) > 0 || func() bool {
 		graceful, _ := ts.gracefulInterruptRequested()
 		return graceful
 	}() {
@@ -140,27 +140,28 @@ func (al *AgentLoop) runTurn(
 		// to the session they become standing "stop using tools" instructions
 		// that poison every later turn — observed in prod, sessions carried up
 		// to 4 of them and degraded into announce-without-acting loops.
-		if budget := maxIter - iteration; maxIter > 0 && budget > 0 {
+		used := ts.budgetUsed(iteration)
+		if budget := maxIter - used; maxIter > 0 && budget > 0 {
 			switch {
-			case !exec.wrapUpNudged && iteration*100 >= maxIter*85:
+			case !exec.wrapUpNudged && used*100 >= maxIter*85:
 				exec.wrapUpNudged = true
 				paceNudged = true // estágio suave perdeu o sentido aqui
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role: "user",
 					Content: fmt.Sprintf(
-						"[System] Tool-budget warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
-						iteration,
+						toolBudgetNudgePrefix+" warning: you are at iteration %d of a hard limit of %d (~%d tool steps left). Start wrapping up NOW — do not begin large new sub-tasks. Save the best result you have so far to artifacts/, then in your next message: (1) deliver and summarize what is done, (2) list what still needs to be done, and (3) ask the user whether to continue. If the task is already essentially complete, just finish normally.",
+						used,
 						maxIter,
 						budget,
 					),
 				})
-			case !paceNudged && iteration*100 >= maxIter*60:
+			case !paceNudged && used*100 >= maxIter*60:
 				paceNudged = true
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role: "user",
 					Content: fmt.Sprintf(
-						"[System] Tool-budget check: you are at iteration %d of a hard limit of %d (~%d tool steps left). Plan the REMAINING work to fit this budget: prioritize what is essential to deliver the task, batch related steps, and skip exploratory detours. You do not need to stop — just spend the rest of the budget deliberately. If the work clearly cannot fit, deliver the most valuable subset and note what would be left.",
-						iteration,
+						toolBudgetNudgePrefix+" check: you are at iteration %d of a hard limit of %d (~%d tool steps left). Plan the REMAINING work to fit this budget: prioritize what is essential to deliver the task, batch related steps, and skip exploratory detours. You do not need to stop — just spend the rest of the budget deliberately. If the work clearly cannot fit, deliver the most valuable subset and note what would be left.",
+						used,
 						maxIter,
 						budget,
 					),
@@ -226,6 +227,10 @@ func (al *AgentLoop) runTurn(
 				if pm.PromptSource != string(PromptSourceSubTurnResult) {
 					ts.repeats.reset()
 				}
+				if pm.PromptSource == string(PromptSourceSteering) {
+					paceNudged = false
+					al.joinPersonMessage(turnCtx, ts, exec, pm, iteration)
+				}
 				if !ts.opts.NoHistory {
 					ts.appendHistoryMessage(pm)
 					ts.recordPersistedMessage(pm)
@@ -270,6 +275,9 @@ func (al *AgentLoop) runTurn(
 			turnStatus = TurnEndStatusError
 			return turnResult{}, callErr
 		}
+		// The call that read the person's message acknowledged it.
+		// (seucaranguejo fork — see steering_join.go)
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, joinedAckNote)
 		messages = exec.messages
 		// Steering CallLLM found stays in exec.pendingMessages, where the next
 		// iteration reads it. Copied here as well, it was read twice: a message
@@ -358,7 +366,7 @@ func (al *AgentLoop) runTurn(
 	synthesized := finalContent == ""
 	if synthesized {
 		exec.incomplete = true
-		if ts.currentIteration() >= maxIter && maxIter > 0 {
+		if ts.atIterationCap(ts.currentIteration()) {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
 			finalContent = toolLimitResponse
