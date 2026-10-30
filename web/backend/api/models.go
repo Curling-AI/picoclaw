@@ -815,6 +815,9 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	if _, ok := rawFields["streaming"]; !ok {
 		mc.Streaming = cfg.ModelList[idx].Streaming
 	}
+	if _, ok := rawFields["audio_file_parts"]; !ok {
+		mc.AudioFileParts = cfg.ModelList[idx].AudioFileParts
+	}
 	// Preserve the existing Provider when the caller omits it. This keeps the
 	// update API backward-compatible for clients that haven't started sending
 	// the new field yet, while still allowing explicit clearing via "".

@@ -60,6 +60,7 @@ func modelConfigResolutionKey(defaultProvider string, mc *config.ModelConfig) st
 		Streaming           config.ModelStreamingConfig `json:"streaming"`
 		ExtraBody           map[string]any              `json:"extra_body"`
 		CustomHeaders       map[string]string           `json:"custom_headers"`
+		AudioFileParts      bool                        `json:"audio_file_parts"`
 	}{
 		ModelName: mc.ModelName, Provider: provider, Model: modelID,
 		APIBase: mc.APIBase, Proxy: mc.Proxy, AuthMethod: mc.AuthMethod,
@@ -68,6 +69,7 @@ func modelConfigResolutionKey(defaultProvider string, mc *config.ModelConfig) st
 		RequestTimeout: mc.RequestTimeout, MaxTokensField: mc.MaxTokensField,
 		ThinkingLevel: mc.ThinkingLevel, ToolSchemaTransform: mc.ToolSchemaTransform,
 		Streaming: mc.Streaming, ExtraBody: mc.ExtraBody, CustomHeaders: mc.CustomHeaders,
+		AudioFileParts: mc.AudioFileParts,
 	})
 	if err != nil {
 		return ""

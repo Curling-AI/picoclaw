@@ -1570,6 +1570,52 @@ func TestHandleUpdateModel_ToolSchemaTransformPreserveAndClear(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateModel_AudioFilePartsPreserveAndClear(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName:      "editable",
+		Model:          "openai/gpt-4o-mini",
+		APIKeys:        config.SimpleSecureStrings("sk-existing"),
+		AudioFileParts: true,
+	}}
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	put := func(body string) bool {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		after, err := config.LoadConfig(configPath)
+		if err != nil {
+			t.Fatalf("LoadConfig() error = %v", err)
+		}
+		return after.ModelList[0].AudioFileParts
+	}
+
+	if !put(`{"model_name":"editable","model":"openai/gpt-4o-mini"}`) {
+		t.Fatal("audio_file_parts lost on an update that omits it")
+	}
+	if put(`{"model_name":"editable","model":"openai/gpt-4o-mini","audio_file_parts":false}`) {
+		t.Fatal("audio_file_parts = true, want false after clearing it")
+	}
+}
+
 func TestHandleUpdateModel_StreamingPreserveAndChange(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

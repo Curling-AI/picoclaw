@@ -109,26 +109,58 @@ func TestSerializeMessages_WithMedia(t *testing.T) {
 	}
 }
 
+func audioPart(t *testing.T, result []any) map[string]any {
+	t.Helper()
+	data, _ := json.Marshal(result)
+	var msgs []map[string]any
+	if err := json.Unmarshal(data, &msgs); err != nil {
+		t.Fatal(err)
+	}
+	content, ok := msgs[0]["content"].([]any)
+	if !ok || len(content) != 2 {
+		t.Fatalf("content = %#v, want the text and the audio", msgs[0]["content"])
+	}
+	part, _ := content[1].(map[string]any)
+	return part
+}
+
+func TestSerializeMessages_WithAudioMedia(t *testing.T) {
+	for _, tc := range []struct{ url, format string }{
+		{"data:audio/ogg;base64,abc123", "ogg"},
+		{"data:audio/mpeg;base64,abc123", "mp3"},
+		{"data:audio/mp4;base64,abc123", "m4a"},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			part := audioPart(t, SerializeMessages(
+				[]Message{{Role: "user", Content: "transcribe this", Media: []string{tc.url}}},
+			))
+			if part["type"] != "input_audio" {
+				t.Fatalf("audio part type = %v, want input_audio", part["type"])
+			}
+			if _, has := part["file"]; has {
+				t.Error("file part sent by default")
+			}
+			audio, _ := part["input_audio"].(map[string]any)
+			if audio["format"] != tc.format || audio["data"] != "abc123" {
+				t.Fatalf("input_audio = %#v, want format %q and data abc123", audio, tc.format)
+			}
+		})
+	}
+}
+
 // O Vercel AI Gateway recusa input_audio ("Invalid input") e aceita o áudio
 // como parte file com o data URL inteiro em file_data (spike da MST-351).
-func TestSerializeMessages_WithAudioMedia(t *testing.T) {
+func TestSerializeMessages_WithAudioFileParts(t *testing.T) {
 	for _, tc := range []struct{ url, filename string }{
 		{"data:audio/ogg;base64,abc123", "audio.ogg"},
 		{"data:audio/mpeg;base64,abc123", "audio.mp3"},
 		{"data:audio/mp4;base64,abc123", "audio.m4a"},
 	} {
 		t.Run(tc.filename, func(t *testing.T) {
-			result := SerializeMessages([]Message{{Role: "user", Content: "transcribe this", Media: []string{tc.url}}})
-			data, _ := json.Marshal(result)
-			var msgs []map[string]any
-			if err := json.Unmarshal(data, &msgs); err != nil {
-				t.Fatal(err)
-			}
-			content, ok := msgs[0]["content"].([]any)
-			if !ok || len(content) != 2 {
-				t.Fatalf("content = %#v, want the text and the audio", msgs[0]["content"])
-			}
-			part, _ := content[1].(map[string]any)
+			part := audioPart(t, SerializeMessages(
+				[]Message{{Role: "user", Content: "transcribe this", Media: []string{tc.url}}},
+				WithAudioFileParts(),
+			))
 			if part["type"] != "file" {
 				t.Fatalf("audio part type = %v, want file", part["type"])
 			}
@@ -144,14 +176,21 @@ func TestSerializeMessages_WithAudioMedia(t *testing.T) {
 }
 
 func TestSerializeMessages_DropsAnEmptyAudio(t *testing.T) {
-	result := SerializeMessages([]Message{{Role: "user", Content: "x", Media: []string{"data:audio/ogg;base64,"}}})
-	data, _ := json.Marshal(result)
-	var msgs []map[string]any
-	if err := json.Unmarshal(data, &msgs); err != nil {
-		t.Fatal(err)
-	}
-	if content, _ := msgs[0]["content"].([]any); len(content) != 1 {
-		t.Fatalf("content = %#v, want only the text", msgs[0]["content"])
+	msgs := []Message{{Role: "user", Content: "x", Media: []string{"data:audio/ogg;base64,"}}}
+	for name, result := range map[string][]any{
+		"default":    SerializeMessages(msgs),
+		"file parts": SerializeMessages(msgs, WithAudioFileParts()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, _ := json.Marshal(result)
+			var got []map[string]any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if content, _ := got[0]["content"].([]any); len(content) != 1 {
+				t.Fatalf("content = %#v, want only the text", got[0]["content"])
+			}
+		})
 	}
 }
 
