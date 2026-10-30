@@ -3,8 +3,12 @@ package asr
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,6 +230,66 @@ func TestAudioModelTranscriberSendsTheMIMEType(t *testing.T) {
 	}
 	if want := "data:audio/mpeg;base64," + base64.StdEncoding.EncodeToString([]byte("fake-mp3")); media != want {
 		t.Fatalf("media = %q, want %q", media, want)
+	}
+}
+
+// O caminho que o ASR usa de verdade: entrada da model_list até o corpo enviado.
+func TestTranscriberFromModelConfigHonorsAudioFileParts(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "clip.ogg")
+	if err := os.WriteFile(audioPath, []byte("fake-ogg"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString([]byte("fake-ogg"))
+
+	for _, fileParts := range []bool{false, true} {
+		t.Run(fmt.Sprintf("audio_file_parts=%v", fileParts), func(t *testing.T) {
+			var body struct {
+				Messages []struct {
+					Content []map[string]any `json:"content"`
+				} `json:"messages"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+			}))
+			defer server.Close()
+
+			cfg := &config.ModelConfig{
+				ModelName:      "maestro-transcribe",
+				Model:          "litellm/maestro-transcribe",
+				APIBase:        server.URL,
+				AudioFileParts: fileParts,
+			}
+			cfg.SetAPIKey("test-key")
+
+			tr := transcriberFromModelConfig(cfg)
+			if tr == nil {
+				t.Fatal("transcriberFromModelConfig() = nil")
+			}
+			if _, err := tr.Transcribe(context.Background(), audioPath); err != nil {
+				t.Fatalf("Transcribe() error = %v", err)
+			}
+
+			if len(body.Messages) != 1 || len(body.Messages[0].Content) != 2 {
+				t.Fatalf("messages = %#v, want one message with text and audio", body.Messages)
+			}
+			part := body.Messages[0].Content[1]
+			if fileParts {
+				file, _ := part["file"].(map[string]any)
+				if part["type"] != "file" || file["filename"] != "audio.ogg" ||
+					file["file_data"] != "data:audio/ogg;base64,"+b64 {
+					t.Fatalf("audio part = %#v, want a file part with the data URL", part)
+				}
+				return
+			}
+			audio, _ := part["input_audio"].(map[string]any)
+			if part["type"] != "input_audio" || audio["format"] != "ogg" || audio["data"] != b64 {
+				t.Fatalf("audio part = %#v, want input_audio with format and data", part)
+			}
+		})
 	}
 }
 

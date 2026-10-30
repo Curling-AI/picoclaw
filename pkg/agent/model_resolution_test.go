@@ -56,6 +56,16 @@ func TestResolvedCandidateModelName_UsesCandidateDisplayName(t *testing.T) {
 	}
 }
 
+// A chave escolhe o provider em cache: entradas que diferem em audio_file_parts
+// não podem dividir o mesmo provider (MST-351).
+func TestModelConfigResolutionKey_SeparatesAudioFileParts(t *testing.T) {
+	plain := &config.ModelConfig{ModelName: "transcribe", Model: "openai/gpt-4o-audio"}
+	fileParts := &config.ModelConfig{ModelName: "transcribe", Model: "openai/gpt-4o-audio", AudioFileParts: true}
+	if modelConfigResolutionKey("", plain) == modelConfigResolutionKey("", fileParts) {
+		t.Fatal("audio_file_parts did not change the resolution key")
+	}
+}
+
 func TestResolveActiveModelConfig_PrefersCandidateIdentityKey(t *testing.T) {
 	cfg := &config.Config{
 		ModelList: []*config.ModelConfig{

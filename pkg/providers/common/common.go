@@ -91,11 +91,29 @@ type openaiFunctionCall struct {
 	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
+type serializeOptions struct{ audioFileParts bool }
+
+// SerializeOption changes the wire format written by SerializeMessages.
+type SerializeOption func(*serializeOptions)
+
+// WithAudioFileParts sends audio as a "file" part carrying the whole data URL.
+// The default stays input_audio because OpenAI Chat Completions only takes PDF
+// in file parts. Opt-in for gateways like Vercel, which refuse input_audio with
+// "Invalid input" (MST-351). (seucaranguejo fork)
+func WithAudioFileParts() SerializeOption {
+	return func(o *serializeOptions) { o.audioFileParts = true }
+}
+
 // SerializeMessages converts internal Message structs to the OpenAI wire format.
 //   - Strips SystemParts (unknown to third-party endpoints)
 //   - Converts messages with Media to multipart content format (text + image_url parts)
 //   - Preserves ToolCallID, ToolCalls, and ReasoningContent for all messages
-func SerializeMessages(messages []Message) []any {
+func SerializeMessages(messages []Message, opts ...SerializeOption) []any {
+	var options serializeOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	// Gemini's OpenAI-compatible endpoint requires a non-empty `name` on tool
 	// result messages (function_response.name). Derive it from the matching
 	// assistant tool call so every tool message carries its tool name,
@@ -154,16 +172,22 @@ func SerializeMessages(messages []Message) []any {
 				continue
 			}
 
-			if _, _, ok := ParseDataAudioURL(mediaURL); ok {
-				// O Vercel AI Gateway recusa input_audio ("Invalid input",
-				// MST-351) e aceita o áudio como parte file, com o data URL
-				// inteiro. Só o transcritor manda bytes de áudio: no turno o
-				// modelo vê o caminho do arquivo. (seucaranguejo fork)
+			if format, data, ok := ParseDataAudioURL(mediaURL); ok {
+				if options.audioFileParts {
+					parts = append(parts, map[string]any{
+						"type": "file",
+						"file": map[string]any{
+							"filename":  audioFilename(mediaURL),
+							"file_data": mediaURL,
+						},
+					})
+					continue
+				}
 				parts = append(parts, map[string]any{
-					"type": "file",
-					"file": map[string]any{
-						"filename":  audioFilename(mediaURL),
-						"file_data": mediaURL,
+					"type": "input_audio",
+					"input_audio": map[string]any{
+						"data":   data,
+						"format": format,
 					},
 				})
 			}

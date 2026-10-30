@@ -1385,6 +1385,80 @@ func TestCreateProviderFromConfig_CustomHeaders(t *testing.T) {
 	}
 }
 
+// audio_file_parts tem de chegar ao corpo da requisição em todo caminho
+// OpenAI-compatível do factory; sem ele, o padrão é input_audio (MST-351).
+func TestCreateProviderFromConfig_AudioFileParts(t *testing.T) {
+	const dataURL = "data:audio/ogg;base64,abc123"
+
+	for _, model := range []string{
+		"openai/gpt-4o-audio",
+		"litellm/maestro-transcribe",
+		"minimax/speech",
+		"anthropic/claude",
+	} {
+		for _, fileParts := range []bool{false, true} {
+			name := model + "/input_audio"
+			if fileParts {
+				name = model + "/file"
+			}
+			t.Run(name, func(t *testing.T) {
+				var body struct {
+					Messages []struct {
+						Content []map[string]any `json:"content"`
+					} `json:"messages"`
+				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decode request body: %v", err)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(openaiCompatResponse))
+				}))
+				defer server.Close()
+
+				cfg := &config.ModelConfig{
+					ModelName:      "audio",
+					Model:          model,
+					APIBase:        server.URL,
+					AudioFileParts: fileParts,
+				}
+				cfg.SetAPIKey("test-key")
+
+				provider, modelID, err := CreateProviderFromConfig(cfg)
+				if err != nil {
+					t.Fatalf("CreateProviderFromConfig() error = %v", err)
+				}
+				_, err = provider.Chat(
+					t.Context(),
+					[]Message{{Role: "user", Content: "transcribe", Media: []string{dataURL}}},
+					nil,
+					modelID,
+					nil,
+				)
+				if err != nil {
+					t.Fatalf("Chat() error = %v", err)
+				}
+
+				if len(body.Messages) != 1 || len(body.Messages[0].Content) != 2 {
+					t.Fatalf("messages = %#v, want one message with text and audio", body.Messages)
+				}
+				part := body.Messages[0].Content[1]
+				if fileParts {
+					file, _ := part["file"].(map[string]any)
+					if part["type"] != "file" || file["filename"] != "audio.ogg" || file["file_data"] != dataURL {
+						t.Fatalf("audio part = %#v, want a file part with the data URL", part)
+					}
+					return
+				}
+				audio, _ := part["input_audio"].(map[string]any)
+				if part["type"] != "input_audio" || audio["format"] != "ogg" || audio["data"] != "abc123" {
+					t.Fatalf("audio part = %#v, want input_audio with format and data", part)
+				}
+			})
+		}
+	}
+}
+
 // openaiCompatResponse is the JSON response used by OpenAI-compatible providers.
 const openaiCompatResponse = `{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`
 
