@@ -195,8 +195,7 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 	}
 	accuracyRule := "**Be helpful and accurate** - Briefly explain what you're doing."
 	if includeToolUseRule {
-		accuracyRule = "**Be helpful and accurate** - Don't narrate your tool calls; " +
-			"say what you found or did in your reply."
+		accuracyRule = "**Be helpful and accurate** - When using tools, briefly explain what you're doing."
 	}
 	rules = append(
 		rules,
