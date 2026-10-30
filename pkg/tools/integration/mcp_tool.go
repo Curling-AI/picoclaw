@@ -276,7 +276,13 @@ func (t *MCPTool) Parameters() map[string]any {
 }
 
 // Execute executes the MCP tool
-func (t *MCPTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *MCPTool) Execute(ctx context.Context, args map[string]any) (toolResult *ToolResult) {
+	var policyErr error
+	ctx, policyErr = toolshared.BeforeExecutionTool(ctx, t)
+	if policyErr != nil {
+		return ErrorResult(policyErr.Error()).WithError(policyErr)
+	}
+	defer func() { toolshared.AfterExecutionTool(ctx, t, toolResult) }()
 	startedAt := time.Now()
 	t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallStart, startedAt, false, "")
 

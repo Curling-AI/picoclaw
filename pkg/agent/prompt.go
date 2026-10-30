@@ -119,6 +119,7 @@ type PromptBuildRequest struct {
 	SenderDisplayName string
 
 	ActiveSkills []string
+	ObserveSkill func(string)
 	Overlays     []PromptPart
 
 	// Loop deste turno. Zero value = sem loop. Decide de quais raízes as skills

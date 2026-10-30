@@ -1077,7 +1077,7 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 		if len(req.AllowedSkills) > 0 {
 			activeSkills = filterNamesByTurnProfile(activeSkills, req.AllowedSkills)
 		}
-		promptParts = append(promptParts, cb.buildActiveSkillsPromptParts(activeSkills, req.Loop)...)
+		promptParts = append(promptParts, cb.buildActiveSkillsPromptPartsObserved(activeSkills, req.Loop, req.ObserveSkill)...)
 	}
 	if !req.SuppressDefaultSystemPrompt {
 		if contributedParts, err := cb.promptRegistryOrDefault().Collect(context.Background(), req); err != nil {
@@ -1476,12 +1476,30 @@ func (cb *ContextBuilder) AddAssistantMessage(
 }
 
 func (cb *ContextBuilder) buildActiveSkillsContext(skillNames []string, scope LoopScope) string {
+	return cb.buildActiveSkillsContextObserved(skillNames, scope, nil)
+}
+
+func (cb *ContextBuilder) buildActiveSkillsContextObserved(skillNames []string, scope LoopScope, observe func(string)) string {
 	ordered := cb.ResolveActiveSkillsForLoop(skillNames, scope)
 	if len(ordered) == 0 {
 		return ""
 	}
 
-	content := cb.loaderForLoop(scope).LoadSkillsForContext(ordered)
+	loader := cb.loaderForLoop(scope)
+	content := ""
+	if observe == nil {
+		content = loader.LoadSkillsForContext(ordered)
+	} else {
+		var parts []string
+		for _, name := range ordered {
+			loaded := loader.LoadSkillsForContext([]string{name})
+			if strings.TrimSpace(loaded) != "" {
+				parts = append(parts, loaded)
+				observe(name)
+			}
+		}
+		content = strings.Join(parts, "\n\n")
+	}
 	if strings.TrimSpace(content) == "" {
 		return ""
 	}
@@ -1523,7 +1541,11 @@ func (cb *ContextBuilder) ResolveActiveSkillsForLoop(skillNames []string, scope 
 }
 
 func (cb *ContextBuilder) buildActiveSkillsPromptParts(skillNames []string, scope LoopScope) []PromptPart {
-	skillsText := cb.buildActiveSkillsContext(skillNames, scope)
+	return cb.buildActiveSkillsPromptPartsObserved(skillNames, scope, nil)
+}
+
+func (cb *ContextBuilder) buildActiveSkillsPromptPartsObserved(skillNames []string, scope LoopScope, observe func(string)) []PromptPart {
+	skillsText := cb.buildActiveSkillsContextObserved(skillNames, scope, observe)
 	if strings.TrimSpace(skillsText) == "" {
 		return nil
 	}

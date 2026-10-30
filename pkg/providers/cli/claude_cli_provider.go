@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // ClaudeCliProvider implements LLMProvider using the claude CLI as a subprocess.
@@ -29,6 +30,9 @@ func NewClaudeCliProvider(workspace string) *ClaudeCliProvider {
 func (p *ClaudeCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
+	if protocoltypes.RestrictedExecution(ctx) {
+		return nil, fmt.Errorf("claude CLI cannot enforce restricted execution resources")
+	}
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
 

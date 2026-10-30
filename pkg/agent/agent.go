@@ -110,6 +110,7 @@ type processOptions struct {
 	SenderDisplayName string          // Current sender display name for dynamic context
 	UserMessage       string          // User message content (may include prefix)
 	ForcedSkills      []string        // Skills explicitly requested for this message
+	ObserveSkill      func(string)
 	// ModelTier is the user-picked tier for THIS message (composer selector).
 	// Empty = main model. Validated by the caller; unknown values are a no-op.
 	// (seucaranguejo fork)
@@ -621,6 +622,10 @@ func (al *AgentLoop) runAgentLoopResult(
 	}
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
+	if err != nil {
+		return turnresult.Failure(err), err
+	}
+	opts, err = executionPolicyOptions(ctx, agent, opts)
 	if err != nil {
 		return turnresult.Failure(err), err
 	}

@@ -717,6 +717,10 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		err := errors.New("invalid cron execution identity")
 		return turnresult.Failure(err), err
 	}
+	if _, restricted := ExecutionPolicySkills(ctx); restricted && job.Payload.Command != "" {
+		err := errors.New("restricted automation cannot execute a raw command or script")
+		return turnresult.Failure(err), err
+	}
 	// Get channel/chatID from job payload
 	channel := job.Payload.Channel
 	chatID := job.Payload.To

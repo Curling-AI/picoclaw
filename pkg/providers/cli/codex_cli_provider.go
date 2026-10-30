@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // CodexCliProvider implements LLMProvider by wrapping the codex CLI as a subprocess.
@@ -30,6 +31,9 @@ func NewCodexCliProvider(workspace string) *CodexCliProvider {
 func (p *CodexCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
+	if protocoltypes.RestrictedExecution(ctx) {
+		return nil, fmt.Errorf("codex CLI cannot enforce restricted execution resources")
+	}
 	if p.command == "" {
 		return nil, fmt.Errorf("codex command not configured")
 	}

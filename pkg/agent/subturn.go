@@ -438,6 +438,11 @@ func spawnSubTurn(
 	if !opts.TurnProfile.Enabled {
 		opts.TurnProfile = parentTS.opts.TurnProfile
 	}
+	var policyErr error
+	opts, policyErr = executionPolicyOptions(childCtx, &agent, opts)
+	if policyErr != nil {
+		return tools.ErrorResult(policyErr.Error()).WithError(policyErr), policyErr
+	}
 
 	// Create event scope for the child turn
 	scope := al.newTurnEventScope(

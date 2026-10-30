@@ -30,6 +30,7 @@ func promptBuildRequestForTurn(
 		Overlays:          promptOverlaysForOptions(ts.opts),
 		Loop:              ts.opts.Loop,
 	}
+	req.ObserveSkill = ts.opts.ObserveSkill
 	hasCallableTools := true
 	if ts.profile.Enabled {
 		hasCallableTools = turnProfileHasCallableTools(ts.profile, ts.agent.Tools.ToProviderDefs()) ||

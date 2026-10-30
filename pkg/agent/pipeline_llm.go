@@ -19,6 +19,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // promptCacheKeyForSession names the upstream cache partition of one session.
@@ -234,6 +235,9 @@ func (p *Pipeline) CallLLM(
 	// Verified via A/B replay: with the referenced defs absent, glm-5.2
 	// returned empty 6/6; with them present, it acted 48/48.
 	ts.seedOfferedTools(ts.agent.Tools)
+	if _, restricted := tools.ExecutionPolicySkills(turnCtx); restricted {
+		ts.offerTools(ts.profile.AllowedTools)
+	}
 	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
 		ts.offerTools(referenced)
 		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
