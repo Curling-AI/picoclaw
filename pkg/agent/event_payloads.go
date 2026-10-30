@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/memory"
+)
 
 // TurnEndStatus describes the terminal state of a turn.
 type TurnEndStatus string
@@ -121,6 +125,8 @@ type ContextCompressPayload struct {
 	Reason            ContextCompressReason
 	DroppedMessages   int
 	RemainingMessages int
+	// ContentTransition is the exact committed mutation, never a later reread.
+	ContentTransition *memory.ContentTransition `json:"contentTransition,omitempty"`
 }
 
 // SessionSummarizePayload describes a completed async session summarization.
@@ -129,6 +135,7 @@ type SessionSummarizePayload struct {
 	KeptMessages       int
 	SummaryLen         int
 	OmittedOversized   bool
+	ContentTransition  *memory.ContentTransition `json:"contentTransition,omitempty"`
 }
 
 // ToolExecStartPayload describes a tool execution request.

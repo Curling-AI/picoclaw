@@ -25,6 +25,7 @@ func (al *AgentLoop) runTurn(
 		modelMu.RLock()
 		defer modelMu.RUnlock()
 	}
+	ts.historyRunID = providers.HistoryRun(ctx)
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
@@ -231,7 +232,7 @@ func (al *AgentLoop) runTurn(
 					al.joinPersonMessage(turnCtx, ts, exec, pm, iteration)
 				}
 				if !ts.opts.NoHistory {
-					ts.agent.Sessions.AddFullMessage(ts.sessionKey, pm)
+					ts.appendHistoryMessage(pm)
 					ts.recordPersistedMessage(pm)
 					ts.ingestMessage(turnCtx, al, pm)
 				}
@@ -395,7 +396,11 @@ func (al *AgentLoop) runTurn(
 func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
 	ts.setPhase(TurnPhaseAborted)
 	if !ts.opts.NoHistory {
-		if err := ts.restoreSession(ts.agent); err != nil {
+		restored, err := ts.restoreSession(ts.agent)
+		if restored {
+			al.forgetWrittenSelfDeliveries(ts)
+		}
+		if err != nil {
 			al.emitEvent(
 				runtimeevents.KindAgentError,
 				ts.eventMeta("abortTurn", "turn.error"),
@@ -406,9 +411,6 @@ func (al *AgentLoop) abortTurn(ts *turnState) (turnResult, error) {
 			)
 			return turnResult{}, err
 		}
-		// The restore took what the turn's scripts sent; the turn's end queues
-		// them again. (seucaranguejo fork — see self_delivery.go)
-		al.forgetWrittenSelfDeliveries(ts)
 	}
 	return turnResult{status: TurnEndStatusAborted}, nil
 }

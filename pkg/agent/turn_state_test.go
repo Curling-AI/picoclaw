@@ -88,6 +88,7 @@ func TestMatchingTurnMessageTail_IgnoresTheDeliveryClock(t *testing.T) {
 	if err := json.Unmarshal(data, &stored); err != nil {
 		t.Fatal(err)
 	}
+	stored.Delivery.ID = "550e8400-e29b-41d4-a716-446655440000"
 	history := []providers.Message{{Role: "user", Content: "older"}, stored}
 	if got := matchingTurnMessageTail(history, []providers.Message{held}); got != 1 {
 		t.Fatalf("matchingTurnMessageTail() = %d, want 1", got)

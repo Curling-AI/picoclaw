@@ -554,6 +554,7 @@ func TestHardAbortSessionRollback(t *testing.T) {
 		depth:                0,
 		session:              sess,
 		initialHistoryLength: 2, // Snapshot: 2 messages
+		restorePointHistory:  append([]providers.Message{}, sess.GetHistory("")...),
 		pendingResults:       make(chan *tools.ToolResult, 16),
 		concurrencySem:       make(chan struct{}, 5),
 	}
@@ -739,6 +740,7 @@ func TestHardAbortOrderOfOperations(t *testing.T) {
 		depth:                0,
 		session:              sess,
 		initialHistoryLength: 1, // Snapshot: 1 message
+		restorePointHistory:  append([]providers.Message{}, sess.GetHistory("")[:1]...),
 		pendingResults:       make(chan *tools.ToolResult, 16),
 		concurrencySem:       make(chan struct{}, 5),
 	}

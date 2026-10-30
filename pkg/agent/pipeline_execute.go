@@ -337,7 +337,7 @@ toolLoop:
 
 					messages = append(messages, toolResultMsg)
 					if !ts.opts.NoHistory {
-						ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
+						ts.appendHistoryMessage(toolResultMsg)
 						ts.recordPersistedMessage(toolResultMsg)
 						ts.ingestMessage(turnCtx, al, toolResultMsg)
 					}
@@ -405,7 +405,7 @@ toolLoop:
 								msg := subTurnResultPromptMessage(content)
 								messages = append(messages, msg)
 								if !ts.opts.NoHistory {
-									ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+									ts.appendHistoryMessage(msg)
 								}
 							}
 						default:
@@ -758,7 +758,7 @@ toolLoop:
 		}
 		messages = append(messages, toolResultMsg)
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
+			ts.appendHistoryMessage(toolResultMsg)
 			ts.recordPersistedMessage(toolResultMsg)
 			ts.ingestMessage(turnCtx, al, toolResultMsg)
 		}
@@ -857,7 +857,7 @@ toolLoop:
 					msg := subTurnResultPromptMessage(content)
 					messages = append(messages, msg)
 					if !ts.opts.NoHistory {
-						ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+						ts.appendHistoryMessage(msg)
 					}
 				}
 			default:
@@ -901,7 +901,7 @@ toolLoop:
 			Attachments: append([]providers.Attachment(nil), handledAttachments...),
 		}
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, summaryMsg)
+			ts.appendHistoryMessage(summaryMsg)
 			ts.recordPersistedMessage(summaryMsg)
 			ts.ingestMessage(turnCtx, al, summaryMsg)
 			if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
@@ -977,7 +977,7 @@ func (al *AgentLoop) skipToolCalls(
 		}
 		answered = append(answered, skippedMsg)
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+			ts.appendHistoryMessage(skippedMsg)
 			ts.recordPersistedMessage(skippedMsg)
 		}
 	}

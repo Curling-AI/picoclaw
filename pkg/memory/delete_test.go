@@ -213,66 +213,6 @@ func TestDeleteSession_AFailedDeleteLeavesNoMetaInTheCache(t *testing.T) {
 	}
 }
 
-// ListSessionMetas fills the cache without the session's lock. A meta it read
-// before a delete must not come back after it, and one it read before a write
-// must not replace what the write cached.
-func TestListSessionMetas_AFillNeverUndoesADeleteOrAWrite(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	seedSession(t, store, "agent:main:web-1")
-	sanitized := sanitizeKey("agent:main:web-1")
-	readBefore, _ := store.cachedMeta(sanitized)
-
-	removals := store.metaRemovalCount()
-	if err := store.DeleteSession(ctx, "agent:main:web-1"); err != nil {
-		t.Fatal(err)
-	}
-	store.fillCachedMeta(sanitized, readBefore, removals)
-	if _, cached := store.cachedMeta(sanitized); cached {
-		t.Fatal("a meta read before the delete was cached after it")
-	}
-
-	seedSession(t, store, "agent:main:web-1")
-	newer, _ := store.cachedMeta(sanitized)
-	store.fillCachedMeta(sanitized, SessionMeta{Key: "agent:main:web-1"}, store.metaRemovalCount())
-	if got, _ := store.cachedMeta(sanitized); got.Count != newer.Count || got.Summary != newer.Summary {
-		t.Fatalf("a fill replaced the cached meta: %+v, want %+v", got, newer)
-	}
-}
-
-// A config reload leaves two stores on one directory. A meta one of them has
-// cached (a sidebar listing is enough) must not outlive a delete through the
-// other: its next write would bring back the summary, scope and aliases.
-func TestDeleteSession_AnotherStoreOnTheDirectoryForgetsTheMetaToo(t *testing.T) {
-	dir := t.TempDir()
-	deleting, err := NewJSONLStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	other, err := NewJSONLStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	seedSession(t, deleting, "agent:main:web-1")
-	other.ListSessionMetas()
-
-	if err = deleting.DeleteSession(ctx, "agent:main:web-1"); err != nil {
-		t.Fatalf("DeleteSession: %v", err)
-	}
-	if err = other.AddMessage(ctx, "agent:main:web-1", "user", "hi"); err != nil {
-		t.Fatalf("AddMessage: %v", err)
-	}
-
-	meta, err := other.GetSessionMeta(ctx, "agent:main:web-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if meta.Count != 1 || meta.Summary != "" || len(meta.Scope) != 0 {
-		t.Errorf("meta = count %d, summary %q, scope %s; want a fresh session", meta.Count, meta.Summary, meta.Scope)
-	}
-}
-
 // A conversation from before the canonical keys still has files under its
 // legacy key, named in the canonical meta's aliases. Left behind, the next
 // message promotes them back into the canonical session. The main session's

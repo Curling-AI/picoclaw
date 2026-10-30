@@ -31,6 +31,43 @@ func newBackend(t *testing.T) *session.JSONLBackend {
 	return session.NewJSONLBackend(store)
 }
 
+func TestJSONLBackendSavePreservesUnownedDurableTail(t *testing.T) {
+	dir := t.TempDir()
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := session.NewJSONLBackend(store)
+	b.AddMessage("unproven-save", "user", "owned message")
+	file, err := os.OpenFile(filepath.Join(dir, "unproven-save.jsonl"), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("{\"role\":\"user\",\"content\":\"external durable message\"}\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Save("unproven-save"); err != nil {
+		t.Fatal("Save rejected ordinary content without capture proof", err)
+	}
+	history := b.GetHistory("unproven-save")
+	if len(history) != 2 || history[1].Content != "external durable message" {
+		t.Fatal("Save erased unowned durable history", history)
+	}
+	if _, err := b.ReadHistoryPage(
+		t.Context(),
+		memory.HistoryPageRequest{Key: "unproven-save"},
+	); !errors.Is(
+		err,
+		memory.ErrHistoryRecoveryRequired,
+	) {
+		t.Fatal("ordinary Save fabricated a capture proof", err)
+	}
+}
+
 func TestJSONLBackend_AddAndGetHistory(t *testing.T) {
 	b := newBackend(t)
 

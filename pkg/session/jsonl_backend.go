@@ -161,6 +161,13 @@ func (b *JSONLBackend) GetHistory(key string) []providers.Message {
 		log.Printf("session: get history: %v", err)
 		return []providers.Message{}
 	}
+	for index := range msgs {
+		msgs[index].HistoryID = ""
+		msgs[index].HistoryRunID = ""
+		msgs[index].HistoryOrderVersion = 0
+		msgs[index].HistoryStreamID = ""
+		msgs[index].HistorySequence = 0
+	}
 	return msgs
 }
 
@@ -200,6 +207,11 @@ func (b *JSONLBackend) TruncateHistory(key string, keepLast int) {
 // space from logically truncated messages (no-op when there are none).
 func (b *JSONLBackend) Save(key string) error {
 	key = b.resolveSessionKey(key)
+	if store, ok := b.store.(interface {
+		CompactForSessionSave(ctx context.Context, sessionKey string) error
+	}); ok {
+		return store.CompactForSessionSave(context.Background(), key)
+	}
 	return b.store.Compact(context.Background(), key)
 }
 
@@ -223,7 +235,7 @@ func (b *JSONLBackend) ListSessions() []string {
 func (b *JSONLBackend) DeleteSession(key string) error {
 	deleter, ok := b.store.(sessionDeletingStore)
 	if !ok {
-		return errors.New("session: the store cannot delete sessions")
+		return memory.ErrHistoryUnsupported
 	}
 	return deleter.DeleteSession(context.Background(), b.resolveSessionKey(key))
 }
