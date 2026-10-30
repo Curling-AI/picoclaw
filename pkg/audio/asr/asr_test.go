@@ -221,6 +221,18 @@ func TestDetectTranscriber(t *testing.T) {
 			},
 			wantName: "audio-model",
 		},
+		{
+			// Sem chave nem base, o provider não sobe e NewAudioModelTranscriber
+			// devolve nil: não pode virar "tem transcritor".
+			name: "voice model whose provider does not build has no transcriber",
+			cfg: &config.Config{
+				Voice: config.VoiceConfig{ModelName: "broken"},
+				ModelList: []*config.ModelConfig{
+					{ModelName: "broken", Model: "openai/gpt-audio"},
+				},
+			},
+			wantNil: true,
+		},
 	}
 
 	for _, tc := range tests {

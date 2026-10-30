@@ -69,7 +69,7 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 		return msg
 	}
 
-	if al.transcriber != nil {
+	if al.currentTranscriber() != nil {
 		al.sendTranscriptionFeedback(ctx, msg.Channel, msg.ChatID, msg.MessageID, transcriptions)
 	}
 
@@ -113,10 +113,12 @@ func (al *AgentLoop) resolveAudioRef(ref string) (string, media.MediaMeta, error
 // transcribeAudio returns the text, or the note that replaces the audio when
 // there is none: no transcriber, a failed call, or no speech in the audio.
 func (al *AgentLoop) transcribeAudio(ctx context.Context, ref, path string) (text, note string) {
-	if al.transcriber == nil {
+	// (seucaranguejo fork) Leitura única, sob lock: SetTranscriber troca o campo.
+	tr := al.currentTranscriber()
+	if tr == nil {
 		return "", noTranscriberAudioNote
 	}
-	result, err := al.transcriber.Transcribe(ctx, path)
+	result, err := tr.Transcribe(ctx, path)
 	if err != nil {
 		logger.WarnCF("voice", "Transcription failed", map[string]any{"ref": ref, "error": err})
 		return "", failedTranscriptionAudioNote
