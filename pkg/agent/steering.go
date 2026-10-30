@@ -196,8 +196,9 @@ func (sq *steeringQueue) getMode() SteeringMode {
 }
 
 // Steer enqueues a user message to be injected into the currently running
-// agent loop. The message will be picked up after the current tool finishes
-// executing, causing any remaining tool calls in the batch to be skipped.
+// agent loop. The message will be picked up once the batch of tool calls in
+// flight finishes (seucaranguejo fork: the rest of the batch is no longer
+// skipped, see steering_join.go).
 func (al *AgentLoop) Steer(msg providers.Message) error {
 	scope := ""
 	agentID := ""

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -565,7 +566,7 @@ func (t *interruptibleTool) Execute(ctx context.Context, args map[string]any) *t
 	return tools.ErrorResult(ctx.Err().Error()).WithError(ctx.Err())
 }
 
-func TestAgentLoop_Steering_SkipsRemainingTools(t *testing.T) {
+func TestAgentLoop_Steering_AnsweredInTheNextCall(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -1898,7 +1899,10 @@ func (m *capturingMockProvider) GetDefaultModel() string {
 	return "capturing-mock"
 }
 
-func TestAgentLoop_Steering_SkippedToolsHaveErrorResults(t *testing.T) {
+// A message sent while a batch runs no longer costs the batch its other
+// calls: they run, and the message comes after their results. (seucaranguejo
+// fork)
+func TestAgentLoop_Steering_RestOfTheBatchRunsBeforeTheMessage(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -1918,7 +1922,7 @@ func TestAgentLoop_Steering_SkippedToolsHaveErrorResults(t *testing.T) {
 
 	execCh := make(chan struct{})
 	tool1 := &slowTool{name: "slow_tool", duration: 50 * time.Millisecond, execCh: execCh}
-	tool2 := &slowTool{name: "skipped_tool", duration: 50 * time.Millisecond}
+	tool2 := &slowTool{name: "second_tool", duration: 50 * time.Millisecond}
 
 	// Provider that captures messages on the second call (after tools)
 	var secondCallMessages []providers.Message
@@ -1940,9 +1944,9 @@ func TestAgentLoop_Steering_SkippedToolsHaveErrorResults(t *testing.T) {
 			{
 				ID:   "call_2",
 				Type: "function",
-				Name: "skipped_tool",
+				Name: "second_tool",
 				Function: &providers.FunctionCall{
-					Name:      "skipped_tool",
+					Name:      "second_tool",
 					Arguments: "{}",
 				},
 				Arguments: map[string]any{},
@@ -1987,24 +1991,25 @@ func TestAgentLoop_Steering_SkippedToolsHaveErrorResults(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
-	// Check that the skipped tool result message is in the conversation
 	capMu.Lock()
 	msgs := secondCallMessages
 	capMu.Unlock()
 
-	foundSkipped := false
-	for _, m := range msgs {
-		if m.Role == "tool" && m.ToolCallID == "call_2" && m.Content == "Skipped due to queued user message." {
-			foundSkipped = true
-			break
-		}
-	}
-	if !foundSkipped {
-		// Log what we actually got
+	secondResult := slices.IndexFunc(msgs, func(m providers.Message) bool {
+		return m.Role == "tool" && m.ToolCallID == "call_2"
+	})
+	message := slices.IndexFunc(msgs, func(m providers.Message) bool {
+		return m.Role == "user" && m.Content == "interrupt!"
+	})
+	if secondResult < 0 || msgs[secondResult].Content != "executed second_tool" || message < secondResult {
 		for i, m := range msgs {
 			t.Logf("msg[%d]: role=%s toolCallID=%s content=%s", i, m.Role, m.ToolCallID, truncate(m.Content, 80))
 		}
-		t.Fatal("expected skipped tool result for call_2")
+		t.Fatalf(
+			"want call_2's own result, then the message; got the result at %d, the message at %d",
+			secondResult,
+			message,
+		)
 	}
 }
 

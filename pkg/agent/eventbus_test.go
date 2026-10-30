@@ -286,7 +286,7 @@ func TestAgentLoop_EmitsMinimalTurnEvents(t *testing.T) {
 	}
 }
 
-func TestAgentLoop_EmitsSteeringAndSkippedToolEvents(t *testing.T) {
+func TestAgentLoop_EmitsSteeringEventAndSkipsNoTool(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-eventbus-steering-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -387,16 +387,9 @@ func TestAgentLoop_EmitsSteeringAndSkippedToolEvents(t *testing.T) {
 		t.Fatalf("expected 1 steering message, got %d", steeringPayload.Count)
 	}
 
-	skippedEvt, ok := findRuntimeEvent(events, runtimeevents.KindAgentToolExecSkipped)
-	if !ok {
-		t.Fatal("expected skipped tool event")
-	}
-	skippedPayload, ok := skippedEvt.Payload.(ToolExecSkippedPayload)
-	if !ok {
-		t.Fatalf("expected ToolExecSkippedPayload, got %T", skippedEvt.Payload)
-	}
-	if skippedPayload.Tool != "tool_two" {
-		t.Fatalf("expected skipped tool_two, got %q", skippedPayload.Tool)
+	// The message waits for the batch (seucaranguejo fork).
+	if skippedEvt, found := findRuntimeEvent(events, runtimeevents.KindAgentToolExecSkipped); found {
+		t.Fatalf("a tool was skipped for the message: %+v", skippedEvt.Payload)
 	}
 
 	interruptEvt, ok := findRuntimeEvent(events, runtimeevents.KindAgentInterruptReceived)
