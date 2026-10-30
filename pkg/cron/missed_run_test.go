@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -135,6 +136,40 @@ func TestStart_ConcurrentServicesReplayAMissedOccurrenceOnce(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if got := count(); got != 1 {
 		t.Errorf("runs = %d, want one replay across both services", got)
+	}
+}
+
+// A store lock left by a lost node must not block the boot nor risk a double
+// replay: Start gives up on the catch-up and schedules the next occurrence.
+func TestStart_SkipsTheReplayWhenTheStoreLockIsHeld(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no inter-process store lock on windows")
+	}
+	timeout := storeLockTimeout
+	storeLockTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { storeLockTimeout = timeout })
+
+	now := time.Now()
+	path := writeStore(t, dailyJob(now.Add(-5*time.Minute), now.Add(-24*time.Hour)))
+	unlock, err := lockStore(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unlock)
+
+	runs, count := countRuns()
+	cs := NewCronService(path, runs)
+	t.Cleanup(cs.Stop)
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if next := nextRunOf(t, cs, "daily"); !next.After(now) {
+		t.Errorf("next run = %s, want the next occurrence", next)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := count(); got != 0 {
+		t.Errorf("runs = %d, want no replay without the lock", got)
 	}
 }
 
