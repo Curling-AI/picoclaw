@@ -21,8 +21,8 @@ github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7Oputl
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
 github.com/SevereCloud/vksdk/v3 v3.3.1 h1:O86zsp5LQnHE+O5acvuXM/s6S1LyxzVTkF6+Lup0Jyg=
 github.com/SevereCloud/vksdk/v3 v3.3.1/go.mod h1:c6WaA5aocUYsXfkcUbg2qy45V9M1VDcqHHmHIN14NAw=
-github.com/adapta-school/hulk-sdk-go v0.31.0 h1:7Nc76oWdeX4KBUx3FSAsm90zPHDeNdx5v7cPWyevA0U=
-github.com/adapta-school/hulk-sdk-go v0.31.0/go.mod h1:zutYUiEqVGj8Ppbyl3z3mFWBdxa7gXfrGbmrgiLL4M8=
+github.com/adapta-school/hulk-sdk-go v0.31.1 h1:2FZKXBxFABnPrRCrRHi01uEOaeKoZl/B8kUbXHVMxwA=
+github.com/adapta-school/hulk-sdk-go v0.31.1/go.mod h1:zutYUiEqVGj8Ppbyl3z3mFWBdxa7gXfrGbmrgiLL4M8=
 github.com/adhocore/gronx v1.20.0 h1:PD13Mo0wekkZ7ZZR9yb1TqeqTfybs7/K3ez9DmjQwEs=
 github.com/adhocore/gronx v1.20.0/go.mod h1:7oUY1WAU8rEJWmAxXR2DN0JaO4gi9khSgKjiRypqteg=
 github.com/agnivade/levenshtein v1.2.1 h1:EHBY3UOn1gwdy/VbFwgo4cxecRznFk7fKWN1KOX7eoM=

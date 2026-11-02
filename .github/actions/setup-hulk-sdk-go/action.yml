@@ -1,0 +1,14 @@
+name: Read private Hulk Go SDK
+description: Configure repository-scoped read-only access for Go module downloads.
+inputs:
+  ssh-key:
+    description: Read-only deploy key for adapta-school/hulk-sdk-go.
+    required: true
+  github-token:
+    description: Token used only to read GitHub public SSH host metadata.
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: setup.cjs
+  post: cleanup.cjs
+  post-if: always()

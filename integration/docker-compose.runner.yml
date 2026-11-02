@@ -5,12 +5,16 @@ services:
     entrypoint: ["bash", "-c"]
     volumes:
       - ${INTEGRATION_REPO_ROOT}:/workspace
+      - ${HULK_SDK_GO_AUTH_DIR:-/tmp/picoclaw-no-sdk-auth}:/hulk-sdk-auth:ro
       - picoclaw-integration-gocache:/go-build-cache
       - picoclaw-integration-gomodcache:/go-mod-cache
     environment:
       GOCACHE: /go-build-cache
       GOMODCACHE: /go-mod-cache
       GOTOOLCHAIN: local
+      GOPRIVATE: github.com/adapta-school/hulk-sdk-go
+      HULK_SDK_GO_AUTH_DIR: /hulk-sdk-auth
+      GIT_CONFIG_GLOBAL: /hulk-sdk-auth/gitconfig
       CGO_ENABLED: "0"
       GOFLAGS: -tags=goolm,stdjson,integration
 
