@@ -47,7 +47,9 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 	for _, ref := range msg.Media {
 		path, meta, err := al.resolveAudioRef(ref)
 		if err != nil {
-			logger.WarnCF("voice", "Failed to resolve media ref", map[string]any{"ref": ref, "error": err})
+			// (seucaranguejo fork) Extension only: a web upload's ref carries the
+			// person's file name, and so does the store's "unknown ref" error.
+			logger.WarnCF("voice", "Failed to resolve media ref", map[string]any{"extension": filepath.Ext(ref)})
 			keptMedia = append(keptMedia, ref)
 			continue
 		}
@@ -120,7 +122,7 @@ func (al *AgentLoop) transcribeAudio(ctx context.Context, ref, path string) (tex
 	}
 	result, err := tr.Transcribe(ctx, path)
 	if err != nil {
-		logger.WarnCF("voice", "Transcription failed", map[string]any{"ref": ref, "error": err})
+		logger.WarnCF("voice", "Transcription failed", map[string]any{"extension": filepath.Ext(ref), "error": err})
 		return "", failedTranscriptionAudioNote
 	}
 	if result.Text == "" {
