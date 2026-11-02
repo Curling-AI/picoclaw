@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -189,12 +190,44 @@ func TestPublicHistoryPreparationRetainsSourceUntilStructuralEditIsCovered(t *te
 					t.Context(),
 					key,
 					[]providers.Message{{Role: "user", Content: "edited"}},
+				); err != nil {
+					t.Fatal("unavailable proof blocked model context replacement", err)
+				}
+				publicAfter, readErr := os.ReadFile(store.publicHistoryPath(key))
+				if readErr != nil || !bytes.Equal(publicBefore, publicAfter) {
+					t.Fatal("fallback altered already confirmed display", readErr)
+				}
+				sourceAfter, readErr := os.ReadFile(store.jsonlPath(key))
+				if readErr != nil || !bytes.HasPrefix(sourceAfter, sourceBefore) ||
+					bytes.Count(sourceAfter, []byte{'\n'}) != 81 {
+					t.Fatal("80-row origin was not retained before restored context", readErr)
+				}
+				model, readErr := store.GetHistory(t.Context(), key)
+				if readErr != nil || len(model) != 1 || model[0].Content != "edited" {
+					t.Fatal("restored model context was not isolated", model, readErr)
+				}
+				meta, readErr := store.readMeta(key)
+				if readErr != nil || meta.Skip != 80 || meta.Count != 81 || meta.PublicHistoryComplete {
+					t.Fatal("fallback invented coverage or lost origin boundary", meta, readErr)
+				}
+				store.SetPublicHistoryProjector(nil)
+				if _, readErr = store.PreparePublicHistory(
+					t.Context(),
+					key,
+					next.Cursor,
 				); !errors.Is(
-					err,
+					readErr,
 					ErrPublicHistoryCoverage,
 				) {
-					t.Fatal("incomplete preparation permitted structural replacement", err)
+					t.Fatal("fallback claimed automatic preparation continuity", readErr)
 				}
+				if readErr = store.Compact(t.Context(), key); !errors.Is(readErr, ErrPublicHistoryCoverage) {
+					t.Fatal("fallback authorized collection of its origin", readErr)
+				}
+				if readErr = store.ClearHistory(t.Context(), key); readErr != nil {
+					t.Fatal("fallback blocked explicit clear", readErr)
+				}
+				return
 			}
 			publicAfter, err := os.ReadFile(store.publicHistoryPath(key))
 			if err != nil || string(publicBefore) != string(publicAfter) {

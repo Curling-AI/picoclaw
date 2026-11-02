@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -60,12 +61,6 @@ func (s *JSONLStore) replaceHistory(
 	original SessionMeta,
 ) error {
 	meta := original
-	if original.Skip > 0 && original.PublicHistoryVersion == PublicHistoryVersion &&
-		original.PublicHistoryPreparation == nil && !original.publicHistoryClear {
-		if err := s.verifyPublicPrefix(ctx, key, original); err != nil {
-			return err
-		}
-	}
 	old, err := s.readHistoryForContentMutation(key, &meta)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -107,6 +102,19 @@ func (s *JSONLStore) replaceHistory(
 			return appendErr
 		}
 	}
+	if !meta.publicHistoryClear && common == len(prepared) && len(prepared) < len(old) {
+		return s.commitHistorySuffixCut(key, old, prepared, meta)
+	}
+	retainPrefix := false
+	if original.Skip > 0 && original.PublicHistoryVersion == PublicHistoryVersion &&
+		original.PublicHistoryPreparation == nil && !original.publicHistoryClear {
+		if prefixErr := s.verifyPublicPrefix(ctx, key, original); prefixErr != nil {
+			if !publicProofUnavailable(prefixErr) {
+				return prefixErr
+			}
+			retainPrefix = true
+		}
+	}
 	prepared = s.projectPublicCommits(prepared, &meta)
 	if orderErr := s.prepareReplacementHistoryOrder(key, prepared, &meta); orderErr != nil {
 		return orderErr
@@ -132,11 +140,17 @@ func (s *JSONLStore) replaceHistory(
 	if len(prepared) > 0 {
 		meta.HistoryTip = prepared[len(prepared)-1].HistoryID
 	}
-	if err := s.commitHistoryRewrite(key, prepared, meta); err != nil {
-		return err
+	if !meta.publicHistoryClear && (original.PublicHistoryVersion < 0 || retainPrefix) {
+		return s.commitHistoryRetainedPrefix(key, prepared, original, meta)
 	}
-	if meta.publicHistoryClear {
-		return s.deletePublicHistoryArtifacts(key)
+	if commitErr := s.commitHistoryRewrite(key, prepared, meta); commitErr != nil {
+		// Coverage qualification failed before this writer opened its journal.
+		// Restore the model independently and retain its unproved raw prefix.
+		var artifactErr *publicArtifactVerificationError
+		if !meta.publicHistoryClear && errors.As(commitErr, &artifactErr) {
+			return s.commitHistoryRetainedPrefix(key, prepared, original, meta)
+		}
+		return commitErr
 	}
 	return nil
 }
@@ -236,4 +250,10 @@ func (s *JSONLStore) historyTipMatches(key string, meta SessionMeta) bool {
 func validHistoryDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size
+}
+
+func publicProofUnavailable(err error) bool {
+	var artifactErr *publicArtifactVerificationError
+	var pathErr *os.PathError
+	return errors.As(err, &artifactErr) || (errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr))
 }

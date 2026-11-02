@@ -11,9 +11,12 @@ import (
 // Only this journal's exact OLD/NEW display may be retired after both owner
 // metadata and model source were removed externally. An unrelated file stays.
 func (s *JSONLStore) retireAbsentHistorySource(ctx context.Context, key string, recovery historyWriteRecovery) error {
-	if recovery.Meta.Key != key || (recovery.Next.Key != "" && recovery.Next.Key != key) {
+	if recovery.Meta.Key == "" ||
+		filepath.Base(s.historyRecoveryPath(recovery.Meta.Key)) != filepath.Base(s.historyRecoveryPath(key)) ||
+		(recovery.Next.Key != "" && recovery.Next.Key != recovery.Meta.Key) {
 		return ErrHistoryOwnershipUnavailable
 	}
+	key = recovery.Meta.Key
 	if recovery.PublicMediaCleanup && !s.requiresPublicHistoryCleanup() {
 		return errPublicHistoryCleanupUnavailable
 	}

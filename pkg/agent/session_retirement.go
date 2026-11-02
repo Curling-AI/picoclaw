@@ -15,5 +15,11 @@ func (al *AgentLoop) RetireSession(ctx context.Context, key string, remove func(
 		return err
 	}
 	al.dropMirroredDeliveriesLocked(key)
-	return remove()
+	if err := remove(); err != nil {
+		return err
+	}
+	// Envelopes can resolve/stamp while remove is running, before they take
+	// this stripe. Retire those too before releasing the completed deletion.
+	al.dropMirroredDeliveriesLocked(key)
+	return nil
 }
