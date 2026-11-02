@@ -44,6 +44,27 @@ func TestDuplicateExecutionPreservesPriorOutcomeAndSchedule(t *testing.T) {
 	}
 }
 
+func TestManualIdentityRequiresAnExecutionHandler(t *testing.T) {
+	service := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), func(*CronJob) (string, error) {
+		t.Error("a bound request reached a legacy callback without its identity")
+		return "", nil
+	})
+	period := int64(time.Hour / time.Millisecond)
+	job, err := service.AddJob(
+		"Identity fixture",
+		CronSchedule{Kind: "every", EveryMS: &period},
+		"fixture",
+		"cli",
+		"fixture",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.RunNowWithIdentity(job.ID, uuid.NewString(), time.Now().UTC()) {
+		t.Fatal("an identity-bound dispatch accepted a legacy-only callback")
+	}
+}
+
 func TestManualIdentityReachesHandlerWithoutUnpausingJob(t *testing.T) {
 	service := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
 	period := int64(time.Hour / time.Millisecond)

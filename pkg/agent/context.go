@@ -1504,7 +1504,7 @@ func (cb *ContextBuilder) buildActiveSkillsContextObserved(
 				observe(name)
 			}
 		}
-		content = strings.Join(parts, "\n\n")
+		content = strings.Join(parts, "\n\n---\n\n")
 	}
 	if strings.TrimSpace(content) == "" {
 		return ""
