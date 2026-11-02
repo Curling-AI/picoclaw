@@ -2869,12 +2869,18 @@ func TestStopAllUnblocksFullWorkerQueues(t *testing.T) {
 			switch mode {
 			case "outbound":
 				go func() { m.dispatchOutbound(ctx); producerDone <- ctx.Err() }()
-				if err := m.bus.PublishOutbound(ctx, testOutboundMessage(bus.OutboundMessage{Channel: "test"})); err != nil {
+				if err := m.bus.PublishOutbound(
+					ctx,
+					testOutboundMessage(bus.OutboundMessage{Channel: "test"}),
+				); err != nil {
 					t.Fatal(err)
 				}
 			case "media":
 				go func() { m.dispatchOutboundMedia(ctx); producerDone <- ctx.Err() }()
-				if err := m.bus.PublishOutboundMedia(ctx, testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: "test"})); err != nil {
+				if err := m.bus.PublishOutboundMedia(
+					ctx,
+					testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: "test"}),
+				); err != nil {
 					t.Fatal(err)
 				}
 			case "direct":
@@ -2954,7 +2960,12 @@ func TestUnregisterChannelDrainsAcceptedWorkerQueues(t *testing.T) {
 	t.Cleanup(w.closeQueues)
 	for range 2 {
 		if !w.enqueue(t.Context(), testOutboundMessage(bus.OutboundMessage{Channel: "test", Content: "accepted"})) ||
-			!w.enqueueMedia(t.Context(), testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: "test", Parts: []bus.MediaPart{{Ref: "media://accepted"}}})) {
+			!w.enqueueMedia(
+				t.Context(),
+				testOutboundMediaMessage(
+					bus.OutboundMediaMessage{Channel: "test", Parts: []bus.MediaPart{{Ref: "media://accepted"}}},
+				),
+			) {
 			t.Fatal("running worker refused an enqueue")
 		}
 	}
@@ -3018,7 +3029,10 @@ func TestDispatcherSkipsStoppedWorkers(t *testing.T) {
 				for _, name := range []string{"stopped", "live"} {
 					var err error
 					if mode == "media" {
-						err = m.bus.PublishOutboundMedia(ctx, testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: name}))
+						err = m.bus.PublishOutboundMedia(
+							ctx,
+							testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: name}),
+						)
 					} else {
 						err = m.bus.PublishOutbound(ctx, testOutboundMessage(bus.OutboundMessage{Channel: name}))
 					}
