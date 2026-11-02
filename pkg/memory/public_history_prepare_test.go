@@ -154,58 +154,80 @@ func TestPublicHistoryPreparationRequiresExistingScopeAndEmptyImportBoundary(t *
 	}
 }
 
-func TestPublicHistoryPreparationPreservesUncoveredPrefixAndInvalidatesAfterEdit(t *testing.T) {
+func TestPublicHistoryPreparationRetainsSourceUntilStructuralEditIsCovered(t *testing.T) {
 	for _, operation := range []string{"compact", "edit"} {
 		t.Run(operation, func(t *testing.T) {
 			store, key := legacyPublicFixture(t, 80)
-			first, firstErr8 := store.PreparePublicHistory(t.Context(), key, "")
-			if firstErr8 != nil {
-				t.Fatal(firstErr8)
+			first, err := store.PreparePublicHistory(t.Context(), key, "")
+			if err != nil {
+				t.Fatal(err)
 			}
-			next, firstErr8 := store.PreparePublicHistory(t.Context(), key, first.Cursor)
-			if firstErr8 != nil {
-				t.Fatal(firstErr8)
+			next, err := store.PreparePublicHistory(t.Context(), key, first.Cursor)
+			if err != nil {
+				t.Fatal(err)
 			}
-			before, firstErr8 := os.ReadFile(store.publicHistoryPath(key))
-			if firstErr8 != nil {
-				t.Fatal(firstErr8)
+			publicBefore, err := os.ReadFile(store.publicHistoryPath(key))
+			if err != nil {
+				t.Fatal(err)
 			}
+			sourceBefore, err := os.ReadFile(store.jsonlPath(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.SetPublicHistoryProjector(
+				unavailablePublicVerifier{err: errors.New("historical artifact unavailable")},
+			)
 			if operation == "compact" {
-				if operationErr9 := store.TruncateHistory(t.Context(), key, 20); operationErr9 != nil {
-					t.Fatal(operationErr9)
+				if err = store.TruncateHistory(t.Context(), key, 20); err != nil {
+					t.Fatal(err)
 				}
-				if err := store.Compact(t.Context(), key); !errors.Is(err, ErrPublicHistoryCoverage) {
-					t.Fatal("physical GC discarded an incompletely prepared prefix", err)
+				if err = store.Compact(t.Context(), key); !errors.Is(err, ErrPublicHistoryCoverage) {
+					t.Fatal("incomplete preparation permitted physical GC", err)
 				}
 			} else {
-				if operationErr11 := store.SetHistory(
+				if err = store.SetHistory(
 					t.Context(),
 					key,
 					[]providers.Message{{Role: "user", Content: "edited"}},
-				); operationErr11 != nil {
-					t.Fatal(operationErr11)
+				); !errors.Is(
+					err,
+					ErrPublicHistoryCoverage,
+				) {
+					t.Fatal("incomplete preparation permitted structural replacement", err)
 				}
 			}
-			if operation == "compact" {
-				after, err := os.ReadFile(store.publicHistoryPath(key))
-				if err != nil || string(before) != string(after) {
-					t.Fatal("refused GC changed incomplete display evidence", err)
+			publicAfter, err := os.ReadFile(store.publicHistoryPath(key))
+			if err != nil || string(publicBefore) != string(publicAfter) {
+				t.Fatal("refused operation changed display checkpoint", err)
+			}
+			sourceAfter, err := os.ReadFile(store.jsonlPath(key))
+			if err != nil || string(sourceBefore) != string(sourceAfter) {
+				t.Fatal("refused operation discarded source", err)
+			}
+			store.SetPublicHistoryProjector(nil)
+			for step := 0; !next.Ready && step < 3; step++ {
+				next, err = store.PreparePublicHistory(t.Context(), key, next.Cursor)
+				if err != nil {
+					t.Fatal("refused operation stranded preparation", err)
 				}
-				return
 			}
-			if _, operationErr12 := store.PreparePublicHistory(
-				t.Context(),
-				key,
-				next.Cursor,
-			); !errors.Is(
-				operationErr12,
-				ErrPublicHistoryCoverage,
-			) {
-				t.Fatalf("incompatible source resumed: %v", operationErr12)
+			if !next.Ready {
+				t.Fatal("preparation did not finish")
 			}
-			after, firstErr8 := os.ReadFile(store.publicHistoryPath(key))
-			if firstErr8 != nil || string(before) != string(after) {
-				t.Fatal("invalidated preparation destroyed source evidence")
+			if operation == "edit" {
+				if err = store.SetHistory(
+					t.Context(),
+					key,
+					[]providers.Message{{Role: "user", Content: "edited"}},
+				); err != nil {
+					t.Fatal("covered structural edit was rejected", err)
+				}
+				public, readErr := store.ReadPublicHistory(t.Context(), key)
+				if readErr != nil || len(public.Entries) != 1 || public.Entries[0].Message.Content != "edited" {
+					t.Fatal("covered edit did not produce intended display", public, readErr)
+				}
+			} else if err = store.Compact(t.Context(), key); err != nil {
+				t.Fatal("covered physical GC was rejected", err)
 			}
 		})
 	}

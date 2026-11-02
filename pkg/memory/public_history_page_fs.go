@@ -60,7 +60,7 @@ func ReadPublicHistoryPageFS(
 		meta.PublicHistoryPreparation != nil || !meta.PublicHistoryComplete {
 		return PublicHistoryPage{}, ErrPublicHistoryCoverage
 	}
-	if operationErr4 := checkPublicReadFiles(ctx, files, name, meta); operationErr4 != nil {
+	if operationErr4 := checkPublicReadFiles(ctx, files, name, &meta); operationErr4 != nil {
 		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, operationErr4)
 	}
 	index, operationErr3 := openPublicIndex(files, name+".jsonl.public.index", meta)
@@ -92,8 +92,9 @@ func ReadPublicHistoryPageFS(
 	if operationErr3 != nil || !bytes.Equal(metadata, current) {
 		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, operationErr3)
 	}
-	if operationErr5 := checkPublicReadFiles(ctx, files, name, meta); operationErr5 != nil {
+	if operationErr5 := checkPublicReadFiles(ctx, files, name, &meta); operationErr5 != nil {
 		return PublicHistoryPage{}, operationErr5
 	}
+	page.Entries = publicHistoryResult(meta, page.Entries).Entries
 	return page, nil
 }

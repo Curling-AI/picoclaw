@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -123,6 +124,11 @@ func (s *JSONLStore) PreparePublicHistory(
 	if cursor != expected.Cursor {
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
 	}
+	if meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable {
+		if err := s.hydrateContentStorage(ctx, canonical, &meta, true, true); err != nil {
+			return PublicHistoryPreparationResult{}, err
+		}
+	}
 	entries, next, canonicalErr := s.readPublicPreparation(ctx, canonical, meta, state)
 	if canonicalErr != nil {
 		return PublicHistoryPreparationResult{}, canonicalErr
@@ -235,14 +241,22 @@ func (s *JSONLStore) readPublicPreparation(
 		historyReadBufferBytes,
 	)
 	entries := make([]PublicHistoryEntry, 0, PublicHistoryImportMessages)
-	bytes := 0
+	encodedBytes := 0
 	for consumed := 0; consumed < PublicHistoryImportMessages && state.Offset < state.Ceiling; consumed++ {
 		if operationErr8 := ctx.Err(); operationErr8 != nil {
 			return nil, state, operationErr8
 		}
 		line, lineErr := readPublicPreparationLine(reader)
+		if errors.Is(lineErr, io.EOF) && meta.HistoryBytes == nil && state.Line == state.Count {
+			state.Ceiling = state.Offset
+			break
+		}
 		if lineErr != nil {
 			return nil, state, lineErr
+		}
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			state.Offset += int64(len(line))
+			continue
 		}
 		entry, visible, lineErr := s.preparedPublicEntry(line, key, meta, state)
 		if lineErr != nil {
@@ -254,10 +268,10 @@ func (s *JSONLStore) readPublicPreparation(
 				return nil, state, ErrHistoryCapacity
 			}
 			encoded, _ := json.Marshal(entry)
-			if bytes+len(encoded)+1 > PublicHistoryOperationBytes {
+			if encodedBytes+len(encoded)+1 > PublicHistoryOperationBytes {
 				break
 			}
-			bytes += len(encoded) + 1
+			encodedBytes += len(encoded) + 1
 			entries = append(entries, entry)
 		}
 		state.Offset += int64(len(line))
@@ -331,6 +345,25 @@ func (s *JSONLStore) preparedPublicEntry(
 	}
 	if order.Valid() {
 		entries[0].SourceDigest = publicSourceDigest(record.Message)
+	}
+	// A pending compaction retains the exact pre-compaction locators until
+	// coverage is acknowledged. Preparation must preserve those existing refs
+	// for the prefix; its current active-row index only contains the suffix.
+	identity := meta.ContentIdentity
+	if entries[0].Ref == nil && identity != nil && !identity.Unavailable &&
+		identity.Pending != nil && identity.Pending.Mutation == nil && int(state.Line) < meta.Skip {
+		for _, row := range identity.Pending.Before.Rows {
+			if row.Line != int(state.Line)+1 {
+				continue
+			}
+			if !row.Ref.Valid() || row.Ref.DomainID != identity.DomainID ||
+				row.Digest != contentDigest(bytes.TrimRight(line, "\r\n")) {
+				return PublicHistoryEntry{}, false, ErrPublicHistoryCoverage
+			}
+			ref := row.Ref
+			entries[0].Ref = &ref
+			break
+		}
 	}
 	return entries[0], true, nil
 }

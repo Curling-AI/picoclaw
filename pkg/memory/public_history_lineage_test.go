@@ -201,3 +201,36 @@ func TestPublicHistoryProvesPrefixBeforeRetentionAndPhysicalGCWithoutSQL(t *test
 		t.Fatal("read-only source crossed its owner", err)
 	}
 }
+
+func TestPublicHistoryRemovedAnchorRetiresImportedSupplement(t *testing.T) {
+	store, request := publicImportBudgetFixture(t)
+	request.Entries[0].Message.Content = "anchored supplement"
+	if _, err := store.ImportPublicHistory(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	initializedContent(t, store, request.Key)
+	if err := store.AddMessage(t.Context(), request.Key, "assistant", "unrelated neighbor"); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := store.ReadHistoryContentFrame(t.Context(), request.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.CommitHistoryContentMutation(t.Context(), request.Key, ContentMutationPlan{
+		MutationID: uuid.NewString(), IntentDigest: contentDigest([]byte("remove anchor")),
+		DomainID: frame.DomainID, BeforeState: frame.StateToken, Kind: ContentMutationRetainPrefix,
+		RetainPrefix: &ContentMutationRetainPrefixIntent{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.ReadPublicHistory(t.Context(), request.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range after.Entries {
+		if entry.ImportID != "" {
+			t.Fatal("removed anchor retained supplement", entry)
+		}
+	}
+}

@@ -96,7 +96,7 @@ func TestPublicHistoryIndexRepairNeverAttestsCorruptSource(t *testing.T) {
 		t.Fatal(readErr)
 	}
 	// Keep valid JSON and length while changing confirmed bytes beneath the metadata digest.
-	data = []byte(strings.Replace(string(data), "assistant", "assistanz", 1))
+	data = []byte(strings.Replace(string(data), "synthetic-0", "synthetic-X", 1))
 	if err := os.WriteFile(store.publicHistoryPath(key), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -116,5 +116,58 @@ func TestPublicHistoryIndexRepairNeverAttestsCorruptSource(t *testing.T) {
 	}
 	if !rejected {
 		t.Fatal("corrupt source was not rejected at digest verification")
+	}
+}
+
+func TestPublicHistoryPageKeepsDisplayButDropsUnavailableIndependentProofs(t *testing.T) {
+	for _, failure := range []string{"order", "domain"} {
+		t.Run(failure, func(t *testing.T) {
+			store, key := pagedStore(t, 2)
+			initializedContent(t, store, key)
+			before, err := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key})
+			if err != nil || len(before.Entries) != 2 || before.Entries[0].Ref == nil ||
+				before.Entries[0].SourceDigest == "" ||
+				!before.Entries[0].Order.Valid() {
+				t.Fatal("fixture lacks independent proofs", before, err)
+			}
+			witness := store.historyOrderWitnessPath(key)
+			if failure == "domain" {
+				witness = store.contentDomainPath(key)
+			}
+			if err := os.Remove(witness); err != nil {
+				t.Fatal(err)
+			}
+			page, err := ReadPublicHistoryPageFS(t.Context(), os.DirFS(store.dir), PublicHistoryPageRequest{Key: key})
+			if err != nil || len(page.Entries) != 2 ||
+				page.Entries[0].Message.Content != before.Entries[0].Message.Content {
+				t.Fatal("proof loss suppressed display", page, err)
+			}
+			if page.Entries[0].Order.Valid() || page.Entries[0].SourceDigest != "" {
+				t.Fatal("proof loss resurrected raw receipt authority", page.Entries[0])
+			}
+			if failure == "domain" && page.Entries[0].Ref != nil {
+				t.Fatal("missing domain resurrected content authority", page.Entries[0])
+			}
+		})
+	}
+}
+
+func TestPublicHistoryPageTailSupplementKeepsItsTransactionalIndex(t *testing.T) {
+	store, key := newTestStore(t), "sk_v1_page_tail_index"
+	run := "11111111-1111-4111-8111-111111111111"
+	if err := store.AddMessage(
+		providers.WithHistoryRun(t.Context(), run),
+		key,
+		"assistant",
+		"confirmed prefix",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordPublicMedia(t.Context(), key, run, "media supplement"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key})
+	if err != nil || len(page.Entries) != 2 || page.Entries[1].Message.Content != "media supplement" {
+		t.Fatal("tail append desynchronized public index", page, err)
 	}
 }
