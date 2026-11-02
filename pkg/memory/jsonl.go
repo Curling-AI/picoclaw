@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -43,34 +44,38 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
-	PublicHistoryPreparation *PublicHistoryPreparation `json:"public_history_preparation,omitempty"`
-	PublicHistoryVersion     int                       `json:"public_history_version,omitempty"`
-	PublicHistoryGeneration  string                    `json:"public_history_generation,omitempty"`
-	PublicHistoryRevision    uint64                    `json:"public_history_revision,omitempty"`
-	PublicHistoryBytes       int64                     `json:"public_history_bytes,omitempty"`
-	PublicHistoryCount       int64                     `json:"public_history_count,omitempty"`
-	PublicHistoryDigest      string                    `json:"public_history_digest,omitempty"`
-	PublicHistoryComplete    bool                      `json:"public_history_complete,omitempty"`
-	HistoryEpoch             int64                     `json:"history_epoch,omitempty"`
-	HistoryFileEpoch         int64                     `json:"history_file_epoch,omitempty"`
-	HistoryGeneration        string                    `json:"history_generation,omitempty"`
-	HistoryFileGeneration    string                    `json:"history_file_generation,omitempty"`
-	HistoryPrefix            int64                     `json:"history_prefix,omitempty"`
-	HistoryParentGeneration  string                    `json:"history_parent_generation,omitempty"`
-	HistoryRetainedUntil     int64                     `json:"history_retained_until,omitempty"`
-	HistoryMutationRunID     string                    `json:"history_mutation_run_id,omitempty"`
-	HistoryDigest            string                    `json:"history_digest,omitempty"`
-	HistoryTip               string                    `json:"history_tip,omitempty"`
-	HistoryBytes             *int64                    `json:"history_bytes,omitempty"`
-	HistoryRecoveryRequired  bool                      `json:"history_recovery_required,omitempty"`
-	Key                      string                    `json:"key"`
-	Summary                  string                    `json:"summary"`
-	Skip                     int                       `json:"skip"`
-	Count                    int                       `json:"count"`
-	CreatedAt                time.Time                 `json:"created_at"`
-	UpdatedAt                time.Time                 `json:"updated_at"`
-	Scope                    json.RawMessage           `json:"scope,omitempty"`
-	Aliases                  []string                  `json:"aliases,omitempty"`
+	publicProjectionUnavailable bool
+	publicRefUnavailable        bool
+	publicOrderUnavailable      bool
+	publicHistoryClear          bool
+	PublicHistoryPreparation    *PublicHistoryPreparation `json:"public_history_preparation,omitempty"`
+	PublicHistoryVersion        int                       `json:"public_history_version,omitempty"`
+	PublicHistoryGeneration     string                    `json:"public_history_generation,omitempty"`
+	PublicHistoryRevision       uint64                    `json:"public_history_revision,omitempty"`
+	PublicHistoryBytes          int64                     `json:"public_history_bytes,omitempty"`
+	PublicHistoryCount          int64                     `json:"public_history_count,omitempty"`
+	PublicHistoryDigest         string                    `json:"public_history_digest,omitempty"`
+	PublicHistoryComplete       bool                      `json:"public_history_complete,omitempty"`
+	HistoryEpoch                int64                     `json:"history_epoch,omitempty"`
+	HistoryFileEpoch            int64                     `json:"history_file_epoch,omitempty"`
+	HistoryGeneration           string                    `json:"history_generation,omitempty"`
+	HistoryFileGeneration       string                    `json:"history_file_generation,omitempty"`
+	HistoryPrefix               int64                     `json:"history_prefix,omitempty"`
+	HistoryParentGeneration     string                    `json:"history_parent_generation,omitempty"`
+	HistoryRetainedUntil        int64                     `json:"history_retained_until,omitempty"`
+	HistoryMutationRunID        string                    `json:"history_mutation_run_id,omitempty"`
+	HistoryDigest               string                    `json:"history_digest,omitempty"`
+	HistoryTip                  string                    `json:"history_tip,omitempty"`
+	HistoryBytes                *int64                    `json:"history_bytes,omitempty"`
+	HistoryRecoveryRequired     bool                      `json:"history_recovery_required,omitempty"`
+	Key                         string                    `json:"key"`
+	Summary                     string                    `json:"summary"`
+	Skip                        int                       `json:"skip"`
+	Count                       int                       `json:"count"`
+	CreatedAt                   time.Time                 `json:"created_at"`
+	UpdatedAt                   time.Time                 `json:"updated_at"`
+	Scope                       json.RawMessage           `json:"scope,omitempty"`
+	Aliases                     []string                  `json:"aliases,omitempty"`
 
 	ContentIdentity   *contentIdentityState `json:"content_identity,omitempty"`
 	summaryCheckpoint string
@@ -1027,6 +1032,9 @@ func (s *JSONLStore) TruncateHistory(
 }
 
 func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history []providers.Message) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	filtered := messageutil.FilterInvalidHistoryMessages(history)
 	lock := s.sessionLock(sessionKey)
 	lock.Lock()
@@ -1044,12 +1052,15 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	}
 	meta.UpdatedAt = now
 	ensureHistoryGeneration(&meta, sessionKey)
+	meta.publicHistoryClear, _ = ctx.Value(publicHistoryClearIntent{}).(bool)
 	prepared := make([]providers.Message, len(filtered))
 	for index, message := range filtered {
 		prepared[index] = prepareHistoryMessage(message, now, providers.HistoryRun(ctx))
 	}
-	if appended, err := s.appendHistorySuffix(sessionKey, prepared, meta); appended || err != nil {
-		return err
+	if !meta.publicHistoryClear {
+		if appended, err := s.appendHistorySuffix(sessionKey, prepared, meta); appended || err != nil {
+			return err
+		}
 	}
 	return s.replaceHistory(ctx, sessionKey, filtered, meta)
 }
@@ -1103,7 +1114,17 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	}
 	if err = s.verifyPublicPrefix(ctx, sessionKey, meta); err != nil {
 		var pathErr *os.PathError
-		if proofOptional && errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr) {
+		var artifactErr *publicArtifactVerificationError
+		if proofOptional && ctx.Err() == nil &&
+			(errors.As(err, &artifactErr) || errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr)) {
+			slog.WarnContext(
+				ctx,
+				"optional public history proof unavailable",
+				"operation",
+				"compact_session",
+				"artifact_missing",
+				errors.Is(err, os.ErrNotExist),
+			)
 			return nil
 		}
 		return err

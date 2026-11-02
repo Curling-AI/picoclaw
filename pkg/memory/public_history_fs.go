@@ -25,7 +25,7 @@ func ReadPublicHistoryFS(ctx context.Context, files fs.FS, key string) (PublicHi
 		meta.PublicHistoryPreparation != nil || meta.PublicHistoryBytes < 0 || meta.PublicHistoryCount < 0 {
 		return PublicHistory{}, ErrPublicHistoryCoverage
 	}
-	if err = checkPublicReadFiles(ctx, files, name, meta); err != nil {
+	if err = checkPublicReadFiles(ctx, files, name, &meta); err != nil {
 		return PublicHistory{}, err
 	}
 	data, err := fs.ReadFile(files, name+".jsonl.public")
@@ -43,50 +43,56 @@ func ReadPublicHistoryFS(ctx context.Context, files fs.FS, key string) (PublicHi
 	if !bytes.Equal(metadata, current) {
 		return PublicHistory{}, ErrPublicHistoryCoverage
 	}
-	if err = checkPublicReadFiles(ctx, files, name, meta); err != nil {
+	if err = checkPublicReadFiles(ctx, files, name, &meta); err != nil {
 		return PublicHistory{}, err
 	}
 	return publicHistoryResult(meta, entries), nil
 }
 
-func checkPublicReadFiles(ctx context.Context, files fs.FS, name string, meta SessionMeta) error {
+func checkPublicReadFiles(ctx context.Context, files fs.FS, name string, meta *SessionMeta) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if meta.HistoryRecoveryRequired {
-		return ErrHistoryRecoveryRequired
-	}
-	for _, suffix := range []string{".jsonl.commit.json", ".jsonl.commit.decision", ".jsonl.recovery-required"} {
+	meta.publicRefUnavailable = meta.ContentIdentity == nil || meta.ContentIdentity.Unavailable
+	meta.publicOrderUnavailable = meta.HistoryRecoveryRequired || meta.HistoryOrderVersion != HistoryOrderVersion
+	for _, suffix := range []string{".jsonl.commit.json", ".jsonl.commit.decision"} {
 		if _, err := fs.Stat(files, name+suffix); err == nil {
 			return ErrHistoryRecoveryRequired
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
+	if _, err := fs.Stat(files, name+".jsonl.recovery-required"); err == nil {
+		meta.publicOrderUnavailable = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	if meta.ContentIdentity != nil {
 		data, err := fs.ReadFile(files, name+".jsonl.content-domain")
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		var witness contentDomainWitness
-		if len(data) > maxContentTransitionMetadata || json.Unmarshal(data, &witness) != nil ||
-			witness.Key != meta.Key ||
-			!contentWitnessMatches(witness, meta) {
-			return ErrContentIdentityUnavailable
+		validDomain := err == nil && len(data) <= maxContentTransitionMetadata &&
+			json.Unmarshal(data, &witness) == nil && witness.Key == meta.Key
+		if !validDomain || !contentWitnessMatches(witness, *meta) {
+			meta.publicRefUnavailable = true
 		}
-		protected := meta.ContentIdentity.MutationVersion != 0
-		if (protected && witness.OrderCheckpoint == "") ||
-			(witness.OrderCheckpoint != "" && witness.OrderCheckpoint != contentOrderCheckpointDigest(meta)) {
-			return ErrHistoryOrderUnavailable
+		// The independent domain also fences rollback of an otherwise valid
+		// order witness. Display availability never weakens that receipt guard.
+		protected := meta.ContentIdentity.MutationVersion != 0 || meta.ContentIdentity.storage != nil
+		if !validDomain || (protected && witness.OrderCheckpoint == "") ||
+			(witness.OrderCheckpoint != "" && witness.OrderCheckpoint != contentOrderCheckpointDigest(*meta)) {
+			meta.publicOrderUnavailable = true
 		}
 	}
 	if meta.HistoryOrderVersion != 0 {
 		witness, err := fs.ReadFile(files, name+".jsonl.order-witness")
-		if err != nil {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		if !validContentReceiptWitness(witness, meta) {
-			return ErrHistoryOrderUnavailable
+		if err != nil || !validContentReceiptWitness(witness, *meta) {
+			meta.publicOrderUnavailable = true
 		}
 	}
 	return nil

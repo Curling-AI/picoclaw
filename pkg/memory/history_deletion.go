@@ -38,6 +38,9 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 		}
 	}
 	if absent {
+		if err := s.deletePublicHistoryArtifacts(key); err != nil {
+			return err
+		}
 		s.forgetDeletedHistory(key, false)
 		return nil
 	}
@@ -80,7 +83,7 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 		return err
 	}
 	images = append(images, floorImages...)
-	if len(images)+len(artifacts) > 0 {
+	if len(images)+len(artifacts) > 0 || s.requiresPublicHistoryCleanup() {
 		if err = s.beginHistoryDeletion(ctx, key, "owner", images, artifacts); err != nil {
 			return err
 		}
@@ -144,4 +147,18 @@ func DeleteJSONLSession(ctx context.Context, dir, key string) error {
 		dir: dir, metaCache: make(map[string]SessionMeta), historyPending: make(map[string]bool),
 	}
 	return s.DeleteSession(ctx, key)
+}
+
+func (s *JSONLStore) deletePublicHistoryArtifacts(key string) error {
+	if projector, ok := s.historyPublicProjector().(interface{ DeleteSession(key string) error }); ok {
+		return projector.DeleteSession(key)
+	}
+	return nil
+}
+
+var errPublicHistoryCleanupUnavailable = errors.New("public history artifact cleanup is not configured")
+
+func (s *JSONLStore) requiresPublicHistoryCleanup() bool {
+	_, ok := s.historyPublicProjector().(interface{ DeleteSession(key string) error })
+	return ok
 }

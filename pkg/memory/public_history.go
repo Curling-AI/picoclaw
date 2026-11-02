@@ -145,6 +145,21 @@ func decodePublicEntries(data []byte, meta SessionMeta) ([]PublicHistoryEntry, e
 }
 
 func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicHistory {
+	if meta.publicOrderUnavailable || meta.HistoryOrderVersion != HistoryOrderVersion || meta.HistoryRecoveryRequired {
+		entries = append([]PublicHistoryEntry(nil), entries...)
+		for i := range entries {
+			entries[i].Order = HistoryOrderProof{}
+			entries[i].AnchorOrder = HistoryOrderProof{}
+			entries[i].LegacyBeforeStreamID = ""
+		}
+	}
+	if meta.publicRefUnavailable || meta.ContentIdentity == nil || meta.ContentIdentity.Unavailable {
+		entries = append([]PublicHistoryEntry(nil), entries...)
+		for i := range entries {
+			entries[i].Ref = nil
+			entries[i].AnchorRef = nil
+		}
+	}
 	return PublicHistory{
 		Version:    PublicHistoryVersion,
 		Generation: meta.PublicHistoryGeneration,
@@ -156,12 +171,12 @@ func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicH
 
 func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicHistory, error) {
 	canonical := key
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return PublicHistory{}, err
-	}
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return PublicHistory{}, err
+	}
 	if operationErr := ctx.Err(); operationErr != nil {
 		return PublicHistory{}, operationErr
 	}
@@ -175,7 +190,7 @@ func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicH
 	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
 		return PublicHistory{}, err
 	}
-	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), meta); err != nil {
+	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); err != nil {
 		return PublicHistory{}, err
 	}
 	entries, canonicalErr := s.readPublicEntries(canonical, meta)
@@ -272,17 +287,11 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	if operationErr8 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr8 != nil {
 		return PublicHistory{}, operationErr8
 	}
-	if meta.HistoryRecoveryRequired {
-		return PublicHistory{}, ErrHistoryRecoveryRequired
+	if operationErr := s.prepareContentMutationOrderFence(canonical, &meta); operationErr != nil {
+		return PublicHistory{}, operationErr
 	}
-	if operationErr9 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr9 != nil {
-		return PublicHistory{}, operationErr9
-	}
-	if operationErr10 := s.probeHistoryOrderWitness(canonical, &meta); operationErr10 != nil {
-		return PublicHistory{}, operationErr10
-	}
-	if meta.HistoryRecoveryRequired {
-		return PublicHistory{}, ErrHistoryRecoveryRequired
+	if operationErr := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); operationErr != nil {
+		return PublicHistory{}, operationErr
 	}
 	entries, payloadErr := s.readPublicEntries(canonical, meta)
 	if payloadErr != nil {
@@ -349,11 +358,12 @@ func preparePublicImports(previous, next []PublicHistoryEntry, meta SessionMeta)
 		if entry.Order != (HistoryOrderProof{}) {
 			return nil, ErrPublicHistoryCoverage
 		}
-		if entry.Ref != nil && (meta.ContentIdentity == nil || entry.Ref.DomainID != meta.ContentIdentity.DomainID) {
+		if entry.Ref != nil &&
+			(meta.publicRefUnavailable || meta.ContentIdentity == nil || entry.Ref.DomainID != meta.ContentIdentity.DomainID) {
 			return nil, ErrPublicHistoryCoverage
 		}
 		if entry.Ref == nil && entry.AnchorID == "" && !entry.Partial && meta.ContentIdentity != nil &&
-			!meta.ContentIdentity.Unavailable {
+			!meta.ContentIdentity.Unavailable && !meta.publicRefUnavailable {
 			entry.Ref = &ContentRef{
 				DomainID:     meta.ContentIdentity.DomainID,
 				OccurrenceID: newHistoryID(),

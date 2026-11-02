@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -123,6 +124,11 @@ func (s *JSONLStore) PreparePublicHistory(
 	if cursor != expected.Cursor {
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
 	}
+	if meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable {
+		if err := s.hydrateContentStorage(ctx, canonical, &meta, true, false); err != nil {
+			return PublicHistoryPreparationResult{}, err
+		}
+	}
 	entries, next, canonicalErr := s.readPublicPreparation(ctx, canonical, meta, state)
 	if canonicalErr != nil {
 		return PublicHistoryPreparationResult{}, canonicalErr
@@ -235,14 +241,22 @@ func (s *JSONLStore) readPublicPreparation(
 		historyReadBufferBytes,
 	)
 	entries := make([]PublicHistoryEntry, 0, PublicHistoryImportMessages)
-	bytes := 0
+	encodedBytes := 0
 	for consumed := 0; consumed < PublicHistoryImportMessages && state.Offset < state.Ceiling; consumed++ {
 		if operationErr8 := ctx.Err(); operationErr8 != nil {
 			return nil, state, operationErr8
 		}
 		line, lineErr := readPublicPreparationLine(reader)
+		if errors.Is(lineErr, io.EOF) && meta.HistoryBytes == nil && state.Line == state.Count {
+			state.Ceiling = state.Offset
+			break
+		}
 		if lineErr != nil {
 			return nil, state, lineErr
+		}
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			state.Offset += int64(len(line))
+			continue
 		}
 		entry, visible, lineErr := s.preparedPublicEntry(line, key, meta, state)
 		if lineErr != nil {
@@ -254,10 +268,10 @@ func (s *JSONLStore) readPublicPreparation(
 				return nil, state, ErrHistoryCapacity
 			}
 			encoded, _ := json.Marshal(entry)
-			if bytes+len(encoded)+1 > PublicHistoryOperationBytes {
+			if encodedBytes+len(encoded)+1 > PublicHistoryOperationBytes {
 				break
 			}
-			bytes += len(encoded) + 1
+			encodedBytes += len(encoded) + 1
 			entries = append(entries, entry)
 		}
 		state.Offset += int64(len(line))

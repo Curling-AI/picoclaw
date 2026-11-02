@@ -162,7 +162,7 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...strin
 		return err
 	}
 	images = append(images, floorImages...)
-	if len(images)+len(artifacts) > 0 {
+	if len(images)+len(artifacts) > 0 || s.requiresPublicHistoryCleanup() {
 		origin := "retention"
 		if len(purpose) > 0 {
 			origin = purpose[0]

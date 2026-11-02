@@ -85,8 +85,7 @@ func (s *JSONLStore) rewritePublicContent(
 	entries []PublicHistoryEntry,
 ) (publicHistoryChange, error) {
 	if next.ContentIdentity == nil || next.ContentIdentity.Unavailable {
-		next.PublicHistoryVersion = -1
-		return publicHistoryChange{}, nil
+		return s.rewritePublicDisplay(key, original, next, messages, entries)
 	}
 	image, err := s.readContentImage(context.Background(), key)
 	if err != nil {
@@ -97,8 +96,7 @@ func (s *JSONLStore) rewritePublicContent(
 		return publicHistoryChange{}, err
 	}
 	if frame.IdentityStatus != ContentIdentityKnown {
-		next.PublicHistoryVersion = -1
-		return publicHistoryChange{}, nil
+		return s.rewritePublicDisplay(key, original, next, messages, entries)
 	}
 	active := make(map[string]bool, len(frame.Entries))
 	for _, row := range image.activeRows() {
@@ -141,8 +139,23 @@ func (s *JSONLStore) rewritePublicContent(
 	return s.replacePublicEntries(key, kept, next)
 }
 
+type publicArtifactVerificationError struct{ cause error }
+
+func (e *publicArtifactVerificationError) Error() string {
+	return "public history artifact verification unavailable"
+}
+
+func (e *publicArtifactVerificationError) Unwrap() error {
+	return errors.Join(ErrPublicHistoryCoverage, e.cause)
+}
+
 func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta SessionMeta) (resultErr error) {
-	if meta.PublicHistoryVersion == 0 || meta.Skip == 0 {
+	if meta.Skip == 0 {
+		return nil
+	}
+	if meta.PublicHistoryVersion == 0 || meta.PublicHistoryPreparation != nil {
+		// The structural transaction materializes legacy coverage before retiring
+		// its OLD source backup; an existing sidecar is not a prerequisite.
 		return nil
 	}
 	entries, err := s.readPublicEntries(key, meta)
@@ -154,7 +167,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 	for _, entry := range entries {
 		if projector != nil {
 			if err = projector.Verify(ctx, entry.Message); err != nil {
-				return err
+				return &publicArtifactVerificationError{cause: err}
 			}
 		}
 		byID[entry.ID] = entry
@@ -195,7 +208,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		public, _ := publicHistoryMessage(projected)
 		entry, exists := byID[decodedHistoryID(raw, filepath.Base(file.Name()), int64(line-1))]
 		if !exists || contentJSONDigest(entry.Message) != contentJSONDigest(public) ||
-			(meta.ContentIdentity != nil && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
+			(meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
 			return ErrPublicHistoryCoverage
 		}
 	}

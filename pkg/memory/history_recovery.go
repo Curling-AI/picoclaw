@@ -151,15 +151,16 @@ func (s *JSONLStore) applyHistoryRecoveryMarker(key string, meta *SessionMeta, m
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
-	PublicOnly        bool                   `json:"publicOnly,omitempty"`
-	Public            *publicHistoryRecovery `json:"public,omitempty"`
-	Meta              SessionMeta            `json:"meta"`
-	Next              SessionMeta            `json:"next"`
-	AppendOffset      *int64                 `json:"appendOffset,omitempty"`
-	Data              []byte                 `json:"data,omitempty"`
-	Existed           bool                   `json:"existed,omitempty"`
-	NextSummaryDigest string                 `json:"nextSummaryDigest,omitempty"`
-	Storage           *contentStorageWrite   `json:"contentStorage,omitempty"`
+	PublicMediaCleanup bool                   `json:"publicMediaCleanup,omitempty"`
+	PublicOnly         bool                   `json:"publicOnly,omitempty"`
+	Public             *publicHistoryRecovery `json:"public,omitempty"`
+	Meta               SessionMeta            `json:"meta"`
+	Next               SessionMeta            `json:"next"`
+	AppendOffset       *int64                 `json:"appendOffset,omitempty"`
+	Data               []byte                 `json:"data,omitempty"`
+	Existed            bool                   `json:"existed,omitempty"`
+	NextSummaryDigest  string                 `json:"nextSummaryDigest,omitempty"`
+	Storage            *contentStorageWrite   `json:"contentStorage,omitempty"`
 }
 
 type historyWriteDecision string
@@ -209,7 +210,10 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 		}
 		seen[key] = true
 		s.markHistoryPending(key)
-		if recoveryErr := s.recoverHistoryWrite(key); recoveryErr != nil {
+		if recoveryErr := s.recoverHistoryWrite(
+			key,
+		); recoveryErr != nil &&
+			!errors.Is(recoveryErr, errPublicHistoryCleanupUnavailable) {
 			log.Printf("memory: pending history recovery failed for %s: %v", entry.Name(), recoveryErr)
 		}
 	}
@@ -217,6 +221,7 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 }
 
 func (s *JSONLStore) beginHistoryWrite(ctx context.Context, key string, recovery historyWriteRecovery) error {
+	recovery.PublicMediaCleanup = recovery.PublicMediaCleanup || s.requiresPublicHistoryCleanup()
 	// NEW is only a commit fingerprint; recovery preserves its actual disk
 	// metadata. Only OLD needs a summary backup, which can be large.
 	// Legacy metadata-only summary/truncation changes remain valid after an
@@ -317,12 +322,6 @@ func (s *JSONLStore) recoverHistoryWriteFor(
 	if variant.Deletion != nil {
 		return historyWriteOld, s.recoverHistoryDeletion(ctx, key, data)
 	}
-	_, metaErr := os.Stat(s.metaPath(key))
-	_, dataErr := os.Stat(s.jsonlPath(key))
-	if errors.Is(metaErr, os.ErrNotExist) && errors.Is(dataErr, os.ErrNotExist) {
-		// A completed external deletion must not be undone by its old journal.
-		return historyWriteOld, s.finishHistoryWrite(key, s.historyDecisionPath(key))
-	}
 	var recovery historyWriteRecovery
 	if operationErr := json.Unmarshal(data, &recovery); operationErr != nil {
 		return historyWriteUnknown, fmt.Errorf("memory: decode history recovery: %w", operationErr)
@@ -332,6 +331,14 @@ func (s *JSONLStore) recoverHistoryWriteFor(
 		filepath.Base(s.historyRecoveryPath(recovery.Meta.Key)) != filepath.Base(s.historyRecoveryPath(key)) {
 		return historyWriteUnknown, errors.New("invalid history recovery key")
 	}
+	_, metaErr := os.Stat(s.metaPath(key))
+	_, dataErr := os.Stat(s.jsonlPath(key))
+	if errors.Is(metaErr, os.ErrNotExist) && errors.Is(dataErr, os.ErrNotExist) {
+		// External deletion must not be undone by its journal, nor may the
+		// next owner inherit the old display's independent sidecar.
+		return historyWriteOld, s.retireAbsentHistorySource(ctx, key, recovery)
+	}
+
 	if (!recovery.PublicOnly &&
 		recovery.Next.HistoryBytes == nil) ||
 		(recovery.Next.HistoryBytes != nil &&

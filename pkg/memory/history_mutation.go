@@ -60,6 +60,12 @@ func (s *JSONLStore) replaceHistory(
 	original SessionMeta,
 ) error {
 	meta := original
+	if original.Skip > 0 && original.PublicHistoryVersion == PublicHistoryVersion &&
+		original.PublicHistoryPreparation == nil && !original.publicHistoryClear {
+		if err := s.verifyPublicPrefix(ctx, key, original); err != nil {
+			return err
+		}
+	}
 	old, err := s.readHistoryForContentMutation(key, &meta)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -96,7 +102,7 @@ func (s *JSONLStore) replaceHistory(
 	if len(old) > 0 {
 		meta.HistoryTip = old[len(old)-1].HistoryID
 	}
-	if common == len(old) && len(prepared) >= len(old) {
+	if !meta.publicHistoryClear && common == len(old) && len(prepared) >= len(old) {
 		if appended, appendErr := s.appendHistorySuffix(key, prepared, meta); appended || appendErr != nil {
 			return appendErr
 		}
@@ -126,7 +132,13 @@ func (s *JSONLStore) replaceHistory(
 	if len(prepared) > 0 {
 		meta.HistoryTip = prepared[len(prepared)-1].HistoryID
 	}
-	return s.commitHistoryRewrite(key, prepared, meta)
+	if err := s.commitHistoryRewrite(key, prepared, meta); err != nil {
+		return err
+	}
+	if meta.publicHistoryClear {
+		return s.deletePublicHistoryArtifacts(key)
+	}
+	return nil
 }
 
 // Return the dense prefix whose positions survive a filtered rewrite. A gap
