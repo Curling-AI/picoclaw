@@ -37,7 +37,6 @@ func (s *JSONLStore) preparePublicAppend(
 		return publicHistoryChange{}, nil
 	}
 	if projectionUnavailable {
-		next.PublicHistoryComplete = false
 		if next.HistoryBytes == nil {
 			return publicHistoryChange{}, ErrPublicHistoryCoverage
 		}
@@ -112,6 +111,8 @@ func (s *JSONLStore) preparePublicRewrite(
 	next *SessionMeta,
 	messages []providers.Message,
 ) (publicHistoryChange, error) {
+	collecting := next.publicHistoryGC
+	next.publicHistoryGC = false
 	if next.publicHistoryClear {
 		next.publicHistoryClear = false
 		next.PublicHistoryVersion = PublicHistoryVersion
@@ -120,11 +121,14 @@ func (s *JSONLStore) preparePublicRewrite(
 		next.PublicHistoryComplete = true
 		return s.replacePublicEntries(key, nil, next)
 	}
-	if next.publicProjectionUnavailable {
-		return publicHistoryChange{}, ErrPublicHistoryCoverage
-	}
 	if original.PublicHistoryVersion < 0 || next.PublicHistoryVersion < 0 {
-		return publicHistoryChange{}, ErrPublicHistoryCoverage
+		// An unavailable display cannot authorize GC or block the independent
+		// model source. The context writer retains its raw skipped prefix.
+		next.publicProjectionUnavailable = false
+		return publicHistoryChange{}, nil
+	}
+	if next.publicProjectionUnavailable {
+		return publicHistoryChange{}, &publicArtifactVerificationError{cause: ErrPublicHistoryCoverage}
 	}
 	if original.PublicHistoryVersion == 0 {
 		_, statErr := os.Stat(s.publicHistoryPath(key))
@@ -139,8 +143,11 @@ func (s *JSONLStore) preparePublicRewrite(
 	if original.PublicHistoryVersion == 0 || original.PublicHistoryPreparation != nil {
 		// Structural rewrites already read the complete source. Materialize its
 		// display in the same OLD/NEW journal before retiring any physical row.
-		old, sourceLines, oldErr := s.readPublicSourceLines(key, original, 0)
+		old, sourceLines, filtered, oldErr := s.readPublicSourceLines(key, original, 0, !collecting)
 		if oldErr != nil {
+			if errors.Is(oldErr, ErrPublicHistoryCoverage) {
+				return publicHistoryChange{}, &publicArtifactVerificationError{cause: oldErr}
+			}
 			return publicHistoryChange{}, oldErr
 		}
 		for index, message := range old {
@@ -187,7 +194,7 @@ func (s *JSONLStore) preparePublicRewrite(
 			entries = confirmed
 		}
 		next.PublicHistoryPreparation = nil
-		next.PublicHistoryComplete = original.PublicHistoryComplete || original.HistoryPrefix == 0
+		next.PublicHistoryComplete = !filtered && (original.PublicHistoryComplete || original.HistoryPrefix == 0)
 		next.PublicHistoryVersion = PublicHistoryVersion
 		next.PublicHistoryGeneration = newHistoryID()
 	} else {
@@ -417,4 +424,39 @@ func mergePublicImport(
 	result = append(result, pending...)
 	result = append(result, existing[position:]...)
 	return result, true, nil
+}
+
+// This is context restoration, not GC. Unknown coverage/checkpoints remain
+// unavailable, while a verified existing display can be edited without reading
+// or retiring its raw historical prefix. Mixed raw lineage never grants ACK/GC.
+func (s *JSONLStore) preparePublicRetainedRewrite(
+	key string,
+	original SessionMeta,
+	next *SessionMeta,
+	messages []providers.Message,
+) (publicHistoryChange, error) {
+	if original.PublicHistoryVersion != PublicHistoryVersion || original.PublicHistoryPreparation != nil {
+		next.publicProjectionUnavailable = false
+		next.PublicHistoryComplete = false
+		return publicHistoryChange{}, nil
+	}
+	entries, err := s.readPublicEntries(key, original)
+	if err != nil {
+		if !publicProofUnavailable(err) {
+			return publicHistoryChange{}, err
+		}
+		next.PublicHistoryVersion = -1
+		next.PublicHistoryComplete = false
+		next.publicProjectionUnavailable = false
+		return publicHistoryChange{}, nil
+	}
+	if next.publicProjectionUnavailable {
+		// The old display bytes remain owned. A missing immutable projection cannot
+		// be replaced with mutable input or be promoted to complete coverage.
+		next.PublicHistoryVersion = -1
+		next.PublicHistoryComplete = false
+		next.publicProjectionUnavailable = false
+		return publicHistoryChange{}, nil
+	}
+	return s.rewritePublicDisplay(key, original, next, messages, entries)
 }

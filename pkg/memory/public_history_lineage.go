@@ -154,8 +154,9 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		return nil
 	}
 	if meta.PublicHistoryVersion == 0 {
-		return nil
+		return ErrPublicHistoryCoverage
 	}
+	ensureHistoryGeneration(&meta, key)
 	entries, err := s.readPublicEntries(key, meta)
 	if err != nil {
 		return err
@@ -185,7 +186,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		}
 		line++
 		var message providers.Message
-		if json.Unmarshal(raw, &message) != nil {
+		if json.Unmarshal(raw, &message) != nil || !historyLineageMatches(raw, meta, key) {
 			return ErrPublicHistoryCoverage
 		}
 		if _, visible := publicHistoryMessage(message); !visible {
@@ -197,7 +198,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		}
 		projected, err := s.projectLegacyPublic(message)
 		if err != nil {
-			return err
+			return &publicArtifactVerificationError{cause: err}
 		}
 		public, _ := publicHistoryMessage(projected)
 		entry, exists := byID[decodedHistoryID(raw, filepath.Base(file.Name()), int64(line-1))]

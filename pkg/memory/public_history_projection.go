@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"log/slog"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -22,8 +23,15 @@ type PublicHistoryProjector interface {
 
 func (s *JSONLStore) SetPublicHistoryProjector(projector PublicHistoryProjector) {
 	s.publicProjectionMu.Lock()
-	defer s.publicProjectionMu.Unlock()
 	s.publicProjector = projector
+	s.publicProjectionMu.Unlock()
+	// Constructor recovery can defer an owned cleanup until this capability exists.
+	// Release the projector lock before recovery takes individual writer locks.
+	if projector != nil {
+		if err := s.recoverPendingHistoryWrites(); err != nil {
+			log.Printf("memory: pending history cleanup discovery failed: %v", err)
+		}
+	}
 }
 
 func (s *JSONLStore) historyPublicProjector() PublicHistoryProjector {

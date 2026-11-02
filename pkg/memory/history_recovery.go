@@ -151,6 +151,7 @@ func (s *JSONLStore) applyHistoryRecoveryMarker(key string, meta *SessionMeta, m
 // The immutable journal precedes transcript writes. A separate, small decision
 // binds recovery to its exact journal without rewriting the rollback backup.
 type historyWriteRecovery struct {
+	ClearPublicMedia   bool                   `json:"clearPublicMedia,omitempty"`
 	PublicMediaCleanup bool                   `json:"publicMediaCleanup,omitempty"`
 	PublicOnly         bool                   `json:"publicOnly,omitempty"`
 	Public             *publicHistoryRecovery `json:"public,omitempty"`
@@ -209,10 +210,12 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 			continue
 		}
 		seen[key] = true
+		lock := s.sessionLock(key)
+		lock.Lock()
 		s.markHistoryPending(key)
-		if recoveryErr := s.recoverHistoryWrite(
-			key,
-		); recoveryErr != nil &&
+		recoveryErr := s.recoverHistoryWrite(key)
+		lock.Unlock()
+		if recoveryErr != nil &&
 			!errors.Is(recoveryErr, errPublicHistoryCleanupUnavailable) {
 			log.Printf("memory: pending history recovery failed for %s: %v", entry.Name(), recoveryErr)
 		}
@@ -413,6 +416,14 @@ func (s *JSONLStore) recoverHistoryWriteFor(
 		); operationErr != nil {
 			return decision, operationErr
 		}
+		if recovery.ClearPublicMedia {
+			if recovery.PublicMediaCleanup && !s.requiresPublicHistoryCleanup() {
+				return decision, errPublicHistoryCleanupUnavailable
+			}
+			if operationErr := s.deletePublicHistoryArtifacts(recovery.Meta.Key); operationErr != nil {
+				return decision, operationErr
+			}
+		}
 		s.storeCachedMeta(sanitizeKey(key), current)
 	} else {
 		if operationErr := s.recoverContentStorageOld(recovery.Storage); operationErr != nil {
@@ -501,6 +512,8 @@ func historyCheckpointMatches(current, expected SessionMeta) bool {
 		current.PublicHistoryBytes == expected.PublicHistoryBytes &&
 		current.PublicHistoryCount == expected.PublicHistoryCount &&
 		current.PublicHistoryComplete == expected.PublicHistoryComplete &&
+		current.HistoryEpoch == expected.HistoryEpoch &&
+		current.HistoryFileEpoch == expected.HistoryFileEpoch &&
 		current.HistoryGeneration == expected.HistoryGeneration &&
 		current.HistoryFileGeneration == expected.HistoryFileGeneration &&
 		current.HistoryTip == expected.HistoryTip &&

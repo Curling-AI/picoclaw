@@ -3,7 +3,6 @@ package memory
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"os"
 	"testing"
 
@@ -121,32 +120,42 @@ func TestPublicHistoryRewritePreservesUncoveredPhysicalPrefix(t *testing.T) {
 				t.Context(),
 				key,
 				[]providers.Message{{Role: "assistant", Content: "edited retained"}},
-			); err == nil {
-				t.Fatal("rewrite collected source without historical artifact proof")
+			); err != nil {
+				t.Fatal("missing display proof blocked context replacement", err)
 			}
 			after, err := os.ReadFile(s.jsonlPath(key))
-			if err != nil || !bytes.Equal(before, after) {
-				t.Fatal("refused rewrite changed its physical source", err)
+			prefix := bytes.Join(bytes.SplitAfter(before, []byte{'\n'})[:79], nil)
+			if err != nil || !bytes.HasPrefix(after, prefix) {
+				t.Fatal("context replacement collected unproved prefix", err)
+			}
+			model, err := s.GetHistory(t.Context(), key)
+			if err != nil || len(model) != 1 || model[0].Content != "edited retained" {
+				t.Fatal("model replacement missing", model, err)
 			}
 			s.SetPublicHistoryProjector(nil)
-			if err = s.SetHistory(
-				t.Context(),
-				key,
-				[]providers.Message{{Role: "assistant", Content: "edited retained"}},
-			); err != nil {
-				t.Fatal(err)
+			if _, err = s.ReadPublicHistory(t.Context(), key); !errors.Is(err, ErrPublicHistoryCoverage) {
+				t.Fatal("fallback invented public coverage", err)
 			}
-			history, err := s.ReadPublicHistory(t.Context(), key)
-			if err != nil || len(history.Entries) != 80 {
-				t.Fatal("durable rewrite lost compacted plaintext", history, err)
+			if _, err = s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); err == nil {
+				t.Fatal("mixed lineage granted a raw cursor")
 			}
-			for index := 0; index < 79; index++ {
-				if history.Entries[index].Message.Content != fmt.Sprintf("legacy-%d", index) {
-					t.Fatal("prefix changed", index)
+			if err = s.Compact(t.Context(), key); !errors.Is(err, ErrPublicHistoryCoverage) {
+				t.Fatal("fallback authorized GC", err)
+			}
+			retained, err := os.ReadFile(s.jsonlPath(key))
+			if err != nil || !bytes.Equal(after, retained) {
+				t.Fatal("refused GC changed raw source", err)
+			}
+			if preparing {
+				if err = s.ClearHistory(t.Context(), key); err != nil {
+					t.Fatal("fallback blocked explicit clear", err)
 				}
-			}
-			if history.Entries[79].Message.Content != "edited retained" {
-				t.Fatal("replacement missing")
+				h, readErr := s.ReadPublicHistory(t.Context(), key)
+				if readErr != nil || len(h.Entries) != 0 {
+					t.Fatal("clear kept fallback display", h, readErr)
+				}
+			} else if err = s.DeleteSession(t.Context(), key); err != nil {
+				t.Fatal("fallback blocked owning deletion", err)
 			}
 		})
 	}

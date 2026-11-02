@@ -446,6 +446,16 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	meta SessionMeta,
 	contentOnly bool,
 ) error {
+	return s.commitHistoryRewriteData(key, messages, meta, contentOnly, nil)
+}
+
+func (s *JSONLStore) commitHistoryRewriteData(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	contentOnly bool,
+	cut *historyRawRewrite,
+) error {
 	original, err := s.readMeta(key)
 	if err != nil {
 		return err
@@ -477,19 +487,34 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	if err != nil {
 		return err
 	}
-	messages = s.projectPublicCommits(messages, &meta)
-	data, err := marshalHistoryJSONL(messages, meta)
-	if err != nil {
-		return err
+	var data []byte
+	if cut == nil {
+		messages = s.projectPublicCommits(messages, &meta)
+		data, err = marshalHistoryJSONL(messages, meta)
+		if err != nil {
+			return err
+		}
+	} else {
+		data = cut.data
 	}
 	size := int64(len(data))
 	meta.HistoryBytes = &size
 	if err = s.prepareContentRewrite(key, original, &meta, data); err != nil {
 		return err
 	}
-	publicChange, publicErr := s.preparePublicRewrite(key, original, &meta, messages)
-	if publicErr != nil {
-		return publicErr
+	clearPublicMedia := meta.publicHistoryClear
+	var publicChange publicHistoryChange
+	if cut == nil {
+		publicChange, err = s.preparePublicRewrite(key, original, &meta, messages)
+	} else if cut.retainedPrefix {
+		publicChange, err = s.preparePublicRetainedRewrite(key, original, &meta, messages)
+	} else if cut.removed != nil {
+		publicChange, err = s.preparePublicSuffixCut(key, original, &meta, cut.removed, int64(len(previous)))
+	} else {
+		publicChange, err = s.preparePublicRewrite(key, original, &meta, messages)
+	}
+	if err != nil {
+		return err
 	}
 	storage, err := s.prepareContentStorage(key, original, &meta, false)
 	if err != nil {
@@ -499,12 +524,13 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 		context.Background(),
 		key,
 		historyWriteRecovery{
-			Meta:    original,
-			Next:    meta,
-			Data:    previous,
-			Existed: existed,
-			Storage: storage,
-			Public:  publicChange.Recovery,
+			ClearPublicMedia: clearPublicMedia,
+			Meta:             original,
+			Next:             meta,
+			Data:             previous,
+			Existed:          existed,
+			Storage:          storage,
+			Public:           publicChange.Recovery,
 		},
 	); commitErr != nil {
 		return commitErr
@@ -518,6 +544,9 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	}
 	if err == nil {
 		err = s.ensureContentDomain(key, original, meta)
+	}
+	if err == nil && clearPublicMedia {
+		err = s.deletePublicHistoryArtifacts(key)
 	}
 	if err == nil && contentOnly {
 		orderMeta := copyMeta(meta)

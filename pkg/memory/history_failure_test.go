@@ -351,13 +351,23 @@ func TestHistoryRewritesWithFilteredRowsRetireMovedPositions(t *testing.T) {
 				}
 				err = s.SetHistory(t.Context(), key, history[:3])
 			}
+			if operation == "compact" {
+				if !errors.Is(err, ErrPublicHistoryCoverage) {
+					t.Fatal("unproved corrupt prefix was collected", err)
+				}
+				retained, readErr := os.ReadFile(s.jsonlPath(key))
+				if readErr != nil || !bytes.Equal(raw, retained) {
+					t.Fatal("refused compaction changed its source", readErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			after, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-			if err != nil || after.Generation == before.Generation || after.ParentGeneration != before.Generation ||
-				after.RetainedUntil != 1 {
-				t.Fatal("filtered physical positions were silently reused", after, err)
+			if err != nil || after.Generation != before.Generation || after.FileEpoch <= before.FileEpoch ||
+				len(after.Entries) != 3 || after.Entries[1].Position != before.Entries[1].Position {
+				t.Fatal("raw cut moved retained physical positions", after, err)
 			}
 			for _, entry := range after.Entries {
 				for _, old := range before.Entries {

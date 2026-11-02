@@ -48,6 +48,7 @@ type SessionMeta struct {
 	publicRefUnavailable        bool
 	publicOrderUnavailable      bool
 	publicHistoryClear          bool
+	publicHistoryGC             bool
 	PublicHistoryPreparation    *PublicHistoryPreparation `json:"public_history_preparation,omitempty"`
 	PublicHistoryVersion        int                       `json:"public_history_version,omitempty"`
 	PublicHistoryGeneration     string                    `json:"public_history_generation,omitempty"`
@@ -1053,6 +1054,9 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	meta.UpdatedAt = now
 	ensureHistoryGeneration(&meta, sessionKey)
 	meta.publicHistoryClear, _ = ctx.Value(publicHistoryClearIntent{}).(bool)
+	if meta.publicHistoryClear {
+		meta.Summary = ""
+	}
 	prepared := make([]providers.Message, len(filtered))
 	for index, message := range filtered {
 		prepared[index] = prepareHistoryMessage(message, now, providers.HistoryRun(ctx))
@@ -1192,6 +1196,7 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	meta.Count = len(active)
 	meta.UpdatedAt = time.Now()
 
+	meta.publicHistoryGC = true
 	err = s.commitHistoryRewrite(sessionKey, active, meta)
 	// Preparing a structural legacy rewrite can discover the same optional
 	// artifact failure after the initial guard, before any transcript write.
