@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -15,6 +16,7 @@ type PublicHistoryProjectionResult struct {
 type PublicHistoryProjector interface {
 	Commit(message providers.Message) (PublicHistoryProjectionResult, error)
 	Legacy(message providers.Message) (PublicHistoryProjectionResult, error)
+	Verify(ctx context.Context, message providers.Message) error
 }
 
 func (s *JSONLStore) SetPublicHistoryProjector(projector PublicHistoryProjector) {

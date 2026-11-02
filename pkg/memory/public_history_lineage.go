@@ -154,7 +154,13 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		return err
 	}
 	byID := make(map[string]PublicHistoryEntry, len(entries))
+	projector := s.historyPublicProjector()
 	for _, entry := range entries {
+		if projector != nil {
+			if err = projector.Verify(ctx, entry.Message); err != nil {
+				return err
+			}
+		}
 		byID[entry.ID] = entry
 	}
 	file, err := os.Open(s.jsonlPath(key))
@@ -183,6 +189,9 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 			continue
 		}
 		message.HistoryPublicMessage = decodedPublicMessage(raw)
+		if message.HistoryPublicMessage != nil && projector == nil {
+			return ErrPublicHistoryCoverage
+		}
 		projected, err := s.projectLegacyPublic(message)
 		if err != nil {
 			return err

@@ -95,6 +95,8 @@ func (testPublicProjector) Legacy(message providers.Message) (memory.PublicHisto
 	return memory.PublicHistoryProjectionResult{Message: message}, nil
 }
 
+func (testPublicProjector) Verify(context.Context, providers.Message) error { return nil }
+
 func TestPublicHistoryProjectorSurvivesRegistryReloadWithoutChangingModelHistory(t *testing.T) {
 	loop, cfg, _, provider, cleanup := newTestAgentLoop(t)
 	defer cleanup()
