@@ -109,41 +109,88 @@ func TestSerializeMessages_WithMedia(t *testing.T) {
 	}
 }
 
-func TestSerializeMessages_WithAudioMedia(t *testing.T) {
-	messages := []Message{
-		{Role: "user", Content: "transcribe this", Media: []string{"data:audio/ogg;base64,abc123"}},
-	}
-	result := SerializeMessages(messages)
-
+func audioPart(t *testing.T, result []any) map[string]any {
+	t.Helper()
 	data, _ := json.Marshal(result)
 	var msgs []map[string]any
-	json.Unmarshal(data, &msgs)
-
+	if err := json.Unmarshal(data, &msgs); err != nil {
+		t.Fatal(err)
+	}
 	content, ok := msgs[0]["content"].([]any)
-	if !ok {
-		t.Fatalf("expected array content for media message, got %T", msgs[0]["content"])
+	if !ok || len(content) != 2 {
+		t.Fatalf("content = %#v, want the text and the audio", msgs[0]["content"])
 	}
-	if len(content) != 2 {
-		t.Fatalf("expected 2 content parts, got %d", len(content))
-	}
+	part, _ := content[1].(map[string]any)
+	return part
+}
 
-	audioPart, ok := content[1].(map[string]any)
-	if !ok {
-		t.Fatalf("expected audio content part to be an object, got %T", content[1])
+func TestSerializeMessages_WithAudioMedia(t *testing.T) {
+	for _, tc := range []struct{ url, format string }{
+		{"data:audio/ogg;base64,abc123", "ogg"},
+		{"data:audio/mpeg;base64,abc123", "mp3"},
+		{"data:audio/mp4;base64,abc123", "m4a"},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			part := audioPart(t, SerializeMessages(
+				[]Message{{Role: "user", Content: "transcribe this", Media: []string{tc.url}}},
+			))
+			if part["type"] != "input_audio" {
+				t.Fatalf("audio part type = %v, want input_audio", part["type"])
+			}
+			if _, has := part["file"]; has {
+				t.Error("file part sent by default")
+			}
+			audio, _ := part["input_audio"].(map[string]any)
+			if audio["format"] != tc.format || audio["data"] != "abc123" {
+				t.Fatalf("input_audio = %#v, want format %q and data abc123", audio, tc.format)
+			}
+		})
 	}
-	if audioPart["type"] != "input_audio" {
-		t.Fatalf("audio part type = %v, want input_audio", audioPart["type"])
-	}
+}
 
-	inputAudio, ok := audioPart["input_audio"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected input_audio object, got %T", audioPart["input_audio"])
+// O Vercel AI Gateway recusa input_audio ("Invalid input") e aceita o áudio
+// como parte file com o data URL inteiro em file_data (spike da MST-351).
+func TestSerializeMessages_WithAudioFileParts(t *testing.T) {
+	for _, tc := range []struct{ url, filename string }{
+		{"data:audio/ogg;base64,abc123", "audio.ogg"},
+		{"data:audio/mpeg;base64,abc123", "audio.mp3"},
+		{"data:audio/mp4;base64,abc123", "audio.m4a"},
+	} {
+		t.Run(tc.filename, func(t *testing.T) {
+			part := audioPart(t, SerializeMessages(
+				[]Message{{Role: "user", Content: "transcribe this", Media: []string{tc.url}}},
+				WithAudioFileParts(),
+			))
+			if part["type"] != "file" {
+				t.Fatalf("audio part type = %v, want file", part["type"])
+			}
+			if _, has := part["input_audio"]; has {
+				t.Error("input_audio still sent")
+			}
+			file, _ := part["file"].(map[string]any)
+			if file["filename"] != tc.filename || file["file_data"] != tc.url {
+				t.Fatalf("file = %#v, want filename %q and the whole data URL", file, tc.filename)
+			}
+		})
 	}
-	if inputAudio["format"] != "ogg" {
-		t.Fatalf("audio format = %v, want ogg", inputAudio["format"])
-	}
-	if inputAudio["data"] != "abc123" {
-		t.Fatalf("audio data = %v, want abc123", inputAudio["data"])
+}
+
+func TestSerializeMessages_DropsAnEmptyAudio(t *testing.T) {
+	msgs := []Message{{Role: "user", Content: "x", Media: []string{"data:audio/ogg;base64,"}}}
+	for name, result := range map[string][]any{
+		"default":    SerializeMessages(msgs),
+		"file parts": SerializeMessages(msgs, WithAudioFileParts()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, _ := json.Marshal(result)
+			var got []map[string]any
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			if content, _ := got[0]["content"].([]any); len(content) != 1 {
+				t.Fatalf("content = %#v, want only the text", got[0]["content"])
+			}
+		})
 	}
 }
 
@@ -690,6 +737,9 @@ func TestParseDataAudioURL(t *testing.T) {
 	}{
 		{"valid mp3", "data:audio/mp3;base64,SGVsbG8=", "mp3", "SGVsbG8=", true},
 		{"valid wav", "data:audio/wav;base64,AAAA", "wav", "AAAA", true},
+		// MIME subtypes que não são o nome do formato voltam ao nome (MST-351).
+		{"mpeg is mp3", "data:audio/mpeg;base64,QQ==", "mp3", "QQ==", true},
+		{"mp4 is m4a", "data:audio/mp4;base64,QQ==", "m4a", "QQ==", true},
 		{"not audio", "data:image/png;base64,abc", "", "", false},
 		{"no comma", "data:audio/mp3;base64", "", "", false},
 		{"empty data", "data:audio/mp3;base64,", "", "", false},

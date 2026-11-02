@@ -1,6 +1,9 @@
 package providers
 
-import httpapi "github.com/sipeed/picoclaw/pkg/providers/httpapi"
+import (
+	httpapi "github.com/sipeed/picoclaw/pkg/providers/httpapi"
+	"github.com/sipeed/picoclaw/pkg/providers/openai_compat"
+)
 
 type (
 	GeminiProvider = httpapi.GeminiProvider
@@ -32,6 +35,7 @@ func NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 	requestTimeoutSeconds int,
 	extraBody map[string]any,
 	customHeaders map[string]string,
+	opts ...openai_compat.Option,
 ) *HTTPProvider {
 	return httpapi.NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 		apiKey,
@@ -42,5 +46,6 @@ func NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 		requestTimeoutSeconds,
 		extraBody,
 		customHeaders,
+		opts...,
 	)
 }

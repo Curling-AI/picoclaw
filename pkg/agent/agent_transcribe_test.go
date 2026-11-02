@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
@@ -234,5 +235,62 @@ func TestTranscribeAudioInMessage_TranscribedAudioBecomesVoiceText(t *testing.T)
 
 	if msg.Content != "[voice: olá]" || len(msg.Media) != 0 {
 		t.Fatalf("got content %q media %v", msg.Content, msg.Media)
+	}
+}
+
+// A web upload's path carries the person's file name, which says what the audio
+// is about: it must not reach the pod's log when the transcription fails.
+func TestTranscribeFailureLogOmitsTheFileName(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "pod.log")
+	if err := logger.EnableFileLogging(logPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(logger.DisableFileLogging)
+	dir := filepath.Join(t.TempDir(), "uploads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audio := filepath.Join(dir, "1a2b3c4d-consulta-fulana-hiv.ogg")
+	if err := os.WriteFile(audio, []byte("OggS"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: failingTranscriber{}}
+
+	al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{Content: "[voice]", Media: []string{audio}})
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Transcription failed") {
+		t.Fatalf("the failure was not logged: %q", data)
+	}
+	if strings.Contains(string(data), "consulta-fulana") {
+		t.Fatalf("the log carries the file name: %q", data)
+	}
+}
+
+func TestSetTranscriber_ConcurrentWithTurn(t *testing.T) {
+	al := &AgentLoop{cfg: &config.Config{}}
+	fake := &fixedTranscriber{text: "olá"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			if i%2 == 0 {
+				al.SetTranscriber(fake)
+			} else {
+				al.SetTranscriber(nil)
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_, _ = al.transcribeAudio(context.Background(), "voice.ogg")
+		}
 	}
 }

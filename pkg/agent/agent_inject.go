@@ -53,7 +53,17 @@ func (al *AgentLoop) SetMediaStore(s media.MediaStore) {
 }
 
 func (al *AgentLoop) SetTranscriber(t asr.Transcriber) {
+	al.mu.Lock()
+	defer al.mu.Unlock()
 	al.transcriber = t
+}
+
+// currentTranscriber reads the transcriber under the lock: ethos swaps it on
+// every ApplyConfig while turns are running. (seucaranguejo fork)
+func (al *AgentLoop) currentTranscriber() asr.Transcriber {
+	al.mu.RLock()
+	defer al.mu.RUnlock()
+	return al.transcriber
 }
 
 func (al *AgentLoop) SetReloadFunc(fn func() error) {

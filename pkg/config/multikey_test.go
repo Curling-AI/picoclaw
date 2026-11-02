@@ -198,6 +198,7 @@ func TestExpandMultiKeyModels_PreservesOtherFields(t *testing.T) {
 		ThinkingLevel:       "high",
 		ToolSchemaTransform: "simple",
 		Streaming:           ModelStreamingConfig{Enabled: true},
+		AudioFileParts:      true,
 	}
 	modelCfg.APIKeys = SimpleSecureStrings("key0", "key1") // Use internal field for multi-key testing
 	models := []*ModelConfig{modelCfg}
@@ -233,6 +234,9 @@ func TestExpandMultiKeyModels_PreservesOtherFields(t *testing.T) {
 	if !primary.Streaming.Enabled {
 		t.Error("expected streaming config preserved on primary")
 	}
+	if !primary.AudioFileParts {
+		t.Error("expected audio_file_parts preserved on primary")
+	}
 
 	// Check additional entry also preserves fields
 	additional := result[0]
@@ -250,6 +254,9 @@ func TestExpandMultiKeyModels_PreservesOtherFields(t *testing.T) {
 	}
 	if !additional.Streaming.Enabled {
 		t.Error("expected streaming config preserved on additional")
+	}
+	if !additional.AudioFileParts {
+		t.Error("expected audio_file_parts preserved on additional")
 	}
 }
 
