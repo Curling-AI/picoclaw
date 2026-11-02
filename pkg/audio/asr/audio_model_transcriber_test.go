@@ -3,9 +3,15 @@ package asr
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -196,8 +202,153 @@ func TestAudioModelTranscriberTranscribe(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for unsupported audio format, got nil")
 		}
-		if got := err.Error(); got != `unsupported audio format for "`+badPath+`"` {
+		if got := err.Error(); got != `unsupported audio format "`+filepath.Ext(badPath)+`"` {
 			t.Fatalf("error = %q, want unsupported format error", got)
+		}
+	})
+}
+
+// O data URL leva o MIME real: mp3 é audio/mpeg (MST-351).
+func TestAudioModelTranscriberSendsTheMIMEType(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "clip.mp3")
+	if err := os.WriteFile(audioPath, []byte("fake-mp3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var media string
+	tr := &AudioModelTranscriber{
+		provider: &fakeLLMProvider{chatFunc: func(
+			_ context.Context, messages []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any,
+		) (*providers.LLMResponse, error) {
+			media = messages[0].Media[0]
+			return &providers.LLMResponse{Content: "ok"}, nil
+		}},
+		modelID: "maestro-transcribe",
+		prompt:  defaultTranscriptionPrompt,
+	}
+	if _, err := tr.Transcribe(context.Background(), audioPath); err != nil {
+		t.Fatal(err)
+	}
+	if want := "data:audio/mpeg;base64," + base64.StdEncoding.EncodeToString([]byte("fake-mp3")); media != want {
+		t.Fatalf("media = %q, want %q", media, want)
+	}
+}
+
+// O caminho que o ASR usa de verdade: entrada da model_list até o corpo enviado.
+func TestTranscriberFromModelConfigHonorsAudioFileParts(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "clip.ogg")
+	if err := os.WriteFile(audioPath, []byte("fake-ogg"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString([]byte("fake-ogg"))
+
+	for _, fileParts := range []bool{false, true} {
+		t.Run(fmt.Sprintf("audio_file_parts=%v", fileParts), func(t *testing.T) {
+			var body struct {
+				Messages []struct {
+					Content []map[string]any `json:"content"`
+				} `json:"messages"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+			}))
+			defer server.Close()
+
+			cfg := &config.ModelConfig{
+				ModelName:      "maestro-transcribe",
+				Model:          "litellm/maestro-transcribe",
+				APIBase:        server.URL,
+				AudioFileParts: fileParts,
+			}
+			cfg.SetAPIKey("test-key")
+
+			tr := transcriberFromModelConfig(cfg)
+			if tr == nil {
+				t.Fatal("transcriberFromModelConfig() = nil")
+			}
+			if _, err := tr.Transcribe(context.Background(), audioPath); err != nil {
+				t.Fatalf("Transcribe() error = %v", err)
+			}
+
+			if len(body.Messages) != 1 || len(body.Messages[0].Content) != 2 {
+				t.Fatalf("messages = %#v, want one message with text and audio", body.Messages)
+			}
+			part := body.Messages[0].Content[1]
+			if fileParts {
+				file, _ := part["file"].(map[string]any)
+				if part["type"] != "file" || file["filename"] != "audio.ogg" ||
+					file["file_data"] != "data:audio/ogg;base64,"+b64 {
+					t.Fatalf("audio part = %#v, want a file part with the data URL", part)
+				}
+				return
+			}
+			audio, _ := part["input_audio"].(map[string]any)
+			if part["type"] != "input_audio" || audio["format"] != "ogg" || audio["data"] != b64 {
+				t.Fatalf("audio part = %#v, want input_audio with format and data", part)
+			}
+		})
+	}
+}
+
+func TestAudioModelTranscriberRejectsEmptyFile(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "empty.ogg")
+	if err := os.WriteFile(audioPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	tr := &AudioModelTranscriber{
+		provider: &fakeLLMProvider{chatFunc: func(
+			context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
+		) (*providers.LLMResponse, error) {
+			called = true
+			return &providers.LLMResponse{Content: "invented"}, nil
+		}},
+		modelID: "m",
+		prompt:  defaultTranscriptionPrompt,
+	}
+	if _, err := tr.Transcribe(context.Background(), audioPath); err == nil {
+		t.Fatal("Transcribe() error = nil, want error for empty file")
+	}
+	if called {
+		t.Fatal("provider was called for an empty file")
+	}
+}
+
+func TestAudioModelTranscriberErrorsOmitFilePath(t *testing.T) {
+	tr := &AudioModelTranscriber{
+		provider: &fakeLLMProvider{},
+		modelID:  "m",
+		prompt:   defaultTranscriptionPrompt,
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		audioPath := filepath.Join(t.TempDir(), "consulta-fulana.ogg")
+		_, err := tr.Transcribe(context.Background(), audioPath)
+		if err == nil {
+			t.Fatal("Transcribe() error = nil, want error")
+		}
+		if strings.Contains(err.Error(), "consulta-fulana") {
+			t.Fatalf("error leaks the file name: %q", err.Error())
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("errors.Is(err, fs.ErrNotExist) = false for %v", err)
+		}
+	})
+
+	t.Run("unsupported format", func(t *testing.T) {
+		audioPath := filepath.Join(t.TempDir(), "consulta-fulana.xyz")
+		if err := os.WriteFile(audioPath, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := tr.Transcribe(context.Background(), audioPath)
+		if err == nil {
+			t.Fatal("Transcribe() error = nil, want error")
+		}
+		if strings.Contains(err.Error(), "consulta-fulana") {
+			t.Fatalf("error leaks the file name: %q", err.Error())
 		}
 	})
 }

@@ -906,6 +906,9 @@ type ModelConfig struct {
 	Streaming           ModelStreamingConfig `json:"streaming,omitzero"`              // Opt-in for provider streaming on this model entry
 	ExtraBody           map[string]any       `json:"extra_body,omitempty"`            // Additional fields to inject into request body
 	CustomHeaders       map[string]string    `json:"custom_headers,omitempty"`        // Additional headers to inject into every HTTP request
+	// AudioFileParts sends audio as a "file" content part instead of input_audio,
+	// for gateways like Vercel that refuse input_audio. (seucaranguejo fork)
+	AudioFileParts bool `json:"audio_file_parts,omitempty"`
 
 	APIKeys SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty"` // API authentication keys (multiple keys for failover)
 
@@ -2078,6 +2081,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				Streaming:           m.Streaming,
 				ExtraBody:           m.ExtraBody,
 				CustomHeaders:       m.CustomHeaders,
+				AudioFileParts:      m.AudioFileParts,
 				UserAgent:           m.UserAgent,
 				isVirtual:           true,
 			}
@@ -2103,6 +2107,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			Streaming:           m.Streaming,
 			ExtraBody:           m.ExtraBody,
 			CustomHeaders:       m.CustomHeaders,
+			AudioFileParts:      m.AudioFileParts,
 			UserAgent:           m.UserAgent,
 			APIKeys:             SimpleSecureStrings(keys[0]),
 		}

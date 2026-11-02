@@ -55,7 +55,7 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 			keptMedia = append(keptMedia, ref)
 			continue
 		}
-		text, note := al.transcribeAudio(ctx, ref, path)
+		text, note := al.transcribeAudio(ctx, path)
 		transcriptions = append(transcriptions, text)
 		if note != "" {
 			replacements = append(replacements, note)
@@ -69,7 +69,7 @@ func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.Inbou
 		return msg
 	}
 
-	if al.transcriber != nil {
+	if al.currentTranscriber() != nil {
 		al.sendTranscriptionFeedback(ctx, msg.Channel, msg.ChatID, msg.MessageID, transcriptions)
 	}
 
@@ -112,13 +112,17 @@ func (al *AgentLoop) resolveAudioRef(ref string) (string, media.MediaMeta, error
 
 // transcribeAudio returns the text, or the note that replaces the audio when
 // there is none: no transcriber, a failed call, or no speech in the audio.
-func (al *AgentLoop) transcribeAudio(ctx context.Context, ref, path string) (text, note string) {
-	if al.transcriber == nil {
+func (al *AgentLoop) transcribeAudio(ctx context.Context, path string) (text, note string) {
+	// (seucaranguejo fork) Leitura única, sob lock: SetTranscriber troca o campo.
+	tr := al.currentTranscriber()
+	if tr == nil {
 		return "", noTranscriberAudioNote
 	}
-	result, err := al.transcriber.Transcribe(ctx, path)
+	result, err := tr.Transcribe(ctx, path)
 	if err != nil {
-		logger.WarnCF("voice", "Transcription failed", map[string]any{"ref": ref, "error": err})
+		// (seucaranguejo fork) Extension only: the path of a web upload carries
+		// the person's file name.
+		logger.WarnCF("voice", "Transcription failed", map[string]any{"extension": filepath.Ext(path), "error": err})
 		return "", failedTranscriptionAudioNote
 	}
 	if result.Text == "" {

@@ -91,11 +91,29 @@ type openaiFunctionCall struct {
 	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
+type serializeOptions struct{ audioFileParts bool }
+
+// SerializeOption changes the wire format written by SerializeMessages.
+type SerializeOption func(*serializeOptions)
+
+// WithAudioFileParts sends audio as a "file" part carrying the whole data URL.
+// The default stays input_audio because OpenAI Chat Completions only takes PDF
+// in file parts. Opt-in for gateways like Vercel, which refuse input_audio with
+// "Invalid input" (MST-351). (seucaranguejo fork)
+func WithAudioFileParts() SerializeOption {
+	return func(o *serializeOptions) { o.audioFileParts = true }
+}
+
 // SerializeMessages converts internal Message structs to the OpenAI wire format.
 //   - Strips SystemParts (unknown to third-party endpoints)
 //   - Converts messages with Media to multipart content format (text + image_url parts)
 //   - Preserves ToolCallID, ToolCalls, and ReasoningContent for all messages
-func SerializeMessages(messages []Message) []any {
+func SerializeMessages(messages []Message, opts ...SerializeOption) []any {
+	var options serializeOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
 	// Gemini's OpenAI-compatible endpoint requires a non-empty `name` on tool
 	// result messages (function_response.name). Derive it from the matching
 	// assistant tool call so every tool message carries its tool name,
@@ -155,6 +173,16 @@ func SerializeMessages(messages []Message) []any {
 			}
 
 			if format, data, ok := ParseDataAudioURL(mediaURL); ok {
+				if options.audioFileParts {
+					parts = append(parts, map[string]any{
+						"type": "file",
+						"file": map[string]any{
+							"filename":  audioFilename(mediaURL),
+							"file_data": mediaURL,
+						},
+					})
+					continue
+				}
 				parts = append(parts, map[string]any{
 					"type": "input_audio",
 					"input_audio": map[string]any{
@@ -233,6 +261,8 @@ func serializeToolCalls(toolCalls []ToolCall) []openaiToolCall {
 }
 
 // ParseDataAudioURL extracts the format and base64 data from a data:audio/... URL.
+// MIME subtypes that differ from the format name map back to it (mpeg -> mp3,
+// mp4 -> m4a), so input_audio keeps the names providers expect. (seucaranguejo fork)
 func ParseDataAudioURL(mediaURL string) (format, data string, ok bool) {
 	if !strings.HasPrefix(mediaURL, "data:audio/") {
 		return "", "", false
@@ -246,11 +276,29 @@ func ParseDataAudioURL(mediaURL string) (format, data string, ok bool) {
 
 	format, _, _ = strings.Cut(meta, ";")
 	format = strings.TrimSpace(format)
+	switch format {
+	case "mpeg":
+		format = "mp3"
+	case "mp4":
+		format = "m4a"
+	}
 	data = strings.TrimSpace(data)
 	if format == "" || data == "" {
 		return "", "", false
 	}
 	return format, data, true
+}
+
+// audioFilename names an audio file part by its data URL's MIME type. (seucaranguejo fork)
+func audioFilename(mediaURL string) string {
+	mime, _, _ := strings.Cut(strings.TrimPrefix(mediaURL, "data:"), ";")
+	switch mime {
+	case "audio/mpeg":
+		return "audio.mp3"
+	case "audio/mp4":
+		return "audio.m4a"
+	}
+	return "audio." + strings.TrimPrefix(mime, "audio/")
 }
 
 // --- Response parsing ---
