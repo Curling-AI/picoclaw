@@ -109,7 +109,7 @@ func (s *JSONLStore) PreparePublicHistory(
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
 	}
 	if meta.PublicHistoryPreparation == nil {
-		return preparationResult(canonical, meta), nil
+		return s.preparePublicIndexResult(ctx, canonical, meta)
 	}
 	state := *meta.PublicHistoryPreparation
 	if state.FileGeneration != meta.HistoryFileGeneration || state.Generation != meta.HistoryGeneration ||

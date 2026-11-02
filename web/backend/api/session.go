@@ -978,7 +978,6 @@ func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		removed = true
-
 	}
 
 	if legacyRef, err := h.findLegacyPicoSession(dir, sessionID); err == nil {

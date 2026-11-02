@@ -28,12 +28,12 @@ func (s *JSONLStore) publicIndexBuildingPath(key string) string {
 
 func (s *JSONLStore) readPublicIndexPreparation(key string, meta SessionMeta) (publicIndexPreparation, error) {
 	state := publicIndexPreparation{Target: publicIndexMeta(meta), Digest: emptyHistoryDigest}
-	data, err := os.ReadFile(s.publicIndexPreparationPath(key))
-	if errors.Is(err, os.ErrNotExist) {
+	data, operationErr0 := os.ReadFile(s.publicIndexPreparationPath(key))
+	if errors.Is(operationErr0, os.ErrNotExist) {
 		return state, nil
 	}
-	if err != nil {
-		return state, err
+	if operationErr0 != nil {
+		return state, operationErr0
 	}
 	if len(data) > publicIndexPreparationMaxBytes || json.Unmarshal(data, &state) != nil {
 		return state, ErrPublicHistoryCoverage
@@ -41,7 +41,7 @@ func (s *JSONLStore) readPublicIndexPreparation(key string, meta SessionMeta) (p
 	if state.Target.Generation != meta.PublicHistoryGeneration {
 		return publicIndexPreparation{Target: publicIndexMeta(meta), Digest: emptyHistoryDigest}, nil
 	}
-	if _, err := encodePublicIndexHeader(state.Target); err != nil || state.Count < 0 ||
+	if _, operationErr1 := encodePublicIndexHeader(state.Target); operationErr1 != nil || state.Count < 0 ||
 		state.Count > state.Target.Count || state.Byte < 0 || state.Byte > state.Target.Bytes ||
 		state.Target.Count > meta.PublicHistoryCount || state.Target.Bytes > meta.PublicHistoryBytes ||
 		state.Target.Revision > meta.PublicHistoryRevision || len(state.Digest) != 64 {
@@ -52,49 +52,82 @@ func (s *JSONLStore) readPublicIndexPreparation(key string, meta SessionMeta) (p
 
 const publicIndexPreparationMaxBytes = 4096
 
+func (s *JSONLStore) preparePublicIndexResult(
+	ctx context.Context,
+	key string,
+	meta SessionMeta,
+) (PublicHistoryPreparationResult, error) {
+	result := preparationResult(key, meta)
+	index, operationErr2 := s.openPublicIndex(key, meta)
+	if operationErr2 == nil {
+		return result, index.file.Close()
+	}
+	if !errors.Is(operationErr2, os.ErrNotExist) {
+		return PublicHistoryPreparationResult{}, operationErr2
+	}
+	if operationErr3 := s.preparePublicIndexLocked(
+		ctx,
+		key,
+		meta,
+	); !errors.Is(
+		operationErr3,
+		ErrPublicHistoryIndexPreparing,
+	) {
+		return PublicHistoryPreparationResult{}, operationErr3
+	}
+	result.Ready = false
+	return result, nil
+}
+
 // Preparation runs only while no index exists. Each call advances at most one
 // bounded batch and reports pending, including the call that publishes it.
 func (s *JSONLStore) preparePublicIndexLocked(ctx context.Context, key string, meta SessionMeta) (resultErr error) {
-	state, err := s.readPublicIndexPreparation(key, meta)
-	if err != nil {
-		return err
+	state, operationErr4 := s.readPublicIndexPreparation(key, meta)
+	if operationErr4 != nil {
+		return operationErr4
 	}
-	building, err := os.OpenFile(s.publicIndexBuildingPath(key), os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return err
+	building, operationErr4 := os.OpenFile(s.publicIndexBuildingPath(key), os.O_RDWR|os.O_CREATE, 0o600)
+	if operationErr4 != nil {
+		return operationErr4
 	}
 	defer closePublicFile(building, &resultErr)
-	if err := validatePublicIndexPreparation(building, state); err != nil {
-		return err
+	if operationErr5 := validatePublicIndexPreparation(building, state); operationErr5 != nil {
+		return operationErr5
 	}
-	if err := building.Truncate(publicIndexHeaderBytes + state.Count*publicIndexRecordBytes); err != nil {
-		return err
+	if operationErr6 := building.Truncate(
+		publicIndexHeaderBytes + state.Count*publicIndexRecordBytes,
+	); operationErr6 != nil {
+		return operationErr6
 	}
-	source, err := os.Open(s.publicHistoryPath(key))
-	if err != nil {
-		return err
+	source, operationErr7 := os.Open(s.publicHistoryPath(key))
+	if operationErr7 != nil {
+		return operationErr7
 	}
 	defer closePublicFile(source, &resultErr)
-	info, err := source.Stat()
-	if err != nil || info.Size() != meta.PublicHistoryBytes {
-		return errors.Join(ErrPublicHistoryCoverage, err)
+	info, operationErr7 := source.Stat()
+	if operationErr7 != nil || info.Size() != meta.PublicHistoryBytes {
+		return errors.Join(ErrPublicHistoryCoverage, operationErr7)
 	}
-	next, records, err := readPublicIndexPreparationBatch(ctx, source, state, meta)
-	if err != nil {
-		return err
+	next, records, operationErr7 := readPublicIndexPreparationBatch(ctx, source, state, meta)
+	if operationErr7 != nil {
+		return operationErr7
 	}
-	if err := writePublicIndexBytes(building, records, publicIndexHeaderBytes+state.Count*publicIndexRecordBytes); err != nil {
-		return err
+	if operationErr8 := writePublicIndexBytes(
+		building,
+		records,
+		publicIndexHeaderBytes+state.Count*publicIndexRecordBytes,
+	); operationErr8 != nil {
+		return operationErr8
 	}
-	if err := building.Sync(); err != nil {
-		return err
+	if operationErr9 := building.Sync(); operationErr9 != nil {
+		return operationErr9
 	}
-	data, err := json.Marshal(next)
-	if err != nil {
-		return err
+	data, operationErr7 := json.Marshal(next)
+	if operationErr7 != nil {
+		return operationErr7
 	}
-	if err := s.writeSessionFile(s.publicIndexPreparationPath(key), data, 0o600); err != nil {
-		return err
+	if operationErr10 := s.writeSessionFile(s.publicIndexPreparationPath(key), data, 0o600); operationErr10 != nil {
+		return operationErr10
 	}
 	if next.Count != meta.PublicHistoryCount || next.Byte != meta.PublicHistoryBytes {
 		return ErrPublicHistoryIndexPreparing
@@ -102,24 +135,27 @@ func (s *JSONLStore) preparePublicIndexLocked(ctx context.Context, key string, m
 	if next.Digest != meta.PublicHistoryDigest {
 		return ErrPublicHistoryCoverage
 	}
-	header, err := encodePublicIndexHeader(publicIndexMeta(meta))
-	if err != nil {
-		return err
+	header, operationErr7 := encodePublicIndexHeader(publicIndexMeta(meta))
+	if operationErr7 != nil {
+		return operationErr7
 	}
-	if err := writePublicIndexBytes(building, header, 0); err != nil {
-		return err
+	if operationErr11 := writePublicIndexBytes(building, header, 0); operationErr11 != nil {
+		return operationErr11
 	}
-	if err := building.Sync(); err != nil {
-		return err
+	if operationErr12 := building.Sync(); operationErr12 != nil {
+		return operationErr12
 	}
-	if err := building.Close(); err != nil {
-		return err
+	if operationErr13 := building.Close(); operationErr13 != nil {
+		return operationErr13
 	}
-	if err := os.Rename(s.publicIndexBuildingPath(key), s.publicIndexPath(key)); err != nil {
-		return err
+	if operationErr14 := os.Rename(s.publicIndexBuildingPath(key), s.publicIndexPath(key)); operationErr14 != nil {
+		return operationErr14
 	}
-	if err := os.Remove(s.publicIndexPreparationPath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if operationErr15 := os.Remove(
+		s.publicIndexPreparationPath(key),
+	); operationErr15 != nil &&
+		!errors.Is(operationErr15, os.ErrNotExist) {
+		return operationErr15
 	}
 	return ErrPublicHistoryIndexPreparing
 }
@@ -132,18 +168,26 @@ func validatePublicIndexPreparation(file *os.File, state publicIndexPreparation)
 		return nil
 	}
 	data := make([]byte, publicIndexRecordBytes)
-	if _, err := file.ReadAt(data, publicIndexHeaderBytes+(state.Count-1)*publicIndexRecordBytes); err != nil {
-		return errors.Join(ErrPublicHistoryCoverage, err)
+	if _, operationErr16 := file.ReadAt(
+		data,
+		publicIndexHeaderBytes+(state.Count-1)*publicIndexRecordBytes,
+	); operationErr16 != nil {
+		return errors.Join(ErrPublicHistoryCoverage, operationErr16)
 	}
-	last, err := decodePublicIndexRecord(data)
-	if err != nil || last.Offset < 0 || last.Length <= 1 || last.Offset+last.Length != state.Byte ||
+	last, operationErr17 := decodePublicIndexRecord(data)
+	if operationErr17 != nil || last.Offset < 0 || last.Length <= 1 || last.Offset+last.Length != state.Byte ||
 		state.Digest != publicIndexRecordDigest(last) {
 		return ErrPublicHistoryCoverage
 	}
 	return nil
 }
 
-func readPublicIndexPreparationBatch(ctx context.Context, source *os.File, state publicIndexPreparation, meta SessionMeta) (publicIndexPreparation, []byte, error) {
+func readPublicIndexPreparationBatch(
+	ctx context.Context,
+	source io.ReaderAt,
+	state publicIndexPreparation,
+	meta SessionMeta,
+) (publicIndexPreparation, []byte, error) {
 	next := state
 	if state.Count == state.Target.Count && state.Byte == state.Target.Bytes {
 		if state.Digest != state.Target.Digest {
@@ -155,11 +199,11 @@ func readPublicIndexPreparationBatch(ctx context.Context, source *os.File, state
 		min(next.Target.Bytes-next.Byte, PublicHistoryOperationBytes)), historyReadBufferBytes)
 	var records []byte
 	for rows := 0; rows < PublicHistoryImportMessages && next.Byte < next.Target.Bytes; rows++ {
-		if err := ctx.Err(); err != nil {
-			return next, nil, err
+		if operationErr18 := ctx.Err(); operationErr18 != nil {
+			return next, nil, operationErr18
 		}
-		line, err := readPublicIndexPreparationLine(reader)
-		if errors.Is(err, io.EOF) {
+		line, operationErr19 := readPublicIndexPreparationLine(reader)
+		if errors.Is(operationErr19, io.EOF) {
 			if next.Target.Bytes-state.Byte <= PublicHistoryOperationBytes {
 				return next, nil, ErrPublicHistoryCoverage
 			}
@@ -168,16 +212,16 @@ func readPublicIndexPreparationBatch(ctx context.Context, source *os.File, state
 			}
 			break
 		}
-		if err != nil {
-			return next, nil, err
+		if operationErr19 != nil {
+			return next, nil, operationErr19
 		}
 		var entry PublicHistoryEntry
 		if json.Unmarshal(line, &entry) != nil || !validPublicPageEntry(entry) {
 			return next, nil, ErrPublicHistoryCoverage
 		}
-		encoded, digest, err := publicIndexRecords(append(line, '\n'), next.Byte, next.Digest)
-		if err != nil {
-			return next, nil, err
+		encoded, digest, operationErr19 := publicIndexRecords(append(line, '\n'), next.Byte, next.Digest)
+		if operationErr19 != nil {
+			return next, nil, operationErr19
 		}
 		records = append(records, encoded...)
 		next.Byte += int64(len(line) + 1)
@@ -196,16 +240,16 @@ func readPublicIndexPreparationBatch(ctx context.Context, source *os.File, state
 func readPublicIndexPreparationLine(reader *bufio.Reader) ([]byte, error) {
 	var line []byte
 	for {
-		part, err := reader.ReadSlice('\n')
+		part, operationErr20 := reader.ReadSlice('\n')
 		if len(line)+len(part) > PublicHistoryOperationBytes {
 			return nil, ErrHistoryCapacity
 		}
 		line = append(line, part...)
-		if errors.Is(err, bufio.ErrBufferFull) {
+		if errors.Is(operationErr20, bufio.ErrBufferFull) {
 			continue
 		}
-		if err != nil {
-			return nil, err
+		if operationErr20 != nil {
+			return nil, operationErr20
 		}
 		return line[:len(line)-1], nil
 	}

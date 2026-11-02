@@ -16,9 +16,9 @@ type publicHistoryReadFile interface {
 }
 
 func openPublicHistoryReadFile(files fs.FS, name string) (publicHistoryReadFile, error) {
-	file, err := files.Open(name)
-	if err != nil {
-		return nil, err
+	file, operationErr0 := files.Open(name)
+	if operationErr0 != nil {
+		return nil, operationErr0
 	}
 	reader, ok := file.(publicHistoryReadFile)
 	if !ok {
@@ -27,23 +27,27 @@ func openPublicHistoryReadFile(files fs.FS, name string) (publicHistoryReadFile,
 	return reader, nil
 }
 
-// ReaderAt keeps shared-volume reads bounded without preparing or recovering source files.
-func ReadPublicHistoryPageFS(ctx context.Context, files fs.FS, request PublicHistoryPageRequest) (_ PublicHistoryPage, resultErr error) {
-	if err := ctx.Err(); err != nil {
-		return PublicHistoryPage{}, err
+// ReadPublicHistoryPageFS uses ReaderAt without preparing or recovering source files.
+func ReadPublicHistoryPageFS(
+	ctx context.Context,
+	files fs.FS,
+	request PublicHistoryPageRequest,
+) (_ PublicHistoryPage, resultErr error) {
+	if operationErr1 := ctx.Err(); operationErr1 != nil {
+		return PublicHistoryPage{}, operationErr1
 	}
 	if request.Cursor != "" {
-		if err := ValidatePublicHistoryPageCursor(request.Cursor); err != nil {
-			return PublicHistoryPage{}, err
+		if operationErr2 := ValidatePublicHistoryPageCursor(request.Cursor); operationErr2 != nil {
+			return PublicHistoryPage{}, operationErr2
 		}
 	}
 	if strings.TrimSpace(request.Key) == "" || strings.TrimSpace(request.Key) != request.Key {
 		return PublicHistoryPage{}, ErrHistoryCursor
 	}
 	name := sanitizeKey(request.Key)
-	metadata, err := fs.ReadFile(files, name+".meta.json")
-	if err != nil {
-		return PublicHistoryPage{}, err
+	metadata, operationErr3 := fs.ReadFile(files, name+".meta.json")
+	if operationErr3 != nil {
+		return PublicHistoryPage{}, operationErr3
 	}
 	var meta SessionMeta
 	if json.Unmarshal(metadata, &meta) != nil || meta.Key != request.Key ||
@@ -51,40 +55,40 @@ func ReadPublicHistoryPageFS(ctx context.Context, files fs.FS, request PublicHis
 		meta.PublicHistoryPreparation != nil || !meta.PublicHistoryComplete {
 		return PublicHistoryPage{}, ErrPublicHistoryCoverage
 	}
-	if err := checkPublicReadFiles(ctx, files, name, meta); err != nil {
-		return PublicHistoryPage{}, err
+	if operationErr4 := checkPublicReadFiles(ctx, files, name, meta); operationErr4 != nil {
+		return PublicHistoryPage{}, operationErr4
 	}
-	index, err := openPublicIndex(files, name+".jsonl.public.index", meta)
-	if errors.Is(err, fs.ErrNotExist) {
+	index, operationErr3 := openPublicIndex(files, name+".jsonl.public.index", meta)
+	if errors.Is(operationErr3, fs.ErrNotExist) {
 		return PublicHistoryPage{}, ErrPublicHistoryIndexPreparing
 	}
-	if err != nil {
-		return PublicHistoryPage{}, err
+	if operationErr3 != nil {
+		return PublicHistoryPage{}, operationErr3
 	}
 	defer closePublicFile(index.file, &resultErr)
-	source, err := openPublicHistoryReadFile(files, name+".jsonl.public")
-	if err != nil {
-		return PublicHistoryPage{}, err
+	source, operationErr3 := openPublicHistoryReadFile(files, name+".jsonl.public")
+	if operationErr3 != nil {
+		return PublicHistoryPage{}, operationErr3
 	}
 	defer closePublicFile(source, &resultErr)
-	info, err := source.Stat()
-	if err != nil || info.Size() != meta.PublicHistoryBytes {
-		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, err)
+	info, operationErr3 := source.Stat()
+	if operationErr3 != nil || info.Size() != meta.PublicHistoryBytes {
+		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, operationErr3)
 	}
-	cursor, err := readPublicHistoryCursor(request, meta, index)
-	if err != nil {
-		return PublicHistoryPage{}, err
+	cursor, operationErr3 := readPublicHistoryCursor(request, meta, index)
+	if operationErr3 != nil {
+		return PublicHistoryPage{}, operationErr3
 	}
-	page, err := readPublicPage(ctx, request, cursor, source, index)
-	if err != nil {
-		return PublicHistoryPage{}, err
+	page, operationErr3 := readPublicPage(ctx, request, cursor, source, index)
+	if operationErr3 != nil {
+		return PublicHistoryPage{}, operationErr3
 	}
-	current, err := fs.ReadFile(files, name+".meta.json")
-	if err != nil || !bytes.Equal(metadata, current) {
-		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, err)
+	current, operationErr3 := fs.ReadFile(files, name+".meta.json")
+	if operationErr3 != nil || !bytes.Equal(metadata, current) {
+		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, operationErr3)
 	}
-	if err := checkPublicReadFiles(ctx, files, name, meta); err != nil {
-		return PublicHistoryPage{}, err
+	if operationErr5 := checkPublicReadFiles(ctx, files, name, meta); operationErr5 != nil {
+		return PublicHistoryPage{}, operationErr5
 	}
 	return page, nil
 }
