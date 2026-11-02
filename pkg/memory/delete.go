@@ -11,9 +11,15 @@ import (
 	"time"
 )
 
-// DeleteSession removes a session from disk: its meta, its transcript, the
-// files of the legacy keys its meta names as aliases, and their cache entries.
-// Deleting a session that does not exist is not an error.
+// DeleteSession removes a session from disk: its meta, its transcript, its
+// history journal and recovery marker, the files of the legacy keys its meta
+// names as aliases, and what is kept of them in memory. Deleting a session that
+// does not exist is not an error.
+//
+// It is the owner's delete, not an automatic prune: a write in flight is
+// resolved first, so its journal cannot republish the session, but a history
+// that still needs recovery does not hold the delete back (as in the web
+// backend's CheckHistoryDeletion).
 //
 // It holds the session's lock, so an append in flight finishes before the files
 // go, and one that follows starts a new session instead of continuing a
@@ -28,15 +34,21 @@ import (
 // Clearing a session (empty history, empty summary) is not a delete: the meta
 // and the transcript stay, and the session stays in every listing with no
 // messages, where each listing keeps paying for it.
-func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
-	if strings.TrimSpace(sessionKey) == "" {
-		return errors.New("memory: delete session: empty key")
+func (s *JSONLStore) DeleteSession(ctx context.Context, sessionKey string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(sessionKey) != sessionKey {
+		return ErrHistoryOwnershipUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	var errs []error
 	for _, alias := range s.legacyAliases(sessionKey) {
 		unlock := s.lockSessionPair(sessionKey, alias)
-		if err := s.removeSessionFiles(sanitizeKey(alias)); err != nil {
+		if err := s.deleteSessionFilesLocked(ctx, alias, true); err != nil {
 			errs = append(errs, err)
 		}
 		unlock()
@@ -50,7 +62,7 @@ func (s *JSONLStore) DeleteSession(_ context.Context, sessionKey string) error {
 	l := s.sessionLock(sessionKey)
 	l.Lock()
 	defer l.Unlock()
-	if err := s.removeSessionFiles(sanitizeKey(sessionKey)); err != nil {
+	if err := s.deleteSessionFilesLocked(ctx, sessionKey); err != nil {
 		return fmt.Errorf("memory: delete session: %w", err)
 	}
 	return nil
@@ -113,8 +125,25 @@ func (s *JSONLStore) PruneEmptySessions(
 
 	var removed []string
 	var errs []error
+	// Metadata may already be durably gone when a later cleanup phase fails.
+	// Its exact prior authorization, not a new emptiness/hook decision, remains
+	// discoverable in the existing journal namespace for a warm retry.
+	pending, discoveryErr := s.pendingHistoryDeletions("empty")
+	if discoveryErr != nil {
+		return nil, discoveryErr
+	}
+	seen := make(map[string]bool)
+	for _, key := range pending {
+		seen[sanitizeKey(key)] = true
+		done, err := s.pruneIfEmpty(key, cutoff, beforeRemove)
+		if err != nil {
+			errs = append(errs, err)
+		} else if done {
+			removed = append(removed, key)
+		}
+	}
 	for _, meta := range s.ListSessionMetas() {
-		if !isEmptyMeta(meta) {
+		if seen[sanitizeKey(meta.Key)] || !isEmptyMeta(meta) {
 			continue
 		}
 		done, err := s.pruneIfEmpty(meta.Key, cutoff, beforeRemove)
@@ -138,7 +167,8 @@ func (s *JSONLStore) PruneEmptySessions(
 var ErrKeepSession = errors.New("memory: session kept by the caller")
 
 func isEmptyMeta(meta SessionMeta) bool {
-	return meta.Count == 0 && meta.Skip == 0 && strings.TrimSpace(meta.Summary) == ""
+	return meta.Count == 0 && meta.Skip == 0 && strings.TrimSpace(meta.Summary) == "" &&
+		!meta.HistoryRecoveryRequired
 }
 
 // pruneIfEmpty decides again, under the session's lock and from the files
@@ -148,6 +178,9 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	l := s.sessionLock(key)
 	l.Lock()
 	defer l.Unlock()
+	if resumed, err := s.resumeHistoryDeletion(key); resumed || err != nil {
+		return resumed && err == nil, err
+	}
 
 	meta, lastWrite, err := s.readMetaFile(key)
 	if errors.Is(err, os.ErrNotExist) {
@@ -172,8 +205,30 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	case !errors.Is(err, os.ErrNotExist):
 		return false, fmt.Errorf("memory: prune empty sessions: stat transcript: %w", err)
 	}
+	journaled, lastJournal, err := s.historyJournalState(key)
+	if err != nil {
+		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
+	}
+	if journaled {
+		return false, nil
+	}
+	if lastJournal.After(lastWrite) {
+		lastWrite = lastJournal
+	}
 	if !lastWrite.Before(cutoff) {
 		return false, nil
+	}
+	// The removal below is guarded like every automatic prune; the hook must
+	// not run for a session the guard would keep.
+	cached, err := s.readMeta(key)
+	if err == nil {
+		err = s.guardHistoryMutation(key, cached)
+	}
+	if errors.Is(err, ErrHistoryRecoveryRequired) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 
 	if beforeRemove != nil {
@@ -181,10 +236,34 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 		}
 	}
-	if err := s.removeSessionFiles(sanitizeKey(key)); err != nil {
+	if err := s.removeSessionFilesLocked(sanitizeKey(key), "empty"); err != nil {
 		return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 	}
 	return true, nil
+}
+
+// historyJournalState reports whether a session has a history write to recover
+// (its journal, decision or recovery marker on disk), and the last time its
+// order witness was written. A session with a write to recover is not empty
+// whatever its meta says.
+func (s *JSONLStore) historyJournalState(key string) (bool, time.Time, error) {
+	for _, path := range []string{s.historyRecoveryPath(key), s.historyDecisionPath(key), s.historyRecoveryRequiredPath(key)} {
+		_, err := os.Stat(path)
+		if err == nil {
+			return true, time.Time{}, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, time.Time{}, err
+		}
+	}
+	info, err := os.Stat(s.historyOrderWitnessPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, time.Time{}, nil
+	}
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return false, info.ModTime(), nil
 }
 
 // readMetaFile reads a session's meta from disk, bypassing the cache, with the

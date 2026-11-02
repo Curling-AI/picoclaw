@@ -114,8 +114,12 @@ func TestJSONLBackend_PruneEmptySessionsRemovesAbandonedGhostsOnly(t *testing.T)
 	b.SetHistory("ghost", nil)
 	b.AddMessage("alive", "user", "hello")
 	old := time.Now().Add(-48 * time.Hour)
-	for _, name := range []string{"ghost.meta.json", "ghost.jsonl", "alive.meta.json", "alive.jsonl"} {
-		if chErr := os.Chtimes(filepath.Join(dir, name), old, old); chErr != nil {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if chErr := os.Chtimes(filepath.Join(dir, entry.Name()), old, old); chErr != nil {
 			t.Fatal(chErr)
 		}
 	}

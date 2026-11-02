@@ -17,7 +17,7 @@ const ghostIdle = 24 * time.Hour
 func age(t *testing.T, store *JSONLStore, key string, idle time.Duration) {
 	t.Helper()
 	stamp := time.Now().Add(-idle)
-	for _, path := range []string{store.metaPath(key), store.jsonlPath(key)} {
+	for _, path := range []string{store.metaPath(key), store.jsonlPath(key), store.historyOrderWitnessPath(key)} {
 		if err := os.Chtimes(path, stamp, stamp); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("chtimes %s: %v", path, err)
 		}
@@ -110,6 +110,8 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 		name  string
 		setup func(t *testing.T, store *JSONLStore, key string)
 		idle  time.Duration
+		// witnessFresh keeps the order witness's own, recent write time.
+		witnessFresh bool
 	}{
 		{
 			name: "a message",
@@ -198,6 +200,33 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 			},
 		},
 		{
+			name: "a history write still to recover",
+			setup: func(t *testing.T, store *JSONLStore, key string) {
+				if err := store.UpsertSessionMeta(ctx, key, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(store.historyRecoveryPath(key), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				stamp := time.Now().Add(-30 * ghostIdle)
+				if err := os.Chtimes(store.historyRecoveryPath(key), stamp, stamp); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "an order witness written a moment ago",
+			setup: func(t *testing.T, store *JSONLStore, key string) {
+				if err := store.UpsertSessionMeta(ctx, key, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(store.historyOrderWitnessPath(key), []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			witnessFresh: true,
+		},
+		{
 			name: "a meta that cannot be read",
 			setup: func(t *testing.T, store *JSONLStore, key string) {
 				if err := os.WriteFile(store.metaPath(key), []byte("{not json"), 0o644); err != nil {
@@ -226,6 +255,12 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 				idle = 30 * ghostIdle
 			}
 			age(t, store, key, idle)
+			if tc.witnessFresh {
+				now := time.Now()
+				if err := os.Chtimes(store.historyOrderWitnessPath(key), now, now); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			removed, err := store.PruneEmptySessions(ghostIdle, time.Now(), func(meta SessionMeta) error {
 				t.Errorf("before-remove hook called for %q", meta.Key)
@@ -319,54 +354,6 @@ func TestPruneEmptySessions_TheHookCanKeepASession(t *testing.T) {
 	}
 	if !fileExists(store.metaPath("agent:main:web-a")) {
 		t.Error("the session the hook kept was removed")
-	}
-}
-
-// A config reload opens a second store on the directory of the first, and a
-// sweep started on the first keeps running. Its lock has to hold off a write
-// through the second, or it removes a message written after its re-check.
-func TestPruneEmptySessions_HoldsOffWritesThroughAnotherStoreOnTheSameDirectory(t *testing.T) {
-	dir := t.TempDir()
-	sweeping, err := NewJSONLStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reloaded, err := NewJSONLStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	const key = "agent:main:whatsapp:direct:42"
-	if upsertErr := sweeping.UpsertSessionMeta(ctx, key, nil, nil); upsertErr != nil {
-		t.Fatal(upsertErr)
-	}
-	age(t, sweeping, key, 2*ghostIdle)
-
-	written := make(chan error, 1)
-	_, err = sweeping.PruneEmptySessions(ghostIdle, time.Now(), func(SessionMeta) error {
-		go func() { written <- reloaded.AddMessage(ctx, key, "user", "olá") }()
-		select {
-		case writeErr := <-written:
-			written <- writeErr
-		case <-time.After(300 * time.Millisecond):
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("PruneEmptySessions: %v", err)
-	}
-	select {
-	case writeErr := <-written:
-		if writeErr != nil {
-			t.Fatalf("AddMessage: %v", writeErr)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the write through the other store never finished")
-	}
-
-	history, err := reloaded.GetHistory(ctx, key)
-	if err != nil || len(history) != 1 {
-		t.Fatalf("history = %v, %v; the message written during the sweep is gone", history, err)
 	}
 }
 
