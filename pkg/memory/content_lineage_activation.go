@@ -1,0 +1,129 @@
+package memory
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"strings"
+)
+
+type contentActivationMetadata struct {
+	Key      string          `json:"key"`
+	Aliases  []string        `json:"aliases"`
+	Identity json.RawMessage `json:"content_identity"`
+}
+
+func (s *JSONLStore) readContentActivationMetadata(key string) (contentActivationMetadata, bool, error) {
+	data, err := os.ReadFile(s.metaPath(key))
+	if errors.Is(err, os.ErrNotExist) {
+		return contentActivationMetadata{}, false, nil
+	}
+	if err != nil {
+		return contentActivationMetadata{}, false, err
+	}
+	var meta contentActivationMetadata
+	if err = json.Unmarshal(data, &meta); err != nil {
+		return contentActivationMetadata{}, false, err
+	}
+	return meta, true, nil
+}
+
+func (s *JSONLStore) HistoryContentIdentityActive(ctx context.Context, key string) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	lock := s.sessionLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	legacy, err := s.ownedContentNeverInitialized(ctx, key)
+	if err != nil || legacy {
+		return false, err
+	}
+	return s.contentIdentityActiveLocked(ctx, key)
+}
+
+// This is only a negative activation probe for an already resolved physical
+// legacy source. It proves no alias ownership and cannot authorize checked
+// append, initialization or mutation. The exact own checkpoint, absent content
+// witness and settled own journal preserve the existing legacy owner operation
+// even if an unrelated metadata file is unreadable.
+func (s *JSONLStore) ownedContentNeverInitialized(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := s.checkContentJournalSettled(key); err != nil {
+		return false, err
+	}
+	meta, present, err := s.readContentActivationMetadata(key)
+	if err != nil || !present || meta.Key != key || len(meta.Identity) != 0 {
+		return false, err
+	}
+	if _, err = os.Lstat(s.contentDomainPath(key)); errors.Is(err, os.ErrNotExist) {
+		return true, ctx.Err()
+	}
+	return false, err
+}
+
+// The caller holds this physical source's lock. Writers use the same metadata
+// ownership preflight without importing the stricter frame/count checks.
+func (s *JSONLStore) contentIdentityActiveLocked(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(key) == "" || strings.TrimSpace(key) != key {
+		return false, ErrHistoryOwnershipUnavailable
+	}
+	meta, present, err := s.readContentActivationMetadata(key)
+	if err != nil {
+		return false, err
+	}
+	if present && meta.Key != "" && meta.Key != key {
+		return false, ErrHistoryOwnershipUnavailable
+	}
+	// Preserve the established canonical sk_v1 shortcut. Other requests must
+	// not label an alias of a known source as an absent/uninitialized source.
+	if !shouldShortCircuitSessionResolve(key) || !present || meta.Key != key {
+		entries, readErr := os.ReadDir(s.dir)
+		if readErr != nil {
+			return false, readErr
+		}
+		for _, entry := range entries {
+			if err = ctx.Err(); err != nil {
+				return false, err
+			}
+			if !strings.HasSuffix(entry.Name(), ".meta.json") {
+				continue
+			}
+			physical := strings.TrimSuffix(entry.Name(), ".meta.json")
+			owner, _, readErr := s.readContentActivationMetadata(physical)
+			if readErr != nil {
+				return false, readErr
+			}
+			if physical == sanitizeKey(key) && owner.Key != "" && owner.Key != key {
+				return false, ErrHistoryOwnershipUnavailable
+			}
+			for _, alias := range owner.Aliases {
+				if alias == key && owner.Key != key {
+					return false, ErrHistoryOwnershipUnavailable
+				}
+			}
+		}
+	}
+	_, err = os.Lstat(s.contentDomainPath(key))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	// Even null or malformed identity/witness evidence remains an activation
+	// marker. The checked frame reader then fails closed rather than silently
+	// enabling the legacy destructive path for a once-initialized source.
+	return len(meta.Identity) != 0 || err == nil, nil
+}
+
+var _ HistoryContentActivation = (*JSONLStore)(nil)

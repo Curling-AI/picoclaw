@@ -152,10 +152,10 @@ func (al *AgentLoop) parkResultLocked(sessionKey string, msg bus.InboundMessage)
 func (al *AgentLoop) releaseParkedResults(sessionKey string) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
+	defer stripe.Unlock()
 	al.mirror.mu.Lock()
 	if al.mirrorBusyLocked(sessionKey) {
 		al.mirror.mu.Unlock()
-		stripe.Unlock()
 		return
 	}
 	parked := al.mirror.parked[sessionKey]
@@ -166,7 +166,6 @@ func (al *AgentLoop) releaseParkedResults(sessionKey string) {
 	if quiet {
 		al.writeNotesLocked(sessionKey, parked)
 	}
-	stripe.Unlock()
 	if quiet || len(parked) == 0 {
 		return
 	}

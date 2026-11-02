@@ -123,7 +123,7 @@ func assistantReply(exec *turnExecution, content string) providers.Message {
 // answer, or a reply the person watched being streamed before the message
 // they sent meanwhile (keepWatchedReply). (seucaranguejo fork)
 func (p *Pipeline) persistAssistantReply(turnCtx context.Context, ts *turnState, msg providers.Message) {
-	ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+	ts.appendHistoryMessage(msg)
 	ts.recordPersistedMessage(msg)
 	ts.ingestMessage(turnCtx, p.al, msg)
 }
