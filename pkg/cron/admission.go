@@ -49,6 +49,7 @@ type executionAdmission struct {
 	RetryAtMS      int64     `json:"retryAtMs"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 	Retried        bool      `json:"retried"`
+	Outcome        string    `json:"outcome,omitempty"`
 }
 
 func (cs *CronService) admissionPath(run string) string {
@@ -118,6 +119,7 @@ func (cs *CronService) beginExecutionAdmission(execution Execution) (*executionA
 	} else if admission.State == admissionFinished {
 		return nil, nil, unlock, ErrDuplicateExecution
 	} else if admission.State == admissionExecuting {
+		admission.Outcome = "indeterminate"
 		return &admission, nil, unlock, errors.New("cron execution outcome unknown after runtime restart")
 	} else {
 		admission.Retried = true

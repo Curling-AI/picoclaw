@@ -95,7 +95,7 @@ func TestClaimedAdmissionIsNeverExecutedAgainAfterRestart(t *testing.T) {
 		t.Fatal("an interrupted effects claim was executed again")
 	}
 	finished, err := readExecutionAdmission(service.admissionPath(run))
-	if err != nil || finished.State != admissionFinished {
+	if err != nil || finished.State != admissionFinished || finished.Outcome != "indeterminate" {
 		t.Fatal("interrupted execution did not retain an unknown-outcome tombstone", err)
 	}
 }
