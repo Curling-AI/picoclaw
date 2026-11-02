@@ -36,11 +36,17 @@ func publicHistoryKeyDigest(key string) string {
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
-func readPublicHistoryCursor(request PublicHistoryPageRequest, meta SessionMeta, index *publicIndexReader) (publicHistoryCursor, error) {
-	cursor := publicHistoryCursor{Version: 1, Key: publicHistoryKeyDigest(request.Key),
+func readPublicHistoryCursor(
+	request PublicHistoryPageRequest,
+	meta SessionMeta,
+	index *publicIndexReader,
+) (publicHistoryCursor, error) {
+	cursor := publicHistoryCursor{
+		Version: 1, Key: publicHistoryKeyDigest(request.Key),
 		Generation: meta.PublicHistoryGeneration, Revision: meta.PublicHistoryRevision,
 		Count: meta.PublicHistoryCount, Bytes: meta.PublicHistoryBytes, Digest: meta.PublicHistoryDigest,
-		Position: meta.PublicHistoryCount, Direction: publicPageBefore}
+		Position: meta.PublicHistoryCount, Direction: publicPageBefore,
+	}
 	if request.Cursor == "" {
 		return cursor, nil
 	}

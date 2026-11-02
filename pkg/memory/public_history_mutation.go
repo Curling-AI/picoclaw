@@ -75,7 +75,12 @@ func (s *JSONLStore) preparePublicAppend(
 	next.PublicHistoryBytes = offset + int64(len(data))
 	next.PublicHistoryCount = original.PublicHistoryCount + int64(len(newEntries))
 	next.PublicHistoryRevision++
-	return s.preparePublicIndex(key, original, *next, publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true}})
+	return s.preparePublicIndex(
+		key,
+		original,
+		*next,
+		publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true}},
+	)
 }
 
 func (s *JSONLStore) preparePublicRewrite(
@@ -181,7 +186,12 @@ func (s *JSONLStore) replacePublicEntries(
 	next.PublicHistoryBytes = int64(len(data))
 	next.PublicHistoryCount = int64(len(entries))
 	next.PublicHistoryRevision++
-	return s.preparePublicIndex(key, SessionMeta{}, *next, publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}})
+	return s.preparePublicIndex(
+		key,
+		SessionMeta{},
+		*next,
+		publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}},
+	)
 }
 
 func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (resultErr error) {

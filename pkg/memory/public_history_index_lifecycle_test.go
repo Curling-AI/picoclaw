@@ -12,19 +12,19 @@ func TestPublicHistoryIndexKeepsOlderDeletionIntentsRecoverable(t *testing.T) {
 	for _, unexpected := range []bool{false, true} {
 		t.Run(map[bool]string{false: "legacy absent index", true: "unproven index"}[unexpected], func(t *testing.T) {
 			store, key := pauseOwnedDeletion(t)
-			data, err := os.ReadFile(store.historyRecoveryPath(key))
-			if err != nil {
-				t.Fatal(err)
+			data, operationErr0 := os.ReadFile(store.historyRecoveryPath(key))
+			if operationErr0 != nil {
+				t.Fatal(operationErr0)
 			}
 			var record historyDeletionRecord
-			if err := json.Unmarshal(data, &record); err != nil {
-				t.Fatal(err)
+			if operationErr1 := json.Unmarshal(data, &record); operationErr1 != nil {
+				t.Fatal(operationErr1)
 			}
 			indexFiles := map[string]bool{}
 			for _, path := range []string{store.publicIndexPath(key), store.publicIndexPreparationPath(key), store.publicIndexBuildingPath(key)} {
 				indexFiles[filepath.Base(path)] = true
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					t.Fatal(err)
+				if operationErr2 := os.Remove(path); operationErr2 != nil && !errors.Is(operationErr2, os.ErrNotExist) {
+					t.Fatal(operationErr2)
 				}
 			}
 			var legacy []historyDeletionFile
@@ -35,30 +35,34 @@ func TestPublicHistoryIndexKeepsOlderDeletionIntentsRecoverable(t *testing.T) {
 			}
 			record.Deletion.Files = legacy
 			record.Deletion.Fingerprint = historyDeletionFingerprint(record.Deletion)
-			data, err = json.Marshal(record)
-			if err != nil {
-				t.Fatal(err)
+			data, operationErr0 = json.Marshal(record)
+			if operationErr0 != nil {
+				t.Fatal(operationErr0)
 			}
-			if err := os.WriteFile(store.historyRecoveryPath(key), data, 0o600); err != nil {
-				t.Fatal(err)
+			if operationErr3 := os.WriteFile(store.historyRecoveryPath(key), data, 0o600); operationErr3 != nil {
+				t.Fatal(operationErr3)
 			}
 			if unexpected {
-				if err := os.WriteFile(store.publicIndexPath(key), []byte("unproven replacement"), 0o600); err != nil {
-					t.Fatal(err)
+				if operationErr4 := os.WriteFile(
+					store.publicIndexPath(key),
+					[]byte("unproven replacement"),
+					0o600,
+				); operationErr4 != nil {
+					t.Fatal(operationErr4)
 				}
 			}
-			err = store.recoverHistoryWrite(key)
+			operationErr0 = store.recoverHistoryWrite(key)
 			if unexpected {
-				if !errors.Is(err, ErrContentIdentityUnavailable) {
-					t.Fatal("old intent authorized deletion of an unproven index", err)
+				if !errors.Is(operationErr0, ErrContentIdentityUnavailable) {
+					t.Fatal("old intent authorized deletion of an unproven index", operationErr0)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatal("index introduction broke a valid older deletion intent", err)
+			if operationErr0 != nil {
+				t.Fatal("index introduction broke a valid older deletion intent", operationErr0)
 			}
-			if _, err := os.Stat(store.metaPath(key)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("older deletion did not complete", err)
+			if _, operationErr5 := os.Stat(store.metaPath(key)); !errors.Is(operationErr5, os.ErrNotExist) {
+				t.Fatal("older deletion did not complete", operationErr5)
 			}
 		})
 	}

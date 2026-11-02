@@ -18,25 +18,29 @@ type publicIndexChange struct {
 	Offset  *int64
 }
 
-func (s *JSONLStore) preparePublicIndex(key string, original, next SessionMeta, change publicHistoryChange) (publicHistoryChange, error) {
+func (s *JSONLStore) preparePublicIndex(
+	key string,
+	original, next SessionMeta,
+	change publicHistoryChange,
+) (publicHistoryChange, error) {
 	if change.Recovery == nil {
 		return change, nil
 	}
-	header, err := encodePublicIndexHeader(publicIndexMeta(next))
-	if err != nil {
-		return publicHistoryChange{}, err
+	header, operationErr0 := encodePublicIndexHeader(publicIndexMeta(next))
+	if operationErr0 != nil {
+		return publicHistoryChange{}, operationErr0
 	}
 	if change.Recovery.Offset != nil {
 		return s.preparePublicIndexAppend(key, original, next, change, header)
 	}
-	records, digest, err := publicIndexRecords(change.Data, 0, emptyHistoryDigest)
-	if err != nil || digest != next.PublicHistoryDigest {
-		return publicHistoryChange{}, errors.Join(ErrPublicHistoryCoverage, err)
+	records, digest, operationErr0 := publicIndexRecords(change.Data, 0, emptyHistoryDigest)
+	if operationErr0 != nil || digest != next.PublicHistoryDigest {
+		return publicHistoryChange{}, errors.Join(ErrPublicHistoryCoverage, operationErr0)
 	}
-	old, err := os.ReadFile(s.publicIndexPath(key))
-	existed := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return publicHistoryChange{}, err
+	old, operationErr0 := os.ReadFile(s.publicIndexPath(key))
+	existed := operationErr0 == nil
+	if operationErr0 != nil && !errors.Is(operationErr0, os.ErrNotExist) {
+		return publicHistoryChange{}, operationErr0
 	}
 	recovery := *change.Recovery
 	recovery.Index = &publicIndexRecovery{Data: old, Existed: existed}
@@ -45,26 +49,35 @@ func (s *JSONLStore) preparePublicIndex(key string, original, next SessionMeta, 
 	return change, nil
 }
 
-func (s *JSONLStore) preparePublicIndexAppend(key string, original, next SessionMeta, change publicHistoryChange, header []byte) (publicHistoryChange, error) {
-	index, err := s.openPublicIndex(key, original)
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrPublicHistoryCoverage) {
+func (s *JSONLStore) preparePublicIndexAppend(
+	key string,
+	original, next SessionMeta,
+	change publicHistoryChange,
+	header []byte,
+) (publicHistoryChange, error) {
+	index, operationErr1 := s.openPublicIndex(key, original)
+	if errors.Is(operationErr1, os.ErrNotExist) || errors.Is(operationErr1, ErrPublicHistoryCoverage) {
 		// A source installed before the index remains writable. Its explicit,
 		// bounded preparation owns index creation; a read never scans it whole.
 		return change, nil
 	}
-	if err != nil {
-		return publicHistoryChange{}, err
+	if operationErr1 != nil {
+		return publicHistoryChange{}, operationErr1
 	}
-	if err := index.file.Close(); err != nil {
-		return publicHistoryChange{}, err
+	if operationErr2 := index.file.Close(); operationErr2 != nil {
+		return publicHistoryChange{}, operationErr2
 	}
-	records, digest, err := publicIndexRecords(change.Data, original.PublicHistoryBytes, original.PublicHistoryDigest)
-	if err != nil || digest != next.PublicHistoryDigest {
-		return publicHistoryChange{}, errors.Join(ErrPublicHistoryCoverage, err)
+	records, digest, operationErr1 := publicIndexRecords(
+		change.Data,
+		original.PublicHistoryBytes,
+		original.PublicHistoryDigest,
+	)
+	if operationErr1 != nil || digest != next.PublicHistoryDigest {
+		return publicHistoryChange{}, errors.Join(ErrPublicHistoryCoverage, operationErr1)
 	}
-	oldHeader, err := encodePublicIndexHeader(publicIndexMeta(original))
-	if err != nil {
-		return publicHistoryChange{}, err
+	oldHeader, operationErr1 := encodePublicIndexHeader(publicIndexMeta(original))
+	if operationErr1 != nil {
+		return publicHistoryChange{}, operationErr1
 	}
 	offset := int64(publicIndexHeaderBytes) + original.PublicHistoryCount*publicIndexRecordBytes
 	recovery := *change.Recovery
@@ -82,21 +95,21 @@ func (s *JSONLStore) writePublicIndex(key string, change *publicIndexChange) err
 		data := append(append([]byte(nil), change.Header...), change.Records...)
 		return s.writeSessionFile(s.publicIndexPath(key), data, 0o600)
 	}
-	file, err := os.OpenFile(s.publicIndexPath(key), os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
+	file, operationErr3 := os.OpenFile(s.publicIndexPath(key), os.O_WRONLY, 0o600)
+	if operationErr3 != nil {
+		return operationErr3
 	}
-	err = file.Truncate(*change.Offset)
-	if err == nil {
-		err = writePublicIndexBytes(file, change.Records, *change.Offset)
+	operationErr3 = file.Truncate(*change.Offset)
+	if operationErr3 == nil {
+		operationErr3 = writePublicIndexBytes(file, change.Records, *change.Offset)
 	}
-	if err == nil {
-		err = writePublicIndexBytes(file, change.Header, 0)
+	if operationErr3 == nil {
+		operationErr3 = writePublicIndexBytes(file, change.Header, 0)
 	}
-	if err == nil {
-		err = file.Sync()
+	if operationErr3 == nil {
+		operationErr3 = file.Sync()
 	}
-	return errors.Join(err, file.Close())
+	return errors.Join(operationErr3, file.Close())
 }
 
 func (s *JSONLStore) restorePublicIndex(key string, recovery *publicIndexRecovery) error {
@@ -107,11 +120,11 @@ func (s *JSONLStore) restorePublicIndex(key string, recovery *publicIndexRecover
 		if recovery.Existed {
 			return s.writeSessionFile(s.publicIndexPath(key), recovery.Data, 0o600)
 		}
-		err := os.Remove(s.publicIndexPath(key))
-		if errors.Is(err, os.ErrNotExist) {
+		operationErr4 := os.Remove(s.publicIndexPath(key))
+		if errors.Is(operationErr4, os.ErrNotExist) {
 			return nil
 		}
-		return err
+		return operationErr4
 	}
 	return s.writePublicIndex(key, &publicIndexChange{Header: recovery.Header, Offset: recovery.Offset})
 }

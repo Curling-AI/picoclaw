@@ -20,11 +20,11 @@ const (
 )
 
 type publicIndexHeader struct {
-	Generation string
-	Revision   uint64
-	Bytes      int64
-	Count      int64
-	Digest     string
+	Generation string `json:"generation"`
+	Revision   uint64 `json:"revision"`
+	Bytes      int64  `json:"bytes"`
+	Count      int64  `json:"count"`
+	Digest     string `json:"digest"`
 }
 
 type publicIndexRecord struct {
@@ -43,15 +43,20 @@ func (s *JSONLStore) publicIndexFiles(key string) []string {
 }
 
 func publicIndexMeta(meta SessionMeta) publicIndexHeader {
-	return publicIndexHeader{meta.PublicHistoryGeneration, meta.PublicHistoryRevision,
-		meta.PublicHistoryBytes, meta.PublicHistoryCount, meta.PublicHistoryDigest}
+	return publicIndexHeader{
+		meta.PublicHistoryGeneration, meta.PublicHistoryRevision,
+		meta.PublicHistoryBytes, meta.PublicHistoryCount, meta.PublicHistoryDigest,
+	}
 }
 
 func encodePublicIndexHeader(header publicIndexHeader) ([]byte, error) {
 	generation, err := uuid.Parse(header.Generation)
 	digest, digestErr := hex.DecodeString(header.Digest)
-	if err != nil || digestErr != nil || len(digest) != sha256.Size || header.Bytes < 0 || header.Bytes > maxHistoryPosition ||
-		header.Count < 0 || header.Count > maxHistoryPosition || header.Revision > uint64(maxHistoryPosition) {
+	if err != nil || digestErr != nil || len(digest) != sha256.Size ||
+		header.Bytes < 0 || header.Bytes > maxHistoryPosition ||
+		header.Count < 0 ||
+		header.Count > maxHistoryPosition ||
+		header.Revision > uint64(maxHistoryPosition) {
 		return nil, ErrPublicHistoryCoverage
 	}
 	data := make([]byte, publicIndexHeaderBytes)
@@ -82,9 +87,11 @@ func decodePublicIndexHeader(data []byte) (publicIndexHeader, error) {
 	if byteCount > uint64(maxHistoryPosition) || rowCount > uint64(maxHistoryPosition) {
 		return publicIndexHeader{}, ErrPublicHistoryCoverage
 	}
-	header := publicIndexHeader{Generation: generation.String(), Revision: binary.BigEndian.Uint64(data[24:32]),
+	header := publicIndexHeader{
+		Generation: generation.String(), Revision: binary.BigEndian.Uint64(data[24:32]),
 		Bytes: int64(byteCount), Count: int64(rowCount),
-		Digest: hex.EncodeToString(data[48:80])}
+		Digest: hex.EncodeToString(data[48:80]),
+	}
 	if _, err := encodePublicIndexHeader(header); err != nil {
 		return publicIndexHeader{}, err
 	}
@@ -172,7 +179,8 @@ func openPublicIndex(files fs.FS, name string, meta SessionMeta) (*publicIndexRe
 	}
 	if err == nil && reader.header.Count > 0 {
 		last, readErr := reader.record(reader.header.Count - 1)
-		if readErr != nil || last.Offset+last.Length != reader.header.Bytes || hex.EncodeToString(last.Chain[:]) != reader.header.Digest {
+		if readErr != nil || last.Offset+last.Length != reader.header.Bytes ||
+			hex.EncodeToString(last.Chain[:]) != reader.header.Digest {
 			err = ErrPublicHistoryCoverage
 		}
 	}

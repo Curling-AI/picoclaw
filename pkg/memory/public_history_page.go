@@ -18,8 +18,7 @@ const (
 	publicHistoryEnvelopeBytes  = 64 << 10
 )
 
-// MessageBytes measures the consumer's actual public projection. Private order
-// evidence and the bounded operation envelope have a separate byte budget.
+// PublicHistoryPageRequest measures messages separately from private evidence and the bounded envelope.
 type PublicHistoryPageRequest struct {
 	Key          string
 	Cursor       string
@@ -47,13 +46,16 @@ type PublicHistoryPage struct {
 	Stats       PublicHistoryReadStats `json:"-"`
 }
 
-func (s *JSONLStore) ReadPublicHistoryPage(ctx context.Context, request PublicHistoryPageRequest) (PublicHistoryPage, error) {
-	if err := ctx.Err(); err != nil {
-		return PublicHistoryPage{}, err
+func (s *JSONLStore) ReadPublicHistoryPage(
+	ctx context.Context,
+	request PublicHistoryPageRequest,
+) (PublicHistoryPage, error) {
+	if operationErr0 := ctx.Err(); operationErr0 != nil {
+		return PublicHistoryPage{}, operationErr0
 	}
 	if request.Cursor != "" {
-		if err := ValidatePublicHistoryPageCursor(request.Cursor); err != nil {
-			return PublicHistoryPage{}, err
+		if operationErr1 := ValidatePublicHistoryPageCursor(request.Cursor); operationErr1 != nil {
+			return PublicHistoryPage{}, operationErr1
 		}
 	}
 	if strings.TrimSpace(request.Key) == "" || strings.TrimSpace(request.Key) != request.Key {
@@ -62,24 +64,24 @@ func (s *JSONLStore) ReadPublicHistoryPage(ctx context.Context, request PublicHi
 	lock := s.sessionLock(request.Key)
 	lock.Lock()
 	defer lock.Unlock()
-	page, err := ReadPublicHistoryPageFS(ctx, os.DirFS(s.dir), request)
-	if errors.Is(err, ErrPublicHistoryIndexPreparing) && request.Cursor == "" {
-		meta, metaErr := s.readMeta(request.Key)
-		if metaErr != nil {
-			return PublicHistoryPage{}, metaErr
-		}
-		return PublicHistoryPage{}, s.preparePublicIndexLocked(ctx, request.Key, meta)
-	}
-	return page, err
+	return ReadPublicHistoryPageFS(ctx, os.DirFS(s.dir), request)
 }
 
-func readPublicPage(ctx context.Context, request PublicHistoryPageRequest, cursor publicHistoryCursor, source io.ReaderAt, index *publicIndexReader) (PublicHistoryPage, error) {
+func readPublicPage(
+	ctx context.Context,
+	request PublicHistoryPageRequest,
+	cursor publicHistoryCursor,
+	source io.ReaderAt,
+	index *publicIndexReader,
+) (PublicHistoryPage, error) {
 	limit := PublicHistoryPageMessages
 	if request.Cursor == "" {
 		limit = PublicHistoryRecentMessages
 	}
-	page := PublicHistoryPage{Version: PublicHistoryVersion, Generation: cursor.Generation, Revision: cursor.Revision,
-		Start: cursor.Position, End: cursor.Position, Ceiling: cursor.Count, Entries: []PublicHistoryEntry{}}
+	page := PublicHistoryPage{
+		Version: PublicHistoryVersion, Generation: cursor.Generation, Revision: cursor.Revision,
+		Start: cursor.Position, End: cursor.Position, Ceiling: cursor.Count, Entries: []PublicHistoryEntry{},
+	}
 	position := cursor.Position
 	for len(page.Entries) < limit {
 		row := position
@@ -89,18 +91,18 @@ func readPublicPage(ctx context.Context, request PublicHistoryPageRequest, curso
 		if row < 0 || row >= cursor.Count {
 			break
 		}
-		if err := ctx.Err(); err != nil {
-			return PublicHistoryPage{}, err
+		if operationErr2 := ctx.Err(); operationErr2 != nil {
+			return PublicHistoryPage{}, operationErr2
 		}
-		entry, readBytes, err := readPublicPageEntry(source, index, row, cursor.Bytes)
+		entry, readBytes, operationErr3 := readPublicPageEntry(source, index, row, cursor.Bytes)
 		page.Stats.DataBytesRead += readBytes
 		page.Stats.RowsRead++
-		if err != nil {
-			return PublicHistoryPage{}, err
+		if operationErr3 != nil {
+			return PublicHistoryPage{}, operationErr3
 		}
-		size, err := publicPageMessageBytes(entry, request.MessageBytes)
-		if err != nil || size > PublicHistoryMessageBytes {
-			return PublicHistoryPage{}, errors.Join(ErrHistoryCapacity, err)
+		size, operationErr3 := publicPageMessageBytes(entry, request.MessageBytes)
+		if operationErr3 != nil || size > PublicHistoryMessageBytes {
+			return PublicHistoryPage{}, errors.Join(ErrHistoryCapacity, operationErr3)
 		}
 		if page.Stats.MessageBytes+int64(size)+publicHistoryEnvelopeBytes > PublicHistoryOperationBytes {
 			page.Stats.LookaheadBytes += readBytes
@@ -119,24 +121,28 @@ func readPublicPage(ctx context.Context, request PublicHistoryPageRequest, curso
 	return finishPublicPage(page, cursor, index)
 }
 
-func finishPublicPage(page PublicHistoryPage, cursor publicHistoryCursor, index *publicIndexReader) (PublicHistoryPage, error) {
+func finishPublicPage(
+	page PublicHistoryPage,
+	cursor publicHistoryCursor,
+	index *publicIndexReader,
+) (PublicHistoryPage, error) {
 	if cursor.Direction == publicPageBefore {
 		for left, right := 0, len(page.Entries)-1; left < right; left, right = left+1, right-1 {
 			page.Entries[left], page.Entries[right] = page.Entries[right], page.Entries[left]
 		}
 	}
 	if page.Start > 0 {
-		var err error
-		page.OlderCursor, err = encodePublicHistoryCursor(cursor, page.Start, publicPageBefore)
-		if err != nil {
-			return PublicHistoryPage{}, err
+		var operationErr4 error
+		page.OlderCursor, operationErr4 = encodePublicHistoryCursor(cursor, page.Start, publicPageBefore)
+		if operationErr4 != nil {
+			return PublicHistoryPage{}, operationErr4
 		}
 	}
 	if page.End < cursor.Count {
-		var err error
-		page.NewerCursor, err = encodePublicHistoryCursor(cursor, page.End, publicPageAfter)
-		if err != nil {
-			return PublicHistoryPage{}, err
+		var operationErr5 error
+		page.NewerCursor, operationErr5 = encodePublicHistoryCursor(cursor, page.End, publicPageAfter)
+		if operationErr5 != nil {
+			return PublicHistoryPage{}, operationErr5
 		}
 	}
 	if len(page.Entries) == 0 && ((cursor.Direction == publicPageBefore && cursor.Position > 0) ||
@@ -151,14 +157,18 @@ func publicPageMessageBytes(entry PublicHistoryEntry, measure func(PublicHistory
 	if measure != nil {
 		return measure(entry)
 	}
-	data, err := json.Marshal(entry.Message)
-	return len(data), err
+	data, operationErr6 := json.Marshal(entry.Message)
+	return len(data), operationErr6
 }
 
-func readPublicPageEntry(source io.ReaderAt, index *publicIndexReader, position, ceilingBytes int64) (PublicHistoryEntry, int64, error) {
-	record, err := index.record(position)
-	if err != nil {
-		return PublicHistoryEntry{}, 0, err
+func readPublicPageEntry(
+	source io.ReaderAt,
+	index *publicIndexReader,
+	position, ceilingBytes int64,
+) (PublicHistoryEntry, int64, error) {
+	record, operationErr7 := index.record(position)
+	if operationErr7 != nil {
+		return PublicHistoryEntry{}, 0, operationErr7
 	}
 	if record.Length > PublicHistoryOperationBytes {
 		return PublicHistoryEntry{}, 0, ErrHistoryCapacity
@@ -169,9 +179,9 @@ func readPublicPageEntry(source io.ReaderAt, index *publicIndexReader, position,
 	previousDigest := emptyHistoryDigest
 	previousEnd := int64(0)
 	if position > 0 {
-		previous, err := index.record(position - 1)
-		if err != nil {
-			return PublicHistoryEntry{}, 0, err
+		previous, previousErr := index.record(position - 1)
+		if previousErr != nil {
+			return PublicHistoryEntry{}, 0, previousErr
 		}
 		previousDigest, previousEnd = publicIndexRecordDigest(previous), previous.Offset+previous.Length
 	}
@@ -179,15 +189,16 @@ func readPublicPageEntry(source io.ReaderAt, index *publicIndexReader, position,
 		return PublicHistoryEntry{}, 0, ErrPublicHistoryCoverage
 	}
 	data := make([]byte, record.Length)
-	n, err := source.ReadAt(data, record.Offset)
-	if err != nil {
-		return PublicHistoryEntry{}, int64(n), errors.Join(ErrPublicHistoryCoverage, err)
+	n, operationErr7 := source.ReadAt(data, record.Offset)
+	if operationErr7 != nil {
+		return PublicHistoryEntry{}, int64(n), errors.Join(ErrPublicHistoryCoverage, operationErr7)
 	}
 	if data[len(data)-1] != '\n' {
 		return PublicHistoryEntry{}, int64(n), ErrPublicHistoryCoverage
 	}
 	line := data[:len(data)-1]
-	if sha256.Sum256(line) != record.Hash || appendPublicDigest(previousDigest, line) != hex.EncodeToString(record.Chain[:]) {
+	if sha256.Sum256(line) != record.Hash ||
+		appendPublicDigest(previousDigest, line) != hex.EncodeToString(record.Chain[:]) {
 		return PublicHistoryEntry{}, int64(n), ErrPublicHistoryCoverage
 	}
 	var entry PublicHistoryEntry
