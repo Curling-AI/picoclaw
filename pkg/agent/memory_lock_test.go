@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,19 +29,28 @@ func TestWriteLongTermSharesCanonicalMemoryLock(t *testing.T) {
 	}()
 	<-locked
 	written := make(chan error, 1)
-	go func() { written <- aliasedStore.WriteLongTerm("agent content") }()
+	var released, bypassed atomic.Bool
+	go func() {
+		err := aliasedStore.WriteLongTerm("agent content")
+		bypassed.Store(!released.Load())
+		written <- err
+	}()
 	select {
 	case err := <-written:
 		close(release)
 		t.Fatalf("WriteLongTerm bypassed the canonical lock: %v", err)
-	case <-time.After(25 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 	}
+	released.Store(true)
 	close(release)
 	if err := <-lockDone; err != nil {
 		t.Fatal(err)
 	}
 	if err := <-written; err != nil {
 		t.Fatal(err)
+	}
+	if bypassed.Load() {
+		t.Fatal("WriteLongTerm completed before the canonical lock was released")
 	}
 	if got := store.ReadLongTerm(); got != "agent content" {
 		t.Fatalf("memory content = %q", got)

@@ -133,9 +133,14 @@ func TestMemoryEditAndAppendHoldLockAcrossReadModifyWrite(t *testing.T) {
 				}
 			}()
 			<-barrier.read
+			root, err := os.OpenRoot(workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
 			compared := make(chan error, 1)
 			go func() {
-				compared <- fileutil.WriteFileIfContent(path, []byte("ui"), fileutil.FileContent{Content: []byte("original")}, 0o600)
+				compared <- fileutil.WriteFileIfContentInRoot(root, "memory/MEMORY.md", []byte("ui"), fileutil.FileContent{Content: []byte("original")}, 0o600)
 			}()
 			select {
 			case err := <-compared:

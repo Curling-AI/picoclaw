@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -83,38 +84,10 @@ func canonicalFilePath(path string) (string, error) {
 	}
 }
 
-// WriteFileIfContent compares the exact raw preimage and atomically replaces a
-// regular file under the writers' shared lock. It never falls back to a direct write.
-func WriteFileIfContent(path string, data []byte, expected FileContent, perm os.FileMode) error {
-	return withFileLock(path, func(canonical string) error {
-		mode := perm
-		info, err := os.Lstat(canonical)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			if !expected.Absent {
-				return ErrFileChanged
-			}
-		case err != nil:
-			return fmt.Errorf("stat file: %w", err)
-		case expected.Absent || !info.Mode().IsRegular():
-			return ErrFileChanged
-		default:
-			mode = info.Mode().Perm()
-			current, err := os.ReadFile(canonical)
-			if err != nil {
-				return fmt.Errorf("read file: %w", err)
-			}
-			if !bytes.Equal(current, expected.Content) {
-				return ErrFileChanged
-			}
-		}
-		return writeFileAtomicStrict(canonical, data, mode)
-	})
-}
-
 // WriteFileIfContentInRoot keeps every data operation beneath root, even when a
 // directory alias changes after the caller validated the workspace path.
 // Creation honors umask; replacement preserves the existing permissions.
+// Unsupported atomic operations use a serialized direct write, as WriteFileAtomic does.
 func WriteFileIfContentInRoot(root *os.Root, path string, data []byte, expected FileContent, perm os.FileMode) error {
 	relative := filepath.Clean(path)
 	if root == nil || relative == "." || !filepath.IsLocal(relative) {
@@ -162,7 +135,25 @@ func WriteFileIfContentInRoot(root *os.Root, path string, data []byte, expected 
 	})
 }
 
-func writeFileAtomicInRoot(root *os.Root, name string, data []byte, perm os.FileMode) (err error) {
+type rootAtomicOps struct {
+	chmod  func(*os.File, os.FileMode) error
+	rename func(string, string) error
+}
+
+func writeFileAtomicInRoot(root *os.Root, name string, data []byte, perm os.FileMode) error {
+	return writeFileAtomicInRootWith(root, name, data, perm, rootAtomicOps{
+		chmod:  (*os.File).Chmod,
+		rename: root.Rename,
+	})
+}
+
+func writeFileAtomicInRootWith(
+	root *os.Root,
+	name string,
+	data []byte,
+	perm os.FileMode,
+	ops rootAtomicOps,
+) (err error) {
 	existing, err := root.Lstat(name)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("stat atomic write target: %w", err)
@@ -188,20 +179,39 @@ func writeFileAtomicInRoot(root *os.Root, name string, data []byte, perm os.File
 		return fmt.Errorf("sync temp file: %w", err)
 	}
 	if existing != nil {
-		if err := file.Chmod(perm); err != nil {
-			return fmt.Errorf("set temp file permissions: %w", err)
+		if err := ops.chmod(file, perm); err != nil {
+			return writeRootAfterUnsupported(root, name, data, perm, fmt.Errorf("set temp file permissions: %w", err))
 		}
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := root.Rename(temporary, name); err != nil {
-		return fmt.Errorf("rename temp file: %w", err)
+	if err := ops.rename(temporary, name); err != nil {
+		return writeRootAfterUnsupported(root, name, data, perm, fmt.Errorf("rename temp file: %w", err))
 	}
 	renamed = true
 	if directory, err := root.Open("."); err == nil {
 		_ = directory.Sync()
 		_ = directory.Close()
+	}
+	return nil
+}
+
+// Mountpoint cannot chmod or rename ordinary S3 objects; the caller still holds the CAS writer lock.
+func writeRootAfterUnsupported(root *os.Root, name string, data []byte, perm os.FileMode, atomicErr error) error {
+	if !errors.Is(atomicErr, syscall.EPERM) && !errors.Is(atomicErr, syscall.EINVAL) &&
+		!errors.Is(atomicErr, syscall.ENOSYS) && !errors.Is(atomicErr, syscall.EOPNOTSUPP) {
+		return atomicErr
+	}
+	info, err := root.Lstat(name)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return errors.Join(atomicErr, fmt.Errorf("stat direct write target: %w", err))
+	}
+	if info != nil && !info.Mode().IsRegular() {
+		return errors.Join(atomicErr, ErrFileChanged)
+	}
+	if err := root.WriteFile(name, data, perm); err != nil {
+		return errors.Join(atomicErr, fmt.Errorf("write file without rename: %w", err))
 	}
 	return nil
 }

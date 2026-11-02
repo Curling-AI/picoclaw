@@ -11,53 +11,14 @@ import (
 	"time"
 )
 
-func TestWriteFileIfContent(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		present  bool
-		current  string
-		expected FileContent
-		conflict bool
-	}{
-		{name: "matching", present: true, current: "old\n", expected: FileContent{Content: []byte("old\n")}},
-		{name: "raw bytes differ", present: true, current: "old\n", expected: FileContent{Content: []byte("old")}, conflict: true},
-		{name: "create missing", expected: FileContent{Absent: true}},
-		{name: "existing empty", present: true, expected: FileContent{}},
-		{name: "empty is not absent", present: true, expected: FileContent{Absent: true}, conflict: true},
-		{name: "absent is not empty", expected: FileContent{}, conflict: true},
-		{name: "stale same size", present: true, current: "new", expected: FileContent{Content: []byte("old")}, conflict: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "memory", "MEMORY.md")
-			if tc.present {
-				if err := WriteFileAtomic(path, []byte(tc.current), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			err := WriteFileIfContent(path, []byte("replacement"), tc.expected, 0o600)
-			if errors.Is(err, ErrFileChanged) != tc.conflict || (err != nil && !tc.conflict) {
-				t.Fatalf("write result = %v, conflict = %v", err, tc.conflict)
-			}
-			got, readErr := os.ReadFile(path)
-			if tc.conflict && !tc.present {
-				if !errors.Is(readErr, os.ErrNotExist) {
-					t.Fatalf("a rejected write created a file: %v", readErr)
-				}
-				return
-			}
-			want := "replacement"
-			if tc.conflict {
-				want = tc.current
-			}
-			if readErr != nil || string(got) != want {
-				t.Fatalf("persisted content = %q, error = %v, want %q", got, readErr, want)
-			}
-		})
+func TestWriteFileIfContentInRootRejectsSameSizeSameSecondMutation(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "MEMORY.md")
+	root, rootErr := os.OpenRoot(workspace)
+	if rootErr != nil {
+		t.Fatal(rootErr)
 	}
-}
-
-func TestWriteFileIfContentRejectsSameSizeSameSecondMutation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "MEMORY.md")
+	defer root.Close()
 	if err := WriteFileAtomic(path, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -75,8 +36,9 @@ func TestWriteFileIfContentRejectsSameSizeSameSecondMutation(t *testing.T) {
 	if err := os.Chtimes(path, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFileIfContent(
-		path,
+	if err := WriteFileIfContentInRoot(
+		root,
+		"MEMORY.md",
 		[]byte("ui"),
 		FileContent{Content: preimage},
 		0o600,
@@ -91,35 +53,22 @@ func TestWriteFileIfContentRejectsSameSizeSameSecondMutation(t *testing.T) {
 	}
 }
 
-func TestWriteFileIfContentPreservesExistingPermissions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "MEMORY.md")
-	if err := WriteFileAtomic(path, []byte("old"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteFileIfContent(path, []byte("new"), FileContent{Content: []byte("old")}, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
+func TestWriteFileIfContentInRootSharesLockThroughDirectoryAlias(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("existing private mode changed to %o", got)
-	}
-}
-
-func TestWriteFileIfContentSharesLockThroughDirectoryAlias(t *testing.T) {
-	dir := t.TempDir()
+	defer root.Close()
 	resolved := filepath.Join(dir, "real")
 	if err := os.MkdirAll(resolved, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(dir, "alias")
-	if err := os.Symlink(resolved, alias); err != nil {
+	if err := os.Symlink("real", alias); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 	path := filepath.Join(resolved, "memory", "MEMORY.md")
-	aliasPath := filepath.Join(alias, "memory", "MEMORY.md")
 	locked, release := make(chan struct{}), make(chan struct{})
 	writer := make(chan error, 1)
 	go func() {
@@ -132,7 +81,7 @@ func TestWriteFileIfContentSharesLockThroughDirectoryAlias(t *testing.T) {
 	<-locked
 	compared := make(chan error, 1)
 	go func() {
-		compared <- WriteFileIfContent(aliasPath, []byte("ui"), FileContent{Absent: true}, 0o600)
+		compared <- WriteFileIfContentInRoot(root, "alias/memory/MEMORY.md", []byte("ui"), FileContent{Absent: true}, 0o600)
 	}()
 	select {
 	case err := <-compared:
@@ -149,34 +98,6 @@ func TestWriteFileIfContentSharesLockThroughDirectoryAlias(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "agent" {
 		t.Fatalf("agent bytes = %q, error = %v", got, err)
-	}
-}
-
-func TestWriteFileIfContentRejectsFinalSymlink(t *testing.T) {
-	dir := t.TempDir()
-	target, link := filepath.Join(dir, "target.md"), filepath.Join(dir, "MEMORY.md")
-	if err := WriteFileAtomic(target, []byte("original"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("file symlinks unavailable: %v", err)
-	}
-	if err := WriteFileIfContent(
-		link,
-		[]byte("replacement"),
-		FileContent{Content: []byte("original")},
-		0o600,
-	); !errors.Is(
-		err,
-		ErrFileChanged,
-	) {
-		t.Fatalf("final symlink was accepted: %v", err)
-	}
-	if got, err := os.ReadFile(target); err != nil || string(got) != "original" {
-		t.Fatalf("symlink target changed: %q, %v", got, err)
-	}
-	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("final symlink was replaced: %v", err)
 	}
 }
 
