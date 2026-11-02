@@ -1758,7 +1758,13 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 		func(msg bus.OutboundMessage) string { return outboundMessageChannel(msg) },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMessage) bool {
 			if !w.enqueue(ctx, msg) {
-				return ctx.Err() == nil
+				if ctx.Err() != nil {
+					return false
+				}
+				logger.WarnCF("channels", "Dropped outbound message for stopped worker", map[string]any{
+					"channel": outboundMessageChannel(msg),
+				})
+				return true
 			}
 			m.publishOutboundQueued(outboundMessageChannel(msg), msg)
 			return true
@@ -1777,7 +1783,13 @@ func (m *Manager) dispatchOutboundMedia(ctx context.Context) {
 		func(msg bus.OutboundMediaMessage) string { return outboundMediaChannel(msg) },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMediaMessage) bool {
 			if !w.enqueueMedia(ctx, msg) {
-				return ctx.Err() == nil
+				if ctx.Err() != nil {
+					return false
+				}
+				logger.WarnCF("channels", "Dropped outbound media message for stopped worker", map[string]any{
+					"channel": outboundMediaChannel(msg),
+				})
+				return true
 			}
 			m.publishOutboundMediaQueued(outboundMediaChannel(msg), msg)
 			return true
