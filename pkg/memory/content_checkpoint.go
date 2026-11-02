@@ -17,11 +17,12 @@ const contentCheckpointWitnessVersion = uint8(2)
 // and UpdatedAt are not content mutations and do not mint or invalidate proof.
 func contentCheckpointDigest(meta SessionMeta) string {
 	return contentJSONDigest(struct {
-		State any    `json:"state"`
-		Count int    `json:"count"`
-		Skip  int    `json:"skip"`
-		Bytes *int64 `json:"bytes"`
-	}{contentIdentityWire(meta.ContentIdentity), meta.Count, meta.Skip, meta.HistoryBytes})
+		State           any    `json:"state"`
+		Count           int    `json:"count"`
+		Skip            int    `json:"skip"`
+		Bytes           *int64 `json:"bytes"`
+		NonLocalImports bool   `json:"nonLocalImports,omitempty"`
+	}{contentIdentityWire(meta.ContentIdentity), meta.Count, meta.Skip, meta.HistoryBytes, meta.PublicHistoryNonLocalImports})
 }
 
 // This is a separate, constant-size commitment, not an order reconstruction.

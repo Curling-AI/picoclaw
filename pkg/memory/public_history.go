@@ -254,7 +254,22 @@ func validPublicEntry(entry PublicHistoryEntry) bool {
 	return string(original) == string(clean)
 }
 
+type publicImportOrigin uint8
+
+const (
+	publicImportExternal publicImportOrigin = iota
+	publicImportNativeMedia
+)
+
 func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHistoryImport) (PublicHistory, error) {
+	return s.importPublicHistory(ctx, request, publicImportExternal)
+}
+
+func (s *JSONLStore) importPublicHistory(
+	ctx context.Context,
+	request PublicHistoryImport,
+	origin publicImportOrigin,
+) (PublicHistory, error) {
 	payload, payloadErr := json.Marshal(request)
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
@@ -317,6 +332,10 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	}
 	if !changed {
 		return publicHistoryResult(meta, entries), nil
+	}
+	if origin == publicImportExternal && meta.ContentIdentity != nil &&
+		meta.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
+		meta.PublicHistoryNonLocalImports = true
 	}
 	next, payloadErr = preparePublicImports(entries, next, meta)
 	if payloadErr != nil {

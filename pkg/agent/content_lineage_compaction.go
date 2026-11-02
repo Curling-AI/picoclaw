@@ -55,6 +55,15 @@ func readContentCompactionView(ctx context.Context, agent *AgentInstance, key st
 	if err != nil {
 		return contentCompactionView{}, err
 	}
+	if native, ok := agent.Sessions.(memory.HistoryNativeContentArchive); ok {
+		if nativeErr := native.PrepareNativeHistoryArchive(
+			ctx,
+			canonical,
+		); nativeErr != nil &&
+			!errors.Is(nativeErr, memory.ErrHistoryUnsupported) {
+			return contentCompactionView{}, nativeErr
+		}
+	}
 	pending, err := api.ReadPendingHistoryCompaction(ctx, canonical)
 	if err != nil {
 		return contentCompactionView{}, err

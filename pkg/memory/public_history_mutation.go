@@ -291,6 +291,9 @@ func (s *JSONLStore) commitPublicChange(
 	if oldErr9 == nil {
 		oldErr9 = s.writeMeta(key, next)
 	}
+	if oldErr9 == nil && old.PublicHistoryNonLocalImports != next.PublicHistoryNonLocalImports {
+		oldErr9 = s.ensureContentDomain(key, old, next)
+	}
 	if oldErr9 == nil {
 		oldErr9 = s.finishHistoryWrite(key)
 	}

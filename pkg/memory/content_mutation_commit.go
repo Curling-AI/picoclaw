@@ -34,6 +34,10 @@ func validContentMutationPlan(plan ContentMutationPlan) bool {
 		!validHistoryStreamID(plan.DomainID) || !validHistoryStreamID(plan.BeforeState) {
 		return false
 	}
+	if view := plan.PublicView; view != nil &&
+		(!validHistoryStreamID(view.Generation) || view.Revision == 0 || view.Revision > MaxHistorySequence) {
+		return false
+	}
 	switch plan.Kind {
 	case ContentMutationEdit:
 		return plan.Edit != nil && plan.RetainPrefix == nil
@@ -79,6 +83,11 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 		return ContentMutationResult{}, err
 	}
 	if frame.DomainID != plan.DomainID || frame.StateToken != plan.BeforeState {
+		return ContentMutationResult{}, ErrContentStateChanged
+	}
+	if view := plan.PublicView; view != nil && (image.Meta.PublicHistoryVersion != PublicHistoryVersion ||
+		!image.Meta.PublicHistoryComplete || image.Meta.PublicHistoryPreparation != nil ||
+		view.Generation != image.Meta.PublicHistoryGeneration || view.Revision != image.Meta.PublicHistoryRevision) {
 		return ContentMutationResult{}, ErrContentStateChanged
 	}
 	next, prepared, err := s.prepareTypedContentMutation(ctx, key, plan, image, frame)

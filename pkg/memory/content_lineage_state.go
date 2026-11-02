@@ -63,6 +63,7 @@ type contentIdentityState struct {
 	Pending         *contentPending      `json:"pending,omitempty"`
 	Last            *contentAcknowledged `json:"last,omitempty"`
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
+	ArchivePolicy   string               `json:"archivePolicy,omitempty"`
 	storage         *contentStorageState
 	opaque          json.RawMessage
 }
@@ -510,6 +511,11 @@ func (s *JSONLStore) frameForContentImage(ctx context.Context, key string, image
 		if known {
 			ref := state.Rows[i].Ref
 			frame.Entries[i].Ref = &ref
+			public := decodedPublicMessage(row.Raw)
+			if public != nil && !validPublicProjection(row.Message, *public) {
+				return ContentFrame{}, ErrPublicHistoryCoverage
+			}
+			frame.Entries[i].Message.HistoryPublicMessage = public
 		}
 	}
 	// No binding is inferred from decodedHistoryID. Only a persisted UUID and
@@ -610,6 +616,13 @@ func (s *JSONLStore) InitializeHistoryContentIdentity(
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	return s.initializeContentIdentityLocked(ctx, key, observation, "")
+}
+
+func (s *JSONLStore) initializeContentIdentityLocked(
+	ctx context.Context,
+	key, observation, archivePolicy string,
+) (ContentFrame, error) {
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return ContentFrame{}, err
 	}
@@ -650,6 +663,7 @@ func (s *JSONLStore) InitializeHistoryContentIdentity(
 	ensureHistoryGeneration(&next, key)
 	next.Count = image.Count
 	state := &contentIdentityState{
+		ArchivePolicy: archivePolicy,
 		Version:       ContentLineageVersion,
 		DomainID:      uuid.NewString(),
 		StateToken:    uuid.NewString(),
