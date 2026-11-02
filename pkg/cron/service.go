@@ -379,6 +379,10 @@ func (cs *CronService) executeJobByID(jobID string) {
 }
 
 func (cs *CronService) executeJob(jobID string, trigger Trigger) {
+	cs.executeJobWithIdentity(jobID, trigger, "", time.Time{})
+}
+
+func (cs *CronService) executeJobWithIdentity(jobID string, trigger Trigger, runID string, startedAt time.Time) {
 	startTime := time.Now().UnixMilli()
 
 	cs.mu.RLock()
@@ -399,7 +403,9 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 		return
 	}
 
-	if cs.devePular(callbackJob) {
+	// Explicit manual runs express fresh user intent even when the recurring
+	// background job has no activity to process. Idle optimization is scheduled-only.
+	if trigger == Scheduled && cs.devePular(callbackJob) {
 		// Reagenda sem executar: o job continua vivo, só não gastou um turno
 		// para descobrir que não havia trabalho.
 		log.Printf("[cron] ⏭ pulando job '%s' (id: %s): nada aconteceu desde a última execução",
@@ -414,15 +420,26 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 
 	var err error
 	if handler != nil {
+		manualIdentity := runID != ""
+		if runID == "" {
+			runID = uuid.NewString()
+		}
+		if startedAt.IsZero() {
+			startedAt = time.Now().UTC().Truncate(time.Microsecond)
+		}
 		if executionContext == nil {
 			executionContext = context.Background()
 		}
 		_, err = handler(
 			executionContext,
-			Execution{Progress: nil, RunID: uuid.NewString(), Trigger: trigger, Job: callbackJob},
+			Execution{Progress: nil, RunID: runID, StartedAt: startedAt, ManualIdentity: manualIdentity, Trigger: trigger, Job: callbackJob},
 		)
 	} else if legacy != nil {
 		_, err = legacy(callbackJob)
+	}
+	if errors.Is(err, ErrDuplicateExecution) {
+		log.Printf("[cron] duplicate execution skipped for job %s", jobID)
+		return
 	}
 
 	execDuration := time.Now().UnixMilli() - startTime
@@ -866,6 +883,17 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 // agora" não deve des-pausar um job pausado (nem re-agendar: o pós-execução
 // respeita Enabled). Respeita o limite de execuções concorrentes.
 func (cs *CronService) RunNow(jobID string) bool {
+	return cs.runNowWithIdentity(jobID, "", time.Time{})
+}
+
+func (cs *CronService) RunNowWithIdentity(jobID, runID string, startedAt time.Time) bool {
+	if uuid.Validate(runID) != nil || runID == uuid.Nil.String() || startedAt.IsZero() {
+		return false
+	}
+	return cs.runNowWithIdentity(jobID, runID, startedAt)
+}
+
+func (cs *CronService) runNowWithIdentity(jobID, runID string, startedAt time.Time) bool {
 	cs.mu.Lock()
 	found := false
 	for i := range cs.store.Jobs {
@@ -882,7 +910,7 @@ func (cs *CronService) RunNow(jobID string) bool {
 	go func() {
 		cs.execSlots <- struct{}{}
 		defer func() { <-cs.execSlots }()
-		cs.executeJob(jobID, Manual)
+		cs.executeJobWithIdentity(jobID, Manual, runID, startedAt)
 	}()
 	return true
 }

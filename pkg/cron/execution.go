@@ -1,6 +1,10 @@
 package cron
 
-import "context"
+import (
+	"context"
+	"errors"
+	"time"
+)
 
 type Trigger string
 
@@ -9,13 +13,17 @@ const (
 	Manual    Trigger = "manual"
 )
 
+var ErrDuplicateExecution = errors.New("duplicate cron execution")
+
 // Execution identifies one dispatch after admission and the idle check. Job IDs
 // remain opaque; the UUID identifies this run even when a one-shot job is deleted.
 type Execution struct {
-	Progress func(stage string)
-	RunID    string
-	Trigger  Trigger
-	Job      *CronJob
+	Progress       func(stage string)
+	RunID          string
+	StartedAt      time.Time
+	ManualIdentity bool
+	Trigger        Trigger
+	Job            *CronJob
 }
 
 type ExecutionHandler func(context.Context, Execution) (string, error)

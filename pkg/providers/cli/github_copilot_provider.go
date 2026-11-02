@@ -7,6 +7,8 @@ import (
 	"sync"
 
 	copilot "github.com/github/copilot-sdk/go"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type GitHubCopilotProvider struct {
@@ -78,6 +80,9 @@ func (p *GitHubCopilotProvider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	if protocoltypes.RestrictedExecution(ctx) {
+		return nil, fmt.Errorf("copilot internal tools cannot enforce restricted execution resources")
+	}
 	type tempMessage struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
