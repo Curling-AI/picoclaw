@@ -39,7 +39,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		return nil, false, nil
 	}
 
-	streamer, ok := p.Bus.GetStreamer(ctx, ts.channel, ts.chatID, ts.sessionKey)
+	streamer, ok := p.Bus.GetStreamer(providers.WithHistoryCall(ctx, exec.llmRequestID), ts.channel, ts.chatID, ts.sessionKey)
 	if !ok || streamer == nil {
 		logger.DebugCF("agent", "configured streaming not used", map[string]any{
 			"agent_id": ts.agent.ID,
@@ -315,7 +315,7 @@ func (p *Pipeline) beginSynthesizedFinalStream(ctx context.Context, ts *turnStat
 	if exec.streamingPublisher != nil || !p.configuredStreamingEligible(ts, exec) {
 		return
 	}
-	streamer, ok := p.Bus.GetStreamer(ctx, ts.channel, ts.chatID, ts.sessionKey)
+	streamer, ok := p.Bus.GetStreamer(providers.WithHistoryCall(ctx, exec.llmRequestID), ts.channel, ts.chatID, ts.sessionKey)
 	if !ok || streamer == nil {
 		// The reply goes out as a plain final outbound, which the channel would
 		// drop as the duplicate of a narration finalized earlier in the turn.

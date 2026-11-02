@@ -148,7 +148,11 @@ func (s *JSONLStore) preparePublicRewrite(
 	if boundary < 0 {
 		return publicHistoryChange{}, ErrPublicHistoryCoverage
 	}
-	entries = append(entries[:boundary:boundary], publicHistoryEntries(messages, *next)...)
+	replacements := publicHistoryEntries(messages, *next)
+	for index := range replacements {
+		replacements[index].CallID = ""
+	}
+	entries = append(entries[:boundary:boundary], replacements...)
 	next.PublicHistoryGeneration = newHistoryID()
 
 	return s.replacePublicEntries(key, entries, next)
