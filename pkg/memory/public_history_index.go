@@ -15,7 +15,7 @@ import (
 
 const (
 	publicIndexHeaderBytes = 128
-	publicIndexRecordBytes = 80
+	publicIndexRecordBytes = 104
 	publicIndexMagic       = "PUBIDX01"
 )
 
@@ -28,10 +28,12 @@ type publicIndexHeader struct {
 }
 
 type publicIndexRecord struct {
-	Offset int64
-	Length int64
-	Hash   [sha256.Size]byte
-	Chain  [sha256.Size]byte
+	Position   int64
+	Generation uuid.UUID
+	Offset     int64
+	Length     int64
+	Hash       [sha256.Size]byte
+	Chain      [sha256.Size]byte
 }
 
 func (s *JSONLStore) publicIndexPath(key string) string {
@@ -56,7 +58,9 @@ func encodePublicIndexHeader(header publicIndexHeader) ([]byte, error) {
 		header.Bytes < 0 || header.Bytes > maxHistoryPosition ||
 		header.Count < 0 ||
 		header.Count > maxHistoryPosition ||
-		header.Revision > uint64(maxHistoryPosition) {
+		header.Revision > uint64(maxHistoryPosition) ||
+		(header.Count == 0) != (header.Bytes == 0) ||
+		(header.Count == 0 && header.Digest != emptyHistoryDigest) {
 		return nil, ErrPublicHistoryCoverage
 	}
 	data := make([]byte, publicIndexHeaderBytes)
@@ -99,7 +103,7 @@ func decodePublicIndexHeader(data []byte) (publicIndexHeader, error) {
 }
 
 func encodePublicIndexRecord(record publicIndexRecord) ([]byte, error) {
-	if record.Offset < 0 || record.Length < 0 {
+	if record.Position < 0 || record.Position > maxHistoryPosition || record.Offset < 0 || record.Length < 0 {
 		return nil, ErrPublicHistoryCoverage
 	}
 	data := make([]byte, publicIndexRecordBytes)
@@ -107,6 +111,8 @@ func encodePublicIndexRecord(record publicIndexRecord) ([]byte, error) {
 	binary.BigEndian.PutUint64(data[8:16], uint64(record.Length))
 	copy(data[16:48], record.Hash[:])
 	copy(data[48:80], record.Chain[:])
+	binary.BigEndian.PutUint64(data[80:88], uint64(record.Position))
+	copy(data[88:104], record.Generation[:])
 	return data, nil
 }
 
@@ -115,16 +121,34 @@ func decodePublicIndexRecord(data []byte) (publicIndexRecord, error) {
 		return publicIndexRecord{}, ErrPublicHistoryCoverage
 	}
 	offset, length := binary.BigEndian.Uint64(data[:8]), binary.BigEndian.Uint64(data[8:16])
-	if offset > uint64(maxHistoryPosition) || length > uint64(maxHistoryPosition) {
+	position := binary.BigEndian.Uint64(data[80:88])
+	if offset > uint64(maxHistoryPosition) || length > uint64(maxHistoryPosition) ||
+		position > uint64(maxHistoryPosition) {
 		return publicIndexRecord{}, ErrPublicHistoryCoverage
 	}
-	record := publicIndexRecord{Offset: int64(offset), Length: int64(length)}
+	record := publicIndexRecord{Position: int64(position), Offset: int64(offset), Length: int64(length)}
+	copy(record.Generation[:], data[88:104])
 	copy(record.Hash[:], data[16:48])
 	copy(record.Chain[:], data[48:80])
 	return record, nil
 }
 
-func publicIndexRecords(data []byte, offset int64, previous string) ([]byte, string, error) {
+func publicIndexRecordHash(record publicIndexRecord, line []byte) [sha256.Size]byte {
+	var scope [24]byte
+	copy(scope[:16], record.Generation[:])
+	binary.BigEndian.PutUint64(scope[16:], uint64(record.Position))
+	digest := sha256.New()
+	_, _ = digest.Write(scope[:])
+	_, _ = digest.Write(line)
+	return [sha256.Size]byte(digest.Sum(nil))
+}
+
+func publicIndexRecords(data []byte, frontier publicIndexHeader) ([]byte, string, error) {
+	generation, generationErr := uuid.Parse(frontier.Generation)
+	if generationErr != nil {
+		return nil, "", ErrPublicHistoryCoverage
+	}
+	offset, position, previous := frontier.Bytes, frontier.Count, frontier.Digest
 	var records []byte
 	for len(data) > 0 {
 		end := bytes.IndexByte(data, '\n')
@@ -137,7 +161,8 @@ func publicIndexRecords(data []byte, offset int64, previous string) ([]byte, str
 		if err != nil {
 			return nil, "", err
 		}
-		record := publicIndexRecord{Offset: offset, Length: int64(end + 1), Hash: sha256.Sum256(line)}
+		record := publicIndexRecord{Position: position, Generation: generation, Offset: offset, Length: int64(end + 1)}
+		record.Hash = publicIndexRecordHash(record, line)
 		copy(record.Chain[:], chain)
 		encoded, err := encodePublicIndexRecord(record)
 		if err != nil {
@@ -145,6 +170,7 @@ func publicIndexRecords(data []byte, offset int64, previous string) ([]byte, str
 		}
 		records = append(records, encoded...)
 		offset += record.Length
+		position++
 		data = data[end+1:]
 	}
 	return records, previous, nil
@@ -208,7 +234,8 @@ func (r *publicIndexReader) record(position int64) (publicIndexRecord, error) {
 		return publicIndexRecord{}, errors.Join(ErrPublicHistoryCoverage, err)
 	}
 	record, err := decodePublicIndexRecord(data)
-	if err != nil || record.Offset < 0 || record.Length <= 1 || record.Offset > r.header.Bytes-record.Length {
+	if err != nil || record.Position != position || record.Generation.String() != r.header.Generation ||
+		record.Offset < 0 || record.Length <= 1 || record.Offset > r.header.Bytes-record.Length {
 		return publicIndexRecord{}, ErrPublicHistoryCoverage
 	}
 	r.records[position] = record

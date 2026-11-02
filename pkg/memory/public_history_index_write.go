@@ -33,7 +33,10 @@ func (s *JSONLStore) preparePublicIndex(
 	if change.Recovery.Offset != nil {
 		return s.preparePublicIndexAppend(key, original, next, change, header)
 	}
-	records, digest, operationErr0 := publicIndexRecords(change.Data, 0, emptyHistoryDigest)
+	records, digest, operationErr0 := publicIndexRecords(
+		change.Data,
+		publicIndexHeader{Generation: next.PublicHistoryGeneration, Digest: emptyHistoryDigest},
+	)
 	if operationErr0 != nil || digest != next.PublicHistoryDigest {
 		return publicHistoryChange{}, errors.Join(ErrPublicHistoryCoverage, operationErr0)
 	}
@@ -69,8 +72,7 @@ func (s *JSONLStore) preparePublicIndexAppend(
 	}
 	records, digest, operationErr1 := publicIndexRecords(
 		change.Data,
-		original.PublicHistoryBytes,
-		original.PublicHistoryDigest,
+		publicIndexMeta(original),
 	)
 	if operationErr1 != nil || digest != next.PublicHistoryDigest {
 		return publicHistoryChange{}, errors.Join(ErrPublicHistoryCoverage, operationErr1)

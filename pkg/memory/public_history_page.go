@@ -3,7 +3,6 @@ package memory
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -197,7 +196,7 @@ func readPublicPageEntry(
 		return PublicHistoryEntry{}, int64(n), ErrPublicHistoryCoverage
 	}
 	line := data[:len(data)-1]
-	if sha256.Sum256(line) != record.Hash ||
+	if publicIndexRecordHash(record, line) != record.Hash ||
 		appendPublicDigest(previousDigest, line) != hex.EncodeToString(record.Chain[:]) {
 		return PublicHistoryEntry{}, int64(n), ErrPublicHistoryCoverage
 	}

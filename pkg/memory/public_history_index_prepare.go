@@ -44,7 +44,8 @@ func (s *JSONLStore) readPublicIndexPreparation(key string, meta SessionMeta) (p
 	if _, operationErr1 := encodePublicIndexHeader(state.Target); operationErr1 != nil || state.Count < 0 ||
 		state.Count > state.Target.Count || state.Byte < 0 || state.Byte > state.Target.Bytes ||
 		state.Target.Count > meta.PublicHistoryCount || state.Target.Bytes > meta.PublicHistoryBytes ||
-		state.Target.Revision > meta.PublicHistoryRevision || len(state.Digest) != 64 {
+		state.Target.Revision > meta.PublicHistoryRevision || len(state.Digest) != 64 ||
+		(state.Count == state.Target.Count) != (state.Byte == state.Target.Bytes) {
 		return state, ErrPublicHistoryCoverage
 	}
 	return state, nil
@@ -57,13 +58,9 @@ func (s *JSONLStore) preparePublicIndexResult(
 	key string,
 	meta SessionMeta,
 ) (PublicHistoryPreparationResult, error) {
-	result := preparationResult(key, meta)
-	index, operationErr2 := s.openPublicIndex(key, meta)
-	if operationErr2 == nil {
-		return result, index.file.Close()
-	}
-	if !errors.Is(operationErr2, os.ErrNotExist) {
-		return PublicHistoryPreparationResult{}, operationErr2
+	result, readinessErr := s.publicPreparationResult(ctx, key, meta)
+	if readinessErr != nil || result.Ready {
+		return result, readinessErr
 	}
 	if operationErr3 := s.preparePublicIndexLocked(
 		ctx,
@@ -77,6 +74,29 @@ func (s *JSONLStore) preparePublicIndexResult(
 	}
 	result.Ready = false
 	return result, nil
+}
+
+func (s *JSONLStore) publicPreparationResult(
+	ctx context.Context,
+	key string,
+	meta SessionMeta,
+) (PublicHistoryPreparationResult, error) {
+	result := preparationResult(key, meta)
+	if !result.Ready {
+		return result, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return PublicHistoryPreparationResult{}, err
+	}
+	index, err := s.openPublicIndex(key, meta)
+	if errors.Is(err, os.ErrNotExist) {
+		result.Ready = false
+		return result, nil
+	}
+	if err != nil {
+		return PublicHistoryPreparationResult{}, err
+	}
+	return result, index.file.Close()
 }
 
 // Preparation runs only while no index exists. Each call advances at most one
@@ -175,7 +195,8 @@ func validatePublicIndexPreparation(file *os.File, state publicIndexPreparation)
 		return errors.Join(ErrPublicHistoryCoverage, operationErr16)
 	}
 	last, operationErr17 := decodePublicIndexRecord(data)
-	if operationErr17 != nil || last.Offset < 0 || last.Length <= 1 || last.Offset+last.Length != state.Byte ||
+	if operationErr17 != nil || last.Position != state.Count-1 || last.Generation.String() != state.Target.Generation ||
+		last.Offset < 0 || last.Length <= 1 || last.Offset+last.Length != state.Byte ||
 		state.Digest != publicIndexRecordDigest(last) {
 		return ErrPublicHistoryCoverage
 	}
@@ -219,7 +240,9 @@ func readPublicIndexPreparationBatch(
 		if json.Unmarshal(line, &entry) != nil || !validPublicPageEntry(entry) {
 			return next, nil, ErrPublicHistoryCoverage
 		}
-		encoded, digest, operationErr19 := publicIndexRecords(append(line, '\n'), next.Byte, next.Digest)
+		encoded, digest, operationErr19 := publicIndexRecords(append(line, '\n'), publicIndexHeader{
+			Generation: next.Target.Generation, Bytes: next.Byte, Count: next.Count, Digest: next.Digest,
+		})
 		if operationErr19 != nil {
 			return next, nil, operationErr19
 		}
@@ -228,7 +251,8 @@ func readPublicIndexPreparationBatch(
 		next.Count++
 		next.Digest = digest
 	}
-	if next.Count > next.Target.Count || next.Byte > next.Target.Bytes {
+	if next.Count > next.Target.Count || next.Byte > next.Target.Bytes ||
+		(next.Count == next.Target.Count) != (next.Byte == next.Target.Bytes) {
 		return next, nil, ErrPublicHistoryCoverage
 	}
 	if next.Count == next.Target.Count && next.Byte == next.Target.Bytes && next.Digest != next.Target.Digest {

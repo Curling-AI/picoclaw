@@ -274,13 +274,20 @@ func (s *JSONLStore) commitPublicChange(
 	if oldErr9 != nil {
 		return oldErr9
 	}
+	indexed := change
+	if indexed.Index == nil {
+		indexed, oldErr9 = s.preparePublicIndex(key, old, next, change)
+		if oldErr9 != nil {
+			return oldErr9
+		}
+	}
 	if operationErr10 := s.beginHistoryWrite(
 		ctx, key,
-		historyWriteRecovery{Meta: old, Next: next, PublicOnly: true, Public: change.Recovery},
+		historyWriteRecovery{Meta: old, Next: next, PublicOnly: true, Public: indexed.Recovery},
 	); operationErr10 != nil {
 		return operationErr10
 	}
-	oldErr9 = s.writePublicChange(key, change)
+	oldErr9 = s.writePublicChange(key, indexed)
 	if oldErr9 == nil {
 		oldErr9 = s.writeMeta(key, next)
 	}
