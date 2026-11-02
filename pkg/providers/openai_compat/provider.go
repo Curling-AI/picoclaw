@@ -43,6 +43,7 @@ type Provider struct {
 	extraBody      map[string]any // Additional fields to inject into request body
 	customHeaders  map[string]string
 	userAgent      string
+	serializeOpts  []common.SerializeOption
 }
 
 type Option func(*Provider)
@@ -104,6 +105,14 @@ func WithCustomHeaders(customHeaders map[string]string) Option {
 	}
 }
 
+// WithAudioFileParts sends audio as a file part, for gateways that refuse
+// input_audio. (seucaranguejo fork)
+func WithAudioFileParts() Option {
+	return func(p *Provider) {
+		p.serializeOpts = append(p.serializeOpts, common.WithAudioFileParts())
+	}
+}
+
 func WithProviderName(providerName string) Option {
 	return func(p *Provider) {
 		p.providerName = strings.ToLower(strings.TrimSpace(providerName))
@@ -151,7 +160,7 @@ func (p *Provider) buildRequestBody(
 
 	requestBody := map[string]any{
 		"model":    model,
-		"messages": common.SerializeMessages(p.prepareMessagesForRequest(messages)),
+		"messages": common.SerializeMessages(p.prepareMessagesForRequest(messages), p.serializeOpts...),
 	}
 
 	// When fallback uses a different provider (e.g. DeepSeek), that provider must not inject web_search_preview.

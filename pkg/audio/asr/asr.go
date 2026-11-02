@@ -100,7 +100,12 @@ func transcriberFromModelConfig(modelCfg *config.ModelConfig) Transcriber {
 		return NewWhisperTranscriber(modelCfg)
 	}
 	if supportsAudioTranscription(modelCfg) {
-		return NewAudioModelTranscriber(modelCfg)
+		// Um *AudioModelTranscriber nil dentro da interface passaria por
+		// "tem transcritor" e quebraria o turno no primeiro áudio.
+		// (seucaranguejo fork)
+		if tr := NewAudioModelTranscriber(modelCfg); tr != nil {
+			return tr
+		}
 	}
 	return nil
 }

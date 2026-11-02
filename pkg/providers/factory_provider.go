@@ -16,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers/azure"
 	"github.com/sipeed/picoclaw/pkg/providers/bedrock"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/openai_compat"
 )
 
 // createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
@@ -132,6 +133,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
 			cfg.CustomHeaders,
+			httpProviderOptions(cfg)...,
 		)
 		provider.SetProviderName(protocol)
 		return finalizeProviderFromConfig(provider, modelID, cfg)
@@ -221,6 +223,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
 			cfg.CustomHeaders,
+			httpProviderOptions(cfg)...,
 		)
 		provider.SetProviderName(protocol)
 		return finalizeProviderFromConfig(provider, modelID, cfg)
@@ -268,6 +271,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.RequestTimeout,
 			extraBody,
 			cfg.CustomHeaders,
+			httpProviderOptions(cfg)...,
 		)
 		provider.SetProviderName(protocol)
 		return finalizeProviderFromConfig(provider, modelID, cfg)
@@ -295,6 +299,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
 			cfg.CustomHeaders,
+			httpProviderOptions(cfg)...,
 		)
 		provider.SetProviderName(protocol)
 		return finalizeProviderFromConfig(provider, modelID, cfg)
@@ -366,6 +371,15 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	default:
 		return nil, "", fmt.Errorf("unknown protocol %q in model %q", protocol, cfg.Model)
 	}
+}
+
+// httpProviderOptions carries the per-model wire format to the OpenAI-compatible
+// provider. (seucaranguejo fork)
+func httpProviderOptions(cfg *config.ModelConfig) []openai_compat.Option {
+	if cfg.AudioFileParts {
+		return []openai_compat.Option{openai_compat.WithAudioFileParts()}
+	}
+	return nil
 }
 
 func finalizeProviderFromConfig(
