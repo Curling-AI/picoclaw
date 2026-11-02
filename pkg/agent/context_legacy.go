@@ -118,12 +118,8 @@ func (m *legacyContextManager) Clear(ctx context.Context, sessionKey string) err
 	if agent == nil || agent.Sessions == nil {
 		return fmt.Errorf("sessions not initialized")
 	}
-	if writer, checked := agent.Sessions.(contextHistoryReplacer); checked {
-		if err := writer.SetHistoryContext(ctx, sessionKey, []providers.Message{}); err != nil {
-			return err
-		}
-	} else {
-		agent.Sessions.SetHistory(sessionKey, []providers.Message{})
+	if err := clearContextHistory(ctx, agent.Sessions, sessionKey); err != nil {
+		return err
 	}
 	agent.Sessions.SetSummary(sessionKey, "")
 	return agent.Sessions.Save(sessionKey)

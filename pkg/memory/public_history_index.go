@@ -195,6 +195,9 @@ func openPublicIndex(files fs.FS, name string, meta SessionMeta) (*publicIndexRe
 	reader := &publicIndexReader{file: file, records: make(map[int64]publicIndexRecord)}
 	data := make([]byte, publicIndexHeaderBytes)
 	_, err = reader.readAt(data, 0)
+	if err != nil {
+		err = errors.Join(ErrPublicHistoryCoverage, err)
+	}
 	if err == nil {
 		reader.header, err = decodePublicIndexHeader(data)
 	}

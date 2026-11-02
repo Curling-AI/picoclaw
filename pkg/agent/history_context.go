@@ -52,3 +52,16 @@ func (ts *turnState) replaceHistory(store session.SessionStore, messages []provi
 	store.SetHistory(ts.sessionKey, messages)
 	return nil
 }
+
+func clearContextHistory(ctx context.Context, store session.SessionStore, key string) error {
+	if clearer, ok := store.(interface {
+		ClearHistoryContext(ctx context.Context, key string) error
+	}); ok {
+		return clearer.ClearHistoryContext(ctx, key)
+	}
+	if writer, ok := store.(contextHistoryReplacer); ok {
+		return writer.SetHistoryContext(ctx, key, nil)
+	}
+	store.SetHistory(key, nil)
+	return nil
+}

@@ -93,6 +93,13 @@ func readPublicPage(
 		if operationErr2 := ctx.Err(); operationErr2 != nil {
 			return PublicHistoryPage{}, operationErr2
 		}
+		record, recordErr := index.record(row)
+		if recordErr != nil {
+			return PublicHistoryPage{}, recordErr
+		}
+		if record.Length > PublicHistoryOperationBytes-page.Stats.DataBytesRead {
+			break
+		}
 		entry, readBytes, operationErr3 := readPublicPageEntry(source, index, row, cursor.Bytes)
 		page.Stats.DataBytesRead += readBytes
 		page.Stats.RowsRead++

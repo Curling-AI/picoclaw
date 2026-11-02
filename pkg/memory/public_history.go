@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
 
 const (
@@ -28,6 +30,7 @@ var ErrPublicHistoryCoverage = errors.New("public history coverage unavailable")
 // or provider requests. AnchorID binds a supplement to an exact occurrence,
 // including that occurrence's order proof, rather than a mutable array index.
 type PublicHistoryEntry struct {
+	SourceDigest         string            `json:"sourceDigest,omitempty"`
 	Ref                  *ContentRef       `json:"ref,omitempty"`
 	AnchorRef            *ContentRef       `json:"anchorRef,omitempty"`
 	BoundaryID           string            `json:"boundaryId,omitempty"`
@@ -104,6 +107,9 @@ func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, star
 		if providers.ValidHistoryCallID(message.HistoryCallID) {
 			entry.CallID = message.HistoryCallID
 		}
+		if entry.Order.Valid() {
+			entry.SourceDigest = publicSourceDigest(message)
+		}
 		entry.Ref = publicContentRef(meta, start+index+1)
 		if entry.Order == (HistoryOrderProof{}) && meta.HistoryOrderVersion == HistoryOrderVersion {
 			entry.LegacyBeforeStreamID = meta.HistoryStreamID
@@ -111,6 +117,14 @@ func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, star
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+func publicSourceDigest(message providers.Message) string {
+	createdAt := ""
+	if message.CreatedAt != nil {
+		createdAt = message.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return messageutil.SourceContentDigest(createdAt, message.Content)
 }
 
 func (s *JSONLStore) readPublicEntries(key string, meta SessionMeta) ([]PublicHistoryEntry, error) {
@@ -149,6 +163,22 @@ func decodePublicEntries(data []byte, meta SessionMeta) ([]PublicHistoryEntry, e
 }
 
 func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicHistory {
+	if meta.publicOrderUnavailable || meta.HistoryOrderVersion != HistoryOrderVersion || meta.HistoryRecoveryRequired {
+		entries = append([]PublicHistoryEntry(nil), entries...)
+		for i := range entries {
+			entries[i].Order = HistoryOrderProof{}
+			entries[i].SourceDigest = ""
+			entries[i].AnchorOrder = HistoryOrderProof{}
+			entries[i].LegacyBeforeStreamID = ""
+		}
+	}
+	if meta.publicRefUnavailable || meta.ContentIdentity == nil || meta.ContentIdentity.Unavailable {
+		entries = append([]PublicHistoryEntry(nil), entries...)
+		for i := range entries {
+			entries[i].Ref = nil
+			entries[i].AnchorRef = nil
+		}
+	}
 	return PublicHistory{
 		Version:    PublicHistoryVersion,
 		Generation: meta.PublicHistoryGeneration,
@@ -160,12 +190,12 @@ func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicH
 
 func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicHistory, error) {
 	canonical := key
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return PublicHistory{}, err
-	}
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return PublicHistory{}, err
+	}
 	if operationErr := ctx.Err(); operationErr != nil {
 		return PublicHistory{}, operationErr
 	}
@@ -179,7 +209,7 @@ func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicH
 	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
 		return PublicHistory{}, err
 	}
-	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), meta); err != nil {
+	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); err != nil {
 		return PublicHistory{}, err
 	}
 	entries, canonicalErr := s.readPublicEntries(canonical, meta)
@@ -203,6 +233,9 @@ func encodePublicEntries(entries []PublicHistoryEntry) ([]byte, error) {
 }
 
 func validPublicEntry(entry PublicHistoryEntry) bool {
+	if entry.SourceDigest != "" {
+		return false
+	}
 	public, ok := publicHistoryMessage(entry.Message)
 	if !ok || entry.BoundaryID != "" || entry.CallID != "" || (entry.Ref != nil && !entry.Ref.Valid()) ||
 		(entry.AnchorRef != nil && !entry.AnchorRef.Valid()) || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
@@ -276,17 +309,11 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	if operationErr8 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr8 != nil {
 		return PublicHistory{}, operationErr8
 	}
-	if meta.HistoryRecoveryRequired {
-		return PublicHistory{}, ErrHistoryRecoveryRequired
+	if operationErr := s.prepareContentMutationOrderFence(canonical, &meta); operationErr != nil {
+		return PublicHistory{}, operationErr
 	}
-	if operationErr9 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr9 != nil {
-		return PublicHistory{}, operationErr9
-	}
-	if operationErr10 := s.probeHistoryOrderWitness(canonical, &meta); operationErr10 != nil {
-		return PublicHistory{}, operationErr10
-	}
-	if meta.HistoryRecoveryRequired {
-		return PublicHistory{}, ErrHistoryRecoveryRequired
+	if operationErr := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); operationErr != nil {
+		return PublicHistory{}, operationErr
 	}
 	entries, payloadErr := s.readPublicEntries(canonical, meta)
 	if payloadErr != nil {
@@ -353,11 +380,12 @@ func preparePublicImports(previous, next []PublicHistoryEntry, meta SessionMeta)
 		if entry.Order != (HistoryOrderProof{}) {
 			return nil, ErrPublicHistoryCoverage
 		}
-		if entry.Ref != nil && (meta.ContentIdentity == nil || entry.Ref.DomainID != meta.ContentIdentity.DomainID) {
+		if entry.Ref != nil &&
+			(meta.publicRefUnavailable || meta.ContentIdentity == nil || entry.Ref.DomainID != meta.ContentIdentity.DomainID) {
 			return nil, ErrPublicHistoryCoverage
 		}
 		if entry.Ref == nil && entry.AnchorID == "" && !entry.Partial && meta.ContentIdentity != nil &&
-			!meta.ContentIdentity.Unavailable {
+			!meta.ContentIdentity.Unavailable && !meta.publicRefUnavailable {
 			entry.Ref = &ContentRef{
 				DomainID:     meta.ContentIdentity.DomainID,
 				OccurrenceID: newHistoryID(),

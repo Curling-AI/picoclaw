@@ -278,6 +278,9 @@ func (al *AgentLoop) deliverToConversationLocked(
 	sessionKey string,
 	msg providers.Message,
 ) (deferred bool, err error) {
+	if msg.Delivery != nil && !msg.Delivery.At.IsZero() && al.clearedSince(sessionKey, msg.Delivery.At) {
+		return false, errClearedSinceLaunch
+	}
 	al.mirror.mu.Lock()
 	if al.mirrorBusyLocked(sessionKey) {
 		al.queueMirroredLocked(sessionKey, msg)
@@ -300,6 +303,10 @@ func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
 	defer stripe.Unlock()
+	al.dropMirroredDeliveriesLocked(sessionKey)
+}
+
+func (al *AgentLoop) dropMirroredDeliveriesLocked(sessionKey string) {
 	al.mirror.mu.Lock()
 	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
 	delete(al.mirror.pending, sessionKey)
