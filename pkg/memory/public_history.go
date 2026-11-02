@@ -214,6 +214,16 @@ func validPublicEntry(entry PublicHistoryEntry) bool {
 		(entry.AnchorID == "" && (entry.AnchorRef != nil || entry.AnchorOrder != (HistoryOrderProof{}))) {
 		return false
 	}
+	references := append([]string(nil), entry.Message.Media...)
+	for _, attachment := range entry.Message.Attachments {
+		references = append(references, attachment.Ref, attachment.URL)
+	}
+	for _, reference := range references {
+		lower := strings.ToLower(reference)
+		if strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "blob:") {
+			return false
+		}
+	}
 	// Only the allowlisted display shape is persisted, even from the authenticated
 	// importer. Audit reasoning, system parts and provider credentials stay out.
 	original, _ := json.Marshal(entry.Message)

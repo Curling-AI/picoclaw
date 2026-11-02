@@ -175,6 +175,17 @@ func TestPublicHistoryImportRejectsAmbiguousIdentityAndPrivateFields(t *testing.
 		t.Fatalf("accepted private import: %v", operationErr7)
 	}
 	request.Entries[0] = entry
+	request.Entries[0].Message.Media = []string{"data:image/png;base64,cHJpdmF0ZQ=="}
+	if _, operationErr := store.ImportPublicHistory(
+		t.Context(),
+		request,
+	); !errors.Is(
+		operationErr,
+		ErrPublicHistoryCoverage,
+	) {
+		t.Fatal("accepted inline binary in an imported public message", operationErr)
+	}
+	request.Entries[0] = entry
 	if _, operationErr8 := store.ImportPublicHistory(t.Context(), request); operationErr8 != nil {
 		t.Fatal(operationErr8)
 	}
