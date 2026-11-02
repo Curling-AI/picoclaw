@@ -516,13 +516,11 @@ func (p *blockingDirectProvider) Chat(
 	p.mu.Lock()
 	p.calls++
 	call := p.calls
-	firstStarted := p.firstStarted
 	releaseFirst := p.releaseFirst
 	firstResp := p.firstResp
 	finalResp := p.finalResp
 	if call == 1 && p.firstStarted != nil {
 		close(p.firstStarted)
-		p.firstStarted = nil
 	}
 	p.mu.Unlock()
 
@@ -535,7 +533,6 @@ func (p *blockingDirectProvider) Chat(
 		return &providers.LLMResponse{Content: firstResp}, nil
 	}
 
-	_ = firstStarted
 	return &providers.LLMResponse{Content: finalResp}, nil
 }
 

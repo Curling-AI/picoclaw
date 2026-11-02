@@ -2845,6 +2845,214 @@ func TestSendWithRetry_PreSendEditsPlaceholder(t *testing.T) {
 
 // --- Dispatcher exit tests (Step 1) ---
 
+func TestStopAllUnblocksFullWorkerQueues(t *testing.T) {
+	for _, mode := range []string{"outbound", "media", "direct"} {
+		t.Run(mode, func(t *testing.T) {
+			m := newTestManager()
+			t.Cleanup(m.bus.Close)
+			w := newChannelWorker("test", &mockChannel{}, "test")
+			m.channels["test"], m.workers["test"] = w.ch, w
+			for range cap(w.queue) {
+				w.queue <- bus.OutboundMessage{}
+				w.mediaQueue <- bus.OutboundMediaMessage{}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			m.dispatchTask = &asyncTask{cancel: cancel}
+			t.Cleanup(w.closeQueues)
+			go func() {
+				<-w.stopping
+				close(w.done)
+				close(w.mediaDone)
+			}()
+			producerDone := make(chan error, 1)
+			switch mode {
+			case "outbound":
+				go func() { m.dispatchOutbound(ctx); producerDone <- ctx.Err() }()
+				if err := m.bus.PublishOutbound(ctx, testOutboundMessage(bus.OutboundMessage{Channel: "test"})); err != nil {
+					t.Fatal(err)
+				}
+			case "media":
+				go func() { m.dispatchOutboundMedia(ctx); producerDone <- ctx.Err() }()
+				if err := m.bus.PublishOutboundMedia(ctx, testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: "test"})); err != nil {
+					t.Fatal(err)
+				}
+			case "direct":
+				go func() { producerDone <- m.SendToChannel(context.Background(), "test", "chat", "blocked") }()
+			}
+			waitForWorkerQueueSender(t, w)
+			registered := make(chan struct{})
+			go func() { m.RegisterChannel("other", &mockChannel{}); close(registered) }()
+			select {
+			case <-registered:
+			case <-time.After(time.Second):
+				t.Fatal("blocked enqueue retained the manager lock")
+			}
+			stopped := make(chan error, 1)
+			go func() { stopped <- m.StopAll(context.Background()) }()
+			select {
+			case err := <-stopped:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("StopAll blocked behind a full queue")
+			}
+			select {
+			case err := <-producerDone:
+				if err == nil {
+					t.Fatal("stopped full-queue producer reported success")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("full-queue producer did not exit")
+			}
+		})
+	}
+}
+
+func waitForWorkerQueueSender(t *testing.T, w *channelWorker) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for w.queueMu.TryLock() {
+		w.queueMu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("producer never entered the full queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestUnregisterChannelDrainsAcceptedWorkerQueues(t *testing.T) {
+	m := newTestManager()
+	t.Cleanup(m.bus.Close)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	textStarted, mediaStarted := make(chan struct{}), make(chan struct{})
+	var textCount, mediaCount atomic.Int32
+	ch := &mockMediaChannel{
+		mockChannel: mockChannel{sendFn: func(context.Context, bus.OutboundMessage) error {
+			if textCount.Add(1) == 1 {
+				close(textStarted)
+			}
+			<-release
+			return nil
+		}},
+		sendMediaFn: func(context.Context, bus.OutboundMediaMessage) ([]string, error) {
+			if mediaCount.Add(1) == 1 {
+				close(mediaStarted)
+			}
+			<-release
+			return nil, nil
+		},
+	}
+	w := newChannelWorker("test", ch, "test")
+	w.limiter = rate.NewLimiter(rate.Inf, 1)
+	m.channels["test"], m.workers["test"] = ch, w
+	go m.runWorker(t.Context(), "test", w)
+	go m.runMediaWorker(t.Context(), "test", w)
+	t.Cleanup(w.closeQueues)
+	for range 2 {
+		if !w.enqueue(t.Context(), testOutboundMessage(bus.OutboundMessage{Channel: "test", Content: "accepted"})) ||
+			!w.enqueueMedia(t.Context(), testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: "test", Parts: []bus.MediaPart{{Ref: "media://accepted"}}})) {
+			t.Fatal("running worker refused an enqueue")
+		}
+	}
+	for _, started := range []chan struct{}{textStarted, mediaStarted} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("worker never started delivering")
+		}
+	}
+	unregistered := make(chan struct{})
+	go func() { m.UnregisterChannel("test"); close(unregistered) }()
+	select {
+	case <-w.stopping:
+	case <-time.After(time.Second):
+		t.Fatal("unregister did not retire the worker")
+	}
+	if w.enqueue(t.Context(), bus.OutboundMessage{}) || w.enqueueMedia(t.Context(), bus.OutboundMediaMessage{}) {
+		t.Fatal("retired worker accepted a late message")
+	}
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-unregistered:
+	case <-time.After(time.Second):
+		t.Fatal("unregister did not finish draining")
+	}
+	if textCount.Load() != 2 || mediaCount.Load() != 2 {
+		t.Fatalf("accepted queues were not drained: text=%d media=%d", textCount.Load(), mediaCount.Load())
+	}
+}
+
+func TestDispatcherSkipsStoppedWorkers(t *testing.T) {
+	for _, mode := range []string{"outbound", "media"} {
+		for _, state := range []string{"retired", "dead"} {
+			t.Run(mode+"/"+state, func(t *testing.T) {
+				m := newTestManager()
+				t.Cleanup(m.bus.Close)
+				stopped := newChannelWorker("stopped", &mockChannel{}, "test")
+				live := newChannelWorker("live", &mockChannel{}, "test")
+				m.channels["stopped"], m.workers["stopped"] = stopped.ch, stopped
+				m.channels["live"], m.workers["live"] = live.ch, live
+				if state == "retired" {
+					stopped.closeQueues()
+				} else {
+					close(stopped.done)
+					close(stopped.mediaDone)
+				}
+				t.Cleanup(stopped.closeQueues)
+				t.Cleanup(live.closeQueues)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					if mode == "media" {
+						m.dispatchOutboundMedia(ctx)
+					} else {
+						m.dispatchOutbound(ctx)
+					}
+				}()
+				for _, name := range []string{"stopped", "live"} {
+					var err error
+					if mode == "media" {
+						err = m.bus.PublishOutboundMedia(ctx, testOutboundMediaMessage(bus.OutboundMediaMessage{Channel: name}))
+					} else {
+						err = m.bus.PublishOutbound(ctx, testOutboundMessage(bus.OutboundMessage{Channel: name}))
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "media" {
+					select {
+					case <-live.mediaQueue:
+					case <-time.After(time.Second):
+						t.Fatal("media dispatcher stopped before the live channel")
+					}
+				} else {
+					select {
+					case <-live.queue:
+					case <-time.After(time.Second):
+						t.Fatal("dispatcher stopped before the live channel")
+					}
+				}
+				if state == "dead" && (len(stopped.queue) != 0 || len(stopped.mediaQueue) != 0) {
+					t.Fatal("dead worker accepted a message")
+				}
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("dispatcher did not exit after cancellation")
+				}
+			})
+		}
+	}
+}
+
 func TestDispatcherExitsOnCancel(t *testing.T) {
 	mb := bus.NewMessageBus()
 	defer mb.Close()
