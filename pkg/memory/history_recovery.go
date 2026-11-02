@@ -332,12 +332,19 @@ func (s *JSONLStore) recoverHistoryWriteFor(
 		filepath.Base(s.historyRecoveryPath(recovery.Meta.Key)) != filepath.Base(s.historyRecoveryPath(key)) {
 		return historyWriteUnknown, errors.New("invalid history recovery key")
 	}
-	if (!recovery.PublicOnly && recovery.Next.HistoryBytes == nil) || (recovery.Next.HistoryBytes != nil && *recovery.Next.HistoryBytes < 0) ||
-		(recovery.NextSummaryDigest != "" && !validHistoryDigest(recovery.NextSummaryDigest)) ||
-		recovery.Next.HistoryFileGeneration == "" || recovery.Next.Count < 0 ||
+	if (!recovery.PublicOnly &&
+		recovery.Next.HistoryBytes == nil) ||
+		(recovery.Next.HistoryBytes != nil &&
+			*recovery.Next.HistoryBytes < 0) ||
+		(recovery.NextSummaryDigest != "" &&
+			!validHistoryDigest(recovery.NextSummaryDigest)) ||
+		recovery.Next.HistoryFileGeneration == "" ||
+		recovery.Next.Count < 0 ||
 		recovery.Next.Skip < 0 ||
 		recovery.Next.Skip > recovery.Next.Count ||
-		(recovery.AppendOffset != nil && (*recovery.AppendOffset < 0 || *recovery.AppendOffset > *recovery.Next.HistoryBytes)) {
+		(recovery.AppendOffset != nil &&
+			(*recovery.AppendOffset < 0 ||
+				*recovery.AppendOffset > *recovery.Next.HistoryBytes)) {
 		return historyWriteUnknown, errors.New("invalid history recovery checkpoint")
 	}
 	if !validContentStorageWrite(key, recovery) {
@@ -478,12 +485,19 @@ func historyNewCheckpointMatches(current, next SessionMeta) bool {
 }
 
 func historyCheckpointMatches(current, expected SessionMeta) bool {
-	return contentCheckpointMatches(current, expected) && samePublicPreparation(current.PublicHistoryPreparation, expected.PublicHistoryPreparation) && current.PublicHistoryDigest == expected.PublicHistoryDigest && current.PublicHistoryVersion == expected.PublicHistoryVersion &&
-		current.PublicHistoryGeneration == expected.PublicHistoryGeneration && current.PublicHistoryRevision == expected.PublicHistoryRevision &&
-		current.PublicHistoryBytes == expected.PublicHistoryBytes && current.PublicHistoryCount == expected.PublicHistoryCount &&
-		current.PublicHistoryComplete == expected.PublicHistoryComplete && current.HistoryGeneration == expected.HistoryGeneration &&
+	return contentCheckpointMatches(current, expected) &&
+		samePublicPreparation(current.PublicHistoryPreparation, expected.PublicHistoryPreparation) &&
+		current.PublicHistoryDigest == expected.PublicHistoryDigest &&
+		current.PublicHistoryVersion == expected.PublicHistoryVersion &&
+		current.PublicHistoryGeneration == expected.PublicHistoryGeneration &&
+		current.PublicHistoryRevision == expected.PublicHistoryRevision &&
+		current.PublicHistoryBytes == expected.PublicHistoryBytes &&
+		current.PublicHistoryCount == expected.PublicHistoryCount &&
+		current.PublicHistoryComplete == expected.PublicHistoryComplete &&
+		current.HistoryGeneration == expected.HistoryGeneration &&
 		current.HistoryFileGeneration == expected.HistoryFileGeneration &&
-		current.HistoryTip == expected.HistoryTip && current.Count == expected.Count &&
+		current.HistoryTip == expected.HistoryTip &&
+		current.Count == expected.Count &&
 		current.HistoryPrefix == expected.HistoryPrefix &&
 		current.HistoryOrderVersion == expected.HistoryOrderVersion &&
 		current.HistoryStreamID == expected.HistoryStreamID &&
