@@ -695,15 +695,25 @@ func (s *JSONLStore) commitContentMetadata(
 	next.HistoryRecoveryRequired = next.HistoryRecoveryRequired || image.WriterRecovery
 	size := image.Bytes
 	next.HistoryBytes = &size
+	publicChange, err := s.bindPublicContentMetadata(key, image, &next)
+	if err != nil {
+		return err
+	}
 	storage, err := s.prepareContentStorage(key, image.Meta, &next, false)
 	if err != nil {
 		return err
 	}
-	recovery := historyWriteRecovery{Meta: image.Meta, Next: next, Existed: image.Exists, Storage: storage}
+	recovery := historyWriteRecovery{
+		Meta:    image.Meta,
+		Next:    next,
+		Existed: image.Exists,
+		Storage: storage,
+		Public:  publicChange.Recovery,
+	}
 	if image.Exists {
 		recovery.AppendOffset = &size
 	}
-	if err := s.beginHistoryWrite(key, recovery); err != nil {
+	if err := s.beginHistoryWrite(ctx, key, recovery); err != nil {
 		return err
 	}
 	if !image.Exists {
@@ -717,22 +727,26 @@ func (s *JSONLStore) commitContentMetadata(
 			return errors.Join(err, s.recoverFailedHistoryWrite(key))
 		}
 	}
+	if err := s.writePublicChange(key, publicChange); err != nil {
+		_, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
+		return errors.Join(err, recoveryErr)
+	}
 	if err := s.writeMeta(key, next); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
 		if committed {
 			return recoveryErr
 		}
 		return errors.Join(err, recoveryErr)
 	}
 	if err := s.ensureContentDomain(key, image.Meta, next); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
 		if committed {
 			return recoveryErr
 		}
 		return errors.Join(err, recoveryErr)
 	}
 	if err := s.finishHistoryWrite(key); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
 		if committed {
 			return recoveryErr
 		}

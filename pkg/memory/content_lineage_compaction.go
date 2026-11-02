@@ -383,6 +383,9 @@ func (s *JSONLStore) finalizeContentArchiveAck(
 	image contentImage,
 	digest string,
 ) error {
+	if err := s.verifyPublicPrefix(ctx, key, image.Meta); err != nil {
+		return err
+	}
 	state := image.Meta.ContentIdentity
 	next := copyMeta(image.Meta)
 	next.ContentIdentity.Last = &contentAcknowledged{

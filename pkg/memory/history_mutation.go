@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -74,6 +75,7 @@ func (s *JSONLStore) replaceHistory(
 		if index < len(old) && sameHistoryCore(old[index], message) &&
 			(message.HistoryID == "" || message.HistoryID == old[index].HistoryID) {
 			message.HistoryID, message.HistoryRunID = old[index].HistoryID, old[index].HistoryRunID
+			message.HistoryPublicMessage = old[index].HistoryPublicMessage
 			if message.CreatedAt == nil {
 				message.CreatedAt = old[index].CreatedAt
 			}
@@ -83,6 +85,7 @@ func (s *JSONLStore) replaceHistory(
 		} else if index < len(old) && message.HistoryID == old[index].HistoryID &&
 			!sameHistoryCore(old[index], message) {
 			message.HistoryRunID = providers.HistoryRun(ctx)
+			message.HistoryPublicMessage = nil
 		}
 		prepared[index] = prepareHistoryMessage(message, meta.UpdatedAt, providers.HistoryRun(ctx))
 	}
@@ -94,11 +97,25 @@ func (s *JSONLStore) replaceHistory(
 	if len(old) > 0 {
 		meta.HistoryTip = old[len(old)-1].HistoryID
 	}
-	if common == len(old) && len(prepared) >= len(old) {
+	if !meta.publicHistoryClear && common == len(old) && len(prepared) >= len(old) {
 		if appended, appendErr := s.appendHistorySuffix(key, prepared, meta); appended || appendErr != nil {
 			return appendErr
 		}
 	}
+	if !meta.publicHistoryClear && common == len(prepared) && len(prepared) < len(old) {
+		return s.commitHistorySuffixCut(key, old, prepared, meta)
+	}
+	retainPrefix := false
+	if original.Skip > 0 && original.PublicHistoryVersion == PublicHistoryVersion &&
+		original.PublicHistoryPreparation == nil && !original.publicHistoryClear {
+		if prefixErr := s.verifyPublicPrefix(ctx, key, original); prefixErr != nil {
+			if !publicProofUnavailable(prefixErr) {
+				return prefixErr
+			}
+			retainPrefix = true
+		}
+	}
+	prepared = s.projectPublicCommits(prepared, &meta)
 	if orderErr := s.prepareReplacementHistoryOrder(key, prepared, &meta); orderErr != nil {
 		return orderErr
 	}
@@ -123,7 +140,19 @@ func (s *JSONLStore) replaceHistory(
 	if len(prepared) > 0 {
 		meta.HistoryTip = prepared[len(prepared)-1].HistoryID
 	}
-	return s.commitHistoryRewrite(key, prepared, meta)
+	if !meta.publicHistoryClear && (original.PublicHistoryVersion < 0 || retainPrefix) {
+		return s.commitHistoryRetainedPrefix(key, prepared, original, meta)
+	}
+	if commitErr := s.commitHistoryRewrite(key, prepared, meta); commitErr != nil {
+		// Coverage qualification failed before this writer opened its journal.
+		// Restore the model independently and retain its unproved raw prefix.
+		var artifactErr *publicArtifactVerificationError
+		if !meta.publicHistoryClear && errors.As(commitErr, &artifactErr) {
+			return s.commitHistoryRetainedPrefix(key, prepared, original, meta)
+		}
+		return commitErr
+	}
+	return nil
 }
 
 // Return the dense prefix whose positions survive a filtered rewrite. A gap
@@ -221,4 +250,10 @@ func (s *JSONLStore) historyTipMatches(key string, meta SessionMeta) bool {
 func validHistoryDigest(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == sha256.Size
+}
+
+func publicProofUnavailable(err error) bool {
+	var artifactErr *publicArtifactVerificationError
+	var pathErr *os.PathError
+	return errors.As(err, &artifactErr) || (errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr))
 }

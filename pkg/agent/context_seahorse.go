@@ -185,7 +185,9 @@ func (m *seahorseContextManager) Clear(ctx context.Context, sessionKey string) e
 		}
 	}
 	if sessions != nil {
-		sessions.SetHistory(sessionKey, []providers.Message{})
+		if err := clearContextHistory(ctx, sessions, sessionKey); err != nil {
+			return err
+		}
 		sessions.SetSummary(sessionKey, "")
 		return sessions.Save(sessionKey)
 	}

@@ -110,7 +110,7 @@ func (s *JSONLStore) pruneSessionFilesLocked(sanitized string, cutoff time.Time)
 	}
 	for _, path := range []string{
 		s.metaPath(sanitized), s.jsonlPath(sanitized), s.historyRecoveryPath(sanitized), s.historyDecisionPath(sanitized),
-		s.historyOrderWitnessPath(sanitized),
+		s.historyOrderWitnessPath(sanitized), s.publicHistoryPath(sanitized),
 	} {
 		info, err := os.Stat(path)
 		if err != nil && !os.IsNotExist(err) {
@@ -162,7 +162,7 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...strin
 		return err
 	}
 	images = append(images, floorImages...)
-	if len(images)+len(artifacts) > 0 {
+	if len(images)+len(artifacts) > 0 || s.requiresPublicHistoryCleanup() {
 		origin := "retention"
 		if len(purpose) > 0 {
 			origin = purpose[0]
@@ -198,6 +198,9 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...strin
 		return err
 	}
 	if err := os.Remove(s.contentDomainPath(sanitized)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Remove(s.publicHistoryPath(sanitized)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.Remove(s.historyOrderWitnessPath(sanitized)); err != nil && !os.IsNotExist(err) {
