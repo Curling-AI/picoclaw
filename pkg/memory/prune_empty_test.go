@@ -17,7 +17,7 @@ const ghostIdle = 24 * time.Hour
 func age(t *testing.T, store *JSONLStore, key string, idle time.Duration) {
 	t.Helper()
 	stamp := time.Now().Add(-idle)
-	for _, path := range []string{store.metaPath(key), store.jsonlPath(key), store.historyOrderWitnessPath(key)} {
+	for _, path := range []string{store.metaPath(key), store.jsonlPath(key), store.historyOrderWitnessPath(key), store.publicHistoryPath(key)} {
 		if err := os.Chtimes(path, stamp, stamp); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("chtimes %s: %v", path, err)
 		}

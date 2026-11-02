@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 
 	"github.com/google/uuid"
 
@@ -45,6 +44,7 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 			RunID:       runID,
 			ImportID:    importID,
 			AnchorID:    anchor.ID,
+			AnchorRef:   anchor.Ref,
 			AnchorOrder: anchor.Order,
 			Message:     providers.Message{Role: "assistant", Content: content},
 		}
@@ -63,43 +63,4 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 		}
 	}
 	return ErrPublicHistoryCoverage
-}
-
-// DeleteSession is an explicit owner action, distinct from automatic pruning.
-// Resolve a pending commit first and remove the display source with its model
-// source; a failed proof never authorizes resurrecting either one later.
-func (s *JSONLStore) DeleteSession(ctx context.Context, key string) error {
-	canonical, canonicalErr := s.canonicalHistoryOrderKey(key)
-	if canonicalErr != nil {
-		return canonicalErr
-	}
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
-	if operationErr := ctx.Err(); operationErr != nil {
-		return operationErr
-	}
-	if operationErr1 := s.recoverHistoryWrite(canonical); operationErr1 != nil {
-		return operationErr1
-	}
-	meta, canonicalErr := s.readMeta(canonical)
-	if canonicalErr != nil {
-		return canonicalErr
-	}
-	if operationErr2 := validateCanonicalHistoryKey(key, canonical, meta); operationErr2 != nil {
-		return operationErr2
-	}
-	for _, path := range []string{s.metaPath(canonical), s.jsonlPath(canonical), s.publicHistoryPath(canonical), s.historyRecoveryPath(canonical), s.historyDecisionPath(canonical), s.historyOrderWitnessPath(canonical), s.historyRecoveryRequiredPath(canonical)} {
-		if operationErr3 := os.Remove(path); operationErr3 != nil && !errors.Is(operationErr3, os.ErrNotExist) {
-			return operationErr3
-		}
-	}
-	sanitized := sanitizeKey(canonical)
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	delete(s.metaCache, sanitized)
-	delete(s.historyPending, sanitized)
-	delete(s.historyMarkers, sanitized)
-	delete(s.historyWitnesses, sanitized)
-	return nil
 }

@@ -128,8 +128,8 @@ func TestPublicHistoryPreparationRequiresExistingScopeAndEmptyImportBoundary(t *
 	if preparedErr != nil {
 		t.Fatal(preparedErr)
 	}
-	if len(result.Entries) != 1 || !result.Entries[0].Order.Valid() {
-		t.Fatal("first imported response lacks canonical producer order")
+	if len(result.Entries) != 1 || result.Entries[0].Order != (HistoryOrderProof{}) {
+		t.Fatal("historical import invented producer receipt authority")
 	}
 	model, preparedErr := store.GetHistory(t.Context(), key)
 	if preparedErr != nil || len(model) != 0 {
@@ -154,7 +154,7 @@ func TestPublicHistoryPreparationRequiresExistingScopeAndEmptyImportBoundary(t *
 	}
 }
 
-func TestPublicHistoryPreparationInvalidatesAfterCompactionOrEdit(t *testing.T) {
+func TestPublicHistoryPreparationPreservesUncoveredPrefixAndInvalidatesAfterEdit(t *testing.T) {
 	for _, operation := range []string{"compact", "edit"} {
 		t.Run(operation, func(t *testing.T) {
 			store, key := legacyPublicFixture(t, 80)
@@ -174,8 +174,8 @@ func TestPublicHistoryPreparationInvalidatesAfterCompactionOrEdit(t *testing.T) 
 				if operationErr9 := store.TruncateHistory(t.Context(), key, 20); operationErr9 != nil {
 					t.Fatal(operationErr9)
 				}
-				if operationErr10 := store.Compact(t.Context(), key); operationErr10 != nil {
-					t.Fatal(operationErr10)
+				if err := store.Compact(t.Context(), key); !errors.Is(err, ErrPublicHistoryCoverage) {
+					t.Fatal("physical GC discarded an incompletely prepared prefix", err)
 				}
 			} else {
 				if operationErr11 := store.SetHistory(
@@ -185,6 +185,13 @@ func TestPublicHistoryPreparationInvalidatesAfterCompactionOrEdit(t *testing.T) 
 				); operationErr11 != nil {
 					t.Fatal(operationErr11)
 				}
+			}
+			if operation == "compact" {
+				after, err := os.ReadFile(store.publicHistoryPath(key))
+				if err != nil || string(before) != string(after) {
+					t.Fatal("refused GC changed incomplete display evidence", err)
+				}
+				return
 			}
 			if _, operationErr12 := store.PreparePublicHistory(
 				t.Context(),

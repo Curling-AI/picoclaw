@@ -186,7 +186,7 @@ func historyDeletionFingerprint(intent *historyDeletionIntent) string {
 
 func (s *JSONLStore) historyDeletionSourcePaths(key string) []string {
 	return []string{
-		s.metaPath(key), s.jsonlPath(key), s.historyDecisionPath(key),
+		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.historyDecisionPath(key),
 		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
 	}
 }
@@ -342,7 +342,7 @@ func (s *JSONLStore) syncHistoryDeletionIntent(file, dir *os.File, key string) e
 	return dir.Sync()
 }
 
-func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
+func (s *JSONLStore) recoverHistoryDeletion(ctx context.Context, key string, data []byte) error {
 	if len(data) > maxHistoryDeletionJournal {
 		return ErrContentIdentityUnavailable
 	}
@@ -383,7 +383,7 @@ func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
 	// Validate the entire remaining set before unlinking any file. Missing
 	// entries are allowed only by this already durable, exact authorization.
 	for _, file := range intent.Files {
-		current, present, operationErr := s.captureHistoryDeletionFile(context.Background(), file)
+		current, present, operationErr := s.captureHistoryDeletionFile(ctx, file)
 		if operationErr != nil {
 			return operationErr
 		}
@@ -477,7 +477,7 @@ func (s *JSONLStore) resumeHistoryDeletion(key string) (bool, error) {
 		return false, nil
 	}
 	s.markHistoryPending(key)
-	return true, s.recoverHistoryDeletion(key, data)
+	return true, s.recoverHistoryDeletion(context.Background(), key, data)
 }
 
 // Discovery grants nothing: only a known, bounded, intact deletion variant is

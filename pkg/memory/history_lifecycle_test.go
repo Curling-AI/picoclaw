@@ -401,7 +401,7 @@ func TestHistoryDeletionDoesNotRestoreAnOrphanedRewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	if operationErr := s.beginHistoryWrite(
-		key,
+		t.Context(), key,
 		historyWriteRecovery{Meta: meta, Next: meta, Data: data, Existed: true},
 	); operationErr != nil {
 		t.Fatal(operationErr)
@@ -483,7 +483,7 @@ func TestHistoryUnrecognizedCheckpointFencesInsteadOfRollingBack(t *testing.T) {
 	next := old
 	next.Count++
 	if operationErr := s.beginHistoryWrite(
-		key,
+		t.Context(), key,
 		historyWriteRecovery{Meta: old, Next: next, AppendOffset: &offset},
 	); operationErr != nil {
 		t.Fatal(operationErr)

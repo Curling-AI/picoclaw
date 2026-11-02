@@ -74,8 +74,8 @@ type AgentLoop struct {
 	mirror deliveryMirror
 	mu     sync.RWMutex
 
-	publicHistoryMu               sync.RWMutex
-	publicHistoryFactory          func(string) memory.PublicHistoryProjector
+	publicHistoryMu                     sync.RWMutex
+	publicHistoryFactory                func(string) memory.PublicHistoryProjector
 	sessionHistoryObserverMu            sync.RWMutex
 	sessionHistoryObserver              func(string)
 	sessionHistoryReceiptObserver       func(string, []memory.CommittedHistoryMessage)

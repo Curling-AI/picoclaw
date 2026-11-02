@@ -28,6 +28,9 @@ var ErrPublicHistoryCoverage = errors.New("public history coverage unavailable")
 // or provider requests. AnchorID binds a supplement to an exact occurrence,
 // including that occurrence's order proof, rather than a mutable array index.
 type PublicHistoryEntry struct {
+	Ref                  *ContentRef       `json:"ref,omitempty"`
+	AnchorRef            *ContentRef       `json:"anchorRef,omitempty"`
+	BoundaryID           string            `json:"boundaryId,omitempty"`
 	ID                   string            `json:"id"`
 	RunID                string            `json:"runId,omitempty"`
 	Message              providers.Message `json:"message"`
@@ -77,8 +80,12 @@ func publicHistoryMessage(message providers.Message) (providers.Message, bool) {
 }
 
 func publicHistoryEntries(messages []providers.Message, meta SessionMeta) []PublicHistoryEntry {
+	return publicHistoryEntriesAt(messages, meta, meta.Count-len(messages))
+}
+
+func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, start int) []PublicHistoryEntry {
 	entries := make([]PublicHistoryEntry, 0, len(messages))
-	for _, message := range messages {
+	for index, message := range messages {
 		input := message
 		if message.HistoryPublicMessage != nil {
 			input = *message.HistoryPublicMessage
@@ -93,6 +100,7 @@ func publicHistoryEntries(messages []providers.Message, meta SessionMeta) []Publ
 			Message: public,
 			Order:   messageHistoryOrder(message),
 		}
+		entry.Ref = publicContentRef(meta, start+index+1)
 		if entry.Order == (HistoryOrderProof{}) && meta.HistoryOrderVersion == HistoryOrderVersion {
 			entry.LegacyBeforeStreamID = meta.HistoryStreamID
 		}
@@ -109,7 +117,12 @@ func (s *JSONLStore) readPublicEntries(key string, meta SessionMeta) ([]PublicHi
 	if dataErr != nil {
 		return nil, dataErr
 	}
-	if int64(len(data)) != meta.PublicHistoryBytes {
+	return decodePublicEntries(data, meta)
+}
+
+func decodePublicEntries(data []byte, meta SessionMeta) ([]PublicHistoryEntry, error) {
+	if int64(len(data)) != meta.PublicHistoryBytes || meta.PublicHistoryCount < 0 || meta.PublicHistoryRevision == 0 ||
+		uuid.Validate(meta.PublicHistoryGeneration) != nil {
 		return nil, ErrPublicHistoryCoverage
 	}
 	var entries []PublicHistoryEntry
@@ -142,9 +155,9 @@ func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicH
 }
 
 func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicHistory, error) {
-	canonical, canonicalErr := s.canonicalHistoryOrderKey(key)
-	if canonicalErr != nil {
-		return PublicHistory{}, canonicalErr
+	canonical := key
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return PublicHistory{}, err
 	}
 	lock := s.sessionLock(canonical)
 	lock.Lock()
@@ -155,21 +168,15 @@ func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicH
 	if _, operationErr1 := os.Stat(s.metaPath(canonical)); operationErr1 != nil {
 		return PublicHistory{}, operationErr1
 	}
-	meta, canonicalErr := s.readMeta(canonical)
+	meta, _, canonicalErr := s.readContentMeta(canonical)
 	if canonicalErr != nil {
 		return PublicHistory{}, canonicalErr
 	}
-	if operationErr2 := validateCanonicalHistoryKey(key, canonical, meta); operationErr2 != nil {
-		return PublicHistory{}, operationErr2
+	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
+		return PublicHistory{}, err
 	}
-	if operationErr3 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr3 != nil {
-		return PublicHistory{}, operationErr3
-	}
-	if meta.HistoryRecoveryRequired {
-		return PublicHistory{}, ErrHistoryRecoveryRequired
-	}
-	if operationErr4 := s.probeHistoryOrderWitness(canonical, &meta); operationErr4 != nil {
-		return PublicHistory{}, operationErr4
+	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), meta); err != nil {
+		return PublicHistory{}, err
 	}
 	entries, canonicalErr := s.readPublicEntries(canonical, meta)
 	if canonicalErr != nil {
@@ -193,13 +200,18 @@ func encodePublicEntries(entries []PublicHistoryEntry) ([]byte, error) {
 
 func validPublicEntry(entry PublicHistoryEntry) bool {
 	public, ok := publicHistoryMessage(entry.Message)
-	if !ok || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
+	if !ok || entry.BoundaryID != "" || (entry.Ref != nil && !entry.Ref.Valid()) ||
+		(entry.AnchorRef != nil && !entry.AnchorRef.Valid()) || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
 		(entry.AnchorID != "" && uuid.Validate(entry.AnchorID) != nil) ||
 		entry.ImportID == "" ||
 		len(entry.ImportID) > 256 {
 		return false
 	}
 	if entry.Order != (HistoryOrderProof{}) && !entry.Order.Valid() {
+		return false
+	}
+	if ((entry.Partial || entry.AnchorID != "") && entry.Order != (HistoryOrderProof{})) ||
+		(entry.AnchorID == "" && (entry.AnchorRef != nil || entry.AnchorOrder != (HistoryOrderProof{}))) {
 		return false
 	}
 	// Only the allowlisted display shape is persisted, even from the authenticated
@@ -227,10 +239,7 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 			return PublicHistory{}, ErrPublicHistoryCoverage
 		}
 	}
-	canonical, payloadErr := s.canonicalHistoryOrderKey(request.Key)
-	if payloadErr != nil {
-		return PublicHistory{}, payloadErr
-	}
+	canonical := request.Key
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
@@ -240,7 +249,10 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	if _, operationErr6 := os.Stat(s.metaPath(canonical)); operationErr6 != nil {
 		return PublicHistory{}, operationErr6
 	}
-	meta, payloadErr := s.readMeta(canonical)
+	if err := s.contentMutationWriterPreflight(ctx, canonical); err != nil {
+		return PublicHistory{}, err
+	}
+	meta, _, payloadErr := s.readContentMeta(canonical)
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
 	}
@@ -273,7 +285,7 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	if !changed {
 		return publicHistoryResult(meta, entries), nil
 	}
-	next, payloadErr = s.orderPublicImports(canonical, entries, next, &meta)
+	next, payloadErr = preparePublicImports(entries, next, meta)
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
 	}
@@ -286,7 +298,7 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
 	}
-	if operationErr11 := s.commitPublicChange(canonical, meta, change); operationErr11 != nil {
+	if operationErr11 := s.commitPublicChange(ctx, canonical, meta, change); operationErr11 != nil {
 		return PublicHistory{}, operationErr11
 	}
 	return publicHistoryResult(meta, next), nil
@@ -313,34 +325,34 @@ func publicEntriesDigest(previous string, entries []PublicHistoryEntry) (string,
 	return digest, nil
 }
 
-func (s *JSONLStore) orderPublicImports(
-	key string,
-	previous, next []PublicHistoryEntry,
-	meta *SessionMeta,
-) ([]PublicHistoryEntry, error) {
+func preparePublicImports(previous, next []PublicHistoryEntry, meta SessionMeta) ([]PublicHistoryEntry, error) {
 	existing := make(map[string]bool, len(previous))
 	for _, entry := range previous {
 		existing[entry.ID] = true
 	}
-	ordered := append([]PublicHistoryEntry(nil), next...)
-	for index, entry := range ordered {
-		if existing[entry.ID] || entry.Partial || entry.AnchorID != "" {
+	prepared := append([]PublicHistoryEntry(nil), next...)
+	for index, entry := range prepared {
+		if existing[entry.ID] {
 			continue
 		}
+		// Imported historical bytes cannot mint a new final-response receipt.
 		if entry.Order != (HistoryOrderProof{}) {
 			return nil, ErrPublicHistoryCoverage
 		}
-		input := entry.Message
-		input.HistoryID = entry.ID
-		input.HistoryRunID = entry.RunID
-		message, messageErr := s.allocateHistoryOrder(key, input, meta)
-		if messageErr != nil {
-			return nil, messageErr
+		if entry.Ref != nil && (meta.ContentIdentity == nil || entry.Ref.DomainID != meta.ContentIdentity.DomainID) {
+			return nil, ErrPublicHistoryCoverage
 		}
-		entry.Order = messageHistoryOrder(message)
-		ordered[index] = entry
+		if entry.Ref == nil && entry.AnchorID == "" && !entry.Partial && meta.ContentIdentity != nil &&
+			!meta.ContentIdentity.Unavailable {
+			entry.Ref = &ContentRef{
+				DomainID:     meta.ContentIdentity.DomainID,
+				OccurrenceID: newHistoryID(),
+				RevisionID:   newHistoryID(),
+			}
+		}
+		prepared[index] = entry
 	}
-	return ordered, nil
+	return prepared, nil
 }
 
 func publicToolCalls(calls []providers.ToolCall) []providers.ToolCall {

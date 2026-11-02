@@ -259,6 +259,9 @@ func (s *JSONLStore) prepareTypedContentMutation(
 		if json.Unmarshal(active[i].Raw, &raw) != nil {
 			return SessionMeta{}, nil, ErrContentIdentityUnavailable
 		}
+		if ref == *entry.Ref {
+			prepared[i].HistoryPublicMessage = raw.PublicMessage
+		}
 		prepared[i].HistoryID = decodedHistoryID(
 			active[i].Raw,
 			filepath.Base(s.jsonlPath(key)),

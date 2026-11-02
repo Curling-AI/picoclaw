@@ -1101,6 +1101,13 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	if meta.Skip == 0 {
 		return nil
 	}
+	if err = s.verifyPublicPrefix(ctx, sessionKey, meta); err != nil {
+		var pathErr *os.PathError
+		if proofOptional && errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr) {
+			return nil
+		}
+		return err
+	}
 
 	// Read only the active messages, skipping truncated lines
 	// without unmarshaling them.

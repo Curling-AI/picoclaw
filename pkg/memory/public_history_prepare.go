@@ -70,10 +70,7 @@ func (s *JSONLStore) PreparePublicHistory(
 	ctx context.Context,
 	key, cursor string,
 ) (PublicHistoryPreparationResult, error) {
-	canonical, canonicalErr := s.canonicalHistoryOrderKey(key)
-	if canonicalErr != nil {
-		return PublicHistoryPreparationResult{}, canonicalErr
-	}
+	canonical := key
 	lock := s.sessionLock(canonical)
 	lock.Lock()
 	defer lock.Unlock()
@@ -83,7 +80,10 @@ func (s *JSONLStore) PreparePublicHistory(
 	if _, operationErr1 := os.Stat(s.metaPath(canonical)); operationErr1 != nil {
 		return PublicHistoryPreparationResult{}, operationErr1
 	}
-	meta, canonicalErr := s.readMeta(canonical)
+	if err := s.contentMutationWriterPreflight(ctx, canonical); err != nil {
+		return PublicHistoryPreparationResult{}, err
+	}
+	meta, _, canonicalErr := s.readContentMeta(canonical)
 	if canonicalErr != nil {
 		return PublicHistoryPreparationResult{}, canonicalErr
 	}
@@ -103,7 +103,7 @@ func (s *JSONLStore) PreparePublicHistory(
 		if cursor != "" {
 			return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
 		}
-		return s.beginPublicPreparation(canonical, meta)
+		return s.beginPublicPreparation(ctx, canonical, meta)
 	}
 	if meta.PublicHistoryVersion != PublicHistoryVersion {
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
@@ -150,13 +150,17 @@ func (s *JSONLStore) PreparePublicHistory(
 	if meta.PublicHistoryPreparation != nil {
 		meta.PublicHistoryPreparation = &next
 	}
-	if operationErr5 := s.commitPublicChange(canonical, meta, change); operationErr5 != nil {
+	if operationErr5 := s.commitPublicChange(ctx, canonical, meta, change); operationErr5 != nil {
 		return PublicHistoryPreparationResult{}, operationErr5
 	}
 	return preparationResult(canonical, meta), nil
 }
 
-func (s *JSONLStore) beginPublicPreparation(key string, meta SessionMeta) (PublicHistoryPreparationResult, error) {
+func (s *JSONLStore) beginPublicPreparation(
+	ctx context.Context,
+	key string,
+	meta SessionMeta,
+) (PublicHistoryPreparationResult, error) {
 	if _, operationErr6 := os.Stat(
 		s.publicHistoryPath(key),
 	); operationErr6 == nil ||
@@ -193,7 +197,7 @@ func (s *JSONLStore) beginPublicPreparation(key string, meta SessionMeta) (Publi
 		meta.PublicHistoryComplete = meta.HistoryPrefix == 0
 	}
 	change := publicHistoryChange{Data: []byte{}, Recovery: &publicHistoryRecovery{Existed: false}}
-	if operationErr7 := s.commitPublicChange(key, meta, change); operationErr7 != nil {
+	if operationErr7 := s.commitPublicChange(ctx, key, meta, change); operationErr7 != nil {
 		return PublicHistoryPreparationResult{}, operationErr7
 	}
 	return preparationResult(key, meta), nil
@@ -213,12 +217,12 @@ func (s *JSONLStore) readPublicPreparation(
 	key string,
 	meta SessionMeta,
 	state PublicHistoryPreparation,
-) ([]PublicHistoryEntry, PublicHistoryPreparation, error) {
+) (result []PublicHistoryEntry, next PublicHistoryPreparation, resultErr error) {
 	file, fileErr := os.Open(s.jsonlPath(key))
 	if fileErr != nil {
 		return nil, state, fileErr
 	}
-	defer file.Close()
+	defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
 	info, fileErr := file.Stat()
 	if fileErr != nil {
 		return nil, state, fileErr
@@ -321,7 +325,7 @@ func (s *JSONLStore) preparedPublicEntry(
 	projected.HistoryID, projected.HistoryRunID = message.HistoryID, message.HistoryRunID
 	projected = messageWithHistoryOrder(projected, order)
 	message = projected
-	entries := publicHistoryEntries([]providers.Message{message}, meta)
+	entries := publicHistoryEntriesAt([]providers.Message{message}, meta, int(state.Line))
 	if len(entries) == 0 {
 		return PublicHistoryEntry{}, false, nil
 	}
