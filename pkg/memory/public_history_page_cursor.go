@@ -9,6 +9,8 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
+
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
 
 var ErrPublicHistoryCursorMalformed = errors.New("public history cursor format invalid")
@@ -130,6 +132,7 @@ func publicIndexRecordDigest(record publicIndexRecord) string {
 func validPublicPageEntry(entry PublicHistoryEntry) bool {
 	if uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
 		(entry.Order != (HistoryOrderProof{}) && !entry.Order.Valid()) ||
+		(entry.SourceDigest != "" && (!entry.Order.Valid() || entry.ImportID != "" || !messageutil.ValidSourceContentDigest(entry.SourceDigest))) ||
 		(entry.Ref != nil && !entry.Ref.Valid()) || (entry.AnchorRef != nil && !entry.AnchorRef.Valid()) {
 		return false
 	}
