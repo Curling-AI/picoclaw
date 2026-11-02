@@ -23,7 +23,7 @@ func TestInternalToolProvidersRefuseRestrictedExecutionBeforeEffects(t *testing.
 		"claude": `{"type":"result","result":"done","is_error":false}`,
 	} {
 		script := "#!/bin/sh\ncat >/dev/null\nprintf effected > \"$MST394_PROVIDER_MARKER\"\nprintf '%s\\n' '" + output + "'\n"
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -39,7 +39,13 @@ func TestInternalToolProvidersRefuseRestrictedExecutionBeforeEffects(t *testing.
 		t.Run(item.name, func(t *testing.T) {
 			for name, ctx := range map[string]context.Context{"direct": restricted, "child": context.WithoutCancel(restricted)} {
 				t.Run(name, func(t *testing.T) {
-					_, err := item.provider.Chat(ctx, []providers.Message{{Role: "user", Content: "do the task"}}, nil, "", nil)
+					_, err := item.provider.Chat(
+						ctx,
+						[]providers.Message{{Role: "user", Content: "do the task"}},
+						nil,
+						"",
+						nil,
+					)
 					if err == nil || !strings.Contains(err.Error(), "restricted execution") {
 						t.Fatalf("internal provider did not refuse the execution policy: %v", err)
 					}
@@ -51,13 +57,26 @@ func TestInternalToolProvidersRefuseRestrictedExecutionBeforeEffects(t *testing.
 			t.Run("fallback", func(t *testing.T) {
 				chain := providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
 				reached := false
-				_, err := chain.Execute(restricted, []providers.FallbackCandidate{{Provider: "primary", Model: "primary"}, {Provider: item.name, Model: "internal"}}, func(ctx context.Context, provider, _ string) (*providers.LLMResponse, error) {
-					if provider == "primary" {
-						return nil, fmt.Errorf("HTTP 429 rate limit exceeded")
-					}
-					reached = true
-					return item.provider.Chat(ctx, []providers.Message{{Role: "user", Content: "do the task"}}, nil, "", nil)
-				})
+				_, err := chain.Execute(
+					restricted,
+					[]providers.FallbackCandidate{
+						{Provider: "primary", Model: "primary"},
+						{Provider: item.name, Model: "internal"},
+					},
+					func(ctx context.Context, provider, _ string) (*providers.LLMResponse, error) {
+						if provider == "primary" {
+							return nil, fmt.Errorf("HTTP 429 rate limit exceeded")
+						}
+						reached = true
+						return item.provider.Chat(
+							ctx,
+							[]providers.Message{{Role: "user", Content: "do the task"}},
+							nil,
+							"",
+							nil,
+						)
+					},
+				)
 				if !reached || err == nil || !strings.Contains(err.Error(), "restricted execution") {
 					t.Fatalf("fallback lost the restricted execution policy: reached=%v err=%v", reached, err)
 				}
@@ -68,7 +87,13 @@ func TestInternalToolProvidersRefuseRestrictedExecutionBeforeEffects(t *testing.
 			if item.name == "copilot" {
 				return
 			}
-			if _, err := item.provider.Chat(t.Context(), []providers.Message{{Role: "user", Content: "do the task"}}, nil, "", nil); err != nil {
+			if _, err := item.provider.Chat(
+				t.Context(),
+				[]providers.Message{{Role: "user", Content: "do the task"}},
+				nil,
+				"",
+				nil,
+			); err != nil {
 				t.Fatalf("unrestricted provider changed: %v", err)
 			}
 			if err := os.Remove(marker); err != nil {

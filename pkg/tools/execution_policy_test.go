@@ -25,10 +25,13 @@ func TestExecutionPoliciesIsolateConcurrentCallsAndSurviveDetachedChildren(t *te
 	registry.RegisterHidden(first)
 	registry.RegisterHidden(second)
 	registry.Register(unknown)
-	contexts := []context.Context{}
+	contexts := make([]context.Context, 0, 2)
 	for _, name := range []string{"first", "second"} {
 		allowed := name
-		policy := ExecutionPolicy{Skills: []string{"selected"}, AllowsTool: func(tool Tool) bool { return tool.Name() == allowed }}
+		policy := ExecutionPolicy{
+			Skills:     []string{"selected"},
+			AllowsTool: func(tool Tool) bool { return tool.Name() == allowed },
+		}
 		ctx := WithExecutionPolicy(context.Background(), policy)
 		policy.Skills[0] = "mutated_after_capture"
 		captured, restricted := ExecutionPolicySkills(ctx)

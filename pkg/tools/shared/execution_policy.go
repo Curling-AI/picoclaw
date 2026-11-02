@@ -20,17 +20,19 @@ type ExecutionPolicy struct {
 	SkillLoaded func(context.Context, string)
 }
 
-type executionPolicyKey struct{}
-type executionInvocationKey struct{}
-type executionInvocation struct {
-	name string
-	once sync.Once
-}
+type (
+	executionPolicyKey     struct{}
+	executionInvocationKey struct{}
+	executionInvocation    struct {
+		name string
+		once sync.Once
+	}
+)
 
 func WithExecutionPolicy(ctx context.Context, policy ExecutionPolicy) context.Context {
-	copy := policy
-	copy.Skills = slices.Clone(policy.Skills)
-	return protocoltypes.WithRestrictedExecution(context.WithValue(ctx, executionPolicyKey{}, copy))
+	snapshot := policy
+	snapshot.Skills = slices.Clone(policy.Skills)
+	return protocoltypes.WithRestrictedExecution(context.WithValue(ctx, executionPolicyKey{}, snapshot))
 }
 
 func ExecutionPolicySkills(ctx context.Context) ([]string, bool) {
@@ -59,7 +61,8 @@ func BeforeExecutionTool(ctx context.Context, tool Tool) (context.Context, error
 	if !ExecutionPolicyAllowsTool(ctx, tool) {
 		return ctx, fmt.Errorf("tool %q is not allowed for this execution", tool.Name())
 	}
-	if invocation, ok := ctx.Value(executionInvocationKey{}).(*executionInvocation); ok && invocation.name == tool.Name() {
+	if invocation, ok := ctx.Value(executionInvocationKey{}).(*executionInvocation); ok &&
+		invocation.name == tool.Name() {
 		return ctx, nil
 	}
 	if policy.BeforeTool != nil {

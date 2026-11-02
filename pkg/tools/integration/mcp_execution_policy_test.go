@@ -11,10 +11,12 @@ import (
 
 func TestMCPDirectExecutionUsesCanonicalServerIdentityAndRechecksAuthority(t *testing.T) {
 	calls, approved, observed := 0, 0, 0
-	manager := &MockMCPManager{callToolFunc: func(context.Context, string, string, map[string]any) (*mcp.CallToolResult, error) {
-		calls++
-		return &mcp.CallToolResult{}, nil
-	}}
+	manager := &MockMCPManager{
+		callToolFunc: func(context.Context, string, string, map[string]any) (*mcp.CallToolResult, error) {
+			calls++
+			return &mcp.CallToolResult{}, nil
+		},
+	}
 	allowed := NewMCPTool(manager, "mail", &mcp.Tool{Name: "send", InputSchema: map[string]any{"type": "object"}})
 	other := NewMCPTool(manager, "mail_other", &mcp.Tool{Name: "send", InputSchema: map[string]any{"type": "object"}})
 	revoked := false

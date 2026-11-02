@@ -43,7 +43,10 @@ func TestExecToolUnrestrictedInvocationKeepsLegacyBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tool.Execute(WithToolContext(t.Context(), "cli", "fixture"), map[string]any{"command": "touch allowed-marker"}).IsError {
+	if tool.Execute(
+		WithToolContext(t.Context(), "cli", "fixture"),
+		map[string]any{"command": "touch allowed-marker"},
+	).IsError {
 		t.Fatal("ordinary exec lost its existing behavior")
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "allowed-marker")); err != nil {

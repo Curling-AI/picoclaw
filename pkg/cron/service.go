@@ -432,7 +432,14 @@ func (cs *CronService) executeJobWithIdentity(jobID string, trigger Trigger, run
 		}
 		_, err = handler(
 			executionContext,
-			Execution{Progress: nil, RunID: runID, StartedAt: startedAt, ManualIdentity: manualIdentity, Trigger: trigger, Job: callbackJob},
+			Execution{
+				Progress:       nil,
+				RunID:          runID,
+				StartedAt:      startedAt,
+				ManualIdentity: manualIdentity,
+				Trigger:        trigger,
+				Job:            callbackJob,
+			},
 		)
 	} else if legacy != nil {
 		_, err = legacy(callbackJob)

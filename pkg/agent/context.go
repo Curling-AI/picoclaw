@@ -1077,7 +1077,9 @@ func (cb *ContextBuilder) BuildMessagesFromPrompt(req PromptBuildRequest) []prov
 		if len(req.AllowedSkills) > 0 {
 			activeSkills = filterNamesByTurnProfile(activeSkills, req.AllowedSkills)
 		}
-		promptParts = append(promptParts, cb.buildActiveSkillsPromptPartsObserved(activeSkills, req.Loop, req.ObserveSkill)...)
+		promptParts = append(
+			promptParts,
+			cb.buildActiveSkillsPromptPartsObserved(activeSkills, req.Loop, req.ObserveSkill)...)
 	}
 	if !req.SuppressDefaultSystemPrompt {
 		if contributedParts, err := cb.promptRegistryOrDefault().Collect(context.Background(), req); err != nil {
@@ -1479,14 +1481,18 @@ func (cb *ContextBuilder) buildActiveSkillsContext(skillNames []string, scope Lo
 	return cb.buildActiveSkillsContextObserved(skillNames, scope, nil)
 }
 
-func (cb *ContextBuilder) buildActiveSkillsContextObserved(skillNames []string, scope LoopScope, observe func(string)) string {
+func (cb *ContextBuilder) buildActiveSkillsContextObserved(
+	skillNames []string,
+	scope LoopScope,
+	observe func(string),
+) string {
 	ordered := cb.ResolveActiveSkillsForLoop(skillNames, scope)
 	if len(ordered) == 0 {
 		return ""
 	}
 
 	loader := cb.loaderForLoop(scope)
-	content := ""
+	var content string
 	if observe == nil {
 		content = loader.LoadSkillsForContext(ordered)
 	} else {
@@ -1540,11 +1546,11 @@ func (cb *ContextBuilder) ResolveActiveSkillsForLoop(skillNames []string, scope 
 	return ordered
 }
 
-func (cb *ContextBuilder) buildActiveSkillsPromptParts(skillNames []string, scope LoopScope) []PromptPart {
-	return cb.buildActiveSkillsPromptPartsObserved(skillNames, scope, nil)
-}
-
-func (cb *ContextBuilder) buildActiveSkillsPromptPartsObserved(skillNames []string, scope LoopScope, observe func(string)) []PromptPart {
+func (cb *ContextBuilder) buildActiveSkillsPromptPartsObserved(
+	skillNames []string,
+	scope LoopScope,
+	observe func(string),
+) []PromptPart {
 	skillsText := cb.buildActiveSkillsContextObserved(skillNames, scope, observe)
 	if strings.TrimSpace(skillsText) == "" {
 		return nil
