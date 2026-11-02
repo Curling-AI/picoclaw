@@ -280,6 +280,9 @@ func samePublicEntry(a, b PublicHistoryEntry) bool {
 	if b.Ref == nil {
 		a.Ref = nil
 	}
+	if b.AnchorRef == nil {
+		a.AnchorRef = nil
+	}
 	if b.AnchorID == "" && !b.Partial && b.Order == (HistoryOrderProof{}) {
 		a.Order = HistoryOrderProof{}
 	}

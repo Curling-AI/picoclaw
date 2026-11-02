@@ -86,6 +86,23 @@ func TestPublicHistoryUsesProducerRefsAndRetiresOnlyRevisedSupplements(t *testin
 	}
 }
 
+func TestPublicHistoryImportRetrySurvivesProducerIdentityActivation(t *testing.T) {
+	store, request := publicImportBudgetFixture(t)
+	request.Entries[0].Message.Content = "confirmed legacy supplement"
+	if _, err := store.ImportPublicHistory(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	initializedContent(t, store, request.Key)
+	before, err := store.ReadPublicHistory(t.Context(), request.Key)
+	if err != nil || before.Entries[1].AnchorRef == nil {
+		t.Fatal("activation did not bind the existing supplement", before, err)
+	}
+	after, err := store.ImportPublicHistory(t.Context(), request)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("identity activation made an identical import retry conflict", after, err)
+	}
+}
+
 func TestPublicHistoryProvesPrefixBeforeRetentionAndPhysicalGCWithoutSQL(t *testing.T) {
 	store, err := NewJSONLStore(t.TempDir())
 	if err != nil {
