@@ -57,7 +57,7 @@ func TestHistoryCallNeverBorrowsTheAuditRequestForASynthesizedReply(t *testing.T
 	history := instance.Sessions.GetHistory(opts.SessionKey)
 	last := history[len(history)-1]
 	reader, ok := instance.Sessions.(interface {
-		ReadPublicHistory(context.Context, string) (memory.PublicHistory, error)
+		ReadPublicHistory(ctx context.Context, key string) (memory.PublicHistory, error)
 	})
 	if !ok {
 		t.Fatal("native source has no public history")
