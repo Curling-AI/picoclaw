@@ -58,11 +58,11 @@ func TestPublicHistoryRewritePreparationBindsRawRetainedPrefixBeforeProjection(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(store.publicHistoryPath(key)); err != nil {
-		t.Fatal(err)
+	if removeErr := os.Remove(store.publicHistoryPath(key)); removeErr != nil {
+		t.Fatal(removeErr)
 	}
-	if err := os.Remove(store.publicIndexPath(key)); err != nil {
-		t.Fatal(err)
+	if removeErr := os.Remove(store.publicIndexPath(key)); removeErr != nil {
+		t.Fatal(removeErr)
 	}
 	meta.PublicHistoryVersion = 0
 	meta.Skip = meta.Count
