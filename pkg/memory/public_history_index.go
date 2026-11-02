@@ -58,7 +58,9 @@ func encodePublicIndexHeader(header publicIndexHeader) ([]byte, error) {
 		header.Bytes < 0 || header.Bytes > maxHistoryPosition ||
 		header.Count < 0 ||
 		header.Count > maxHistoryPosition ||
-		header.Revision > uint64(maxHistoryPosition) {
+		header.Revision > uint64(maxHistoryPosition) ||
+		(header.Count == 0) != (header.Bytes == 0) ||
+		(header.Count == 0 && header.Digest != emptyHistoryDigest) {
 		return nil, ErrPublicHistoryCoverage
 	}
 	data := make([]byte, publicIndexHeaderBytes)
