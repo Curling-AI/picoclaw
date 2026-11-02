@@ -328,8 +328,10 @@ func (p *Pipeline) beginSynthesizedFinalStream(ctx context.Context, ts *turnStat
 	if !p.configuredStreamingEligible(ts, exec) {
 		return
 	}
+	// The synthesized occurrence proves itself, without borrowing an LLM audit ID.
+	exec.historyCallID = newLLMRequestID()
 	streamer, ok := p.Bus.GetStreamer(
-		providers.WithHistoryCall(ctx, ""),
+		providers.WithHistoryCall(ctx, exec.historyCallID),
 		ts.channel,
 		ts.chatID,
 		ts.sessionKey,

@@ -32,8 +32,38 @@ func (s *JSONLStore) preparePublicAppend(
 	messages []providers.Message,
 	sourceOffset int64,
 ) (publicHistoryChange, error) {
-	if next.HistoryRecoveryRequired || original.PublicHistoryPreparation != nil || original.PublicHistoryVersion < 0 ||
+	projectionUnavailable := next.publicProjectionUnavailable
+	next.publicProjectionUnavailable = false
+	if original.PublicHistoryPreparation != nil || original.PublicHistoryVersion < 0 ||
 		next.PublicHistoryVersion < 0 {
+		return publicHistoryChange{}, nil
+	}
+	if projectionUnavailable {
+		next.PublicHistoryComplete = false
+		if next.HistoryBytes == nil {
+			return publicHistoryChange{}, ErrPublicHistoryCoverage
+		}
+		state := &PublicHistoryPreparation{
+			FileGeneration: next.HistoryFileGeneration,
+			Generation:     next.HistoryGeneration,
+			Ceiling:        *next.HistoryBytes,
+			Count:          int64(next.Count),
+			Offset:         sourceOffset,
+			Line:           int64(original.Count),
+			Prefix:         next.HistoryPrefix,
+		}
+		if original.PublicHistoryVersion == 0 {
+			if _, err := os.Stat(s.publicHistoryPath(key)); err == nil || !errors.Is(err, os.ErrNotExist) {
+				return publicHistoryChange{}, ErrPublicHistoryCoverage
+			}
+			state.Offset, state.Line = 0, 0
+			next.PublicHistoryVersion = PublicHistoryVersion
+			next.PublicHistoryGeneration = newHistoryID()
+			next.PublicHistoryDigest = emptyHistoryDigest
+			next.PublicHistoryPreparation = state
+			return s.replacePublicEntries(key, nil, next)
+		}
+		next.PublicHistoryPreparation = state
 		return publicHistoryChange{}, nil
 	}
 	newEntries := publicHistoryEntries(messages, *next)
@@ -89,39 +119,82 @@ func (s *JSONLStore) preparePublicRewrite(
 	next *SessionMeta,
 	messages []providers.Message,
 ) (publicHistoryChange, error) {
-	if next.HistoryRecoveryRequired || original.PublicHistoryPreparation != nil || original.PublicHistoryVersion < 0 ||
-		next.PublicHistoryVersion < 0 {
-		return publicHistoryChange{}, nil
+	if next.publicHistoryClear {
+		next.publicHistoryClear = false
+		next.PublicHistoryVersion = PublicHistoryVersion
+		next.PublicHistoryPreparation = nil
+		next.PublicHistoryGeneration = newHistoryID()
+		next.PublicHistoryComplete = true
+		return s.replacePublicEntries(key, nil, next)
+	}
+	if next.publicProjectionUnavailable {
+		return publicHistoryChange{}, ErrPublicHistoryCoverage
+	}
+	if original.PublicHistoryVersion < 0 || next.PublicHistoryVersion < 0 {
+		return publicHistoryChange{}, ErrPublicHistoryCoverage
 	}
 	if original.PublicHistoryVersion == 0 {
 		_, statErr := os.Stat(s.publicHistoryPath(key))
 		if statErr == nil {
-			next.PublicHistoryVersion = -1
-			return publicHistoryChange{}, nil
+			return publicHistoryChange{}, ErrPublicHistoryCoverage
 		}
 		if !errors.Is(statErr, os.ErrNotExist) {
 			return publicHistoryChange{}, statErr
 		}
 	}
 	var entries []PublicHistoryEntry
-	if original.PublicHistoryVersion == 0 {
-		old, oldErr := s.readCommittedHistory(key, original, 0)
+	if original.PublicHistoryVersion == 0 || original.PublicHistoryPreparation != nil {
+		// Structural rewrites already read the complete source. Materialize its
+		// display in the same OLD/NEW journal before retiring any physical row.
+		old, sourceLines, oldErr := s.readPublicSourceLines(key, original, 0)
 		if oldErr != nil {
 			return publicHistoryChange{}, oldErr
 		}
 		for index, message := range old {
 			projected, projectionErr := s.projectLegacyPublic(message)
-			hasProjection := projectionErr == nil
-			if !hasProjection {
-				next.PublicHistoryVersion = -1
-				return publicHistoryChange{}, nil
+			if projectionErr != nil {
+				return publicHistoryChange{}, &publicArtifactVerificationError{cause: projectionErr}
 			}
-			projected.HistoryID, projected.HistoryRunID = message.HistoryID, message.HistoryRunID
-			projected = messageWithHistoryOrder(projected, messageHistoryOrder(message))
-			old[index] = projected
+			if projector := s.historyPublicProjector(); projector != nil {
+				if verifyErr := projector.Verify(context.Background(), projected); verifyErr != nil {
+					return publicHistoryChange{}, &publicArtifactVerificationError{cause: verifyErr}
+				}
+			}
+			// Keep the raw receipt body separate from its immutable public projection.
+			old[index].HistoryPublicMessage = &projected
+		}
+		if original.ContentIdentity != nil && !original.ContentIdentity.Unavailable {
+			if err := s.hydrateContentStorage(context.Background(), key, &original, true, false); err != nil {
+				return publicHistoryChange{}, err
+			}
 		}
 		entries = publicHistoryEntries(old, original)
-		next.PublicHistoryComplete = original.HistoryPrefix == 0
+		for index := range entries {
+			entries[index].Ref = publicContentRef(original, sourceLines[entries[index].ID])
+		}
+		if original.PublicHistoryVersion == PublicHistoryVersion {
+			readMeta := original
+			readMeta.PublicHistoryPreparation = nil
+			previous, readErr := s.readPublicEntries(key, readMeta)
+			if readErr != nil {
+				return publicHistoryChange{}, readErr
+			}
+			// Previously committed supplements and compacted source entries have
+			// no remaining source row. Preserve their exact identifiers/bytes.
+			seen := make(map[string]bool, len(previous))
+			for _, entry := range previous {
+				seen[entry.ID] = true
+			}
+			confirmed := previous
+			for _, entry := range entries {
+				if !seen[entry.ID] {
+					confirmed = append(confirmed, entry)
+				}
+			}
+			entries = confirmed
+		}
+		next.PublicHistoryPreparation = nil
+		next.PublicHistoryComplete = original.PublicHistoryComplete || original.HistoryPrefix == 0
 		next.PublicHistoryVersion = PublicHistoryVersion
 		next.PublicHistoryGeneration = newHistoryID()
 	} else {
@@ -134,35 +207,7 @@ func (s *JSONLStore) preparePublicRewrite(
 	if original.ContentIdentity != nil {
 		return s.rewritePublicContent(key, original, next, messages, entries)
 	}
-	if next.HistoryGeneration == original.HistoryGeneration {
-		return s.replacePublicEntries(key, entries, next)
-	}
-	active, activeErr := s.readCommittedHistory(key, original, original.Skip)
-	if activeErr != nil {
-		return publicHistoryChange{}, activeErr
-	}
-	activePublic := publicHistoryEntries(active, original)
-	boundary := len(entries)
-	if len(activePublic) > 0 {
-		boundary = -1
-		for index, entry := range entries {
-			if entry.ID == activePublic[0].ID {
-				boundary = index
-				break
-			}
-		}
-	}
-	if boundary < 0 {
-		return publicHistoryChange{}, ErrPublicHistoryCoverage
-	}
-	replacements := publicHistoryEntries(messages, *next)
-	for index := range replacements {
-		replacements[index].CallID = ""
-	}
-	entries = append(entries[:boundary:boundary], replacements...)
-	next.PublicHistoryGeneration = newHistoryID()
-
-	return s.replacePublicEntries(key, entries, next)
+	return s.rewritePublicDisplay(key, original, next, messages, entries)
 }
 
 func (s *JSONLStore) replacePublicEntries(
@@ -186,12 +231,29 @@ func (s *JSONLStore) replacePublicEntries(
 	next.PublicHistoryBytes = int64(len(data))
 	next.PublicHistoryCount = int64(len(entries))
 	next.PublicHistoryRevision++
-	return s.preparePublicIndex(
-		key,
-		SessionMeta{},
-		*next,
-		publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}},
-	)
+	original := SessionMeta{}
+	if existed {
+		var metaErr error
+		original, metaErr = s.readMeta(key)
+		if metaErr != nil {
+			return publicHistoryChange{}, metaErr
+		}
+	}
+	if existed && bytes.Equal(old, data) && original.PublicHistoryVersion == PublicHistoryVersion &&
+		original.PublicHistoryDigest == next.PublicHistoryDigest {
+		// An unchanged public view keeps its index and cursors even when model history compacted.
+		next.PublicHistoryGeneration = original.PublicHistoryGeneration
+		next.PublicHistoryRevision = original.PublicHistoryRevision
+		return publicHistoryChange{}, nil
+	}
+	if existed && bytes.HasPrefix(data, old) && original.PublicHistoryGeneration == next.PublicHistoryGeneration {
+		offset := int64(len(old))
+		return s.preparePublicIndex(key, original, *next, publicHistoryChange{
+			Data: data[len(old):], Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true},
+		})
+	}
+	return s.preparePublicIndex(key, SessionMeta{}, *next,
+		publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}})
 }
 
 func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (resultErr error) {
@@ -330,7 +392,7 @@ func mergePublicImport(
 ) ([]PublicHistoryEntry, bool, error) {
 	byID := make(map[string]PublicHistoryEntry, len(existing))
 	byImport := make(map[string]PublicHistoryEntry, len(existing))
-	for _, entry := range existing {
+	for _, entry := range publicHistoryResult(meta, existing).Entries {
 		byID[entry.ID] = entry
 		if entry.ImportID != "" {
 			byImport[entry.ImportID] = entry

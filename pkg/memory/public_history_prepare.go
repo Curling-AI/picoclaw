@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -90,14 +91,11 @@ func (s *JSONLStore) PreparePublicHistory(
 	if operationErr2 := validateCanonicalHistoryKey(key, canonical, meta); operationErr2 != nil {
 		return PublicHistoryPreparationResult{}, operationErr2
 	}
-	if operationErr3 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr3 != nil {
-		return PublicHistoryPreparationResult{}, operationErr3
+	if err := s.prepareContentMutationOrderFence(canonical, &meta); err != nil {
+		return PublicHistoryPreparationResult{}, err
 	}
-	if meta.HistoryRecoveryRequired {
-		return PublicHistoryPreparationResult{}, ErrHistoryRecoveryRequired
-	}
-	if operationErr4 := s.probeHistoryOrderWitness(canonical, &meta); operationErr4 != nil {
-		return PublicHistoryPreparationResult{}, operationErr4
+	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); err != nil {
+		return PublicHistoryPreparationResult{}, err
 	}
 	if meta.PublicHistoryVersion == 0 {
 		if cursor != "" {
@@ -122,6 +120,18 @@ func (s *JSONLStore) PreparePublicHistory(
 	}
 	if cursor != expected.Cursor {
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
+	}
+	// The owning lock fixes the current committed append frontier. Include it
+	// in this same bounded read instead of requiring an extra retry just to
+	// discover that a small completed legacy range acquired a new tail.
+	if meta.HistoryBytes != nil && *meta.HistoryBytes > state.Ceiling {
+		state.Ceiling = *meta.HistoryBytes
+		state.Count = int64(meta.Count)
+	}
+	if meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable {
+		if err := s.hydrateContentStorage(ctx, canonical, &meta, true, true); err != nil {
+			return PublicHistoryPreparationResult{}, err
+		}
 	}
 	entries, next, canonicalErr := s.readPublicPreparation(ctx, canonical, meta, state)
 	if canonicalErr != nil {
@@ -235,14 +245,22 @@ func (s *JSONLStore) readPublicPreparation(
 		historyReadBufferBytes,
 	)
 	entries := make([]PublicHistoryEntry, 0, PublicHistoryImportMessages)
-	bytes := 0
+	encodedBytes := 0
 	for consumed := 0; consumed < PublicHistoryImportMessages && state.Offset < state.Ceiling; consumed++ {
 		if operationErr8 := ctx.Err(); operationErr8 != nil {
 			return nil, state, operationErr8
 		}
 		line, lineErr := readPublicPreparationLine(reader)
+		if errors.Is(lineErr, io.EOF) && meta.HistoryBytes == nil && state.Line == state.Count {
+			state.Ceiling = state.Offset
+			break
+		}
 		if lineErr != nil {
 			return nil, state, lineErr
+		}
+		if len(bytes.TrimRight(line, "\r\n")) == 0 {
+			state.Offset += int64(len(line))
+			continue
 		}
 		entry, visible, lineErr := s.preparedPublicEntry(line, key, meta, state)
 		if lineErr != nil {
@@ -254,10 +272,10 @@ func (s *JSONLStore) readPublicPreparation(
 				return nil, state, ErrHistoryCapacity
 			}
 			encoded, _ := json.Marshal(entry)
-			if bytes+len(encoded)+1 > PublicHistoryOperationBytes {
+			if encodedBytes+len(encoded)+1 > PublicHistoryOperationBytes {
 				break
 			}
-			bytes += len(encoded) + 1
+			encodedBytes += len(encoded) + 1
 			entries = append(entries, entry)
 		}
 		state.Offset += int64(len(line))
@@ -298,16 +316,18 @@ func (s *JSONLStore) preparedPublicEntry(
 		return PublicHistoryEntry{}, false, ErrPublicHistoryCoverage
 	}
 	order, orderErr := decodedHistoryOrder(line)
-	if orderErr != nil {
+	if orderErr != nil && !meta.publicOrderUnavailable {
 		return PublicHistoryEntry{}, false, orderErr
 	}
 	legacy, orderErr := decodedLegacyHistoryStream(line)
-	if orderErr != nil {
+	if orderErr != nil && !meta.publicOrderUnavailable {
 		return PublicHistoryEntry{}, false, orderErr
 	}
 	fromFence := meta.HistoryFileGeneration == meta.HistoryLegacyFileGeneration &&
 		state.Offset+int64(len(line)) <= meta.HistoryLegacyBytes
-	if order != (HistoryOrderProof{}) {
+	if meta.publicOrderUnavailable {
+		order = HistoryOrderProof{}
+	} else if order != (HistoryOrderProof{}) {
 		if legacy != "" || order.StreamID != meta.HistoryStreamID || order.Sequence > meta.HistorySequence {
 			return PublicHistoryEntry{}, false, ErrPublicHistoryCoverage
 		}
@@ -331,6 +351,31 @@ func (s *JSONLStore) preparedPublicEntry(
 	}
 	if order.Valid() {
 		entries[0].SourceDigest = publicSourceDigest(record.Message)
+	}
+	if meta.publicRefUnavailable {
+		entries[0].Ref = nil
+	}
+	if meta.publicOrderUnavailable {
+		entries[0].LegacyBeforeStreamID = ""
+	}
+	// A pending compaction retains the exact pre-compaction locators until
+	// coverage is acknowledged. Preparation must preserve those existing refs
+	// for the prefix; its current active-row index only contains the suffix.
+	identity := meta.ContentIdentity
+	if entries[0].Ref == nil && !meta.publicRefUnavailable && identity != nil && !identity.Unavailable &&
+		identity.Pending != nil && identity.Pending.Mutation == nil && int(state.Line) < meta.Skip {
+		for _, row := range identity.Pending.Before.Rows {
+			if row.Line != int(state.Line)+1 {
+				continue
+			}
+			if !row.Ref.Valid() || row.Ref.DomainID != identity.DomainID ||
+				row.Digest != contentDigest(bytes.TrimRight(line, "\r\n")) {
+				return PublicHistoryEntry{}, false, ErrPublicHistoryCoverage
+			}
+			ref := row.Ref
+			entries[0].Ref = &ref
+			break
+		}
 	}
 	return entries[0], true, nil
 }

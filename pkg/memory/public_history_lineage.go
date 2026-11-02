@@ -85,8 +85,7 @@ func (s *JSONLStore) rewritePublicContent(
 	entries []PublicHistoryEntry,
 ) (publicHistoryChange, error) {
 	if next.ContentIdentity == nil || next.ContentIdentity.Unavailable {
-		next.PublicHistoryVersion = -1
-		return publicHistoryChange{}, nil
+		return s.rewritePublicDisplay(key, original, next, messages, entries)
 	}
 	image, err := s.readContentImage(context.Background(), key)
 	if err != nil {
@@ -97,8 +96,7 @@ func (s *JSONLStore) rewritePublicContent(
 		return publicHistoryChange{}, err
 	}
 	if frame.IdentityStatus != ContentIdentityKnown {
-		next.PublicHistoryVersion = -1
-		return publicHistoryChange{}, nil
+		return s.rewritePublicDisplay(key, original, next, messages, entries)
 	}
 	active := make(map[string]bool, len(frame.Entries))
 	for _, row := range image.activeRows() {
@@ -145,8 +143,21 @@ func (s *JSONLStore) rewritePublicContent(
 	return s.replacePublicEntries(key, kept, next)
 }
 
+type publicArtifactVerificationError struct{ cause error }
+
+func (e *publicArtifactVerificationError) Error() string {
+	return "public history artifact verification unavailable"
+}
+
+func (e *publicArtifactVerificationError) Unwrap() error {
+	return errors.Join(ErrPublicHistoryCoverage, e.cause)
+}
+
 func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta SessionMeta) (resultErr error) {
-	if meta.PublicHistoryVersion == 0 || meta.Skip == 0 {
+	if meta.Skip == 0 {
+		return nil
+	}
+	if meta.PublicHistoryVersion == 0 {
 		return nil
 	}
 	entries, err := s.readPublicEntries(key, meta)
@@ -156,13 +167,9 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 	byID := make(map[string]PublicHistoryEntry, len(entries))
 	projector := s.historyPublicProjector()
 	for _, entry := range entries {
-		if projector != nil {
-			if err = projector.Verify(ctx, entry.Message); err != nil {
-				return err
-			}
-		}
 		byID[entry.ID] = entry
 	}
+	prefix := make(map[string]bool)
 	file, err := os.Open(s.jsonlPath(key))
 	if err != nil {
 		return err
@@ -199,15 +206,48 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		public, _ := publicHistoryMessage(projected)
 		entry, exists := byID[decodedHistoryID(raw, filepath.Base(file.Name()), int64(line-1))]
 		if !exists || contentJSONDigest(entry.Message) != contentJSONDigest(public) ||
-			(meta.ContentIdentity != nil && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
+			(meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
 			return ErrPublicHistoryCoverage
 		}
+		prefix[entry.ID] = true
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 	if line != meta.Skip {
 		return ErrPublicHistoryCoverage
+	}
+	if projector != nil {
+		// Imports may be anchored through another imported supplement. Follow
+		// exact IDs transitively so narrowing the hash work never omits them.
+		children := make(map[string][]string)
+		for _, entry := range entries {
+			for _, parent := range []string{entry.AnchorID, entry.BoundaryID} {
+				if parent != "" {
+					children[parent] = append(children[parent], entry.ID)
+				}
+			}
+		}
+		queue := make([]string, 0, len(prefix))
+		for id := range prefix {
+			queue = append(queue, id)
+		}
+		for position := 0; position < len(queue); position++ {
+			for _, id := range children[queue[position]] {
+				if !prefix[id] {
+					prefix[id] = true
+					queue = append(queue, id)
+				}
+			}
+		}
+		for _, entry := range entries {
+			if !prefix[entry.ID] {
+				continue
+			}
+			if err := projector.Verify(ctx, entry.Message); err != nil {
+				return &publicArtifactVerificationError{cause: err}
+			}
+		}
 	}
 	return nil
 }

@@ -167,7 +167,7 @@ func (s *JSONLStore) PruneEmptySessions(
 var ErrKeepSession = errors.New("memory: session kept by the caller")
 
 func isEmptyMeta(meta SessionMeta) bool {
-	return meta.Count == 0 && meta.Skip == 0 && strings.TrimSpace(meta.Summary) == "" &&
+	return meta.Count == 0 && meta.Skip == 0 && meta.PublicHistoryCount == 0 && strings.TrimSpace(meta.Summary) == "" &&
 		!meta.HistoryRecoveryRequired
 }
 

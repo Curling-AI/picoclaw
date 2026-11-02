@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -33,14 +34,14 @@ func (s *JSONLStore) historyPublicProjector() PublicHistoryProjector {
 
 func (s *JSONLStore) projectPublicCommits(messages []providers.Message, meta *SessionMeta) []providers.Message {
 	projector := s.historyPublicProjector()
-	if projector == nil {
+	if projector == nil || meta.publicProjectionUnavailable {
 		return messages
 	}
 	projected := append([]providers.Message(nil), messages...)
 	for index, message := range projected {
 		if message.HistoryPublicMessage != nil {
 			if !validPublicProjection(message, *message.HistoryPublicMessage) {
-				meta.PublicHistoryVersion = -1
+				meta.publicProjectionUnavailable = true
 				return projected
 			}
 			continue
@@ -49,9 +50,18 @@ func (s *JSONLStore) projectPublicCommits(messages []providers.Message, meta *Se
 		if !visible {
 			continue
 		}
-		result, resultErr := projector.Commit(public)
+		var result PublicHistoryProjectionResult
+		var resultErr error
+		if scoped, ok := projector.(interface {
+			CommitSession(key string, message providers.Message) (PublicHistoryProjectionResult, error)
+		}); ok {
+			result, resultErr = scoped.CommitSession(meta.Key, public)
+		} else {
+			result, resultErr = projector.Commit(public)
+		}
 		if resultErr != nil || !validPublicProjection(message, result.Message) {
-			meta.PublicHistoryVersion = -1
+			meta.publicProjectionUnavailable = true
+			slog.Warn("public history projection unavailable", "operation", "commit_public_history")
 			return projected
 		}
 		if result.HasVersionedReferences {

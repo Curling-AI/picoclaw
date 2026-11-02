@@ -49,6 +49,45 @@ func nativeArchivePlan(frame ContentFrame) ContentCompactionPlan {
 	}
 }
 
+func TestNativeArchiveRequiresContentProofIndependentlyOfReadableBodiesAndOrder(t *testing.T) {
+	for _, missing := range []string{"none", "order_witness", "content_witness"} {
+		t.Run(missing, func(t *testing.T) {
+			store, key, frame := nativeArchiveSource(t)
+			meta, err := store.readMeta(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missing == "order_witness" {
+				err = os.Remove(store.historyOrderWitnessPath(key))
+			} else if missing == "content_witness" {
+				err = store.writeContentCheckpointAvailability(key, meta, true)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key})
+			if err != nil || len(page.Entries) != len(frame.Entries) {
+				t.Fatal("independent proof loss hid the confirmed display", err)
+			}
+			if (page.Entries[0].Ref == nil) != (missing == "content_witness") ||
+				page.Entries[1].Order.Valid() != (missing != "order_witness") {
+				t.Fatal("public page did not preserve independent proof degradation")
+			}
+			transition := ContentTransition{Dropped: frameRefs(frame)[:2]}
+			proof, err := store.verifyNativeArchive(t.Context(), key, meta, frame, transition)
+			if missing == "content_witness" {
+				if !errors.Is(err, ErrPublicHistoryCoverage) || len(proof.Archived) != 0 {
+					t.Fatal("readable bodies were borrowed as a content archive proof", err)
+				}
+				return
+			}
+			if err != nil || len(proof.Archived) != len(transition.Dropped) {
+				t.Fatal("independent order loss blocked proved content retention", err)
+			}
+		})
+	}
+}
+
 func TestNativeArchiveReleasesOnlyVerifiedPublicCoverageAndRecoversTheSamePending(t *testing.T) {
 	for _, kind := range []string{"verified", "missing_index", "corrupt_index", "corrupt_public", "missing_ref", "imported_ref"} {
 		t.Run(kind, func(t *testing.T) {

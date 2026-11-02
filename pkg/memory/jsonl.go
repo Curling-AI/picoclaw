@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -43,6 +44,10 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
+	publicProjectionUnavailable  bool
+	publicRefUnavailable         bool
+	publicOrderUnavailable       bool
+	publicHistoryClear           bool
 	PublicHistoryPreparation     *PublicHistoryPreparation `json:"public_history_preparation,omitempty"`
 	PublicHistoryVersion         int                       `json:"public_history_version,omitempty"`
 	PublicHistoryGeneration      string                    `json:"public_history_generation,omitempty"`
@@ -1028,6 +1033,9 @@ func (s *JSONLStore) TruncateHistory(
 }
 
 func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history []providers.Message) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	filtered := messageutil.FilterInvalidHistoryMessages(history)
 	lock := s.sessionLock(sessionKey)
 	lock.Lock()
@@ -1045,12 +1053,15 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	}
 	meta.UpdatedAt = now
 	ensureHistoryGeneration(&meta, sessionKey)
+	meta.publicHistoryClear, _ = ctx.Value(publicHistoryClearIntent{}).(bool)
 	prepared := make([]providers.Message, len(filtered))
 	for index, message := range filtered {
 		prepared[index] = prepareHistoryMessage(message, now, providers.HistoryRun(ctx))
 	}
-	if appended, err := s.appendHistorySuffix(sessionKey, prepared, meta); appended || err != nil {
-		return err
+	if !meta.publicHistoryClear {
+		if appended, err := s.appendHistorySuffix(sessionKey, prepared, meta); appended || err != nil {
+			return err
+		}
 	}
 	return s.replaceHistory(ctx, sessionKey, filtered, meta)
 }
@@ -1102,9 +1113,24 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	if meta.Skip == 0 {
 		return nil
 	}
-	if err = s.verifyPublicPrefix(ctx, sessionKey, meta); err != nil {
+	// A structural rewrite materializes legacy/preparing coverage in its
+	// existing transaction. ACKs still require a ready public source.
+	if meta.PublicHistoryVersion != 0 && meta.PublicHistoryPreparation == nil {
+		err = s.verifyPublicPrefix(ctx, sessionKey, meta)
+	}
+	if err != nil {
 		var pathErr *os.PathError
-		if proofOptional && errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr) {
+		var artifactErr *publicArtifactVerificationError
+		if proofOptional && ctx.Err() == nil &&
+			(errors.As(err, &artifactErr) || errors.Is(err, ErrPublicHistoryCoverage) && !errors.As(err, &pathErr)) {
+			slog.WarnContext(
+				ctx,
+				"optional public history proof unavailable",
+				"operation",
+				"compact_session",
+				"artifact_missing",
+				errors.Is(err, os.ErrNotExist),
+			)
 			return nil
 		}
 		return err
@@ -1167,7 +1193,21 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	meta.Count = len(active)
 	meta.UpdatedAt = time.Now()
 
-	return s.commitHistoryRewrite(sessionKey, active, meta)
+	err = s.commitHistoryRewrite(sessionKey, active, meta)
+	// Preparing a structural legacy rewrite can discover the same optional
+	// artifact failure after the initial guard, before any transcript write.
+	if artifactErr, ok := err.(*publicArtifactVerificationError); proofOptional && ok && ctx.Err() == nil {
+		slog.WarnContext(
+			ctx,
+			"optional public history proof unavailable",
+			"operation",
+			"compact_session",
+			"artifact_missing",
+			errors.Is(artifactErr, os.ErrNotExist),
+		)
+		return nil
+	}
+	return err
 }
 
 func marshalHistoryJSONL(msgs []providers.Message, meta SessionMeta) ([]byte, error) {

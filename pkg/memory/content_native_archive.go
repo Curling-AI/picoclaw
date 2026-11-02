@@ -134,8 +134,11 @@ func (s *JSONLStore) verifyNativeArchive(
 		meta.PublicHistoryPreparation != nil {
 		return nativeArchiveProof{}, ErrPublicHistoryCoverage
 	}
-	if readErr := checkPublicReadFiles(ctx, files, name, meta); readErr != nil {
+	if readErr := checkPublicReadFiles(ctx, files, name, &meta); readErr != nil {
 		return nativeArchiveProof{}, readErr
+	}
+	if meta.publicRefUnavailable {
+		return nativeArchiveProof{}, ErrPublicHistoryCoverage
 	}
 	index, err := openPublicIndex(files, name+".jsonl.public.index", meta)
 	if err != nil {
