@@ -3,11 +3,11 @@ module github.com/sipeed/picoclaw
 go 1.26.10
 
 require (
-	github.com/adapta-school/hulk-sdk-go v0.31.0
 	fyne.io/systray v1.12.2
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 	github.com/SevereCloud/vksdk/v3 v3.3.1
+	github.com/adapta-school/hulk-sdk-go v0.31.0
 	github.com/adhocore/gronx v1.20.0
 	github.com/anthropics/anthropic-sdk-go v1.55.1
 	github.com/atc0005/go-teams-notify/v2 v2.14.0
@@ -34,7 +34,7 @@ require (
 	github.com/muesli/termenv v0.16.0
 	github.com/mymmrac/telego v1.10.0
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
-	github.com/openai/openai-go/v3 v3.22.0
+	github.com/openai/openai-go/v3 v3.44.0
 	github.com/pion/rtp v1.10.2
 	github.com/pion/webrtc/v3 v3.3.6
 	github.com/pmezard/go-difflib v1.0.0
