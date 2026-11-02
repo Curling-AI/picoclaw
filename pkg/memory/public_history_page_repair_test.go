@@ -134,8 +134,8 @@ func TestPublicHistoryPageKeepsDisplayButDropsUnavailableIndependentProofs(t *te
 			if failure == "domain" {
 				witness = store.contentDomainPath(key)
 			}
-			if err := os.Remove(witness); err != nil {
-				t.Fatal(err)
+			if removeErr := os.Remove(witness); removeErr != nil {
+				t.Fatal(removeErr)
 			}
 			page, err := ReadPublicHistoryPageFS(t.Context(), os.DirFS(store.dir), PublicHistoryPageRequest{Key: key})
 			if err != nil || len(page.Entries) != 2 ||
