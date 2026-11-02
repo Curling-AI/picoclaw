@@ -46,10 +46,14 @@ func (s *JSONLStore) rewritePublicDisplay(
 					continue
 				}
 			}
-		} else if _, wasActive := active[entry.ID]; wasActive {
+		} else if originalMessage, wasActive := active[entry.ID]; wasActive {
 			replacement, exists := updated[entry.ID]
 			if !exists {
 				continue
+			}
+			if original.HistoryGeneration != "" && next.HistoryGeneration == original.HistoryGeneration &&
+				sameHistoryCore(originalMessage, changed[entry.ID]) {
+				replacement.CallID = entry.CallID
 			}
 			entry = replacement
 		}
