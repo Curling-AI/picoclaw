@@ -3,11 +3,10 @@ FROM golang:1.26.10-bookworm AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -o /out/mcp-streamable-server ./integration/fixtures/mcp-streamable-server
+RUN CGO_ENABLED=0 go build -mod=readonly -o /out/mcp-streamable-server ./integration/fixtures/mcp-streamable-server
 
 FROM alpine:3.22
 
