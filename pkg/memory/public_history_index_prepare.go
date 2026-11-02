@@ -175,7 +175,8 @@ func validatePublicIndexPreparation(file *os.File, state publicIndexPreparation)
 		return errors.Join(ErrPublicHistoryCoverage, operationErr16)
 	}
 	last, operationErr17 := decodePublicIndexRecord(data)
-	if operationErr17 != nil || last.Offset < 0 || last.Length <= 1 || last.Offset+last.Length != state.Byte ||
+	if operationErr17 != nil || last.Position != state.Count-1 || last.Generation.String() != state.Target.Generation ||
+		last.Offset < 0 || last.Length <= 1 || last.Offset+last.Length != state.Byte ||
 		state.Digest != publicIndexRecordDigest(last) {
 		return ErrPublicHistoryCoverage
 	}
@@ -219,7 +220,9 @@ func readPublicIndexPreparationBatch(
 		if json.Unmarshal(line, &entry) != nil || !validPublicPageEntry(entry) {
 			return next, nil, ErrPublicHistoryCoverage
 		}
-		encoded, digest, operationErr19 := publicIndexRecords(append(line, '\n'), next.Byte, next.Digest)
+		encoded, digest, operationErr19 := publicIndexRecords(append(line, '\n'), publicIndexHeader{
+			Generation: next.Target.Generation, Bytes: next.Byte, Count: next.Count, Digest: next.Digest,
+		})
 		if operationErr19 != nil {
 			return next, nil, operationErr19
 		}

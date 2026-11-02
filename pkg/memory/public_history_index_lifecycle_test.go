@@ -6,7 +6,42 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+func TestPublicHistoryIndexFreshWriteRetainsCronUntilAllCompanionsAreOld(t *testing.T) {
+	store, err := NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "agent:cron-public-index-retention"
+	if operationErr := store.SetHistory(
+		t.Context(),
+		key,
+		[]providers.Message{{Role: "assistant", Content: "confirmed"}},
+	); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	age(t, store, key, 48*time.Hour)
+	now := time.Now()
+	if operationErr := os.Chtimes(store.publicIndexPath(key), now, now); operationErr != nil {
+		t.Fatal(operationErr)
+	}
+	removed, err := store.PruneCronRuns(24*time.Hour, now)
+	if err != nil || removed != 0 {
+		t.Fatal("retention removed a fresh index write", removed, err)
+	}
+	age(t, store, key, 48*time.Hour)
+	removed, err = store.PruneCronRuns(24*time.Hour, now)
+	if err != nil || removed != 1 {
+		t.Fatal("retention kept an entirely old cron source", removed, err)
+	}
+	if _, operationErr := os.Stat(store.publicIndexPath(key)); !errors.Is(operationErr, os.ErrNotExist) {
+		t.Fatal("retention stranded an old index", operationErr)
+	}
+}
 
 func TestPublicHistoryIndexKeepsOlderDeletionIntentsRecoverable(t *testing.T) {
 	for _, unexpected := range []bool{false, true} {
