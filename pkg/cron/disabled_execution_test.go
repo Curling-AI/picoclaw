@@ -16,8 +16,17 @@ func TestClaimedScheduledJobDoesNotRunAfterItIsDisabled(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
-			service := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), func(*CronJob) (string, error) { calls++; return "fixture", nil })
-			job, err := service.AddJob("Synthetic fixture", CronSchedule{Kind: "cron", Expr: "0 0 1 1 *"}, "fixture", "", "")
+			service := NewCronService(
+				filepath.Join(t.TempDir(), "jobs.json"),
+				func(*CronJob) (string, error) { calls++; return "fixture", nil },
+			)
+			job, err := service.AddJob(
+				"Synthetic fixture",
+				CronSchedule{Kind: "cron", Expr: "0 0 1 1 *"},
+				"fixture",
+				"",
+				"",
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
