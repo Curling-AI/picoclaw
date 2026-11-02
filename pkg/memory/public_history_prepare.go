@@ -329,5 +329,8 @@ func (s *JSONLStore) preparedPublicEntry(
 	if len(entries) == 0 {
 		return PublicHistoryEntry{}, false, nil
 	}
+	if order.Valid() {
+		entries[0].SourceDigest = publicSourceDigest(record.Message)
+	}
 	return entries[0], true, nil
 }

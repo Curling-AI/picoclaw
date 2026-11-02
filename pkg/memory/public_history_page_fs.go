@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+var ErrPublicHistorySessionNotFound = errors.New("public history session not found")
+
 type publicHistoryReadFile interface {
 	fs.File
 	io.ReaderAt
@@ -46,6 +48,9 @@ func ReadPublicHistoryPageFS(
 	}
 	name := sanitizeKey(request.Key)
 	metadata, operationErr3 := fs.ReadFile(files, name+".meta.json")
+	if errors.Is(operationErr3, fs.ErrNotExist) {
+		return PublicHistoryPage{}, ErrPublicHistorySessionNotFound
+	}
 	if operationErr3 != nil {
 		return PublicHistoryPage{}, operationErr3
 	}
@@ -56,7 +61,7 @@ func ReadPublicHistoryPageFS(
 		return PublicHistoryPage{}, ErrPublicHistoryCoverage
 	}
 	if operationErr4 := checkPublicReadFiles(ctx, files, name, meta); operationErr4 != nil {
-		return PublicHistoryPage{}, operationErr4
+		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, operationErr4)
 	}
 	index, operationErr3 := openPublicIndex(files, name+".jsonl.public.index", meta)
 	if errors.Is(operationErr3, fs.ErrNotExist) {
@@ -68,7 +73,7 @@ func ReadPublicHistoryPageFS(
 	defer closePublicFile(index.file, &resultErr)
 	source, operationErr3 := openPublicHistoryReadFile(files, name+".jsonl.public")
 	if operationErr3 != nil {
-		return PublicHistoryPage{}, operationErr3
+		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, operationErr3)
 	}
 	defer closePublicFile(source, &resultErr)
 	info, operationErr3 := source.Stat()

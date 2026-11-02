@@ -89,6 +89,13 @@ func (s *JSONLStore) publicPreparationResult(
 		return PublicHistoryPreparationResult{}, err
 	}
 	index, err := s.openPublicIndex(key, meta)
+	if errors.Is(err, ErrPublicHistoryCoverage) {
+		// Only the derived index is discarded; bounded preparation verifies the source digest.
+		if removeErr := os.Remove(s.publicIndexPath(key)); removeErr != nil {
+			return PublicHistoryPreparationResult{}, removeErr
+		}
+		err = os.ErrNotExist
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		result.Ready = false
 		return result, nil

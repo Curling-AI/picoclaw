@@ -133,7 +133,7 @@ func TestPublicHistoryPagesRespectPublicMessageAndOperationBudgets(t *testing.T)
 	}
 	page, operationErr5 := store.ReadPublicHistoryPage(t.Context(), PublicHistoryPageRequest{Key: key})
 	if operationErr5 != nil || len(page.Entries) != 2 || page.Start != 2 || page.End != 4 || page.OlderCursor == "" ||
-		page.Stats.LookaheadBytes == 0 || page.Stats.MessageBytes+publicHistoryEnvelopeBytes > PublicHistoryOperationBytes {
+		page.Stats.DataBytesRead > PublicHistoryOperationBytes || page.Stats.MessageBytes+publicHistoryEnvelopeBytes > PublicHistoryOperationBytes {
 		t.Fatalf("operation did not stop before the undelivered message: %+v %v", page, operationErr5)
 	}
 	t.Logf(

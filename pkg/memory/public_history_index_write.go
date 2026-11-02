@@ -3,6 +3,8 @@ package memory
 import (
 	"errors"
 	"os"
+
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 type publicIndexRecovery struct {
@@ -59,6 +61,9 @@ func (s *JSONLStore) preparePublicIndexAppend(
 	header []byte,
 ) (publicHistoryChange, error) {
 	index, operationErr1 := s.openPublicIndex(key, original)
+	if errors.Is(operationErr1, ErrPublicHistoryCoverage) {
+		logger.WarnC("memory", "Public history index is invalid; explicit bounded preparation is required")
+	}
 	if errors.Is(operationErr1, os.ErrNotExist) || errors.Is(operationErr1, ErrPublicHistoryCoverage) {
 		// A source installed before the index remains writable. Its explicit,
 		// bounded preparation owns index creation; a read never scans it whole.
