@@ -33,22 +33,36 @@ func (ts *turnState) appendUserPrompt(loop *AgentLoop, message providers.Message
 		ts.appendHistoryMessage(message)
 		return message
 	}
-	receipt, err := writer.AppendHistoryReceipt(providers.WithHistoryRun(context.Background(), ts.historyRunID), ts.sessionKey, message)
+	receipt, err := writer.AppendHistoryReceipt(
+		providers.WithHistoryRun(context.Background(), ts.historyRunID),
+		ts.sessionKey,
+		message,
+	)
 	switch {
 	case errors.Is(err, memory.ErrHistoryInputCommitted):
 		warnCommittedHistoryRecovery(ts.sessionKey, err)
 		return message
-	case errors.Is(err, memory.ErrHistoryUnsupported), errors.Is(err, memory.ErrHistoryOwnershipUnavailable), errors.Is(err, memory.ErrHistoryReceiptUnavailable):
+	case errors.Is(err, memory.ErrHistoryUnsupported),
+		errors.Is(err, memory.ErrHistoryOwnershipUnavailable),
+		errors.Is(err, memory.ErrHistoryReceiptUnavailable):
 		// These outcomes reject the receipt before writing; uncertain commits
 		// must never reach the legacy append and duplicate the prompt.
 		ts.appendHistoryMessage(message)
 		return message
 	case err != nil:
-		logger.WarnCF("agent", "Turn history append failed", map[string]any{"operation": "append_user_prompt", "error": err.Error()})
+		logger.WarnCF(
+			"agent",
+			"Turn history append failed",
+			map[string]any{"operation": "append_user_prompt", "error": err.Error()},
+		)
 		return message
 	}
 	if !validUserPromptReceipt(receipt, message, ts.historyRunID) {
-		logger.WarnCF("agent", "User prompt receipt failed validation", map[string]any{"operation": "capture_user_prompt"})
+		logger.WarnCF(
+			"agent",
+			"User prompt receipt failed validation",
+			map[string]any{"operation": "capture_user_prompt"},
+		)
 		return message
 	}
 	loop.notifySessionHistoryReceipts(ts.sessionKey, []memory.CommittedHistoryMessage{receipt})
@@ -57,8 +71,11 @@ func (ts *turnState) appendUserPrompt(loop *AgentLoop, message providers.Message
 
 func validUserPromptReceipt(receipt memory.CommittedHistoryMessage, input providers.Message, runID string) bool {
 	source, err := uuid.Parse(receipt.Message.HistoryID)
-	if err != nil || source == uuid.Nil || !receipt.Order.Valid() || receipt.Message.HistoryRunID != runID || receipt.Message.Role != "user" ||
-		receipt.Message.HistoryOrderVersion != receipt.Order.Version || receipt.Message.HistoryStreamID != receipt.Order.StreamID || receipt.Message.HistorySequence != receipt.Order.Sequence {
+	if err != nil || source == uuid.Nil || !receipt.Order.Valid() || receipt.Message.HistoryRunID != runID ||
+		receipt.Message.Role != "user" ||
+		receipt.Message.HistoryOrderVersion != receipt.Order.Version ||
+		receipt.Message.HistoryStreamID != receipt.Order.StreamID ||
+		receipt.Message.HistorySequence != receipt.Order.Sequence {
 		return false
 	}
 	input.HistoryID, input.HistoryRunID = receipt.Message.HistoryID, receipt.Message.HistoryRunID
