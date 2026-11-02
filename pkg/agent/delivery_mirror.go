@@ -165,6 +165,9 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 }
 
 func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool) {
+	// Admission precedes resolver/storage I/O: retirement can finish while an
+	// existing conversation lookup is suspended before taking its stripe.
+	admittedAt := time.Now().Round(0)
 	origin, text := d.Origin, strings.TrimSpace(d.Text)
 	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
 	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
@@ -202,7 +205,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 	msg := providers.Message{
 		Role:     "assistant",
 		Content:  text,
-		Delivery: &providers.Delivery{Origin: origin, At: time.Now().Round(0), Self: self},
+		Delivery: &providers.Delivery{Origin: origin, At: admittedAt, Self: self},
 	}
 	heldByTurn := self && al.holdForOwnTurn(target, d.TurnID, msg)
 	deferred := heldByTurn

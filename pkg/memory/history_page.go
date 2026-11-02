@@ -65,6 +65,8 @@ type HistoryPage struct {
 }
 
 type historyPageCursor struct {
+	Epoch          int64    `json:"e,omitempty"`
+	FileEpoch      int64    `json:"p,omitempty"`
 	Key            [32]byte `json:"k"`
 	Generation     string   `json:"g"`
 	FileGeneration string   `json:"f"`
@@ -151,6 +153,8 @@ func readPageCursor(request HistoryPageRequest, meta SessionMeta, size int64) (h
 		size = *meta.HistoryBytes
 	}
 	c := historyPageCursor{
+		Epoch:          meta.HistoryEpoch,
+		FileEpoch:      meta.HistoryFileEpoch,
 		Key:            sha256.Sum256([]byte(request.Key)),
 		Generation:     meta.HistoryGeneration,
 		FileGeneration: meta.HistoryFileGeneration,
@@ -165,7 +169,8 @@ func readPageCursor(request HistoryPageRequest, meta SessionMeta, size int64) (h
 		var previous historyPageCursor
 		if err != nil || json.Unmarshal(data, &previous) != nil || previous.Key != c.Key ||
 			previous.Generation != c.Generation ||
-			previous.FileGeneration != c.FileGeneration {
+			previous.FileGeneration != c.FileGeneration ||
+			previous.Epoch != c.Epoch || previous.FileEpoch != c.FileEpoch {
 			return c, ErrHistoryCursor
 		}
 		c = previous
