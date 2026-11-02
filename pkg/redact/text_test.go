@@ -266,7 +266,7 @@ func TestText_MasksUploadNames(t *testing.T) {
 		},
 		{
 			name: "text after a dot is not an extension",
-			in:   `uploads/ab12cd34-Contrato.Acme_Confidencial`,
+			in:   `uploads/ab12cd34-Contrato.Acme_Sigiloso`,
 			want: `uploads/ab12cd34-[REDACTED]`,
 		},
 		{
