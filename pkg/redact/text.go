@@ -63,6 +63,13 @@ var (
 		`(?i)((?:password|passwd|senha|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)` +
 			`(\\?["']?\s*(?:=>|[:=])\s*)` +
 			`(\\"(?:[^"\\]|\\[^"])*|"(?:[^"\\]|\\.)*|'[^']*|[^\s"'\\&,;}]+)`)
+	// An upload as the pod stores it: a random prefix and the person's file
+	// name, which UploadFile reduces to these characters. Not a credential, but
+	// the person's, and every read_file would log it.
+	uploadNameRe = regexp.MustCompile(`(uploads/[0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
+	// The part of the name that stays: it says what kind of file failed. Short,
+	// so the end of a name with dots does not pass for an extension.
+	uploadExtensionRe = regexp.MustCompile(`\.[A-Za-z0-9]{1,5}$`)
 )
 
 // textRule runs mask only when the lowercased text holds one of its hints.
@@ -101,9 +108,11 @@ var textRules = []textRule{
 		},
 		func(s string) string { return assignmentRe.ReplaceAllStringFunc(s, maskAssignment) },
 	},
+	{[]string{"uploads/"}, maskUploadNames},
 }
 
-// Text masks the credentials found in free text.
+// Text masks the credentials found in free text, and the file name in the path
+// of an upload.
 func Text(s string) string {
 	if s == "" {
 		return s
@@ -152,6 +161,15 @@ func maskCredentialWord(re *regexp.Regexp, s string) string {
 			closing = quote
 		}
 		return parts[1] + user + ":" + Mask + closing
+	})
+}
+
+// maskUploadNames keeps the prefix, which tells two uploads apart, and the
+// extension.
+func maskUploadNames(s string) string {
+	return uploadNameRe.ReplaceAllStringFunc(s, func(match string) string {
+		parts := uploadNameRe.FindStringSubmatch(match)
+		return parts[1] + Mask + uploadExtensionRe.FindString(parts[2])
 	})
 }
 

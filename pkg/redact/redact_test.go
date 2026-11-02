@@ -150,6 +150,12 @@ func TestToolArgs(t *testing.T) {
 			want: map[string]any{"path": "a.env", "old_text": Mask + " (6 chars)", "new_text": Mask + " (6 chars)"},
 		},
 		{
+			name: "read_file keeps the upload's path and hides its name",
+			tool: "read_file",
+			in:   map[string]any{"path": "uploads/ab12cd34-Contrato_Acme.pdf", "offset": 0},
+			want: map[string]any{"path": "uploads/ab12cd34-" + Mask + ".pdf", "offset": 0},
+		},
+		{
 			name: "exec command keeps its shape",
 			tool: "exec",
 			in:   map[string]any{"command": "curl -u admin:hunter2 https://x", "timeout": 30},

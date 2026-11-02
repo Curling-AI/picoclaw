@@ -228,8 +228,72 @@ func TestText_MasksCredentials(t *testing.T) {
 	}
 }
 
+func TestText_MasksUploadNames(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "relative path",
+			in:   `uploads/ab12cd34-Contrato_Acme_2026.pdf`,
+			want: `uploads/ab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "absolute path",
+			in:   `/home/ethos/.assistant/workspace/uploads/ab12cd34-Contrato_Acme.docx`,
+			want: `/home/ethos/.assistant/workspace/uploads/ab12cd34-[REDACTED].docx`,
+		},
+		{
+			name: "tool call preview",
+			in:   `Tool call: read_file({"path":"uploads/ab12cd34-Contrato_Acme.pdf"})`,
+			want: `Tool call: read_file({"path":"uploads/ab12cd34-[REDACTED].pdf"})`,
+		},
+		{
+			name: "shell command",
+			in:   `pdftotext uploads/ab12cd34-Contrato_Acme.pdf -`,
+			want: `pdftotext uploads/ab12cd34-[REDACTED].pdf -`,
+		},
+		{
+			name: "two uploads in one line",
+			in:   `cat uploads/ab12cd34-a_b.txt uploads/00ff00ff-c_d.csv`,
+			want: `cat uploads/ab12cd34-[REDACTED].txt uploads/00ff00ff-[REDACTED].csv`,
+		},
+		{
+			name: "no extension",
+			in:   `uploads/ab12cd34-Contrato_Acme`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "text after a dot is not an extension",
+			in:   `uploads/ab12cd34-Contrato.Acme_Confidencial`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "only the last extension stays",
+			in:   `uploads/ab12cd34-Contrato.Acme.tar.gz`,
+			want: `uploads/ab12cd34-[REDACTED].gz`,
+		},
+		{
+			name: "masking twice changes nothing",
+			in:   `uploads/ab12cd34-[REDACTED].pdf`,
+			want: `uploads/ab12cd34-[REDACTED].pdf`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Text(tt.in); got != tt.want {
+				t.Fatalf("Text(%q)\n got  %q\n want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestText_LeavesNonSecretsAlone(t *testing.T) {
 	tests := []string{
+		`ls uploads/`,
+		`uploads/notes.txt`,
+		`uploads/ab12cd34`,
 		`curl -H "Authorization: Bearer $TOKEN" https://x`,
 		`TOKEN=$(cat work/token.txt); curl -H "Authorization: Bearer ${TOKEN}" https://x`,
 		`{"model":"x","max_tokens":100,"token_count":512}`,
