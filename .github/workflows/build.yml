@@ -12,6 +12,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Read private Hulk Go SDK
+        uses: ./.github/actions/setup-hulk-sdk-go
+        with:
+          ssh-key: ${{ secrets.HULK_SDK_GO_READ_KEY }}
+
       - name: Run Docker-backed integration suites
         run: bash ./scripts/run-integration-tests.sh
 
@@ -21,6 +26,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Read private Hulk Go SDK
+        uses: ./.github/actions/setup-hulk-sdk-go
+        with:
+          ssh-key: ${{ secrets.HULK_SDK_GO_READ_KEY }}
 
       - name: Setup Go
         uses: actions/setup-go@v6

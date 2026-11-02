@@ -16,7 +16,8 @@ func TestHulkTranscriberUsesScopedProxyReaderAndLanguage(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if r.URL.Path != "/llm-proxy/assistant/hulk/v1/audio/transcriptions" || r.Header.Get("Authorization") != "Bearer assistant-proxy-token" {
+		if r.URL.Path != "/llm-proxy/assistant/hulk/v1/audio/transcriptions" ||
+			r.Header.Get("Authorization") != "Bearer assistant-proxy-token" {
 			t.Errorf("unexpected proxy identity: %s", r.URL.Path)
 		}
 		parts, err := r.MultipartReader()
@@ -44,13 +45,17 @@ func TestHulkTranscriberUsesScopedProxyReaderAndLanguage(t *testing.T) {
 		io.WriteString(w, `{"text":"olá","language":"pt","duration":1.5}`)
 	}))
 	defer server.Close()
-	model := &config.ModelConfig{Model: "openai/maestro-stt", APIBase: server.URL + "/llm-proxy/assistant/hulk", APIKeys: config.SimpleSecureStrings("assistant-proxy-token")}
+	model := &config.ModelConfig{
+		Model:   "openai/maestro-stt",
+		APIBase: server.URL + "/llm-proxy/assistant/hulk",
+		APIKeys: config.SimpleSecureStrings("assistant-proxy-token"),
+	}
 	transcriber := transcriberFromModelConfig(model)
 	if transcriber == nil || transcriber.Name() != "hulk" {
 		t.Fatal("did not select Hulk STT")
 	}
 	path := filepath.Join(t.TempDir(), "audio.ogg")
-	if err := os.WriteFile(path, []byte("ogg audio"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("ogg audio"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := transcriber.Transcribe(context.Background(), path)

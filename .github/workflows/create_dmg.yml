@@ -17,6 +17,11 @@ jobs:
         with:
           ref: main
 
+      - name: Read private Hulk Go SDK
+        uses: ./.github/actions/setup-hulk-sdk-go
+        with:
+          ssh-key: ${{ secrets.HULK_SDK_GO_READ_KEY }}
+
       # 1. Install Go from go.mod
       - name: Setup Go
         uses: actions/setup-go@v6

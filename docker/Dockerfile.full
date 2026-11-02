@@ -3,17 +3,24 @@
 # ============================================================
 FROM golang:1.26.10-alpine AS builder
 
-RUN apk add --no-cache git make
+RUN apk add --no-cache git make openssh-client
 
 WORKDIR /src
+ENV GOPRIVATE=github.com/adapta-school/hulk-sdk-go
 
 # Cache dependencies
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=secret,id=hulk_sdk_key,target=/run/hulk-sdk/key,required=true \
+    --mount=type=secret,id=hulk_sdk_hosts,target=/run/hulk-sdk/known_hosts,required=true \
+    --mount=type=secret,id=hulk_sdk_gitconfig,target=/run/hulk-sdk/gitconfig,required=true \
+    HULK_SDK_GO_AUTH_DIR=/run/hulk-sdk GIT_CONFIG_GLOBAL=/run/hulk-sdk/gitconfig go mod download
 
 # Copy source and build
 COPY . .
-RUN make build
+RUN --mount=type=secret,id=hulk_sdk_key,target=/run/hulk-sdk/key,required=true \
+    --mount=type=secret,id=hulk_sdk_hosts,target=/run/hulk-sdk/known_hosts,required=true \
+    --mount=type=secret,id=hulk_sdk_gitconfig,target=/run/hulk-sdk/gitconfig,required=true \
+    HULK_SDK_GO_AUTH_DIR=/run/hulk-sdk GIT_CONFIG_GLOBAL=/run/hulk-sdk/gitconfig make build
 
 # ============================================================
 # Stage 2: Node.js-based runtime with full MCP support

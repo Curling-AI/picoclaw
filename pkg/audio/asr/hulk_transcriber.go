@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	hulksdk "github.com/adapta-school/hulk-sdk-go"
+
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
@@ -20,11 +21,23 @@ type HulkTranscriber struct{ user *hulksdk.GatewayUserClient }
 // NewHulkTranscriber uses the assistant proxy token; a Hulk invoke key never
 // enters the assistant process. The proxy assigns the authoritative owner.
 func NewHulkTranscriber(model *config.ModelConfig) *HulkTranscriber {
-	if model == nil || model.APIKey() == "" || !strings.Contains(model.APIBase, "/llm-proxy/") || !strings.HasSuffix(strings.TrimRight(model.APIBase, "/"), "/hulk") {
+	if model == nil || model.APIKey() == "" || !strings.Contains(model.APIBase, "/llm-proxy/") ||
+		!strings.HasSuffix(strings.TrimRight(model.APIBase, "/"), "/hulk") {
 		return nil
 	}
-	transport := &hulkProxyClient{token: model.APIKey(), client: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	client, err := hulksdk.NewGatewayClient(hulksdk.GatewayClientOptions{BaseURL: strings.TrimRight(model.APIBase, "/"), APIKey: "hulk_invoke.proxy.scoped", HTTPClient: transport})
+	transport := &hulkProxyClient{
+		token: model.APIKey(),
+		client: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+	}
+	client, err := hulksdk.NewGatewayClient(
+		hulksdk.GatewayClientOptions{
+			BaseURL:    strings.TrimRight(model.APIBase, "/"),
+			APIKey:     "hulk_invoke.proxy.scoped",
+			HTTPClient: transport,
+		},
+	)
 	if err != nil {
 		return nil
 	}
@@ -41,9 +54,9 @@ type hulkProxyClient struct {
 }
 
 func (c *hulkProxyClient) Do(request *http.Request) (*http.Response, error) {
-	copy := request.Clone(request.Context())
-	copy.Header.Set("Authorization", "Bearer "+c.token)
-	return c.client.Do(copy)
+	forwarded := request.Clone(request.Context())
+	forwarded.Header.Set("Authorization", "Bearer "+c.token)
+	return c.client.Do(forwarded)
 }
 
 func (t *HulkTranscriber) Transcribe(ctx context.Context, path string) (*TranscriptionResponse, error) {
@@ -63,7 +76,15 @@ func (t *HulkTranscriber) Transcribe(ctx context.Context, path string) (*Transcr
 	if mediaType == "" {
 		mediaType = "application/octet-stream"
 	}
-	result, err := t.user.Audio.Transcriptions.CreateFromReader(ctx, hulksdk.TranscriptionReaderParams{Model: hulkTranscriptionModel, Reader: file, Filename: filepath.Base(path), MediaType: mediaType})
+	result, err := t.user.Audio.Transcriptions.CreateFromReader(
+		ctx,
+		hulksdk.TranscriptionReaderParams{
+			Model:     hulkTranscriptionModel,
+			Reader:    file,
+			Filename:  filepath.Base(path),
+			MediaType: mediaType,
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("transcribe through assistant proxy: %w", err)
 	}

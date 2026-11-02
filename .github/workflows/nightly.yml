@@ -21,6 +21,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Read private Hulk Go SDK
+        uses: ./.github/actions/setup-hulk-sdk-go
+        with:
+          ssh-key: ${{ secrets.HULK_SDK_GO_READ_KEY }}
+
       - name: Compute version
         id: version
         run: |

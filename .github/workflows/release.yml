@@ -47,6 +47,12 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.tag }}
 
+      - name: Read private Hulk Go SDK
+        if: hashFiles('.github/actions/setup-hulk-sdk-go/action.yml') != ''
+        uses: ./.github/actions/setup-hulk-sdk-go
+        with:
+          ssh-key: ${{ secrets.HULK_SDK_GO_READ_KEY }}
+
       - name: Setup Go from go.mod
         id: setup-go
         uses: actions/setup-go@v6
