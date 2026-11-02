@@ -158,7 +158,7 @@ func readPublicIndexPreparationBatch(ctx context.Context, source *os.File, state
 		if err := ctx.Err(); err != nil {
 			return next, nil, err
 		}
-		line, err := readPublicPreparationLine(reader)
+		line, err := readPublicIndexPreparationLine(reader)
 		if errors.Is(err, io.EOF) {
 			if next.Target.Bytes-state.Byte <= PublicHistoryOperationBytes {
 				return next, nil, ErrPublicHistoryCoverage
@@ -193,7 +193,7 @@ func readPublicIndexPreparationBatch(ctx context.Context, source *os.File, state
 	return next, records, nil
 }
 
-func readPublicPreparationLine(reader *bufio.Reader) ([]byte, error) {
+func readPublicIndexPreparationLine(reader *bufio.Reader) ([]byte, error) {
 	var line []byte
 	for {
 		part, err := reader.ReadSlice('\n')

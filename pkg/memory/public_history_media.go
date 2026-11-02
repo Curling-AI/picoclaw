@@ -64,4 +64,3 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 	}
 	return ErrPublicHistoryCoverage
 }
-

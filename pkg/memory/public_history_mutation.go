@@ -212,7 +212,7 @@ func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (
 	if operationErr4 := file.Sync(); operationErr4 != nil {
 		return operationErr4
 	}
-return s.writePublicIndex(key, change.Index)
+	return s.writePublicIndex(key, change.Index)
 }
 
 func (s *JSONLStore) restorePublicHistory(key string, recovery *publicHistoryRecovery) (resultErr error) {

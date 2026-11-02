@@ -123,9 +123,12 @@ func publicIndexRecordDigest(record publicIndexRecord) string {
 
 func validPublicPageEntry(entry PublicHistoryEntry) bool {
 	if uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
-		(entry.Order != (HistoryOrderProof{}) && !entry.Order.Valid()) {
+		(entry.Order != (HistoryOrderProof{}) && !entry.Order.Valid()) ||
+		(entry.Ref != nil && !entry.Ref.Valid()) || (entry.AnchorRef != nil && !entry.AnchorRef.Valid()) {
 		return false
 	}
-	_, public := publicHistoryMessage(entry.Message)
-	return public
+	public, visible := publicHistoryMessage(entry.Message)
+	original, originalErr := json.Marshal(entry.Message)
+	projected, projectedErr := json.Marshal(public)
+	return visible && originalErr == nil && projectedErr == nil && bytes.Equal(original, projected)
 }

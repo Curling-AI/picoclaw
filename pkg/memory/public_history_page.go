@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"strings"
 )
@@ -46,7 +47,7 @@ type PublicHistoryPage struct {
 	Stats       PublicHistoryReadStats `json:"-"`
 }
 
-func (s *JSONLStore) ReadPublicHistoryPage(ctx context.Context, request PublicHistoryPageRequest) (_ PublicHistoryPage, resultErr error) {
+func (s *JSONLStore) ReadPublicHistoryPage(ctx context.Context, request PublicHistoryPageRequest) (PublicHistoryPage, error) {
 	if err := ctx.Err(); err != nil {
 		return PublicHistoryPage{}, err
 	}
@@ -55,67 +56,24 @@ func (s *JSONLStore) ReadPublicHistoryPage(ctx context.Context, request PublicHi
 			return PublicHistoryPage{}, err
 		}
 	}
-	canonical := strings.TrimSpace(request.Key)
-	if canonical == "" || canonical != request.Key {
+	if strings.TrimSpace(request.Key) == "" || strings.TrimSpace(request.Key) != request.Key {
 		return PublicHistoryPage{}, ErrHistoryCursor
 	}
-	lock := s.sessionLock(canonical)
+	lock := s.sessionLock(request.Key)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := ctx.Err(); err != nil {
-		return PublicHistoryPage{}, err
-	}
-	meta, err := s.readMeta(canonical)
-	if err != nil {
-		return PublicHistoryPage{}, err
-	}
-	if err := validateCanonicalHistoryKey(request.Key, canonical, meta); err != nil {
-		return PublicHistoryPage{}, err
-	}
-	if err := s.probeHistoryRecoveryMarker(canonical, &meta); err != nil {
-		return PublicHistoryPage{}, err
-	}
-	if err := s.probeHistoryOrderWitness(canonical, &meta); err != nil {
-		return PublicHistoryPage{}, err
-	}
-	fresh, err := s.readRecoveryMeta(canonical)
-	if err != nil || !historyCheckpointMatches(meta, fresh) {
-		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, err)
-	}
-	if meta.HistoryRecoveryRequired || meta.PublicHistoryVersion != PublicHistoryVersion || !meta.PublicHistoryComplete {
-		return PublicHistoryPage{}, ErrPublicHistoryCoverage
-	}
-	if _, err := encodePublicIndexHeader(publicIndexMeta(meta)); err != nil {
-		return PublicHistoryPage{}, err
-	}
-	index, err := s.openPublicIndex(canonical, meta)
-	if errors.Is(err, os.ErrNotExist) {
-		if request.Cursor != "" {
-			return PublicHistoryPage{}, ErrPublicHistoryCoverage
+	page, err := ReadPublicHistoryPageFS(ctx, os.DirFS(s.dir), request)
+	if errors.Is(err, ErrPublicHistoryIndexPreparing) && request.Cursor == "" {
+		meta, metaErr := s.readMeta(request.Key)
+		if metaErr != nil {
+			return PublicHistoryPage{}, metaErr
 		}
-		return PublicHistoryPage{}, s.preparePublicIndexLocked(ctx, canonical, meta)
+		return PublicHistoryPage{}, s.preparePublicIndexLocked(ctx, request.Key, meta)
 	}
-	if err != nil {
-		return PublicHistoryPage{}, err
-	}
-	defer closePublicFile(index.file, &resultErr)
-	source, err := os.Open(s.publicHistoryPath(canonical))
-	if err != nil {
-		return PublicHistoryPage{}, err
-	}
-	defer closePublicFile(source, &resultErr)
-	info, err := source.Stat()
-	if err != nil || info.Size() != meta.PublicHistoryBytes {
-		return PublicHistoryPage{}, errors.Join(ErrPublicHistoryCoverage, err)
-	}
-	cursor, err := readPublicHistoryCursor(request, meta, index)
-	if err != nil {
-		return PublicHistoryPage{}, err
-	}
-	return readPublicPage(ctx, request, cursor, source, index)
+	return page, err
 }
 
-func readPublicPage(ctx context.Context, request PublicHistoryPageRequest, cursor publicHistoryCursor, source *os.File, index *publicIndexReader) (PublicHistoryPage, error) {
+func readPublicPage(ctx context.Context, request PublicHistoryPageRequest, cursor publicHistoryCursor, source io.ReaderAt, index *publicIndexReader) (PublicHistoryPage, error) {
 	limit := PublicHistoryPageMessages
 	if request.Cursor == "" {
 		limit = PublicHistoryRecentMessages
@@ -197,7 +155,7 @@ func publicPageMessageBytes(entry PublicHistoryEntry, measure func(PublicHistory
 	return len(data), err
 }
 
-func readPublicPageEntry(source *os.File, index *publicIndexReader, position, ceilingBytes int64) (PublicHistoryEntry, int64, error) {
+func readPublicPageEntry(source io.ReaderAt, index *publicIndexReader, position, ceilingBytes int64) (PublicHistoryEntry, int64, error) {
 	record, err := index.record(position)
 	if err != nil {
 		return PublicHistoryEntry{}, 0, err

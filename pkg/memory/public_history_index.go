@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 
 	"github.com/google/uuid"
@@ -35,6 +36,10 @@ type publicIndexRecord struct {
 
 func (s *JSONLStore) publicIndexPath(key string) string {
 	return s.publicHistoryPath(key) + ".index"
+}
+
+func (s *JSONLStore) publicIndexFiles(key string) []string {
+	return []string{s.publicIndexPath(key), s.publicIndexPreparationPath(key), s.publicIndexBuildingPath(key)}
 }
 
 func publicIndexMeta(meta SessionMeta) publicIndexHeader {
@@ -139,14 +144,18 @@ func publicIndexRecords(data []byte, offset int64, previous string) ([]byte, str
 }
 
 type publicIndexReader struct {
-	file    *os.File
+	file    publicHistoryReadFile
 	header  publicIndexHeader
 	bytes   int64
 	records map[int64]publicIndexRecord
 }
 
 func (s *JSONLStore) openPublicIndex(key string, meta SessionMeta) (*publicIndexReader, error) {
-	file, err := os.Open(s.publicIndexPath(key))
+	return openPublicIndex(os.DirFS(s.dir), sanitizeKey(key)+".jsonl.public.index", meta)
+}
+
+func openPublicIndex(files fs.FS, name string, meta SessionMeta) (*publicIndexReader, error) {
+	file, err := openPublicHistoryReadFile(files, name)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +215,7 @@ func writePublicIndexBytes(file *os.File, data []byte, offset int64) error {
 	return err
 }
 
-func closePublicFile(file *os.File, result *error) {
+func closePublicFile(file io.Closer, result *error) {
 	if err := file.Close(); !errors.Is(err, os.ErrClosed) {
 		*result = errors.Join(*result, err)
 	}
