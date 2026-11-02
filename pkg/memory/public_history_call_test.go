@@ -23,7 +23,7 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 		providers.Message{
 			Role:          "assistant",
 			Content:       "first",
-			LLMCall:       &providers.LLMCall{RequestID: call},
+			LLMCall:       &providers.LLMCall{RequestID: "pc-ffeeddccbbaa998877665544"},
 			HistoryCallID: call,
 		},
 	); err != nil {

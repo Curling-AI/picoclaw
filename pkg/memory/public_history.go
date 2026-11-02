@@ -101,8 +101,7 @@ func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, star
 			Message: public,
 			Order:   messageHistoryOrder(message),
 		}
-		if message.LLMCall != nil && message.HistoryCallID == message.LLMCall.RequestID &&
-			providers.ValidHistoryCallID(message.HistoryCallID) {
+		if providers.ValidHistoryCallID(message.HistoryCallID) {
 			entry.CallID = message.HistoryCallID
 		}
 		entry.Ref = publicContentRef(meta, start+index+1)
