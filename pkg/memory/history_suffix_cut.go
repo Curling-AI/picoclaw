@@ -14,6 +14,7 @@ type historyRawRewrite struct {
 	data           []byte
 	removed        map[string]bool
 	retainedPrefix bool
+	publicChange   *publicHistoryChange
 }
 
 func (s *JSONLStore) commitHistorySuffixCut(key string, old, retained []providers.Message, meta SessionMeta) error {
@@ -153,25 +154,27 @@ func (s *JSONLStore) commitHistoryRetainedPrefix(
 	if err != nil {
 		return err
 	}
-	count, offset := 0, 0
-	for _, row := range bytes.SplitAfter(raw, []byte{'\n'}) {
-		if count == original.Skip {
-			break
-		}
-		if len(row) == 0 || row[len(row)-1] != '\n' {
-			break
-		}
-		offset += len(row)
+	// Retain every complete original row, including confirmed active rows a
+	// generic replacement would otherwise discard before their display is
+	// covered. An unterminated tail is not a committed source row and must not
+	// be concatenated onto the first new model record. OLD still backs it up.
+	offset := bytes.LastIndexByte(raw, '\n') + 1
+	count := 0
+	for _, row := range bytes.SplitAfter(raw[:offset], []byte{'\n'}) {
 		if len(bytes.TrimRight(row, "\r\n")) != 0 {
 			count++
 		}
 	}
-	if count != original.Skip {
-		return ErrContentStateChanged
+	if count != original.Count || (original.HistoryBytes != nil && *original.HistoryBytes != int64(offset)) {
+		// Complete unowned rows remain data, never proof of a committed
+		// continuation. Use the existing durable recovery fence.
+		if err = s.markHistoryRecoveryRequired(key, &next); err != nil {
+			return err
+		}
 	}
 	next.HistoryPrefix = original.HistoryPrefix
-	next.Skip = original.Skip
-	next.Count = len(messages) + original.Skip
+	next.Skip = count
+	next.Count = len(messages) + count
 	active, err := marshalHistoryJSONL(messages, next)
 	if err != nil {
 		return err

@@ -487,7 +487,8 @@ func TestPublicLifecycleUnavailableReplacementCrashPreservesRawPrefix(t *testing
 				t.Fatal("recovery collected prefix", err)
 			}
 			current, err := reopened.readMeta(key)
-			if err != nil || current.Skip != meta.Skip || current.PublicHistoryVersion != -1 {
+			if err != nil || current.Skip != map[bool]int{false: meta.Skip, true: meta.Count}[stage == "metadata"] ||
+				current.PublicHistoryVersion != -1 {
 				t.Fatal("recovery adopted public proof", current, err)
 			}
 			active, err := reopened.GetHistory(t.Context(), key)
@@ -596,6 +597,70 @@ func TestPublicLifecycleProvenStructuralRewriteCanMaterializeReady(t *testing.T)
 			meta, err := s.readMeta(key)
 			if err != nil || meta.Skip != 0 || meta.Count != 1 {
 				t.Fatal("proved rewrite did not retire covered source", meta, err)
+			}
+		})
+	}
+}
+
+func TestPublicLifecycleRetainedRestoreSeparatesCommittedRowsFromTail(t *testing.T) {
+	for _, tail := range []string{"partial", "complete-unowned"} {
+		t.Run(tail, func(t *testing.T) {
+			s, key := pagedStore(t, 3)
+			meta, err := s.readMeta(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			meta.PublicHistoryVersion = -1
+			if err = s.writeMeta(key, meta); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(s.jsonlPath(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			extra := []byte(`{"role":"assistant","content":"unconfirmed tail`)
+			if tail == "complete-unowned" {
+				extra = []byte("{\"role\":\"assistant\",\"content\":\"external complete row\"}\n")
+			}
+			oldRaw := append(append([]byte(nil), before...), extra...)
+			if err = os.WriteFile(s.jsonlPath(key), oldRaw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err = s.SetHistory(
+				t.Context(),
+				key,
+				[]providers.Message{{Role: "user", Content: "restored context"}},
+			); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(s.jsonlPath(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			retained := before
+			expectedSkip := 3
+			if tail == "complete-unowned" {
+				retained = oldRaw
+				expectedSkip = 4
+			}
+			if !bytes.HasPrefix(after, retained) || bytes.Contains(after, []byte("unconfirmed tail")) {
+				t.Fatal("restore lost complete origin or promoted a partial row")
+			}
+			model, err := s.GetHistory(t.Context(), key)
+			if err != nil || len(model) != 1 || model[0].Content != "restored context" {
+				t.Fatal("tail contaminated restored context", model, err)
+			}
+			current, err := s.readMeta(key)
+			if err != nil || current.Skip != expectedSkip || current.Count != expectedSkip+1 ||
+				current.HistoryBytes == nil ||
+				*current.HistoryBytes != int64(len(after)) {
+				t.Fatal("restore frontier/count was not exact", current, err)
+			}
+			if tail == "complete-unowned" && !current.HistoryRecoveryRequired {
+				t.Fatal("unowned complete row became proof")
+			}
+			if _, err = s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); err == nil {
+				t.Fatal("retained mixed/unowned source granted continuity")
 			}
 		})
 	}

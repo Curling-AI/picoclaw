@@ -504,7 +504,9 @@ func (s *JSONLStore) commitHistoryRewriteData(
 	}
 	clearPublicMedia := meta.publicHistoryClear
 	var publicChange publicHistoryChange
-	if cut == nil {
+	if cut != nil && cut.publicChange != nil {
+		publicChange = *cut.publicChange
+	} else if cut == nil {
 		publicChange, err = s.preparePublicRewrite(key, original, &meta, messages)
 	} else if cut.retainedPrefix {
 		publicChange, err = s.preparePublicRetainedRewrite(key, original, &meta, messages)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -153,6 +154,27 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 	if meta.Skip == 0 {
 		return nil
 	}
+	file, err := os.Open(s.jsonlPath(key))
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
+	return s.verifyPublicPrefixReader(ctx, key, meta, file, true)
+}
+
+// sourceLineage is false only for an exact Pending-owned preimage whose
+// immutable descriptor and digest were already verified. This checks display
+// retention, never issues a new raw continuation or native-order receipt.
+func (s *JSONLStore) verifyPublicPrefixReader(
+	ctx context.Context,
+	key string,
+	meta SessionMeta,
+	reader io.Reader,
+	sourceLineage bool,
+) error {
+	if meta.Skip == 0 {
+		return nil
+	}
 	if meta.PublicHistoryVersion == 0 {
 		return ErrPublicHistoryCoverage
 	}
@@ -167,12 +189,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		byID[entry.ID] = entry
 	}
 	prefix := make(map[string]bool)
-	file, err := os.Open(s.jsonlPath(key))
-	if err != nil {
-		return err
-	}
-	defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, historyReadBufferBytes), maxLineSize)
 	scanner.Split(scanCommittedHistoryLine)
 	line := 0
@@ -186,7 +203,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 		}
 		line++
 		var message providers.Message
-		if json.Unmarshal(raw, &message) != nil || !historyLineageMatches(raw, meta, key) {
+		if json.Unmarshal(raw, &message) != nil || (sourceLineage && !historyLineageMatches(raw, meta, key)) {
 			return ErrPublicHistoryCoverage
 		}
 		if _, visible := publicHistoryMessage(message); !visible {
@@ -201,9 +218,15 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 			return &publicArtifactVerificationError{cause: err}
 		}
 		public, _ := publicHistoryMessage(projected)
-		entry, exists := byID[decodedHistoryID(raw, filepath.Base(file.Name()), int64(line-1))]
+		entry, exists := byID[decodedHistoryID(raw, filepath.Base(s.jsonlPath(key)), int64(line-1))]
 		if !exists || contentJSONDigest(entry.Message) != contentJSONDigest(public) ||
-			(meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
+			(sourceLineage && meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
+			return ErrPublicHistoryCoverage
+		}
+		// Existing independent order may disprove an ID association, but its
+		// absence never invents a historical Ref/Order for this body copy.
+		storedOrder := decodedStoredContentOrder(raw)
+		if storedOrder.Valid() && entry.Order.Valid() && storedOrder != entry.Order {
 			return ErrPublicHistoryCoverage
 		}
 		prefix[entry.ID] = true

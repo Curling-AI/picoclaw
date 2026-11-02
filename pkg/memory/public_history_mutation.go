@@ -122,10 +122,7 @@ func (s *JSONLStore) preparePublicRewrite(
 		return s.replacePublicEntries(key, nil, next)
 	}
 	if original.PublicHistoryVersion < 0 || next.PublicHistoryVersion < 0 {
-		// An unavailable display cannot authorize GC or block the independent
-		// model source. The context writer retains its raw skipped prefix.
-		next.publicProjectionUnavailable = false
-		return publicHistoryChange{}, nil
+		return publicHistoryChange{}, ErrPublicHistoryCoverage
 	}
 	if next.publicProjectionUnavailable {
 		return publicHistoryChange{}, &publicArtifactVerificationError{cause: ErrPublicHistoryCoverage}

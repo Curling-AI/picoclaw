@@ -124,7 +124,7 @@ func TestPublicHistoryRewritePreservesUncoveredPhysicalPrefix(t *testing.T) {
 				t.Fatal("missing display proof blocked context replacement", err)
 			}
 			after, err := os.ReadFile(s.jsonlPath(key))
-			prefix := bytes.Join(bytes.SplitAfter(before, []byte{'\n'})[:79], nil)
+			prefix := before
 			if err != nil || !bytes.HasPrefix(after, prefix) {
 				t.Fatal("context replacement collected unproved prefix", err)
 			}

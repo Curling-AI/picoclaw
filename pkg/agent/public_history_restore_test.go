@@ -86,14 +86,14 @@ func TestRestoreSessionKeepsModelContextAvailableWithUnavailablePublicSource(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			if current.Skip != meta.Skip || current.PublicHistoryVersion != -1 || current.PublicHistoryComplete {
+			if current.Skip < meta.Skip || current.PublicHistoryVersion != -1 || current.PublicHistoryComplete {
 				t.Fatal("restore adopted public proof or collected prefix", current)
 			}
 			if _, err = store.ReadPublicHistory(t.Context(), key); !errors.Is(err, memory.ErrPublicHistoryCoverage) {
 				t.Fatal("unavailable public source was reattested", err)
 			}
 			if truncated {
-				prefix := bytes.SplitAfter(before, []byte{'\n'})[0]
+				prefix := before
 				raw, readErr := os.ReadFile(filepath.Join(dir, key+".jsonl"))
 				if readErr != nil || !bytes.HasPrefix(raw, prefix) {
 					t.Fatal("restore collected skipped source", readErr)
