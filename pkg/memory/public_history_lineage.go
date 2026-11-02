@@ -153,9 +153,7 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 	if meta.Skip == 0 {
 		return nil
 	}
-	if meta.PublicHistoryVersion == 0 || meta.PublicHistoryPreparation != nil {
-		// The structural transaction materializes legacy coverage before retiring
-		// its OLD source backup; an existing sidecar is not a prerequisite.
+	if meta.PublicHistoryVersion == 0 {
 		return nil
 	}
 	entries, err := s.readPublicEntries(key, meta)
@@ -165,13 +163,9 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 	byID := make(map[string]PublicHistoryEntry, len(entries))
 	projector := s.historyPublicProjector()
 	for _, entry := range entries {
-		if projector != nil {
-			if err = projector.Verify(ctx, entry.Message); err != nil {
-				return &publicArtifactVerificationError{cause: err}
-			}
-		}
 		byID[entry.ID] = entry
 	}
+	prefix := make(map[string]bool)
 	file, err := os.Open(s.jsonlPath(key))
 	if err != nil {
 		return err
@@ -211,12 +205,45 @@ func (s *JSONLStore) verifyPublicPrefix(ctx context.Context, key string, meta Se
 			(meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable && (entry.Ref == nil || !entry.Ref.Valid() || entry.Ref.DomainID != meta.ContentIdentity.DomainID)) {
 			return ErrPublicHistoryCoverage
 		}
+		prefix[entry.ID] = true
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 	if line != meta.Skip {
 		return ErrPublicHistoryCoverage
+	}
+	if projector != nil {
+		// Imports may be anchored through another imported supplement. Follow
+		// exact IDs transitively so narrowing the hash work never omits them.
+		children := make(map[string][]string)
+		for _, entry := range entries {
+			for _, parent := range []string{entry.AnchorID, entry.BoundaryID} {
+				if parent != "" {
+					children[parent] = append(children[parent], entry.ID)
+				}
+			}
+		}
+		queue := make([]string, 0, len(prefix))
+		for id := range prefix {
+			queue = append(queue, id)
+		}
+		for position := 0; position < len(queue); position++ {
+			for _, id := range children[queue[position]] {
+				if !prefix[id] {
+					prefix[id] = true
+					queue = append(queue, id)
+				}
+			}
+		}
+		for _, entry := range entries {
+			if !prefix[entry.ID] {
+				continue
+			}
+			if err := projector.Verify(ctx, entry.Message); err != nil {
+				return &publicArtifactVerificationError{cause: err}
+			}
+		}
 	}
 	return nil
 }

@@ -125,7 +125,7 @@ func (s *JSONLStore) PreparePublicHistory(
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
 	}
 	if meta.ContentIdentity != nil && !meta.ContentIdentity.Unavailable {
-		if err := s.hydrateContentStorage(ctx, canonical, &meta, true, false); err != nil {
+		if err := s.hydrateContentStorage(ctx, canonical, &meta, true, true); err != nil {
 			return PublicHistoryPreparationResult{}, err
 		}
 	}
@@ -342,6 +342,25 @@ func (s *JSONLStore) preparedPublicEntry(
 	entries := publicHistoryEntriesAt([]providers.Message{message}, meta, int(state.Line))
 	if len(entries) == 0 {
 		return PublicHistoryEntry{}, false, nil
+	}
+	// A pending compaction retains the exact pre-compaction locators until
+	// coverage is acknowledged. Preparation must preserve those existing refs
+	// for the prefix; its current active-row index only contains the suffix.
+	identity := meta.ContentIdentity
+	if entries[0].Ref == nil && identity != nil && !identity.Unavailable &&
+		identity.Pending != nil && identity.Pending.Mutation == nil && int(state.Line) < meta.Skip {
+		for _, row := range identity.Pending.Before.Rows {
+			if row.Line != int(state.Line)+1 {
+				continue
+			}
+			if !row.Ref.Valid() || row.Ref.DomainID != identity.DomainID ||
+				row.Digest != contentDigest(bytes.TrimRight(line, "\r\n")) {
+				return PublicHistoryEntry{}, false, ErrPublicHistoryCoverage
+			}
+			ref := row.Ref
+			entries[0].Ref = &ref
+			break
+		}
 	}
 	return entries[0], true, nil
 }

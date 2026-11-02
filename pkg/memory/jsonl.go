@@ -1112,7 +1112,12 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	if meta.Skip == 0 {
 		return nil
 	}
-	if err = s.verifyPublicPrefix(ctx, sessionKey, meta); err != nil {
+	// A structural rewrite materializes legacy/preparing coverage in its
+	// existing transaction. ACKs still require a ready public source.
+	if meta.PublicHistoryVersion != 0 && meta.PublicHistoryPreparation == nil {
+		err = s.verifyPublicPrefix(ctx, sessionKey, meta)
+	}
+	if err != nil {
 		var pathErr *os.PathError
 		var artifactErr *publicArtifactVerificationError
 		if proofOptional && ctx.Err() == nil &&
@@ -1187,7 +1192,21 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	meta.Count = len(active)
 	meta.UpdatedAt = time.Now()
 
-	return s.commitHistoryRewrite(sessionKey, active, meta)
+	err = s.commitHistoryRewrite(sessionKey, active, meta)
+	// Preparing a structural legacy rewrite can discover the same optional
+	// artifact failure after the initial guard, before any transcript write.
+	if artifactErr, ok := err.(*publicArtifactVerificationError); proofOptional && ok && ctx.Err() == nil {
+		slog.WarnContext(
+			ctx,
+			"optional public history proof unavailable",
+			"operation",
+			"compact_session",
+			"artifact_missing",
+			errors.Is(artifactErr, os.ErrNotExist),
+		)
+		return nil
+	}
+	return err
 }
 
 func marshalHistoryJSONL(msgs []providers.Message, meta SessionMeta) ([]byte, error) {

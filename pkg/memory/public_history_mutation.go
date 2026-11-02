@@ -224,6 +224,16 @@ func (s *JSONLStore) replacePublicEntries(
 	next.PublicHistoryBytes = int64(len(data))
 	next.PublicHistoryCount = int64(len(entries))
 	next.PublicHistoryRevision++
+	if existed && bytes.Equal(old, data) {
+		return publicHistoryChange{}, nil
+	}
+	if existed && bytes.HasPrefix(data, old) {
+		offset := int64(len(old))
+		return publicHistoryChange{
+			Data:     data[len(old):],
+			Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true},
+		}, nil
+	}
 	return publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}}, nil
 }
 
