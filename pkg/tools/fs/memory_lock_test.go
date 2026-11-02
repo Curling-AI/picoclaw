@@ -34,11 +34,20 @@ func holdMemoryFile(t *testing.T, path string) func() {
 func executeMemoryWrite(workspace string, restricted bool, operation, path string) *ToolResult {
 	switch operation {
 	case "write":
-		return NewWriteFileTool(workspace, restricted).Execute(context.Background(), map[string]any{"path": path, "content": "changed", "overwrite": true})
+		return NewWriteFileTool(
+			workspace,
+			restricted,
+		).Execute(context.Background(), map[string]any{"path": path, "content": "changed", "overwrite": true})
 	case "edit":
-		return NewEditFileTool(workspace, restricted).Execute(context.Background(), map[string]any{"path": path, "old_text": "original", "new_text": "changed"})
+		return NewEditFileTool(
+			workspace,
+			restricted,
+		).Execute(context.Background(), map[string]any{"path": path, "old_text": "original", "new_text": "changed"})
 	case "append":
-		return NewAppendFileTool(workspace, restricted).Execute(context.Background(), map[string]any{"path": path, "content": " changed"})
+		return NewAppendFileTool(
+			workspace,
+			restricted,
+		).Execute(context.Background(), map[string]any{"path": path, "content": " changed"})
 	default:
 		return ErrorResult("unknown test operation")
 	}
@@ -48,39 +57,42 @@ func TestMemoryWriteToolsShareFileLock(t *testing.T) {
 	for _, restricted := range []bool{false, true} {
 		for _, name := range []string{"MEMORY.md", "USER.md", "SOUL.md"} {
 			for _, operation := range []string{"write", "edit", "append"} {
-				t.Run(operation+"/"+name+map[bool]string{false: "/host", true: "/sandbox"}[restricted], func(t *testing.T) {
-					workspace := t.TempDir()
-					path := filepath.Join(workspace, "memory", name)
-					if err := fileutil.WriteFileAtomic(path, []byte("original"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					argument := path
-					if restricted {
-						argument = filepath.Join("memory", name)
-					}
-					release := holdMemoryFile(t, path)
-					done := make(chan *ToolResult, 1)
-					go func() {
-						done <- executeMemoryWrite(workspace, restricted, operation, argument)
-					}()
-					select {
-					case result := <-done:
+				t.Run(
+					operation+"/"+name+map[bool]string{false: "/host", true: "/sandbox"}[restricted],
+					func(t *testing.T) {
+						workspace := t.TempDir()
+						path := filepath.Join(workspace, "memory", name)
+						if err := fileutil.WriteFileAtomic(path, []byte("original"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						argument := path
+						if restricted {
+							argument = filepath.Join("memory", name)
+						}
+						release := holdMemoryFile(t, path)
+						done := make(chan *ToolResult, 1)
+						go func() {
+							done <- executeMemoryWrite(workspace, restricted, operation, argument)
+						}()
+						select {
+						case result := <-done:
+							release()
+							t.Fatalf("memory writer bypassed the shared lock: %v", result)
+						case <-time.After(25 * time.Millisecond):
+						}
 						release()
-						t.Fatalf("memory writer bypassed the shared lock: %v", result)
-					case <-time.After(25 * time.Millisecond):
-					}
-					release()
-					if result := <-done; result.IsError {
-						t.Fatal(result.ForLLM)
-					}
-					want := "changed"
-					if operation == "append" {
-						want = "original changed"
-					}
-					if got, err := os.ReadFile(path); err != nil || string(got) != want {
-						t.Fatalf("memory writer bytes = %q, error = %v, want %q", got, err, want)
-					}
-				})
+						if result := <-done; result.IsError {
+							t.Fatal(result.ForLLM)
+						}
+						want := "changed"
+						if operation == "append" {
+							want = "original changed"
+						}
+						if got, err := os.ReadFile(path); err != nil || string(got) != want {
+							t.Fatalf("memory writer bytes = %q, error = %v, want %q", got, err, want)
+						}
+					},
+				)
 			}
 		}
 	}
@@ -107,7 +119,11 @@ func TestMemoryEditAndAppendHoldLockAcrossReadModifyWrite(t *testing.T) {
 			if err := fileutil.WriteFileAtomic(path, []byte("original"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			barrier := &memoryReadBarrier{fileSystem: buildFs(workspace, true, nil), read: make(chan struct{}), release: make(chan struct{})}
+			barrier := &memoryReadBarrier{
+				fileSystem: buildFs(workspace, true, nil),
+				read:       make(chan struct{}),
+				release:    make(chan struct{}),
+			}
 			written := make(chan *ToolResult, 1)
 			go func() {
 				if operation == "edit" {

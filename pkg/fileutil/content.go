@@ -127,8 +127,8 @@ func WriteFileIfContentInRoot(root *os.Root, path string, data []byte, expected 
 			if !expected.Absent {
 				return ErrFileChanged
 			}
-			if err := root.MkdirAll(directory, 0o755); err != nil {
-				return fmt.Errorf("create file directory: %w", err)
+			if mkdirErr := root.MkdirAll(directory, 0o755); mkdirErr != nil {
+				return fmt.Errorf("create file directory: %w", mkdirErr)
 			}
 			parent, err = root.OpenRoot(directory)
 		}

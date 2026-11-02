@@ -75,7 +75,15 @@ func TestWriteFileIfContentRejectsSameSizeSameSecondMutation(t *testing.T) {
 	if err := os.Chtimes(path, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFileIfContent(path, []byte("ui"), FileContent{Content: preimage}, 0o600); !errors.Is(err, ErrFileChanged) {
+	if err := WriteFileIfContent(
+		path,
+		[]byte("ui"),
+		FileContent{Content: preimage},
+		0o600,
+	); !errors.Is(
+		err,
+		ErrFileChanged,
+	) {
 		t.Fatalf("same-size same-second edit was not detected: %v", err)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
@@ -102,15 +110,15 @@ func TestWriteFileIfContentPreservesExistingPermissions(t *testing.T) {
 
 func TestWriteFileIfContentSharesLockThroughDirectoryAlias(t *testing.T) {
 	dir := t.TempDir()
-	real := filepath.Join(dir, "real")
-	if err := os.MkdirAll(real, 0o700); err != nil {
+	resolved := filepath.Join(dir, "real")
+	if err := os.MkdirAll(resolved, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(dir, "alias")
-	if err := os.Symlink(real, alias); err != nil {
+	if err := os.Symlink(resolved, alias); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
-	path := filepath.Join(real, "memory", "MEMORY.md")
+	path := filepath.Join(resolved, "memory", "MEMORY.md")
 	aliasPath := filepath.Join(alias, "memory", "MEMORY.md")
 	locked, release := make(chan struct{}), make(chan struct{})
 	writer := make(chan error, 1)
@@ -153,7 +161,15 @@ func TestWriteFileIfContentRejectsFinalSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("file symlinks unavailable: %v", err)
 	}
-	if err := WriteFileIfContent(link, []byte("replacement"), FileContent{Content: []byte("original")}, 0o600); !errors.Is(err, ErrFileChanged) {
+	if err := WriteFileIfContent(
+		link,
+		[]byte("replacement"),
+		FileContent{Content: []byte("original")},
+		0o600,
+	); !errors.Is(
+		err,
+		ErrFileChanged,
+	) {
 		t.Fatalf("final symlink was accepted: %v", err)
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "original" {
@@ -247,7 +263,13 @@ func TestWriteFileIfContentInRootAcceptsInternalDirectoryAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := WriteFileIfContentInRoot(root, "alias/USER.md", []byte("new"), FileContent{Content: []byte("old")}, 0o644); err != nil {
+	if err := WriteFileIfContentInRoot(
+		root,
+		"alias/USER.md",
+		[]byte("new"),
+		FileContent{Content: []byte("old")},
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "new" {
@@ -272,11 +294,26 @@ func TestWriteFileIfContentInRootRejectsEscapesAndFinalSymlink(t *testing.T) {
 	}
 	defer root.Close()
 	for _, path := range []string{"../escaped.md", filepath.Join(outside, "absolute.md"), "escape/new.md"} {
-		if err := WriteFileIfContentInRoot(root, path, []byte("unexpected"), FileContent{Absent: true}, 0o600); err == nil {
+		if err := WriteFileIfContentInRoot(
+			root,
+			path,
+			[]byte("unexpected"),
+			FileContent{Absent: true},
+			0o600,
+		); err == nil {
 			t.Fatal("an escaping root CAS was accepted")
 		}
 	}
-	if err := WriteFileIfContentInRoot(root, "alias.md", []byte("unexpected"), FileContent{Content: []byte("original")}, 0o600); !errors.Is(err, ErrFileChanged) {
+	if err := WriteFileIfContentInRoot(
+		root,
+		"alias.md",
+		[]byte("unexpected"),
+		FileContent{Content: []byte("original")},
+		0o600,
+	); !errors.Is(
+		err,
+		ErrFileChanged,
+	) {
 		t.Fatalf("final symlink was accepted by root CAS: %v", err)
 	}
 	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
@@ -304,7 +341,13 @@ func TestWriteFileIfContentInRootKeepsOpenedRootAfterNameReplacement(t *testing.
 	if err := os.Symlink(outside, workspace); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
-	if err := WriteFileIfContentInRoot(root, "memory/USER.md", []byte("inside"), FileContent{Absent: true}, 0o600); err != nil {
+	if err := WriteFileIfContentInRoot(
+		root,
+		"memory/USER.md",
+		[]byte("inside"),
+		FileContent{Absent: true},
+		0o600,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(moved, "memory", "USER.md")); err != nil || string(got) != "inside" {
@@ -365,7 +408,14 @@ func TestWriteFileIfContentInRootHonorsUmaskOnCreation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		child := exec.Command(shell, "-c", `umask 077; exec "$@"`, "cas-umask-test", binary, "-test.run=^TestWriteFileIfContentInRootHonorsUmaskOnCreation$")
+		child := exec.Command(
+			shell,
+			"-c",
+			`umask 077; exec "$@"`,
+			"cas-umask-test",
+			binary,
+			"-test.run=^TestWriteFileIfContentInRootHonorsUmaskOnCreation$",
+		)
 		child.Env = []string{"PICOCLAW_CAS_UMASK_CHILD=1"}
 		if output, err := child.CombinedOutput(); err != nil {
 			t.Fatalf("isolated umask test failed: %v\n%s", err, output)
@@ -373,35 +423,44 @@ func TestWriteFileIfContentInRootHonorsUmaskOnCreation(t *testing.T) {
 		return
 	}
 	for _, present := range []bool{false, true} {
-		t.Run(map[bool]string{false: "create requested 0644 becomes 0600", true: "existing 0644 remains exact"}[present], func(t *testing.T) {
-			workspace := t.TempDir()
-			path := filepath.Join(workspace, "USER.md")
-			expected := FileContent{Absent: true}
-			wantMode := os.FileMode(0o600)
-			if present {
-				if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Run(
+			map[bool]string{false: "create requested 0644 becomes 0600", true: "existing 0644 remains exact"}[present],
+			func(t *testing.T) {
+				workspace := t.TempDir()
+				path := filepath.Join(workspace, "USER.md")
+				expected := FileContent{Absent: true}
+				wantMode := os.FileMode(0o600)
+				if present {
+					if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(path, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					expected, wantMode = FileContent{Content: []byte("old")}, 0o644
+				}
+				root, err := os.OpenRoot(workspace)
+				if err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Chmod(path, 0o644); err != nil {
+				defer root.Close()
+				if writeErr := WriteFileIfContentInRoot(
+					root,
+					"USER.md",
+					[]byte("new"),
+					expected,
+					0o644,
+				); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
 					t.Fatal(err)
 				}
-				expected, wantMode = FileContent{Content: []byte("old")}, 0o644
-			}
-			root, err := os.OpenRoot(workspace)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer root.Close()
-			if err := WriteFileIfContentInRoot(root, "USER.md", []byte("new"), expected, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := info.Mode().Perm(); got != wantMode {
-				t.Fatalf("CAS under umask 077 produced mode %04o, want %04o", got, wantMode)
-			}
-		})
+				if got := info.Mode().Perm(); got != wantMode {
+					t.Fatalf("CAS under umask 077 produced mode %04o, want %04o", got, wantMode)
+				}
+			},
+		)
 	}
 }
