@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -89,6 +90,9 @@ func readExecutionAdmission(path string) (executionAdmission, error) {
 }
 
 func (cs *CronService) beginExecutionAdmission(execution Execution) (*executionAdmission, func() error, func(), error) {
+	if runtime.GOOS == "windows" {
+		return nil, nil, nil, errors.New("durable cron admission requires advisory file locking")
+	}
 	path := cs.admissionPath(execution.RunID)
 	unlock, err := lockStore(path, 0)
 	if err != nil {

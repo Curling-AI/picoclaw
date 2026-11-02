@@ -151,3 +151,39 @@ func TestPreparedAdmissionRespectsPauseAndRejectsEditedPayload(t *testing.T) {
 		t.Fatal("an edited payload inherited an older admission")
 	}
 }
+
+func TestConcurrentAdmissionOwnersCannotDuplicateTheEffectsClaim(t *testing.T) {
+	first, job := admissionOneShot(t)
+	second := NewCronService(first.storePath, nil)
+	run, at := uuid.NewString(), time.Now().UTC().Truncate(time.Microsecond)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var effects atomic.Int32
+	first.SetOnExecutionWithAdmission(t.Context(), func(_ context.Context, execution Execution) (string, error) {
+		if err := execution.BeginEffects(); err != nil {
+			return "", err
+		}
+		effects.Add(1)
+		close(entered)
+		<-release
+		return "done", nil
+	})
+	go func() {
+		defer close(done)
+		first.executeJobWithAdmission(job.ID, Scheduled, run, at, false)
+	}()
+	<-entered
+	second.SetOnExecutionWithAdmission(t.Context(), func(_ context.Context, execution Execution) (string, error) {
+		if err := execution.BeginEffects(); err != nil {
+			return "", err
+		}
+		effects.Add(1)
+		return "unexpected", nil
+	})
+	second.executeJobWithAdmission(job.ID, Scheduled, run, at, false)
+	close(release)
+	<-done
+	second.executeJobWithAdmission(job.ID, Scheduled, run, at, false)
+	if effects.Load() != 1 {
+		t.Fatal("a concurrent or finished admission executed effects twice")
+	}
+}
