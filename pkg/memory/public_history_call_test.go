@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -16,18 +17,32 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := providers.WithHistoryRun(t.Context(), run)
-	if err := store.AddFullMessage(ctx, key, providers.Message{Role: "assistant", Content: "first", LLMCall: &providers.LLMCall{RequestID: call}}); err != nil {
+	if err = store.AddFullMessage(
+		ctx,
+		key,
+		providers.Message{
+			Role:          "assistant",
+			Content:       "first",
+			LLMCall:       &providers.LLMCall{RequestID: call},
+			HistoryCallID: call,
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddFullMessage(ctx, key, providers.Message{Role: "assistant", Content: "neighbor"}); err != nil {
+	if err = store.AddFullMessage(
+		ctx,
+		key,
+		providers.Message{Role: "assistant", Content: "neighbor", LLMCall: &providers.LLMCall{RequestID: call}},
+	); err != nil {
 		t.Fatal(err)
 	}
 	initializedContent(t, store, key)
 	before, err := store.ReadPublicHistory(ctx, key)
-	if err != nil || len(before.Entries) != 2 || before.Entries[0].CallID != call || before.Entries[0].RunID != run || before.Entries[0].Ref == nil {
+	if err != nil || len(before.Entries) != 2 || before.Entries[0].CallID != call || before.Entries[0].RunID != run ||
+		before.Entries[0].Ref == nil || before.Entries[1].CallID != "" {
 		t.Fatalf("producer occurrence lacks call proof: %+v %v", before, err)
 	}
-	if err := store.Compact(ctx, key); err != nil {
+	if err = store.Compact(ctx, key); err != nil {
 		t.Fatal(err)
 	}
 	store, err = NewJSONLStore(dir)
@@ -44,8 +59,14 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 	}
 	entries := append([]ContentEntry(nil), frame.Entries...)
 	entries[0].Message.Content = "edited"
-	plan := ContentMutationPlan{MutationID: uuid.NewString(), IntentDigest: contentDigest([]byte("edit first")), DomainID: frame.DomainID,
-		BeforeState: frame.StateToken, Kind: ContentMutationEdit, Edit: &ContentMutationEditIntent{Entries: entries, Summary: frame.Summary}}
+	plan := ContentMutationPlan{
+		MutationID:   uuid.NewString(),
+		IntentDigest: contentDigest([]byte("edit first")),
+		DomainID:     frame.DomainID,
+		BeforeState:  frame.StateToken,
+		Kind:         ContentMutationEdit,
+		Edit:         &ContentMutationEditIntent{Entries: entries, Summary: frame.Summary},
+	}
 	mutation, err := store.CommitHistoryContentMutation(ctx, key, plan)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +75,7 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 	if err != nil || edited.Entries[0].CallID != "" || samePublicRef(edited.Entries[0].Ref, before.Entries[0].Ref) {
 		t.Fatalf("edit reused the producer call proof: %+v %v", edited, err)
 	}
-	if err := store.AcknowledgeHistoryContentMutation(ctx, key, typedAppliedAck(mutation.Transition)); err != nil {
+	if err = store.AcknowledgeHistoryContentMutation(ctx, key, typedAppliedAck(mutation.Transition)); err != nil {
 		t.Fatal(err)
 	}
 	frame, err = store.ReadHistoryContentFrame(ctx, key)
@@ -63,17 +84,44 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 	}
 	entries = append([]ContentEntry(nil), frame.Entries...)
 	entries[1].Message.Content = "edited neighbor"
-	plan = ContentMutationPlan{MutationID: uuid.NewString(), IntentDigest: contentDigest([]byte("edit neighbor")), DomainID: frame.DomainID,
-		BeforeState: frame.StateToken, Kind: ContentMutationEdit, Edit: &ContentMutationEditIntent{Entries: entries, Summary: frame.Summary}}
-	if _, err := store.CommitHistoryContentMutation(ctx, key, plan); err != nil {
+	plan = ContentMutationPlan{
+		MutationID:   uuid.NewString(),
+		IntentDigest: contentDigest([]byte("edit neighbor")),
+		DomainID:     frame.DomainID,
+		BeforeState:  frame.StateToken,
+		Kind:         ContentMutationEdit,
+		Edit:         &ContentMutationEditIntent{Entries: entries, Summary: frame.Summary},
+	}
+	mutation, err = store.CommitHistoryContentMutation(ctx, key, plan)
+	if err != nil {
 		t.Fatal(err)
 	}
 	repeated, err := store.ReadPublicHistory(ctx, key)
 	if err != nil || repeated.Entries[0].CallID != "" {
 		t.Fatalf("unchanged rewrite restored retired call proof: %+v %v", repeated, err)
 	}
-	entry := PublicHistoryEntry{ID: uuid.NewString(), ImportID: "legacy:forged", AnchorID: edited.Entries[0].ID, AnchorRef: edited.Entries[0].Ref, AnchorOrder: edited.Entries[0].Order, CallID: call, Message: providers.Message{Role: "assistant", Content: "import"}}
-	_, err = store.ImportPublicHistory(ctx, PublicHistoryImport{Key: key, Generation: repeated.Generation, Revision: repeated.Revision, AfterID: entry.AnchorID, Entries: []PublicHistoryEntry{entry}})
+	if err = store.AcknowledgeHistoryContentMutation(ctx, key, typedAppliedAck(mutation.Transition)); err != nil {
+		t.Fatal(err)
+	}
+	entry := PublicHistoryEntry{
+		ID:          uuid.NewString(),
+		ImportID:    "legacy:forged",
+		AnchorID:    edited.Entries[0].ID,
+		AnchorRef:   edited.Entries[0].Ref,
+		AnchorOrder: edited.Entries[0].Order,
+		CallID:      call,
+		Message:     providers.Message{Role: "assistant", Content: "import"},
+	}
+	_, err = store.ImportPublicHistory(
+		ctx,
+		PublicHistoryImport{
+			Key:        key,
+			Generation: repeated.Generation,
+			Revision:   repeated.Revision,
+			AfterID:    entry.AnchorID,
+			Entries:    []PublicHistoryEntry{entry},
+		},
+	)
 	if !errors.Is(err, ErrPublicHistoryCoverage) {
 		t.Fatalf("import forged producer call proof: %v", err)
 	}

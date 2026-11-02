@@ -25,6 +25,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	exec.streamingPublisher = nil
 	exec.streamingFallback = false
 	exec.streamingPublishedContent = false
+	exec.historyCallID = ""
 	if !p.configuredStreamingEligible(ts, exec) {
 		return nil, false, nil
 	}
@@ -39,7 +40,12 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		return nil, false, nil
 	}
 
-	streamer, ok := p.Bus.GetStreamer(providers.WithHistoryCall(ctx, exec.llmRequestID), ts.channel, ts.chatID, ts.sessionKey)
+	streamer, ok := p.Bus.GetStreamer(
+		providers.WithHistoryCall(ctx, exec.llmRequestID),
+		ts.channel,
+		ts.chatID,
+		ts.sessionKey,
+	)
 	if !ok || streamer == nil {
 		logger.DebugCF("agent", "configured streaming not used", map[string]any{
 			"agent_id": ts.agent.ID,
@@ -50,6 +56,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		})
 		return nil, false, nil
 	}
+	exec.historyCallID = exec.llmRequestID
 
 	publisher := &streamingChunkPublisher{
 		streamer:  streamer,
@@ -170,6 +177,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			// fallback must not reuse the stream's.
 			fallbackOpts, fallbackID := optsWithFreshRequestID(exec.llmOpts)
 			exec.llmRequestID = fallbackID
+			exec.historyCallID = ""
 			logFields["fallback_request_id"] = fallbackID
 			logger.WarnCF("agent", "ChatStream update failed before visible output; retrying with Chat", logFields)
 			publisher.Cancel(ctx)
@@ -190,6 +198,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		if !publisher.Published() {
 			fallbackOpts, fallbackID := optsWithFreshRequestID(exec.llmOpts)
 			exec.llmRequestID = fallbackID
+			exec.historyCallID = ""
 			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", map[string]any{
 				"agent_id":            ts.agent.ID,
 				"channel":             ts.channel,
@@ -312,10 +321,19 @@ func finalizeConfiguredStreamingLLM(
 // stream, Finalize delivers the reply as it delivers a streamed answer.
 // (seucaranguejo fork)
 func (p *Pipeline) beginSynthesizedFinalStream(ctx context.Context, ts *turnState, exec *turnExecution) {
-	if exec.streamingPublisher != nil || !p.configuredStreamingEligible(ts, exec) {
+	if exec.streamingPublisher != nil {
 		return
 	}
-	streamer, ok := p.Bus.GetStreamer(providers.WithHistoryCall(ctx, exec.llmRequestID), ts.channel, ts.chatID, ts.sessionKey)
+	exec.historyCallID = ""
+	if !p.configuredStreamingEligible(ts, exec) {
+		return
+	}
+	streamer, ok := p.Bus.GetStreamer(
+		providers.WithHistoryCall(ctx, ""),
+		ts.channel,
+		ts.chatID,
+		ts.sessionKey,
+	)
 	if !ok || streamer == nil {
 		// The reply goes out as a plain final outbound, which the channel would
 		// drop as the duplicate of a narration finalized earlier in the turn.

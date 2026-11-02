@@ -8,6 +8,9 @@ import (
 func TestHistoryCallAcceptsOnlyProducerRequestIDs(t *testing.T) {
 	const call = "pc-00112233445566778899aabb"
 	ctx := WithHistoryCall(context.Background(), call)
+	if HistoryCall(WithHistoryCall(ctx, "")) != "" {
+		t.Fatal("an unlinked producer inherited another call's identity")
+	}
 	if HistoryCall(ctx) != call || HistoryCall(nil) != "" {
 		t.Fatal("producer request identity did not survive context propagation")
 	}

@@ -8,8 +8,10 @@ import (
 	"github.com/google/uuid"
 )
 
-type historyRunKey struct{}
-type historyCallKey struct{}
+type (
+	historyRunKey  struct{}
+	historyCallKey struct{}
+)
 
 // WithHistoryRun attaches persistence provenance without adding provider fields.
 func WithHistoryRun(ctx context.Context, runID string) context.Context {
@@ -30,7 +32,7 @@ func HistoryRun(ctx context.Context) string {
 // WithHistoryCall carries the producer's request identity to its live stream.
 func WithHistoryCall(ctx context.Context, callID string) context.Context {
 	if !ValidHistoryCallID(callID) {
-		return ctx
+		callID = ""
 	}
 	return context.WithValue(ctx, historyCallKey{}, callID)
 }
