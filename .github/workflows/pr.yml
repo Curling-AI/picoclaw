@@ -90,3 +90,11 @@ jobs:
 
       - name: Run Docker-backed integration suites
         run: bash ./scripts/run-integration-tests.sh
+
+      - name: Build the core image with private module secrets
+        run: |
+          docker build --target builder --file docker/Dockerfile \
+            --secret "id=hulk_sdk_key,src=$HULK_SDK_GO_AUTH_DIR/key" \
+            --secret "id=hulk_sdk_hosts,src=$HULK_SDK_GO_AUTH_DIR/known_hosts" \
+            --secret "id=hulk_sdk_gitconfig,src=$HULK_SDK_GO_AUTH_DIR/gitconfig" \
+            --tag picoclaw-sdk-auth-validation .
