@@ -1,8 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,6 +240,61 @@ func TestTranscribeAudioInMessage_TranscribedAudioBecomesVoiceText(t *testing.T)
 
 	if msg.Content != "[voice: olá]" || len(msg.Media) != 0 {
 		t.Fatalf("got content %q media %v", msg.Content, msg.Media)
+	}
+}
+
+// silentAudioModel answers the way the transcription model answers silence: the
+// marker when the prompt asks for it, otherwise the refusal that reached the
+// conversation as the person's speech in the 2026-11-02 test (MST-575).
+func silentAudioModel(t *testing.T) *asr.AudioModelTranscriber {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		reply := "I'm sorry, but I cannot transcribe the audio you provided."
+		if bytes.Contains(body, []byte("reply with exactly NO_SPEECH")) {
+			reply = "NO_SPEECH"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"content": reply},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.ModelConfig{
+		ModelName:      "maestro-transcribe",
+		Model:          "litellm/maestro-transcribe",
+		APIBase:        server.URL,
+		AudioFileParts: true,
+	}
+	cfg.SetAPIKey("test-key")
+	tr := asr.NewAudioModelTranscriber(cfg)
+	if tr == nil {
+		t.Fatal("NewAudioModelTranscriber() = nil")
+	}
+	return tr
+}
+
+func TestTranscribeAudioInMessage_SilenceBecomesTheNoSpeechNote(t *testing.T) {
+	store := media.NewFileMediaStore()
+	ref := storeAudio(t, store, "voice.ogg", "audio/ogg")
+	al := &AgentLoop{cfg: &config.Config{}, mediaStore: store, transcriber: silentAudioModel(t)}
+
+	msg := al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{
+		Content: "[voice]",
+		Media:   []string{ref},
+	})
+
+	if msg.Content != noSpeechAudioNote {
+		t.Fatalf("got content %q, want the no-speech note", msg.Content)
 	}
 }
 
