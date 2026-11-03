@@ -183,7 +183,11 @@ type contentCompactionOutcomeStore struct {
 	err        error
 }
 
-func (s contentCompactionOutcomeStore) CommitHistoryCompaction(context.Context, string, memory.ContentCompactionPlan) (memory.ContentTransition, error) {
+func (s contentCompactionOutcomeStore) CommitHistoryCompaction(
+	context.Context,
+	string,
+	memory.ContentCompactionPlan,
+) (memory.ContentTransition, error) {
 	return s.transition, s.err
 }
 
@@ -193,7 +197,11 @@ func TestContentCompactionKeepsCommittedTransitionWhileArchiveRecoveryIsPending(
 		t.Run(fmt.Sprint(committed), func(t *testing.T) {
 			source := contentCompactionOutcomeStore{err: memory.ErrContentStateChanged}
 			if committed {
-				source.transition = memory.ContentTransition{Version: memory.ContentLineageVersion, CanonicalKey: key, MutationID: "committed"}
+				source.transition = memory.ContentTransition{
+					Version:      memory.ContentLineageVersion,
+					CanonicalKey: key,
+					MutationID:   "committed",
+				}
 				source.err = errors.Join(memory.ErrHistoryInputCommitted, os.ErrPermission)
 			}
 			view := contentCompactionView{frame: &frame, store: source}

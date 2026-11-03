@@ -71,7 +71,14 @@ func (s *JSONLStore) prepareNativeHistoryArchiveLocked(ctx context.Context, key 
 	for index, locator := range pending.Before.Rows {
 		before.Entries[index].Message.HistoryPublicMessage = decodedPublicMessage(byLine[locator.Line])
 	}
-	proof, err := s.verifyNativeArchiveAt(ctx, key, image.Meta, before, pending.Transition, pending.NativeArchiveFrontier)
+	proof, err := s.verifyNativeArchiveAt(
+		ctx,
+		key,
+		image.Meta,
+		before,
+		pending.Transition,
+		pending.NativeArchiveFrontier,
+	)
 	if err != nil {
 		return err
 	}
@@ -107,7 +114,8 @@ func (s *JSONLStore) nativeArchiveMessages(
 		reason := ContentArchiveUnsupportedRole
 		if message.Role == "user" || message.Role == "assistant" || message.Role == "tool" {
 			raw := strings.TrimSpace(message.Content)
-			if !strings.HasPrefix(raw, "[System]") && !strings.HasPrefix(raw, "[SYSTEM]") && !strings.HasPrefix(raw, "[System: ") {
+			if !strings.HasPrefix(raw, "[System]") && !strings.HasPrefix(raw, "[SYSTEM]") &&
+				!strings.HasPrefix(raw, "[System: ") {
 				return nil, nil, ErrPublicHistoryCoverage
 			}
 			reason = ContentArchiveInternalSteering
@@ -253,7 +261,12 @@ func validateNativeArchiveFrontier(index *publicIndexReader, frontier publicInde
 	return nil
 }
 
-func verifyNativeArchiveSupplements(ctx context.Context, projector PublicHistoryProjector, entries []PublicHistoryEntry, roots map[string]bool) error {
+func verifyNativeArchiveSupplements(
+	ctx context.Context,
+	projector PublicHistoryProjector,
+	entries []PublicHistoryEntry,
+	roots map[string]bool,
+) error {
 	children := make(map[string][]string)
 	byID := make(map[string]PublicHistoryEntry, len(entries))
 	for _, entry := range entries {

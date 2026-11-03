@@ -119,7 +119,11 @@ func (view contentCompactionView) commit(
 		if transition.Version == 0 || !errors.Is(err, memory.ErrHistoryInputCommitted) {
 			return nil, err
 		}
-		logger.WarnCF("agent", "Content compaction committed with pending archive recovery", map[string]any{"error": err.Error()})
+		logger.WarnCF(
+			"agent",
+			"Content compaction committed with pending archive recovery",
+			map[string]any{"error": err.Error()},
+		)
 	}
 	return &transition, nil
 }

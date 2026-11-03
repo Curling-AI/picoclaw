@@ -344,6 +344,9 @@ func (s *JSONLStore) importPublicHistory(
 	}
 	if origin == publicImportExternal && meta.ContentIdentity != nil &&
 		meta.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
+		if meta.ContentIdentity.Pending != nil && meta.ContentIdentity.Pending.Mutation == nil {
+			return PublicHistory{}, ErrContentLineagePending
+		}
 		if !meta.PublicHistoryNonLocalImports && meta.publicRefUnavailable {
 			return PublicHistory{}, ErrContentIdentityUnavailable
 		}

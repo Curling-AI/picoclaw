@@ -270,7 +270,12 @@ func TestNativeArchiveKeepsItsSuffixBudgetAndFencesNonLocalImports(t *testing.T)
 					t.Fatal("native suffix required an unbounded archive scan", err, pending, pendingErr)
 				}
 			} else if !errors.Is(err, ErrHistoryCapacity) || pendingErr != nil || pending.Version != 0 {
-				t.Fatal("nonlocal imports escaped the bounded proof or published an unprovable pending cut", err, pending, pendingErr)
+				t.Fatal(
+					"nonlocal imports escaped the bounded proof or published an unprovable pending cut",
+					err,
+					pending,
+					pendingErr,
+				)
 			}
 			if origin == "external_import" {
 				current, readErr := restarted.ReadHistoryContentFrame(t.Context(), key)
