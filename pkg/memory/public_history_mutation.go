@@ -126,6 +126,7 @@ func (s *JSONLStore) preparePublicRewrite(
 		next.PublicHistoryPreparation = nil
 		next.PublicHistoryGeneration = newHistoryID()
 		next.PublicHistoryComplete = true
+		next.PublicHistoryNonLocalImports = false
 		return s.replacePublicEntries(key, nil, next)
 	}
 	if original.PublicHistoryVersion < 0 || next.PublicHistoryVersion < 0 {

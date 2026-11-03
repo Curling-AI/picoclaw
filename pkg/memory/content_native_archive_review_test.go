@@ -130,6 +130,19 @@ func TestNativeArchiveImportCannotReattestMissingContentWitness(t *testing.T) {
 			if err != nil || frame.IdentityStatus != ContentIdentityUnavailable {
 				t.Fatal("import reattested or blocked source", frame, err)
 			}
+			if appendErr := store.AddMessage(
+				t.Context(),
+				key,
+				"user",
+				"allowed append without content proof",
+			); appendErr != nil {
+				t.Fatal("proof refusal blocked ordinary append", appendErr)
+			}
+			after, readErr := store.ReadHistoryContentFrame(t.Context(), key)
+			if readErr != nil || after.IdentityStatus != ContentIdentityUnavailable ||
+				len(after.Entries) != len(frame.Entries)+1 {
+				t.Fatal("ordinary append reattested or lost degraded source", after, readErr)
+			}
 		})
 	}
 }
@@ -365,6 +378,14 @@ func TestNativeArchivePendingFrontierSurvivesRestartAndLaterAppends(t *testing.T
 	if operationErr := os.WriteFile(store.publicIndexPath(key), index, 0o600); operationErr != nil {
 		t.Fatal(operationErr)
 	}
+	if appendErr := store.AddMessage(
+		t.Context(),
+		key,
+		"user",
+		"ordinary append during pending archive",
+	); appendErr != nil {
+		t.Fatal("native pending archive blocked ordinary append", appendErr)
+	}
 	meta, err := store.readMeta(key)
 	if err != nil {
 		t.Fatal(err)
@@ -428,5 +449,48 @@ func TestNativeArchivePendingFrontierSurvivesRestartAndLaterAppends(t *testing.T
 	pending, err := restarted.ReadPendingHistoryCompaction(t.Context(), key)
 	if err != nil || pending.Version != 0 {
 		t.Fatal("proved pending cut was not acknowledged", pending, err)
+	}
+}
+
+func TestNativeArchiveClearRetiresItsOldImportFence(t *testing.T) {
+	store, key, _ := nativeArchiveSource(t)
+	history, err := store.ReadPublicHistory(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := history.Entries[0]
+	_, err = store.ImportPublicHistory(
+		t.Context(),
+		PublicHistoryImport{
+			Key:        key,
+			Generation: history.Generation,
+			Revision:   history.Revision,
+			BeforeID:   anchor.ID,
+			Entries: []PublicHistoryEntry{
+				{
+					ID:          uuid.NewString(),
+					ImportID:    "legacy:old-domain",
+					AnchorID:    anchor.ID,
+					AnchorRef:   anchor.Ref,
+					AnchorOrder: anchor.Order,
+					Message:     providers.Message{Role: "assistant", Content: "old import"},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clearErr := store.ClearHistory(t.Context(), key); clearErr != nil {
+		t.Fatal(clearErr)
+	}
+	meta, err := store.readMeta(key)
+	if err != nil || meta.PublicHistoryNonLocalImports || meta.PublicHistoryCount != 0 ||
+		meta.ContentIdentity.ArchivePolicy != nativePublicArchivePolicy {
+		t.Fatal(
+			"clear retained the old domain import fence or lost archive policy",
+			meta.PublicHistoryNonLocalImports,
+			err,
+		)
 	}
 }
