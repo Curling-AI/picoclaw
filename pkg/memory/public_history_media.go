@@ -20,6 +20,12 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 	for attempt := 0; attempt < 2; attempt++ {
 		history, historyErr := s.ReadPublicHistory(ctx, key)
 		if historyErr != nil {
+			if errors.Is(historyErr, ErrPublicHistoryCoverage) {
+				historyErr = s.recordPreparingPublicMedia(ctx, key, runID, content)
+				if errors.Is(historyErr, ErrPublicHistoryCoverage) {
+					continue
+				}
+			}
 			return historyErr
 		}
 		var anchor *PublicHistoryEntry

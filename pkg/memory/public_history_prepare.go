@@ -25,6 +25,9 @@ type PublicHistoryPreparation struct {
 	Offset         int64  `json:"offset"`
 	Line           int64  `json:"line"`
 	Prefix         int64  `json:"prefix"`
+	MediaOffset    int64  `json:"mediaOffset,omitempty"`
+	MediaCount     int64  `json:"mediaCount,omitempty"`
+	MediaDigest    string `json:"mediaDigest,omitempty"`
 }
 
 type PublicHistoryPreparationResult struct {
@@ -110,6 +113,11 @@ func (s *JSONLStore) PreparePublicHistory(
 		return s.preparePublicIndexResult(ctx, canonical, meta)
 	}
 	state := *meta.PublicHistoryPreparation
+	if state.MediaCount < 0 || state.MediaCount > meta.PublicHistoryCount || state.MediaOffset < 0 ||
+		state.MediaOffset > meta.PublicHistoryBytes || (state.MediaCount == 0 && (state.MediaOffset != 0 || state.MediaDigest != "")) ||
+		(state.MediaCount > 0 && !validHistoryDigest(state.MediaDigest)) {
+		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
+	}
 	if state.FileGeneration != meta.HistoryFileGeneration || state.Generation != meta.HistoryGeneration ||
 		state.Prefix != meta.HistoryPrefix {
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
@@ -120,6 +128,9 @@ func (s *JSONLStore) PreparePublicHistory(
 	}
 	if cursor != expected.Cursor {
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
+	}
+	if state.MediaCount > 0 {
+		return s.preparePublicMediaTail(ctx, canonical, meta, state)
 	}
 	// The owning lock fixes the current committed append frontier. Include it
 	// in this same bounded read instead of requiring an extra retry just to
@@ -134,6 +145,10 @@ func (s *JSONLStore) PreparePublicHistory(
 		}
 	}
 	entries, next, canonicalErr := s.readPublicPreparation(ctx, canonical, meta, state)
+	if canonicalErr != nil {
+		return PublicHistoryPreparationResult{}, canonicalErr
+	}
+	entries, canonicalErr = s.dedupePreparedPublicEntries(ctx, canonical, publicIndexMeta(meta), entries)
 	if canonicalErr != nil {
 		return PublicHistoryPreparationResult{}, canonicalErr
 	}
@@ -273,6 +288,9 @@ func (s *JSONLStore) readPublicPreparation(
 			}
 			encoded, _ := json.Marshal(entry)
 			if encodedBytes+len(encoded)+1 > PublicHistoryOperationBytes {
+				if consumed == 0 {
+					return nil, state, ErrHistoryCapacity
+				}
 				break
 			}
 			encodedBytes += len(encoded) + 1
