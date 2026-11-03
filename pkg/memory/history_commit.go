@@ -146,7 +146,7 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 			ordered[index] = messageWithHistoryOrder(message, HistoryOrderProof{})
 		}
 	}
-	messages = ordered
+	messages = s.projectPublicCommits(ordered, &meta)
 	if meta.HistoryRecoveryRequired {
 		if operationErr := s.markHistoryRecoveryRequired(key, &meta); operationErr != nil {
 			return nil, operationErr
@@ -165,6 +165,7 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 		}
 		meta.HistoryDigest, meta.HistoryTip = "", ""
 	}
+	messages = s.projectPublicCommits(messages, &meta)
 	data, err := marshalHistoryJSONL(messages, meta)
 	if err != nil {
 		return nil, err
@@ -196,12 +197,16 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 	if err = s.prepareContentAppend(key, original, &meta, data, offset, qualifyContent); err != nil {
 		return nil, err
 	}
+	publicChange, publicErr := s.preparePublicAppend(key, original, &meta, messages, offset)
+	if publicErr != nil {
+		return nil, publicErr
+	}
 	storage, err := s.prepareContentStorage(key, original, &meta, true)
 	if err != nil {
 		return nil, err
 	}
-	if commitErr := s.beginHistoryWrite(key, historyWriteRecovery{
-		Meta: original, Next: meta, AppendOffset: &offset, Storage: storage,
+	if commitErr := s.beginHistoryWrite(context.Background(), key, historyWriteRecovery{
+		Meta: original, Next: meta, AppendOffset: &offset, Storage: storage, Public: publicChange.Recovery,
 	}); commitErr != nil {
 		if errors.Is(commitErr, ErrHistoryReceiptUnavailable) {
 			meta = appendMeta
@@ -240,6 +245,9 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 		err = s.appendContentStorageWrite(storage)
 	}
 	if err == nil {
+		err = s.writePublicChange(key, publicChange)
+	}
+	if err == nil {
 		err = s.writeMeta(key, meta)
 	}
 	if err == nil {
@@ -249,7 +257,7 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 		err = s.finishHistoryWrite(key)
 	}
 	if err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, meta)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(context.Background(), key, meta)
 		if !committed {
 			return nil, errors.Join(err, recoveryErr)
 		}
@@ -385,6 +393,9 @@ func hasCompleteHistoryTail(file *os.File, offset, physicalBytes int64) (bool, e
 // physical count and durably propagate the latch before a legitimate rewrite.
 // The caller holds the session lock; our own journal is already resolved.
 func (s *JSONLStore) prepareHistoryMutation(key string, meta *SessionMeta) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -438,6 +449,16 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	meta SessionMeta,
 	contentOnly bool,
 ) error {
+	return s.commitHistoryRewriteData(key, messages, meta, contentOnly, nil)
+}
+
+func (s *JSONLStore) commitHistoryRewriteData(
+	key string,
+	messages []providers.Message,
+	meta SessionMeta,
+	contentOnly bool,
+	cut *historyRawRewrite,
+) error {
 	original, err := s.readMeta(key)
 	if err != nil {
 		return err
@@ -469,13 +490,35 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 	if err != nil {
 		return err
 	}
-	data, err := marshalHistoryJSONL(messages, meta)
-	if err != nil {
-		return err
+	var data []byte
+	if cut == nil {
+		messages = s.projectPublicCommits(messages, &meta)
+		data, err = marshalHistoryJSONL(messages, meta)
+		if err != nil {
+			return err
+		}
+	} else {
+		data = cut.data
 	}
 	size := int64(len(data))
 	meta.HistoryBytes = &size
 	if err = s.prepareContentRewrite(key, original, &meta, data); err != nil {
+		return err
+	}
+	clearPublicMedia := meta.publicHistoryClear
+	var publicChange publicHistoryChange
+	if cut != nil && cut.publicChange != nil {
+		publicChange = *cut.publicChange
+	} else if cut == nil {
+		publicChange, err = s.preparePublicRewrite(key, original, &meta, messages)
+	} else if cut.retainedPrefix {
+		publicChange, err = s.preparePublicRetainedRewrite(key, original, &meta, messages)
+	} else if cut.removed != nil {
+		publicChange, err = s.preparePublicSuffixCut(key, original, &meta, cut.removed, int64(len(previous)))
+	} else {
+		publicChange, err = s.preparePublicRewrite(key, original, &meta, messages)
+	}
+	if err != nil {
 		return err
 	}
 	storage, err := s.prepareContentStorage(key, original, &meta, false)
@@ -483,17 +526,32 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 		return err
 	}
 	if commitErr := s.beginHistoryWrite(
+		context.Background(),
 		key,
-		historyWriteRecovery{Meta: original, Next: meta, Data: previous, Existed: existed, Storage: storage},
+		historyWriteRecovery{
+			ClearPublicMedia: clearPublicMedia,
+			Meta:             original,
+			Next:             meta,
+			Data:             previous,
+			Existed:          existed,
+			Storage:          storage,
+			Public:           publicChange.Recovery,
+		},
 	); commitErr != nil {
 		return commitErr
 	}
 	if writeErr := s.writeSessionFile(s.jsonlPath(key), data, 0o644); writeErr != nil {
 		return errors.Join(writeErr, s.recoverFailedHistoryWrite(key))
 	}
-	err = s.writeMeta(key, meta)
+	err = s.writePublicChange(key, publicChange)
+	if err == nil {
+		err = s.writeMeta(key, meta)
+	}
 	if err == nil {
 		err = s.ensureContentDomain(key, original, meta)
+	}
+	if err == nil && clearPublicMedia {
+		err = s.deletePublicHistoryArtifacts(key)
 	}
 	if err == nil && contentOnly {
 		orderMeta := copyMeta(meta)
@@ -506,7 +564,7 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 		var committed bool
 		var recoveryErr error
 		if contentOnly {
-			committed, recoveryErr = s.recoverExpectedHistoryContentCommit(key, meta)
+			committed, recoveryErr = s.recoverExpectedHistoryContentCommit(context.Background(), key, meta)
 		} else {
 			committed, recoveryErr = s.recoverExpectedHistoryCommit(key, meta, data)
 		}
@@ -526,7 +584,7 @@ func (s *JSONLStore) commitHistoryRewriteFor(
 }
 
 func (s *JSONLStore) recoverExpectedHistoryCommit(key string, next SessionMeta, expectedData []byte) (bool, error) {
-	decision, recoveryErr := s.recoverHistoryWriteFor(key, historyFailedWrite)
+	decision, recoveryErr := s.recoverHistoryWriteFor(context.Background(), key, historyFailedWrite)
 	decidedNew := decision == historyWriteNew
 	if decision == historyWriteOld || (!decidedNew && recoveryErr == nil) {
 		return false, recoveryErr

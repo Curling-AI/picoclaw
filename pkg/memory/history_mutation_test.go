@@ -100,8 +100,9 @@ func TestHistoryReplacementDistinguishesMetadataFromAnEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	removed, err := restarted.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-	if err != nil || len(removed.Entries) != 2 || removed.ParentGeneration != edited.Generation ||
-		removed.RetainedUntil != 2 ||
+	if err != nil || len(removed.Entries) != 2 || removed.Generation != edited.Generation ||
+		removed.ParentGeneration != edited.ParentGeneration || removed.RetainedUntil != edited.RetainedUntil ||
+		removed.FileEpoch <= edited.FileEpoch || removed.Entries[1].Position != edited.Entries[1].Position ||
 		removed.Entries[0].ID != before.Entries[0].ID {
 		t.Fatal("removed messages reappeared after restart", err)
 	}

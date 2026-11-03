@@ -81,6 +81,7 @@ type contentWireIdentity struct {
 	Count           int                  `json:"count"`
 	Unavailable     bool                 `json:"unavailable,omitempty"`
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
+	ArchivePolicy   string               `json:"archivePolicy,omitempty"`
 	DiskVersion     uint8                `json:"diskVersion"`
 	Storage         contentStorageHeader `json:"storage"`
 }
@@ -104,6 +105,7 @@ func contentIdentityWire(state *contentIdentityState) any {
 		Count:           state.Count,
 		Unavailable:     state.Unavailable,
 		MutationVersion: state.MutationVersion,
+		ArchivePolicy:   state.ArchivePolicy,
 		DiskVersion:     contentStorageVersion,
 		Storage:         state.storage.Header,
 	}
@@ -145,6 +147,7 @@ func decodeContentIdentity(data []byte) *contentIdentityState {
 		Version: wire.Version, DomainID: wire.DomainID, StateToken: wire.StateToken,
 		SummaryDigest: wire.SummaryDigest, Skip: wire.Skip, Count: wire.Count, Unavailable: wire.Unavailable,
 		MutationVersion: wire.MutationVersion, storage: &contentStorageState{Header: wire.Storage},
+		ArchivePolicy: wire.ArchivePolicy,
 	}
 	if !validContentStorageHeader(state, wire.Storage.Key) {
 		return opaqueContentIdentity(data)
@@ -346,6 +349,7 @@ func contentMetaForCache(meta SessionMeta) SessionMeta {
 		Count:           state.Count,
 		Unavailable:     state.Unavailable,
 		MutationVersion: state.MutationVersion,
+		ArchivePolicy:   state.ArchivePolicy,
 		storage:         &contentStorageState{Header: cloneContentStorage(state.storage).Header},
 	}
 	meta.ContentIdentity.restoreContentCapsules()

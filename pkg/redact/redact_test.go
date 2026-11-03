@@ -124,6 +124,15 @@ func TestField_MasksBySensitiveName(t *testing.T) {
 	}
 }
 
+// Value marshals a type it does not walk before Text sees it, so a newline in it
+// reaches the mask escaped.
+func TestValue_MasksUploadNamesInAMarshaledType(t *testing.T) {
+	got := Value(struct{ O string }{"ls:\nab12cd34-Joao_Silva.pdf"})
+	if want := `{"O":"ls:\nab12cd34-[REDACTED].pdf"}`; got != want {
+		t.Fatalf("Value = %q, want %q", got, want)
+	}
+}
+
 func TestToolArgs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -152,6 +161,12 @@ func TestToolArgs(t *testing.T) {
 			tool: "edit_file",
 			in:   map[string]any{"path": "a.env", "old_text": "PASS=x", "new_text": "PASS=y"},
 			want: map[string]any{"path": "a.env", "old_text": Mask + " (6 chars)", "new_text": Mask + " (6 chars)"},
+		},
+		{
+			name: "read_file keeps the upload's path and hides its name",
+			tool: "read_file",
+			in:   map[string]any{"path": "uploads/ab12cd34-Contrato_Acme.pdf", "offset": 0},
+			want: map[string]any{"path": "uploads/ab12cd34-" + Mask + ".pdf", "offset": 0},
 		},
 		{
 			name: "exec command keeps its shape",

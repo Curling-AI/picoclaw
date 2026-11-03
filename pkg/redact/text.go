@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -73,11 +74,39 @@ var (
 			`app(?:lication)?[_-]?key)[A-Za-z0-9_.-]*)` +
 			`(\\?["']?\s*(?:=>|[:=])\s*)` +
 			`(\\"(?:[^"\\]|\\[^"])*|"(?:[^"\\]|\\.)*|'[^']*|[^\s"'\\&,;}]+)`)
+	// An upload as the pod stores it: a random 8-hex prefix and the person's
+	// file name, which UploadFile reduces to these characters. Not a credential,
+	// but the person's, and every read_file would log it. Matched with or
+	// without the uploads/ folder, since a command run inside it names the file
+	// alone. The prefix must start the token, so a pod or job name with a hex
+	// part stays. Text often arrives escaped (JSON of a command's output, a URL),
+	// so an escape before the prefix also starts a token.
+	uploadNameRe = regexp.MustCompile(
+		`(^|[^A-Za-z0-9._-]|\\[nrt]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})([0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
+	// The rest of a UUID after its first 8 hex digits, ending the token or
+	// followed by an extension or a separator. It names a run, a session or a
+	// media file, and logs are searched by it.
+	uuidTailRe = regexp.MustCompile(`^[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:$|[._-])`)
 )
+
+// uploadExtensions are the extensions kept after a masked upload name: they say
+// what kind of file failed. Anything else after a dot may be part of the name,
+// such as an invoice number.
+var uploadExtensions = map[string]bool{
+	".pdf": true, ".doc": true, ".docx": true, ".odt": true, ".rtf": true, ".epub": true,
+	".xls": true, ".xlsx": true, ".ods": true, ".csv": true, ".ppt": true, ".pptx": true, ".odp": true,
+	".txt": true, ".md": true, ".json": true, ".xml": true, ".html": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".heic": true, ".svg": true,
+	".ogg": true, ".oga": true, ".opus": true, ".mp3": true, ".m4a": true, ".wav": true, ".aac": true,
+	".amr": true, ".flac": true, ".wma": true,
+	".mp4": true, ".mov": true, ".webm": true,
+	".zip": true, ".gz": true, ".tar": true, ".rar": true, ".7z": true,
+}
 
 // textRule runs mask only when the lowercased text holds one of its hints.
 // Text runs on every log line and most lines carry no credential, so a few
-// substring checks spare the regexes almost always.
+// substring checks spare the regexes almost always. The upload rule's hint, a
+// dash, is in most lines; its mask scans for the 8-hex prefix before the regex.
 type textRule struct {
 	hints []string
 	mask  func(string) string
@@ -115,12 +144,14 @@ var textRules = []textRule{
 		},
 		func(s string) string { return assignmentRe.ReplaceAllStringFunc(s, maskAssignment) },
 	},
+	{[]string{"-"}, maskUploadNames},
 	// After assignmentRe: it masks a quoted value to its closing quote, and
 	// this rule, which stops at the first space, would leave the rest.
 	{[]string{"="}, maskShellTokens},
 }
 
-// Text masks the credentials found in free text.
+// Text masks the credentials found in free text, and the file name in the path
+// of an upload.
 func Text(s string) string {
 	if s == "" {
 		return s
@@ -233,6 +264,46 @@ func hasUpperAssignment(s string) bool {
 		}
 	}
 	return false
+}
+
+// maskUploadNames keeps the prefix, which tells two uploads apart, and a known
+// extension. A UUID stays whole.
+func maskUploadNames(s string) string {
+	if !hasHexBeforeDash(s) {
+		return s
+	}
+	return uploadNameRe.ReplaceAllStringFunc(s, func(match string) string {
+		parts := uploadNameRe.FindStringSubmatch(match)
+		name := parts[3]
+		if uuidTailRe.MatchString(name) {
+			return match
+		}
+		return parts[1] + parts[2] + Mask + uploadExtension(name)
+	})
+}
+
+// hasHexBeforeDash says whether eight lowercase hex digits come right before a
+// dash: uploadNameRe has no literal to anchor on, and most lines fail this.
+func hasHexBeforeDash(s string) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '-' && run >= 8:
+			return true
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f':
+			run++
+		default:
+			run = 0
+		}
+	}
+	return false
+}
+
+func uploadExtension(name string) string {
+	if ext := filepath.Ext(name); uploadExtensions[strings.ToLower(ext)] {
+		return ext
+	}
+	return ""
 }
 
 func maskAssignment(match string) string {

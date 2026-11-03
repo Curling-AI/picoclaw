@@ -12,6 +12,9 @@ import (
 // and unqualified history replacements retain their stricter retention guards.
 // The caller holds the source lock, including the pair lock used for aliases.
 func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, ownedAlias ...bool) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -38,6 +41,9 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 		}
 	}
 	if absent {
+		if err := s.deletePublicHistoryArtifacts(key); err != nil {
+			return err
+		}
 		s.forgetDeletedHistory(key, false)
 		return nil
 	}
@@ -80,7 +86,7 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 		return err
 	}
 	images = append(images, floorImages...)
-	if len(images)+len(artifacts) > 0 {
+	if len(images)+len(artifacts) > 0 || s.requiresPublicHistoryCleanup() {
 		if err = s.beginHistoryDeletion(ctx, key, "owner", images, artifacts); err != nil {
 			return err
 		}
@@ -99,7 +105,7 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 	// Keep the established launcher deletion order: remove the listing before
 	// the payload, then retire every proof and journal belonging to this source.
 	for _, path := range []string{
-		s.metaPath(key), s.jsonlPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key),
+		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.publicIndexPath(key), s.publicIndexPreparationPath(key), s.publicIndexBuildingPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key),
 		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
 	} {
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
@@ -144,4 +150,18 @@ func DeleteJSONLSession(ctx context.Context, dir, key string) error {
 		dir: dir, metaCache: make(map[string]SessionMeta), historyPending: make(map[string]bool),
 	}
 	return s.DeleteSession(ctx, key)
+}
+
+func (s *JSONLStore) deletePublicHistoryArtifacts(key string) error {
+	if projector, ok := s.historyPublicProjector().(interface{ DeleteSession(key string) error }); ok {
+		return projector.DeleteSession(key)
+	}
+	return nil
+}
+
+var errPublicHistoryCleanupUnavailable = errors.New("public history artifact cleanup is not configured")
+
+func (s *JSONLStore) requiresPublicHistoryCleanup() bool {
+	_, ok := s.historyPublicProjector().(interface{ DeleteSession(key string) error })
+	return ok
 }

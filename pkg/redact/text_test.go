@@ -251,6 +251,24 @@ func TestText_MasksCredentials(t *testing.T) {
 			secret: "cd34efgh5678",
 		},
 		{
+			name:   "token with a dash or a slash after its first character",
+			in:     `K=a-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2 J=a/Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2 ./x`,
+			want:   `K=[REDACTED] J=[REDACTED] ./x`,
+			secret: "Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2",
+		},
+		{
+			name:   "token whose only digit ends the line",
+			in:     `K=abcdefghijklmnopqrst1`,
+			want:   `K=[REDACTED]`,
+			secret: "abcdefghijklmnopqrst1",
+		},
+		{
+			name:   "token before a dot that ends a sentence",
+			in:     `T=Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2. Depois {"c":"K=Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2.\nfim"} J=Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2.Ótimo`,
+			want:   `T=[REDACTED]. Depois {"c":"K=[REDACTED].\nfim"} J=[REDACTED].Ótimo`,
+			secret: "Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2",
+		},
+		{
 			name:   "token under a short name inside an escaped JSON command",
 			in:     `{"command":"bash -c \"DDK=0123456789abcdef0123456789abcdef curl -s https://x\""}`,
 			want:   `{"command":"bash -c \"DDK=[REDACTED] curl -s https://x\""}`,
@@ -306,8 +324,153 @@ func TestText_MasksCredentials(t *testing.T) {
 	}
 }
 
+func TestText_MasksUploadNames(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "relative path",
+			in:   `uploads/ab12cd34-Contrato_Acme_2026.pdf`,
+			want: `uploads/ab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "absolute path",
+			in:   `/home/ethos/.assistant/workspace/uploads/ab12cd34-Contrato_Acme.docx`,
+			want: `/home/ethos/.assistant/workspace/uploads/ab12cd34-[REDACTED].docx`,
+		},
+		{
+			name: "tool call preview",
+			in:   `Tool call: read_file({"path":"uploads/ab12cd34-Contrato_Acme.pdf"})`,
+			want: `Tool call: read_file({"path":"uploads/ab12cd34-[REDACTED].pdf"})`,
+		},
+		{
+			name: "shell command",
+			in:   `pdftotext uploads/ab12cd34-Contrato_Acme.pdf -`,
+			want: `pdftotext uploads/ab12cd34-[REDACTED].pdf -`,
+		},
+		{
+			name: "two uploads in one line",
+			in:   `cat uploads/ab12cd34-a_b.txt uploads/00ff00ff-c_d.csv`,
+			want: `cat uploads/ab12cd34-[REDACTED].txt uploads/00ff00ff-[REDACTED].csv`,
+		},
+		{
+			name: "no extension",
+			in:   `uploads/ab12cd34-Contrato_Acme`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "text after a dot is not an extension",
+			in:   `uploads/ab12cd34-Contrato.Acme_Sigiloso`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "only the last extension stays",
+			in:   `uploads/ab12cd34-Contrato.Acme.tar.gz`,
+			want: `uploads/ab12cd34-[REDACTED].gz`,
+		},
+		{
+			name: "masking twice changes nothing",
+			in:   `uploads/ab12cd34-[REDACTED].pdf`,
+			want: `uploads/ab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "a command run inside uploads/",
+			in:   `cd uploads && pdftotext ab12cd34-Contrato_Acme.pdf -`,
+			want: `cd uploads && pdftotext ab12cd34-[REDACTED].pdf -`,
+		},
+		{
+			name: "an exec whose cwd is uploads/",
+			in:   `{"command":"cat ab12cd34-Contrato_Acme.txt","cwd":"uploads"}`,
+			want: `{"command":"cat ab12cd34-[REDACTED].txt","cwd":"uploads"}`,
+		},
+		{
+			name: "a suffix that is part of the name",
+			in:   `uploads/ab12cd34-Laudo.Silva`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "a number after the dot",
+			in:   `uploads/ab12cd34-NF.12345`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "an extension in capitals",
+			in:   `uploads/ab12cd34-Foto_Silva.JPG`,
+			want: `uploads/ab12cd34-[REDACTED].JPG`,
+		},
+		{
+			name: "a name of digits, like a CPF",
+			in:   `uploads/ab12cd34-12345678900`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "a name like a date",
+			in:   `uploads/ab12cd34-2026-11-03`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "after an escaped newline",
+			in:   `ls:\nab12cd34-Joao_Silva.pdf`,
+			want: `ls:\nab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "every name of an ls serialized to JSON",
+			in:   `{"output":"ab12cd34-A.pdf\nab12cd34-B.pdf"}`,
+			want: `{"output":"ab12cd34-[REDACTED].pdf\nab12cd34-[REDACTED].pdf"}`,
+		},
+		{
+			name: "after an escaped tab",
+			in:   `a\tab12cd34-X.pdf`,
+			want: `a\tab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "after a percent-encoded slash",
+			in:   `uploads%2Fab12cd34-X.pdf`,
+			want: `uploads%2Fab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "after a JSON unicode escape",
+			in:   `\u003cab12cd34-X.pdf\u003e`,
+			want: `\u003cab12cd34-[REDACTED].pdf\u003e`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Text(tt.in); got != tt.want {
+				t.Fatalf("Text(%q)\n got  %q\n want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestText_MasksShellTokenWhateverTheNameEndsWith(t *testing.T) {
+	for _, name := range []string{"A", "Z", "K0", "K9", "K_"} {
+		in := name + "=Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2 ./x"
+		if got, want := Text(in), name+"=[REDACTED] ./x"; got != want {
+			t.Errorf("Text(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestText_LeavesNonSecretsAlone(t *testing.T) {
 	tests := []string{
+		`ls uploads/`,
+		`uploads/notes.txt`,
+		`uploads/ab12cd34`,
+		// A UUID names a run or a session; its tail is hex and dashes.
+		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc started`,
+		`/ws/sessions/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.jsonl`,
+		`chat 3f2c1a9e-1b2c-4d5e-8f90-123456789abc.`,
+		`media/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
+		`job 3f2c1a9e-1b2c-4d5e-8f90-123456789abc_retry`,
+		`ls:\n3f2c1a9e-1b2c-4d5e-8f90-123456789abc.jsonl`,
+		`media%2F3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
+		`{"session_id":"3f2c1a9e-1b2c-4d5e-8f90-123456789abc"}`,
+		// A hex part inside a longer name does not start the token.
+		`pod maestro-gateway-ab12cd34-x9k2p ready`,
+		`agent:cron-job-17800000-0000-4000-8000-000000000031`,
 		`curl -H "Authorization: Bearer $TOKEN" https://x`,
 		`TOKEN=$(cat work/token.txt); curl -H "Authorization: Bearer ${TOKEN}" https://x`,
 		`{"model":"x","max_tokens":100,"token_count":512}`,
@@ -331,9 +494,16 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		`WORKSPACE=/home/ethos/workspace/project2026 ./build`,
 		`NODE_OPTIONS=--max-old-space-size=4096 node x.js`,
 		`BUILD=20261103150000123456 STAGE=productionreleasecandidate make`,
-		`HOST=ip-10-0-1-23-abcdefghijk.ec2.internal curl https://x`,
+		// A value that goes on past `.`, `:` or `@` is part of a longer name.
+		`HOST=ip-10-0-1-23-abcdefghijk.amazonaws.com curl https://x`,
+		`ARCHIVE=backup-2026-11-03-abcdefgh.zip ./upload`,
+		`PKG=app-release-2026-abcdefghij.APK ./install`,
+		`DUMP=db-2026-11-03-abcdefghij.Z`,
+		`VERSION=release-candidate-abcdef2026.0`,
 		`IMAGE=registry-0123456789abcdef:5000/app docker pull "$IMAGE"`,
+		`ADDR=ip-10-0-1-23-abcdefghij:9090 ./probe`,
 		`FROM=release-bot-2026-abcdef@example.com ./notify`,
+		`== heading ==`,
 		// Lowercase names are log fields and URL parameters, not shell variables.
 		`INF tool registry.go:409 > Tool execution started tool=mcp_composio_gmail_fetch_emails_v2`,
 		`https://cdn.example.com/x.jpg?_nc_ht=scontent-gru2-1.xx&oh=00_AYBabcdef1234567890xyz`,
@@ -342,5 +512,19 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		if got := Text(in); got != in {
 			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
 		}
+	}
+}
+
+func BenchmarkText(b *testing.B) {
+	for _, line := range []string{
+		`Tool call: exec({"command":"ls -la work/2026-11-03","session_id":"pc-12"})`,
+		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc finished in 1.2s`,
+		`Tool call: read_file({"path":"uploads/ab12cd34-Contrato_Acme.pdf"})`,
+	} {
+		b.Run(line[:20], func(b *testing.B) {
+			for b.Loop() {
+				Text(line)
+			}
+		})
 	}
 }
