@@ -306,7 +306,8 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 	}
 
 	// One save: a second one could fail unseen, or write back a stale NextRunAtMS
-	// after the scheduler already claimed a job that was due at once.
+	// after the scheduler already claimed a job that was due at once. Model and the
+	// origin fields stay empty on purpose: only the platform sets them, never the agent.
 	job, err := t.cronService.AddJobWithPayload(
 		utils.AutomationName(name, message),
 		schedule,

@@ -654,8 +654,8 @@ func (cs *CronService) AddJob(
 }
 
 // AddJobWithModel is AddJob plus a platform-fixed model override for the job's
-// agent turn (Payload.Model). Kept separate so the agent-facing cron tool can
-// only reach the no-model AddJob and never pick its own model.
+// agent turn (Payload.Model). The platform sets the model; the agent-facing
+// cron tool never does (it leaves Model empty in its own AddJobWithPayload call).
 func (cs *CronService) AddJobWithModel(
 	name string,
 	schedule CronSchedule,
@@ -679,8 +679,10 @@ func (cs *CronService) AddJobWithModel(
 	)
 }
 
-// AddJobWithPayload persists platform metadata atomically before the scheduler
-// can admit the job. The agent-facing tool continues using AddJob.
+// AddJobWithPayload persists the whole payload atomically before the scheduler
+// can admit the job. The agent-facing cron tool calls it too, and keeps the
+// platform-owned fields (Model, LoopSlug, RoundKind, GoalID) empty itself: the
+// boundary is that call site, not this API.
 func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, payload CronPayload) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
