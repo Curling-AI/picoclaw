@@ -83,6 +83,62 @@ type channelWorker struct {
 	done       chan struct{}
 	mediaDone  chan struct{}
 	limiter    *rate.Limiter
+	queueMu    sync.RWMutex // Prevents sends from racing queue closure.
+	stopping   chan struct{}
+	closeOnce  sync.Once
+}
+
+func (w *channelWorker) enqueue(ctx context.Context, msg bus.OutboundMessage) bool {
+	w.queueMu.RLock()
+	defer w.queueMu.RUnlock()
+	select {
+	case <-w.stopping:
+		return false
+	case <-w.done:
+		return false
+	default:
+	}
+	select {
+	case w.queue <- msg:
+		return true
+	case <-w.stopping:
+	case <-w.done:
+	case <-ctx.Done():
+	}
+	return false
+}
+
+func (w *channelWorker) enqueueMedia(ctx context.Context, msg bus.OutboundMediaMessage) bool {
+	w.queueMu.RLock()
+	defer w.queueMu.RUnlock()
+	select {
+	case <-w.stopping:
+		return false
+	case <-w.mediaDone:
+		return false
+	default:
+	}
+	select {
+	case w.mediaQueue <- msg:
+		return true
+	case <-w.stopping:
+	case <-w.mediaDone:
+	case <-ctx.Done():
+	}
+	return false
+}
+
+func (w *channelWorker) closeQueues() {
+	w.closeOnce.Do(func() {
+		// Wake full-queue senders before waiting for their read locks.
+		if w.stopping != nil {
+			close(w.stopping)
+		}
+		w.queueMu.Lock()
+		defer w.queueMu.Unlock()
+		close(w.queue)
+		close(w.mediaQueue)
+	})
 }
 
 type Manager struct {
@@ -1416,21 +1472,15 @@ func (m *Manager) StopAll(ctx context.Context) error {
 		m.dispatchTask = nil
 	}
 
-	// Close all worker queues and wait for them to drain
+	// Reject pending enqueues before closing worker queues.
 	for _, w := range m.workers {
 		if w != nil {
-			close(w.queue)
+			w.closeQueues()
 		}
 	}
 	for _, w := range m.workers {
 		if w != nil {
 			<-w.done
-		}
-	}
-	// Close all media worker queues and wait for them to drain
-	for _, w := range m.workers {
-		if w != nil {
-			close(w.mediaQueue)
 		}
 	}
 	for _, w := range m.workers {
@@ -1480,6 +1530,7 @@ func newChannelWorker(name string, ch Channel, channelType string) *channelWorke
 		done:       make(chan struct{}),
 		mediaDone:  make(chan struct{}),
 		limiter:    rate.NewLimiter(rate.Limit(rateVal), burst),
+		stopping:   make(chan struct{}),
 	}
 }
 
@@ -1709,13 +1760,17 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 		m.bus.OutboundChan(),
 		func(msg bus.OutboundMessage) string { return outboundMessageChannel(msg) },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMessage) bool {
-			select {
-			case w.queue <- msg:
-				m.publishOutboundQueued(outboundMessageChannel(msg), msg)
+			if !w.enqueue(ctx, msg) {
+				if ctx.Err() != nil {
+					return false
+				}
+				logger.WarnCF("channels", "Dropped outbound message for stopped worker", map[string]any{
+					"channel": outboundMessageChannel(msg),
+				})
 				return true
-			case <-ctx.Done():
-				return false
 			}
+			m.publishOutboundQueued(outboundMessageChannel(msg), msg)
+			return true
 		},
 		"Outbound dispatcher started",
 		"Outbound dispatcher stopped",
@@ -1730,13 +1785,17 @@ func (m *Manager) dispatchOutboundMedia(ctx context.Context) {
 		m.bus.OutboundMediaChan(),
 		func(msg bus.OutboundMediaMessage) string { return outboundMediaChannel(msg) },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMediaMessage) bool {
-			select {
-			case w.mediaQueue <- msg:
-				m.publishOutboundMediaQueued(outboundMediaChannel(msg), msg)
+			if !w.enqueueMedia(ctx, msg) {
+				if ctx.Err() != nil {
+					return false
+				}
+				logger.WarnCF("channels", "Dropped outbound media message for stopped worker", map[string]any{
+					"channel": outboundMediaChannel(msg),
+				})
 				return true
-			case <-ctx.Done():
-				return false
 			}
+			m.publishOutboundMediaQueued(outboundMediaChannel(msg), msg)
+			return true
 		},
 		"Outbound media dispatcher started",
 		"Outbound media dispatcher stopped",
@@ -2067,9 +2126,8 @@ func (m *Manager) unregisterChannelLocked(name string) {
 		m.unregisterChannelHTTPHandler(name, ch)
 	}
 	if w, ok := m.workers[name]; ok && w != nil {
-		close(w.queue)
+		w.closeQueues()
 		<-w.done
-		close(w.mediaQueue)
 		<-w.mediaDone
 	}
 	delete(m.workers, name)
@@ -2168,13 +2226,14 @@ func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, conten
 	msg = bus.NormalizeOutboundMessage(msg)
 
 	if wExists && w != nil {
-		select {
-		case w.queue <- msg:
+		if w.enqueue(ctx, msg) {
 			m.publishOutboundQueued(channelName, msg)
 			return nil
-		case <-ctx.Done():
-			return ctx.Err()
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("channel %s has no active worker", channelName)
 	}
 
 	// Fallback: direct send (should not happen)

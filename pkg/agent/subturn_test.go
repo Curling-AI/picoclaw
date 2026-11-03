@@ -1195,6 +1195,69 @@ func TestInterruptHard_Alias(t *testing.T) {
 	_ = info // turn may still be in map briefly; hard abort sets isFinished on the state
 }
 
+func TestFinishKeepsPendingResultsOpenAndReleasesBlockedSender(t *testing.T) {
+	al, _, _, _, cleanup := newTestAgentLoop(t) //nolint:dogsled
+	defer cleanup()
+	orphans, closeEvents := subscribeRuntimeEventsForTest(t, al, 4, runtimeevents.KindAgentSubTurnOrphan)
+	defer closeEvents()
+	parent := &turnState{turnID: "finish-result-lifecycle", pendingResults: make(chan *tools.ToolResult, 1)}
+	parent.pendingResults <- &tools.ToolResult{ForLLM: "already accepted"}
+	senderDone := make(chan struct{})
+	go func() {
+		defer close(senderDone)
+		deliverSubTurnResult(al, parent, "blocked-child", &tools.ToolResult{ForLLM: "blocked"})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		parent.mu.Lock()
+		waiting := parent.finishedChan != nil
+		parent.mu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sender did not enter the full-channel select")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	parent.Finish(false)
+	select {
+	case <-parent.Finished():
+	default:
+		t.Fatal("Finish did not close its completion signal")
+	}
+	select {
+	case <-senderDone:
+	case <-time.After(time.Second):
+		t.Fatal("Finish did not release the blocked sender")
+	}
+	if result, ok := <-parent.pendingResults; !ok || result.ForLLM != "already accepted" {
+		t.Fatal("Finish discarded an accepted result")
+	}
+	select {
+	case _, ok := <-parent.pendingResults:
+		if !ok {
+			t.Fatal("Finish closed the data channel")
+		}
+		t.Fatal("blocked result was delivered after Finish")
+	default:
+	}
+	deliverSubTurnResult(al, parent, "late-child", &tools.ToolResult{ForLLM: "late"})
+	if len(parent.pendingResults) != 0 {
+		t.Fatal("finished parent accepted a late result")
+	}
+	for range 2 {
+		select {
+		case event := <-orphans:
+			if event.Kind != runtimeevents.KindAgentSubTurnOrphan {
+				t.Fatal("expected an orphan result")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("blocked or late result did not emit an orphan event")
+		}
+	}
+}
+
 // TestFinish_ConcurrentCalls verifies that calling Finish() concurrently from multiple
 // goroutines is safe and doesn't cause panics or double-close errors.
 func TestFinish_ConcurrentCalls(t *testing.T) {
@@ -1315,19 +1378,13 @@ func TestDeliverSubTurnResult_RaceWithFinish(t *testing.T) {
 
 	t.Logf("Delivered: %d, Orphan: %d, Total: %d", finalDelivered, finalOrphan, finalDelivered+finalOrphan)
 
-	// With the new drainPendingResults behavior, the total events may be >= numResults
-	// because Finish() drains remaining results from the channel and emits them as orphans.
-	// So we expect:
-	// - Some results were delivered successfully (before Finish())
-	// - Some results became orphans (after Finish() or channel full)
-	// - Some results were in the channel when Finish() was called and got drained as orphans
-	// The total should be at least numResults (could be more due to drain)
+	// Every delivery attempt must emit a delivered or orphan event.
 	if finalDelivered+finalOrphan < numResults {
 		t.Errorf("Expected at least %d total events, got %d delivered + %d orphan = %d",
 			numResults, finalDelivered, finalOrphan, finalDelivered+finalOrphan)
 	}
 
-	// Should have at least some orphan results (those that arrived after Finish() or were drained)
+	// The full buffer leaves some senders waiting for Finish.
 	if finalOrphan == 0 {
 		t.Error("Expected at least some orphan results after Finish()")
 	}

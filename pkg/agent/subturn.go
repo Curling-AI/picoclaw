@@ -641,19 +641,18 @@ func timeLimitSubTurnError(limit time.Duration, iterations int) error {
 //
 // Delivery behavior:
 //   - If parent turn is still running: attempts to deliver to pendingResults channel
-//   - If channel is full: emits agent.subturn.orphan (result is lost from channel but tracked)
+//   - If channel is full: waits for a receiver or parent completion
 //   - If parent turn has finished: emits agent.subturn.orphan (late arrival)
 //
 // Thread safety:
 //   - Reads parent state under lock, then releases lock before channel send
-//   - Small race window exists but is acceptable (worst case: result becomes orphan)
+//   - Finished signals completion; pendingResults stays open while children reference it
 //
 // Event emissions:
 //   - agent.subturn.result_delivered: successful delivery to channel
-//   - agent.subturn.orphan: delivery failed (parent finished or channel full)
+//   - agent.subturn.orphan: parent finished before delivery or delivery panicked
 func deliverSubTurnResult(al *AgentLoop, parentTS *turnState, childID string, result *tools.ToolResult) {
-	// Let GC clean up the pendingResults channel; parent Finish will no longer close it.
-	// We use defer/recover to catch any unlikely channel panics if it were ever closed.
+	// Recover unexpected delivery panics so asynchronous cleanup can continue.
 	defer func() {
 		if r := recover(); r != nil {
 			logger.RecoverPanicNoExit(r)
