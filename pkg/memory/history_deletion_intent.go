@@ -194,10 +194,10 @@ func historyDeletionFingerprint(intent *historyDeletionIntent) string {
 }
 
 func (s *JSONLStore) historyDeletionSourcePaths(key string) []string {
-	return []string{
+	return append([]string{
 		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.historyDecisionPath(key),
 		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
-	}
+	}, s.publicIndexFiles(key)...)
 }
 
 func (s *JSONLStore) validHistoryDeletion(key string, intent *historyDeletionIntent) error {
@@ -288,8 +288,12 @@ func (s *JSONLStore) validHistoryDeletion(key string, intent *historyDeletionInt
 	if !private && !(intent.PublicMediaCleanup && ownedSource) {
 		return ErrContentIdentityUnavailable
 	}
+	optional := make(map[string]bool)
+	for _, path := range s.publicIndexFiles(key) {
+		optional[filepath.Base(path)] = true
+	}
 	for name := range sources {
-		if !seen[name] {
+		if !seen[name] && !optional[name] {
 			if name == filepath.Base(s.publicHistoryPath(intent.Key)) {
 				if _, err := os.Lstat(s.publicHistoryPath(intent.Key)); errors.Is(err, os.ErrNotExist) {
 					continue
@@ -369,6 +373,9 @@ func (s *JSONLStore) recoverHistoryDeletion(ctx context.Context, key string, dat
 		return err
 	}
 	if err := s.validHistoryDeletion(key, record.Deletion); err != nil {
+		return err
+	}
+	if err := s.checkPublicIndexDeletion(ctx, key, record.Deletion.Files); err != nil {
 		return err
 	}
 	intent := record.Deletion

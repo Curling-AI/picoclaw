@@ -102,7 +102,7 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 	// Keep the established launcher deletion order: remove the listing before
 	// the payload, then retire every proof and journal belonging to this source.
 	for _, path := range []string{
-		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key),
+		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.publicIndexPath(key), s.publicIndexPreparationPath(key), s.publicIndexBuildingPath(key), s.historyRecoveryPath(key), s.historyDecisionPath(key),
 		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
 	} {
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {

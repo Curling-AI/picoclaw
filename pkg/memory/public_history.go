@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
 
 const (
@@ -28,6 +30,7 @@ var ErrPublicHistoryCoverage = errors.New("public history coverage unavailable")
 // or provider requests. AnchorID binds a supplement to an exact occurrence,
 // including that occurrence's order proof, rather than a mutable array index.
 type PublicHistoryEntry struct {
+	SourceDigest         string            `json:"sourceDigest,omitempty"`
 	Ref                  *ContentRef       `json:"ref,omitempty"`
 	AnchorRef            *ContentRef       `json:"anchorRef,omitempty"`
 	BoundaryID           string            `json:"boundaryId,omitempty"`
@@ -100,6 +103,9 @@ func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, star
 			Message: public,
 			Order:   messageHistoryOrder(message),
 		}
+		if entry.Order.Valid() {
+			entry.SourceDigest = publicSourceDigest(message)
+		}
 		entry.Ref = publicContentRef(meta, start+index+1)
 		if entry.Order == (HistoryOrderProof{}) && meta.HistoryOrderVersion == HistoryOrderVersion {
 			entry.LegacyBeforeStreamID = meta.HistoryStreamID
@@ -107,6 +113,14 @@ func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, star
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+func publicSourceDigest(message providers.Message) string {
+	createdAt := ""
+	if message.CreatedAt != nil {
+		createdAt = message.CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return messageutil.SourceContentDigest(createdAt, message.Content)
 }
 
 func (s *JSONLStore) readPublicEntries(key string, meta SessionMeta) ([]PublicHistoryEntry, error) {
@@ -149,6 +163,7 @@ func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicH
 		entries = append([]PublicHistoryEntry(nil), entries...)
 		for i := range entries {
 			entries[i].Order = HistoryOrderProof{}
+			entries[i].SourceDigest = ""
 			entries[i].AnchorOrder = HistoryOrderProof{}
 			entries[i].LegacyBeforeStreamID = ""
 		}
@@ -214,6 +229,9 @@ func encodePublicEntries(entries []PublicHistoryEntry) ([]byte, error) {
 }
 
 func validPublicEntry(entry PublicHistoryEntry) bool {
+	if entry.SourceDigest != "" {
+		return false
+	}
 	public, ok := publicHistoryMessage(entry.Message)
 	if !ok || entry.BoundaryID != "" || (entry.Ref != nil && !entry.Ref.Valid()) ||
 		(entry.AnchorRef != nil && !entry.AnchorRef.Valid()) || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||

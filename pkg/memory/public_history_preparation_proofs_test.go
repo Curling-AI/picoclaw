@@ -86,6 +86,9 @@ func TestPublicPreparationPreservesDisplayWithoutReattestingIndependentProofs(t 
 				t.Fatal("display preparation rewrote its canonical source", err)
 			}
 			if proof == "order-missing" {
+				if persisted[0].SourceDigest != "" {
+					t.Fatal("preparation minted a raw receipt binding without order proof")
+				}
 				if persisted[0].LegacyBeforeStreamID != "" {
 					t.Fatal("preparation minted a legacy order boundary without proof")
 				}

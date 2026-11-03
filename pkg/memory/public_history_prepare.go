@@ -107,7 +107,7 @@ func (s *JSONLStore) PreparePublicHistory(
 		return PublicHistoryPreparationResult{}, ErrPublicHistoryCoverage
 	}
 	if meta.PublicHistoryPreparation == nil {
-		return preparationResult(canonical, meta), nil
+		return s.preparePublicIndexResult(ctx, canonical, meta)
 	}
 	state := *meta.PublicHistoryPreparation
 	if state.FileGeneration != meta.HistoryFileGeneration || state.Generation != meta.HistoryGeneration ||
@@ -163,7 +163,7 @@ func (s *JSONLStore) PreparePublicHistory(
 	if operationErr5 := s.commitPublicChange(ctx, canonical, meta, change); operationErr5 != nil {
 		return PublicHistoryPreparationResult{}, operationErr5
 	}
-	return preparationResult(canonical, meta), nil
+	return s.publicPreparationResult(ctx, canonical, meta)
 }
 
 func (s *JSONLStore) beginPublicPreparation(
@@ -210,7 +210,7 @@ func (s *JSONLStore) beginPublicPreparation(
 	if operationErr7 := s.commitPublicChange(ctx, key, meta, change); operationErr7 != nil {
 		return PublicHistoryPreparationResult{}, operationErr7
 	}
-	return preparationResult(key, meta), nil
+	return s.publicPreparationResult(ctx, key, meta)
 }
 
 func appendPreparedEntries(meta SessionMeta, entries []PublicHistoryEntry) (publicHistoryChange, error) {
@@ -348,6 +348,9 @@ func (s *JSONLStore) preparedPublicEntry(
 	entries := publicHistoryEntriesAt([]providers.Message{message}, meta, int(state.Line))
 	if len(entries) == 0 {
 		return PublicHistoryEntry{}, false, nil
+	}
+	if order.Valid() {
+		entries[0].SourceDigest = publicSourceDigest(record.Message)
 	}
 	if meta.publicRefUnavailable {
 		entries[0].Ref = nil

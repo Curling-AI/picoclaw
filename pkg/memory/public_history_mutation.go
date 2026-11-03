@@ -13,12 +13,14 @@ import (
 )
 
 type publicHistoryRecovery struct {
-	Offset  *int64 `json:"offset,omitempty"`
-	Data    []byte `json:"data,omitempty"`
-	Existed bool   `json:"existed,omitempty"`
+	Index   *publicIndexRecovery `json:"index,omitempty"`
+	Offset  *int64               `json:"offset,omitempty"`
+	Data    []byte               `json:"data,omitempty"`
+	Existed bool                 `json:"existed,omitempty"`
 }
 
 type publicHistoryChange struct {
+	Index    *publicIndexChange
 	Data     []byte
 	Recovery *publicHistoryRecovery
 }
@@ -102,7 +104,12 @@ func (s *JSONLStore) preparePublicAppend(
 	next.PublicHistoryBytes = offset + int64(len(data))
 	next.PublicHistoryCount = original.PublicHistoryCount + int64(len(newEntries))
 	next.PublicHistoryRevision++
-	return publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true}}, nil
+	return s.preparePublicIndex(
+		key,
+		original,
+		*next,
+		publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true}},
+	)
 }
 
 func (s *JSONLStore) preparePublicRewrite(
@@ -157,8 +164,8 @@ func (s *JSONLStore) preparePublicRewrite(
 					return publicHistoryChange{}, &publicArtifactVerificationError{cause: verifyErr}
 				}
 			}
-			projected.HistoryID, projected.HistoryRunID = message.HistoryID, message.HistoryRunID
-			old[index] = messageWithHistoryOrder(projected, messageHistoryOrder(message))
+			// Keep the raw receipt body separate from its immutable public projection.
+			old[index].HistoryPublicMessage = &projected
 		}
 		if original.ContentIdentity != nil && !original.ContentIdentity.Unavailable {
 			if err := s.hydrateContentStorage(context.Background(), key, &original, true, false); err != nil {
@@ -228,17 +235,29 @@ func (s *JSONLStore) replacePublicEntries(
 	next.PublicHistoryBytes = int64(len(data))
 	next.PublicHistoryCount = int64(len(entries))
 	next.PublicHistoryRevision++
-	if existed && bytes.Equal(old, data) {
+	original := SessionMeta{}
+	if existed {
+		var metaErr error
+		original, metaErr = s.readMeta(key)
+		if metaErr != nil {
+			return publicHistoryChange{}, metaErr
+		}
+	}
+	if existed && bytes.Equal(old, data) && original.PublicHistoryVersion == PublicHistoryVersion &&
+		original.PublicHistoryDigest == next.PublicHistoryDigest {
+		// An unchanged public view keeps its index and cursors even when model history compacted.
+		next.PublicHistoryGeneration = original.PublicHistoryGeneration
+		next.PublicHistoryRevision = original.PublicHistoryRevision
 		return publicHistoryChange{}, nil
 	}
-	if existed && bytes.HasPrefix(data, old) {
+	if existed && bytes.HasPrefix(data, old) && original.PublicHistoryGeneration == next.PublicHistoryGeneration {
 		offset := int64(len(old))
-		return publicHistoryChange{
-			Data:     data[len(old):],
-			Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true},
-		}, nil
+		return s.preparePublicIndex(key, original, *next, publicHistoryChange{
+			Data: data[len(old):], Recovery: &publicHistoryRecovery{Offset: &offset, Existed: true},
+		})
 	}
-	return publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}}, nil
+	return s.preparePublicIndex(key, SessionMeta{}, *next,
+		publicHistoryChange{Data: data, Recovery: &publicHistoryRecovery{Data: old, Existed: existed}})
 }
 
 func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (resultErr error) {
@@ -247,7 +266,10 @@ func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (
 	}
 	path := s.publicHistoryPath(key)
 	if change.Recovery.Offset == nil {
-		return s.writeSessionFile(path, change.Data, 0o600)
+		if err := s.writeSessionFile(path, change.Data, 0o600); err != nil {
+			return err
+		}
+		return s.writePublicIndex(key, change.Index)
 	}
 	file, fileErr := os.OpenFile(filepath.Clean(path), os.O_WRONLY, 0o600)
 	if fileErr != nil {
@@ -270,12 +292,15 @@ func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (
 	if operationErr4 := file.Sync(); operationErr4 != nil {
 		return operationErr4
 	}
-	return nil
+	return s.writePublicIndex(key, change.Index)
 }
 
 func (s *JSONLStore) restorePublicHistory(key string, recovery *publicHistoryRecovery) (resultErr error) {
 	if recovery == nil {
 		return nil
+	}
+	if err := s.restorePublicIndex(key, recovery.Index); err != nil {
+		return err
 	}
 	path := s.publicHistoryPath(key)
 	if recovery.Offset != nil {
@@ -315,13 +340,20 @@ func (s *JSONLStore) commitPublicChange(
 	if oldErr9 != nil {
 		return oldErr9
 	}
+	indexed := change
+	if indexed.Index == nil {
+		indexed, oldErr9 = s.preparePublicIndex(key, old, next, change)
+		if oldErr9 != nil {
+			return oldErr9
+		}
+	}
 	if operationErr10 := s.beginHistoryWrite(
 		ctx, key,
-		historyWriteRecovery{Meta: old, Next: next, PublicOnly: true, Public: change.Recovery},
+		historyWriteRecovery{Meta: old, Next: next, PublicOnly: true, Public: indexed.Recovery},
 	); operationErr10 != nil {
 		return operationErr10
 	}
-	oldErr9 = s.writePublicChange(key, change)
+	oldErr9 = s.writePublicChange(key, indexed)
 	if oldErr9 == nil {
 		oldErr9 = s.writeMeta(key, next)
 	}
