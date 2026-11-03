@@ -16,7 +16,7 @@ import (
 // independent Order or ContentRef witnesses as a prerequisite for its body.
 // IDs come only from source locators; this function does not issue receipts.
 func (s *JSONLStore) readPublicSource(key string, meta SessionMeta, skip int) ([]providers.Message, error) {
-	messages, _, err := s.readPublicSourceLines(key, meta, skip)
+	messages, _, _, err := s.readPublicSourceLines(key, meta, skip, true)
 	return messages, err
 }
 
@@ -24,23 +24,25 @@ func (s *JSONLStore) readPublicSourceLines(
 	key string,
 	meta SessionMeta,
 	skip int,
-) (messages []providers.Message, lines map[string]int, resultErr error) {
+	allowFilteredActive bool,
+) (messages []providers.Message, lines map[string]int, filtered bool, resultErr error) {
+	ensureHistoryGeneration(&meta, key)
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) && meta.Count == 0 {
-		return nil, nil, nil
+		return nil, nil, false, nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
 	var reader io.Reader = file
 	if meta.HistoryBytes != nil {
 		info, statErr := file.Stat()
 		if statErr != nil {
-			return nil, nil, statErr
+			return nil, nil, false, statErr
 		}
 		if *meta.HistoryBytes < 0 || *meta.HistoryBytes > info.Size() {
-			return nil, nil, ErrPublicHistoryCoverage
+			return nil, nil, false, ErrPublicHistoryCoverage
 		}
 		reader = io.LimitReader(file, *meta.HistoryBytes)
 	}
@@ -60,7 +62,17 @@ func (s *JSONLStore) readPublicSourceLines(
 		}
 		var message providers.Message
 		if json.Unmarshal(raw, &message) != nil {
+			// An explicit model rewrite keeps its established filtering of
+			// invalid active rows. A skipped row has no such removal intent:
+			// losing it would silently collect unproved historical display.
+			if !allowFilteredActive || line <= meta.Skip {
+				return nil, nil, false, ErrPublicHistoryCoverage
+			}
+			filtered = true
 			continue
+		}
+		if !allowFilteredActive && line <= meta.Skip && !historyLineageMatches(raw, meta, key) {
+			return nil, nil, false, ErrPublicHistoryCoverage
 		}
 		if _, visible := publicHistoryMessage(message); !visible {
 			continue
@@ -75,10 +87,10 @@ func (s *JSONLStore) readPublicSourceLines(
 		messages = append(messages, message)
 	}
 	if scanner.Err() != nil {
-		return nil, nil, scanner.Err()
+		return nil, nil, false, scanner.Err()
 	}
 	if line != meta.Count {
-		return nil, nil, ErrPublicHistoryCoverage
+		return nil, nil, false, ErrPublicHistoryCoverage
 	}
-	return messages, lines, nil
+	return messages, lines, filtered, nil
 }

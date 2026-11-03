@@ -3,6 +3,7 @@ package memory
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -129,5 +130,154 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 	)
 	if !errors.Is(err, ErrPublicHistoryCoverage) {
 		t.Fatalf("import forged producer call proof: %v", err)
+	}
+}
+
+func TestPublicHistoryCallSurvivesPhysicalCompactionBeforeIdentityInitialization(t *testing.T) {
+	const call = "pc-00112233445566778899aabb"
+	store, key := newTestStore(t), "agent:web:call-before-identity"
+	if err := store.AddMessage(t.Context(), key, "user", "prefix"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddFullMessage(
+		t.Context(),
+		key,
+		providers.Message{
+			Role:          "assistant",
+			Content:       "retained reply",
+			HistoryCallID: call,
+			LLMCall:       &providers.LLMCall{RequestID: call},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ReadPublicHistory(t.Context(), key)
+	if err != nil || len(before.Entries) != 2 || before.Entries[1].CallID != call {
+		t.Fatal("fixture lacks native producer provenance", before, err)
+	}
+	if err = store.TruncateHistory(t.Context(), key, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Compact(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.ReadPublicHistory(t.Context(), key)
+	if err != nil || len(after.Entries) != 2 || after.Entries[1].ID != before.Entries[1].ID ||
+		after.Entries[1].CallID != call ||
+		after.Entries[1].Order != before.Entries[1].Order {
+		t.Fatal("physical compaction lost native provenance of its retained occurrence", after, err)
+	}
+	initializedContent(t, store, key)
+	promoted, err := store.ReadPublicHistory(t.Context(), key)
+	if err != nil || promoted.Entries[1].Ref == nil || !promoted.Entries[1].Ref.Valid() ||
+		promoted.Entries[1].CallID != call {
+		t.Fatal("later content identity could not bind the native producer occurrence", promoted, err)
+	}
+}
+
+func TestPublicHistoryCallSurvivesSuffixRollbackWithoutReissuingIdentity(t *testing.T) {
+	const call = "pc-00112233445566778899aabb"
+	store, key := newTestStore(t), "agent:web:call-suffix-rollback"
+	ctx := providers.WithHistoryRun(t.Context(), uuid.NewString())
+	if err := store.AddFullMessage(ctx, key, providers.Message{
+		Role:          "assistant",
+		Content:       "retained reply",
+		HistoryCallID: call,
+		LLMCall:       &providers.LLMCall{RequestID: call},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddMessage(ctx, key, "user", "aborted next prompt"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.ReadPublicHistory(ctx, key)
+	if err != nil || len(before.Entries) != 2 || before.Entries[0].CallID != call ||
+		before.Entries[0].ID == "" {
+		t.Fatal("fixture lacks native producer provenance", before, err)
+	}
+	originalMeta, err := store.readMeta(key)
+	if err != nil || originalMeta.HistoryGeneration == "" {
+		t.Fatal("fixture lacks a source generation", originalMeta, err)
+	}
+	messages, err := store.GetHistory(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.SetHistory(ctx, key, messages[:1]); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.ReadPublicHistory(ctx, key)
+	if err != nil || len(after.Entries) != 1 || after.Entries[0].ID != before.Entries[0].ID ||
+		after.Entries[0].Order != before.Entries[0].Order || after.Entries[0].CallID != call {
+		t.Fatal("suffix rollback changed the retained occurrence or its native producer proof", after, err)
+	}
+	retainedMeta, err := store.readMeta(key)
+	if err != nil || retainedMeta.HistoryGeneration != originalMeta.HistoryGeneration {
+		t.Fatal("suffix rollback reissued the retained source generation", retainedMeta, err)
+	}
+}
+
+func TestPublicHistoryDisplayRewriteDoesNotTransferCallToEditsOrAnotherOccurrence(t *testing.T) {
+	for _, change := range []string{"edit", "occurrence", "generation"} {
+		t.Run(change, func(t *testing.T) {
+			const call = "pc-00112233445566778899aabb"
+			store, key := newTestStore(t), "agent:web:call-retirement"
+			expectedCount, nativeIndex := 1, 0
+			if change == "generation" {
+				if err := store.AddMessage(t.Context(), key, "user", "removed prefix"); err != nil {
+					t.Fatal(err)
+				}
+				expectedCount, nativeIndex = 2, 1
+			}
+			if err := store.AddFullMessage(
+				t.Context(),
+				key,
+				providers.Message{
+					Role:          "assistant",
+					Content:       "native reply",
+					HistoryCallID: call,
+					LLMCall:       &providers.LLMCall{RequestID: call},
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.ReadPublicHistory(t.Context(), key)
+			if err != nil || len(before.Entries) != expectedCount || before.Entries[nativeIndex].CallID != call {
+				t.Fatal("fixture lacks native producer provenance", before, err)
+			}
+			originalMeta, err := store.readMeta(key)
+			if err != nil || originalMeta.HistoryGeneration == "" {
+				t.Fatal("fixture lacks a source generation", originalMeta, err)
+			}
+			messages, err := store.GetHistory(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change == "generation" {
+				messages = messages[1:]
+			} else if change == "edit" {
+				messages[0].Content = "edited reply"
+			} else {
+				messages[0].HistoryID = uuid.NewString()
+				changedAt := messages[0].CreatedAt.Add(time.Second)
+				messages[0].CreatedAt = &changedAt
+			}
+			messages[0].HistoryCallID = call
+			if err = store.SetHistory(t.Context(), key, messages); err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.ReadPublicHistory(t.Context(), key)
+			if err != nil || len(after.Entries) != 1 || after.Entries[0].ID != messages[0].HistoryID ||
+				after.Entries[0].CallID != "" {
+				t.Fatal("rewrite transferred a previous call to changed content or another occurrence", after, err)
+			}
+			if change == "generation" {
+				rewrittenMeta, readErr := store.readMeta(key)
+				if readErr != nil || rewrittenMeta.HistoryGeneration == "" ||
+					rewrittenMeta.HistoryGeneration == originalMeta.HistoryGeneration {
+					t.Fatal("fixture did not replace the source generation", rewrittenMeta, readErr)
+				}
+			}
+		})
 	}
 }

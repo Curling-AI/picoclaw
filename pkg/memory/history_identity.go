@@ -87,7 +87,9 @@ func historyLineageMatches(data []byte, meta SessionMeta, key string) bool {
 		return false
 	}
 	if record.Generation == "" && record.FileGeneration == "" {
-		return meta.HistoryEpoch == 0 && meta.HistoryFileEpoch == 0 &&
+		// FileEpoch also advances for an exact raw suffix cut. The legacy
+		// generation still fences every rewrite that actually moved rows.
+		return meta.HistoryEpoch == 0 &&
 			meta.HistoryFileGeneration == legacyHistoryGeneration(key)
 	}
 	return record.Generation == meta.HistoryGeneration && record.FileGeneration == meta.HistoryFileGeneration

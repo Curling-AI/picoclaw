@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 )
 
@@ -41,6 +42,29 @@ func (s *JSONLStore) AcknowledgeHistoryContentMutation(
 	image, _, err := s.contentMutationImage(ctx, key)
 	if err != nil {
 		return err
+	}
+	if pending.Before.Skip > 0 {
+		before, beforeErr := s.readContentPreimage(
+			ctx,
+			key,
+			state.DomainID,
+			pending.Transition.MutationID,
+			pending.Before.Image,
+		)
+		if beforeErr != nil {
+			return beforeErr
+		}
+		prefixMeta := copyMeta(image.Meta)
+		prefixMeta.Skip = pending.Before.Skip
+		if coverageErr := s.verifyPublicPrefixReader(
+			ctx,
+			key,
+			prefixMeta,
+			bytes.NewReader(before),
+			false,
+		); coverageErr != nil {
+			return coverageErr
+		}
 	}
 	next := copyMeta(image.Meta)
 	next.ContentIdentity.Last = &contentAcknowledged{Mutation: &contentMutationAcknowledged{

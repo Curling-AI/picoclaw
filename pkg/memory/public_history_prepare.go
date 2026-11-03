@@ -154,7 +154,7 @@ func (s *JSONLStore) PreparePublicHistory(
 			next.Count = int64(meta.Count)
 		} else {
 			meta.PublicHistoryPreparation = nil
-			meta.PublicHistoryComplete = next.Prefix == 0
+			meta.PublicHistoryComplete = meta.PublicHistoryComplete || next.Prefix == 0
 		}
 	}
 	if meta.PublicHistoryPreparation != nil {
