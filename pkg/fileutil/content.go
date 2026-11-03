@@ -174,7 +174,10 @@ func writeFileAtomicInRootWith(
 				if err != nil {
 					err = errors.Join(err, fmt.Errorf("remove temp file: %w", cleanupErr))
 				} else {
-					slog.Warn("could not remove committed write's temporary file", "file", temporary, "error", cleanupErr)
+					slog.Warn(
+						"could not remove committed write's temporary file",
+						"file", temporary, "error", cleanupErr,
+					)
 				}
 			}
 		}
