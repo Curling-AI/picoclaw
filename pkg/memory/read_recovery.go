@@ -12,8 +12,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const maxReadRecoveryBytes = 8 << 20
-const maxReadRecoveryRecords = 1000
+const (
+	maxReadRecoveryBytes   = 8 << 20
+	maxReadRecoveryRecords = 1000
+)
 
 // ReadOrderRecovery proves the entire original stream, including skipped rows.
 // Missing replaced/collected occurrences make this proof unavailable.
@@ -49,9 +51,14 @@ func (s *JSONLStore) requireNoReadRecovery(key string) error {
 	return err
 }
 
-// The durable gate survives a lost callback/restart. Only the controller which
-// has finalized the database attempt may release it; readers remain available.
-func (s *JSONLStore) WithReadOrderRecovery(ctx context.Context, key string, request ReadOrderRecoveryRequest, apply func(ReadOrderRecovery) error) error {
+// WithReadOrderRecovery keeps its durable gate across lost callbacks/restarts
+// until the controller finalizes the database attempt; readers remain available.
+func (s *JSONLStore) WithReadOrderRecovery(
+	ctx context.Context,
+	key string,
+	request ReadOrderRecoveryRequest,
+	apply func(ReadOrderRecovery) error,
+) error {
 	attempt := request.AttemptID
 	if uuid.Validate(attempt) != nil || attempt == uuid.Nil.String() || request.Admit == nil || apply == nil {
 		return ErrHistoryOrderUnavailable
@@ -82,21 +89,21 @@ func (s *JSONLStore) WithReadOrderRecovery(ctx context.Context, key string, requ
 			return ErrHistoryRecoveryRequired
 		}
 	case errors.Is(err, os.ErrNotExist):
-		encoded, err := json.Marshal(gate)
-		if err != nil {
-			return err
+		encoded, encodeErr := json.Marshal(gate)
+		if encodeErr != nil {
+			return encodeErr
 		}
-		if err := s.writeSessionFile(s.readRecoveryPath(canonical), encoded, 0o600); err != nil {
-			return err
+		if writeErr := s.writeSessionFile(s.readRecoveryPath(canonical), encoded, 0o600); writeErr != nil {
+			return writeErr
 		}
 	default:
 		return err
 	}
-	if err := s.syncHistoryFile(s.readRecoveryPath(canonical)); err != nil {
-		return err
+	if syncErr := s.syncHistoryFile(s.readRecoveryPath(canonical)); syncErr != nil {
+		return syncErr
 	}
-	if err := apply(proof); err != nil {
-		return err
+	if applyErr := apply(proof); applyErr != nil {
+		return applyErr
 	}
 	return s.releaseReadOrderRecovery(canonical, attempt)
 }
@@ -126,8 +133,8 @@ func (s *JSONLStore) releaseReadOrderRecovery(key, attempt string) error {
 	if json.Unmarshal(data, &gate) != nil || gate.AttemptID != attempt {
 		return ErrHistoryRecoveryRequired
 	}
-	if err := os.Remove(s.readRecoveryPath(key)); err != nil {
-		return err
+	if removeErr := os.Remove(s.readRecoveryPath(key)); removeErr != nil {
+		return removeErr
 	}
 	dir, err := os.Open(s.dir)
 	if err != nil {
@@ -156,20 +163,23 @@ func (s *JSONLStore) readOrderRecoveryProof(ctx context.Context, key string) (Re
 		return ReadOrderRecovery{}, err
 	}
 	meta.HistoryRecoveryRequired = meta.HistoryRecoveryRequired || marked
-	if err := validateCanonicalHistoryKey(key, key, meta); err != nil {
-		return ReadOrderRecovery{}, err
+	if keyErr := validateCanonicalHistoryKey(key, key, meta); keyErr != nil {
+		return ReadOrderRecovery{}, keyErr
 	}
-	if err := s.probeHistoryRecoveryMarker(key, &meta); err != nil {
-		return ReadOrderRecovery{}, err
+	if markerErr := s.probeHistoryRecoveryMarker(key, &meta); markerErr != nil {
+		return ReadOrderRecovery{}, markerErr
 	}
-	if err := s.probeHistoryOrderWitness(key, &meta); err != nil {
-		return ReadOrderRecovery{}, err
+	if witnessErr := s.probeHistoryOrderWitness(key, &meta); witnessErr != nil {
+		return ReadOrderRecovery{}, witnessErr
 	}
-	if err := validateHistoryOrderState(meta); err != nil {
-		return ReadOrderRecovery{}, err
+	if stateErr := validateHistoryOrderState(meta); stateErr != nil {
+		return ReadOrderRecovery{}, stateErr
 	}
 	// shortcut: a complete proof must fit the existing 1000-record/8-MiB audit window; use streaming verification for larger sources.
-	if meta.HistoryOrderVersion != HistoryOrderVersion || meta.HistorySequence == 0 || meta.Count > maxReadRecoveryRecords || meta.HistoryBytes == nil || *meta.HistoryBytes > maxReadRecoveryBytes {
+	if meta.HistoryOrderVersion != HistoryOrderVersion || meta.HistorySequence == 0 ||
+		meta.Count > maxReadRecoveryRecords ||
+		meta.HistoryBytes == nil ||
+		*meta.HistoryBytes > maxReadRecoveryBytes {
 		return ReadOrderRecovery{}, ErrHistoryOrderUnavailable
 	}
 	messages, committedEnd, err := s.readCommittedHistoryOrderOrigins(key, meta, 0, true)
@@ -179,10 +189,14 @@ func (s *JSONLStore) readOrderRecoveryProof(ctx context.Context, key string) (Re
 	if committedEnd != *meta.HistoryBytes {
 		return ReadOrderRecovery{}, ErrHistoryOrderUnavailable
 	}
-	if err := validateHistoryMessageOrders(messages, meta); err != nil {
-		return ReadOrderRecovery{}, err
+	if orderErr := validateHistoryMessageOrders(messages, meta); orderErr != nil {
+		return ReadOrderRecovery{}, orderErr
 	}
-	proof := ReadOrderRecovery{StreamID: meta.HistoryStreamID, Frontier: meta.HistorySequence, Messages: make([]CommittedHistoryMessage, 0, len(messages))}
+	proof := ReadOrderRecovery{
+		StreamID: meta.HistoryStreamID,
+		Frontier: meta.HistorySequence,
+		Messages: make([]CommittedHistoryMessage, 0, len(messages)),
+	}
 	var count uint64
 	for _, message := range messages {
 		order := messageHistoryOrder(message)
@@ -199,16 +213,16 @@ func (s *JSONLStore) readOrderRecoveryProof(ctx context.Context, key string) (Re
 		return ReadOrderRecovery{}, err
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(file, maxReadRecoveryBytes+1))
-	if err := errors.Join(readErr, file.Close()); err != nil {
-		return ReadOrderRecovery{}, err
+	if readCloseErr := errors.Join(readErr, file.Close()); readCloseErr != nil {
+		return ReadOrderRecovery{}, readCloseErr
 	}
 	if int64(len(raw)) != *meta.HistoryBytes {
 		return ReadOrderRecovery{}, ErrHistoryOrderUnavailable
 	}
 	encoded, err := json.Marshal(struct {
-		Meta      SessionMeta
-		Messages  []CommittedHistoryMessage
-		RawDigest [sha256.Size]byte
+		Meta      SessionMeta               `json:"Meta"`
+		Messages  []CommittedHistoryMessage `json:"Messages"`
+		RawDigest [sha256.Size]byte         `json:"RawDigest"`
 	}{meta, proof.Messages, sha256.Sum256(raw)})
 	if err != nil {
 		return ReadOrderRecovery{}, err
