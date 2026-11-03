@@ -655,8 +655,11 @@ Each admitted execution receives one UUID, a `scheduled` or `manual` trigger,
 and an immutable job copy. `CronTool.ExecuteJobWithResult` uses that UUID for
 the executor session and preserves its actual outcome. The embedding context
 owns cancellation; `CronService.Stop` still stops scheduling only. Platform
-metadata can be persisted atomically through `AddJobWithPayload`; the agent
-tool continues using the existing restricted `AddJob` path.
+metadata can be persisted atomically through `AddJobWithPayload`
+(`AddPausedJobWithPayload` for a job that starts paused). The agent tool calls
+it too and leaves the platform-owned fields (`Model`, `LoopSlug`, `RoundKind`,
+`GoalID`) empty in its own payload literal: that call site is the boundary, not
+the API.
 
 ## 📚 Documentation
 

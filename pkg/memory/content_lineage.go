@@ -149,6 +149,14 @@ type HistoryContentAppender interface {
 	AppendHistoryContent(ctx context.Context, key string, message providers.Message) (ContentAppendResult, error)
 }
 
+type HistoryContentInitializer interface {
+	InitializeNewHistoryContentIdentity(ctx context.Context, key string) error
+}
+
+type HistoryNativeContentArchive interface {
+	PrepareNativeHistoryArchive(ctx context.Context, key string) error
+}
+
 // HistoryContentInputAppender accepts input and may return its independently
 // produced order receipt, but never a content Ref, binding or state interval.
 // It is an optional wake-up lane; subsequent proof uses a strict content frame.
