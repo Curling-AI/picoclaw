@@ -23,6 +23,8 @@ const (
 	admissionSweepInterval = time.Hour
 )
 
+var errExecutionAdmissionFinished = errors.New("cron execution admission already finished")
+
 type deferredExecutionError struct {
 	cause error
 	delay time.Duration
@@ -118,7 +120,7 @@ func (cs *CronService) beginExecutionAdmission(execution Execution) (*executionA
 	} else if admission.Job.ID != execution.Job.ID || !admission.StartedAt.Equal(execution.StartedAt) || admission.Trigger != execution.Trigger || admission.ManualIdentity != execution.ManualIdentity {
 		return nil, nil, unlock, errors.New("cron admission identity changed")
 	} else if admission.State == admissionFinished {
-		return nil, nil, unlock, ErrDuplicateExecution
+		return &admission, nil, unlock, errExecutionAdmissionFinished
 	} else if admission.State == admissionExecuting {
 		admission.Outcome = "indeterminate"
 		return &admission, nil, unlock, errors.New("cron execution outcome unknown after runtime restart")
@@ -130,7 +132,7 @@ func (cs *CronService) beginExecutionAdmission(execution Execution) (*executionA
 	}
 	claim := func() error {
 		current, exists := cs.GetJob(admission.Job.ID)
-		if !exists || current.Payload != admission.Job.Payload ||
+		if !exists || !samePayload(current.Payload, admission.Job.Payload) ||
 			!sameSchedule(current.Schedule, admission.Job.Schedule) ||
 			(admission.Trigger == Scheduled && !current.Enabled) {
 			return ErrExecutionSuperseded

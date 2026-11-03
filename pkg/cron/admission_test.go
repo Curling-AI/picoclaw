@@ -180,10 +180,22 @@ func TestConcurrentAdmissionOwnersCannotDuplicateTheEffectsClaim(t *testing.T) {
 		return "unexpected", nil
 	})
 	second.executeJobWithAdmission(job.ID, Scheduled, run, at, false)
+	if _, queued := second.admissionRetries[run]; !queued {
+		t.Error("admission with a live owner was not queued for retry")
+	}
+	if _, exists := second.GetJob(job.ID); !exists {
+		t.Error("losing the lock consumed the one-shot before its owner finished")
+	}
 	close(release)
 	<-done
+	if due := second.dueExecutionAdmissions(time.Now().Add(time.Minute).UnixMilli()); len(due) != 1 {
+		t.Fatalf("expected one due retry, got %d", len(due))
+	}
 	second.executeJobWithAdmission(job.ID, Scheduled, run, at, false)
 	if effects.Load() != 1 {
 		t.Fatal("a concurrent or finished admission executed effects twice")
+	}
+	if _, exists := second.GetJob(job.ID); exists {
+		t.Error("finished admission left the winner's deleted one-shot in the losing store")
 	}
 }
