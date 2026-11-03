@@ -304,6 +304,16 @@ func TestText_MasksUploadNames(t *testing.T) {
 			in:   `uploads/ab12cd34-Foto_Silva.JPG`,
 			want: `uploads/ab12cd34-[REDACTED].JPG`,
 		},
+		{
+			name: "a name of digits, like a CPF",
+			in:   `uploads/ab12cd34-12345678900`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "a name like a date",
+			in:   `uploads/ab12cd34-2026-11-03`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -321,6 +331,10 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		`uploads/ab12cd34`,
 		// A UUID names a run or a session; its tail is hex and dashes.
 		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc started`,
+		`/ws/sessions/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.jsonl`,
+		`chat 3f2c1a9e-1b2c-4d5e-8f90-123456789abc.`,
+		`media/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
+		`job 3f2c1a9e-1b2c-4d5e-8f90-123456789abc_retry`,
 		`{"session_id":"3f2c1a9e-1b2c-4d5e-8f90-123456789abc"}`,
 		// A hex part inside a longer name does not start the token.
 		`pod maestro-gateway-ab12cd34-x9k2p ready`,
@@ -346,5 +360,19 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		if got := Text(in); got != in {
 			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
 		}
+	}
+}
+
+func BenchmarkText(b *testing.B) {
+	for _, line := range []string{
+		`Tool call: exec({"command":"ls -la work/2026-11-03","session_id":"pc-12"})`,
+		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc finished in 1.2s`,
+		`Tool call: read_file({"path":"uploads/ab12cd34-Contrato_Acme.pdf"})`,
+	} {
+		b.Run(line[:20], func(b *testing.B) {
+			for b.Loop() {
+				Text(line)
+			}
+		})
 	}
 }

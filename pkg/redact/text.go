@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -70,6 +71,10 @@ var (
 	// alone. The prefix must start the token, so a pod or job name with a hex
 	// part stays.
 	uploadNameRe = regexp.MustCompile(`(^|[^A-Za-z0-9._-])([0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
+	// The rest of a UUID after its first 8 hex digits, ending the token or
+	// followed by an extension or a separator. It names a run, a session or a
+	// media file, and logs are searched by it.
+	uuidTailRe = regexp.MustCompile(`^[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:$|[._-])`)
 )
 
 // uploadExtensions are the extensions kept after a masked upload name: they say
@@ -88,7 +93,8 @@ var uploadExtensions = map[string]bool{
 
 // textRule runs mask only when the lowercased text holds one of its hints.
 // Text runs on every log line and most lines carry no credential, so a few
-// substring checks spare the regexes almost always.
+// substring checks spare the regexes almost always. The upload rule's hint, a
+// dash, is in most lines; its mask scans for the 8-hex prefix before the regex.
 type textRule struct {
 	hints []string
 	mask  func(string) string
@@ -179,24 +185,43 @@ func maskCredentialWord(re *regexp.Regexp, s string) string {
 }
 
 // maskUploadNames keeps the prefix, which tells two uploads apart, and a known
-// extension. A tail of hex and dashes is a UUID, which names a run or a session.
+// extension. A UUID stays whole.
 func maskUploadNames(s string) string {
+	if !hasHexBeforeDash(s) {
+		return s
+	}
 	return uploadNameRe.ReplaceAllStringFunc(s, func(match string) string {
 		parts := uploadNameRe.FindStringSubmatch(match)
 		name := parts[3]
-		if strings.Trim(name, "0123456789abcdef-") == "" {
+		if uuidTailRe.MatchString(name) {
 			return match
 		}
 		return parts[1] + parts[2] + Mask + uploadExtension(name)
 	})
 }
 
-func uploadExtension(name string) string {
-	dot := strings.LastIndexByte(name, '.')
-	if dot < 0 || !uploadExtensions[strings.ToLower(name[dot:])] {
-		return ""
+// hasHexBeforeDash says whether eight lowercase hex digits come right before a
+// dash: uploadNameRe has no literal to anchor on, and most lines fail this.
+func hasHexBeforeDash(s string) bool {
+	run := 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '-' && run >= 8:
+			return true
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f':
+			run++
+		default:
+			run = 0
+		}
 	}
-	return name[dot:]
+	return false
+}
+
+func uploadExtension(name string) string {
+	if ext := filepath.Ext(name); uploadExtensions[strings.ToLower(ext)] {
+		return ext
+	}
+	return ""
 }
 
 func maskAssignment(match string) string {
