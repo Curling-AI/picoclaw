@@ -185,6 +185,13 @@ func (s *JSONLStore) CommitHistoryCompaction(
 		},
 		After: after,
 	}
+	if next.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
+		proof, proofErr := s.verifyNativeArchive(ctx, key, image.Meta, frame, transition)
+		if proofErr != nil {
+			return ContentTransition{}, proofErr
+		}
+		next.ContentIdentity.Pending.NativeArchiveFrontier = &proof.Frontier
+	}
 	size, err := contentPendingMetadataSize(next.ContentIdentity.Pending)
 	if err != nil {
 		return ContentTransition{}, err
@@ -197,7 +204,7 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	}
 	if next.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
 		if err := s.prepareNativeHistoryArchiveLocked(ctx, key); err != nil {
-			return transition, err
+			return transition, historyCommittedError(err)
 		}
 	}
 	return transition, nil

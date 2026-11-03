@@ -269,8 +269,14 @@ func TestNativeArchiveKeepsItsSuffixBudgetAndFencesNonLocalImports(t *testing.T)
 				if err != nil || pendingErr != nil || pending.Version != 0 {
 					t.Fatal("native suffix required an unbounded archive scan", err, pending, pendingErr)
 				}
-			} else if !errors.Is(err, ErrHistoryCapacity) || pendingErr != nil || pending.MutationID != plan.MutationID {
-				t.Fatal("nonlocal imports escaped the bounded proof or lost retention", err, pending, pendingErr)
+			} else if !errors.Is(err, ErrHistoryCapacity) || pendingErr != nil || pending.Version != 0 {
+				t.Fatal("nonlocal imports escaped the bounded proof or published an unprovable pending cut", err, pending, pendingErr)
+			}
+			if origin == "external_import" {
+				current, readErr := restarted.ReadHistoryContentFrame(t.Context(), key)
+				if readErr != nil || current.StateToken != frame.StateToken || current.Summary != frame.Summary {
+					t.Fatal("capacity refusal changed the source frame", current, readErr)
+				}
 			}
 		})
 	}

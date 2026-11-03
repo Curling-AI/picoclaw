@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -115,7 +116,10 @@ func (view contentCompactionView) commit(
 		SummaryInputs: refs[:cut], Retained: refs[cut:],
 	})
 	if err != nil {
-		return nil, err
+		if transition.Version == 0 || !errors.Is(err, memory.ErrHistoryInputCommitted) {
+			return nil, err
+		}
+		logger.WarnCF("agent", "Content compaction committed with pending archive recovery", map[string]any{"error": err.Error()})
 	}
 	return &transition, nil
 }

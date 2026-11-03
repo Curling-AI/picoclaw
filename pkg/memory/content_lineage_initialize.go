@@ -22,8 +22,10 @@ func (s *JSONLStore) InitializeNewHistoryContentIdentity(ctx context.Context, ke
 	if err != nil {
 		return err
 	}
+	name := sanitizeKey(key)
 	for _, file := range files {
-		if strings.HasPrefix(file.Name(), sanitizeKey(key)+".") {
+		if file.Name() == name+".meta.json" || file.Name() == name+".jsonl" ||
+			strings.HasPrefix(file.Name(), name+".jsonl.") {
 			return nil
 		}
 	}

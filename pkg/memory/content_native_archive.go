@@ -71,7 +71,7 @@ func (s *JSONLStore) prepareNativeHistoryArchiveLocked(ctx context.Context, key 
 	for index, locator := range pending.Before.Rows {
 		before.Entries[index].Message.HistoryPublicMessage = decodedPublicMessage(byLine[locator.Line])
 	}
-	proof, err := s.verifyNativeArchive(ctx, key, image.Meta, before, pending.Transition)
+	proof, err := s.verifyNativeArchiveAt(ctx, key, image.Meta, before, pending.Transition, pending.NativeArchiveFrontier)
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func (s *JSONLStore) nativeArchiveMessages(
 	before ContentFrame,
 	transition ContentTransition,
 ) (map[ContentRef]providers.Message, []ContentArchiveExclusion, error) {
-	if len(transition.Dropped) > len(before.Entries) || len(before.Entries) > maxNativeArchiveRows {
+	if len(transition.Dropped) > len(before.Entries) || len(transition.Dropped) > maxNativeArchiveRows {
 		return nil, nil, ErrHistoryCapacity
 	}
 	wanted := make(map[ContentRef]providers.Message, len(transition.Dropped))
@@ -107,7 +107,7 @@ func (s *JSONLStore) nativeArchiveMessages(
 		reason := ContentArchiveUnsupportedRole
 		if message.Role == "user" || message.Role == "assistant" || message.Role == "tool" {
 			raw := strings.TrimSpace(message.Content)
-			if !strings.HasPrefix(raw, "[System]") && !strings.HasPrefix(raw, "[SYSTEM]") {
+			if !strings.HasPrefix(raw, "[System]") && !strings.HasPrefix(raw, "[SYSTEM]") && !strings.HasPrefix(raw, "[System: ") {
 				return nil, nil, ErrPublicHistoryCoverage
 			}
 			reason = ContentArchiveInternalSteering
@@ -123,6 +123,13 @@ func (s *JSONLStore) verifyNativeArchive(
 	meta SessionMeta,
 	before ContentFrame,
 	transition ContentTransition,
+) (nativeArchiveProof, error) {
+	return s.verifyNativeArchiveAt(ctx, key, meta, before, transition, nil)
+}
+
+func (s *JSONLStore) verifyNativeArchiveAt(
+	ctx context.Context, key string, meta SessionMeta, before ContentFrame, transition ContentTransition,
+	frontier *publicIndexHeader,
 ) (_ nativeArchiveProof, resultErr error) {
 	wanted, excluded, err := s.nativeArchiveMessages(before, transition)
 	if err != nil {
@@ -154,8 +161,15 @@ func (s *JSONLStore) verifyNativeArchive(
 	if err != nil || info.Size() != meta.PublicHistoryBytes {
 		return nativeArchiveProof{}, errors.Join(ErrPublicHistoryCoverage, err)
 	}
+	bound := index.header
+	if frontier != nil {
+		if err := validateNativeArchiveFrontier(index, *frontier); err != nil {
+			return nativeArchiveProof{}, err
+		}
+		bound = *frontier
+	}
 	proof := nativeArchiveProof{
-		PolicyID: nativePublicArchivePolicy, Frontier: index.header, Transition: transition,
+		PolicyID: nativePublicArchivePolicy, Frontier: bound, Transition: transition,
 		Archived: make([]ContentRef, 0, len(wanted)), Excluded: excluded,
 	}
 	projector := s.historyPublicProjector()
@@ -165,8 +179,10 @@ func (s *JSONLStore) verifyNativeArchive(
 	}
 	var bytesRead int64
 	rows := 0
+	entries := make([]PublicHistoryEntry, 0)
+	roots := make(map[string]bool)
 	// shortcut: non-local imports need the whole bounded archive, index anchors when larger imported archives must compact.
-	for position := meta.PublicHistoryCount - 1; position >= 0 && (len(wanted) != 0 || meta.PublicHistoryNonLocalImports); position-- {
+	for position := bound.Count - 1; position >= 0 && (len(wanted) != 0 || meta.PublicHistoryNonLocalImports); position-- {
 		if err := ctx.Err(); err != nil {
 			return nativeArchiveProof{}, err
 		}
@@ -180,12 +196,13 @@ func (s *JSONLStore) verifyNativeArchive(
 		if record.Length > maxNativeArchiveBytes-bytesRead {
 			return nativeArchiveProof{}, ErrHistoryCapacity
 		}
-		entry, size, err := readPublicPageEntry(file, index, position, meta.PublicHistoryBytes)
+		entry, size, err := readPublicPageEntry(file, index, position, bound.Bytes)
 		if err != nil {
 			return nativeArchiveProof{}, err
 		}
 		bytesRead += size
 		rows++
+		entries = append(entries, entry)
 		if entry.AnchorRef != nil && dropped[*entry.AnchorRef] {
 			if err := verifyNativePublicMessage(ctx, projector, entry.Message); err != nil {
 				return nativeArchiveProof{}, err
@@ -204,13 +221,65 @@ func (s *JSONLStore) verifyNativeArchive(
 		if err := verifyNativePublicMessage(ctx, projector, entry.Message); err != nil {
 			return nativeArchiveProof{}, err
 		}
+		roots[entry.ID] = true
 		proof.Archived = append(proof.Archived, *entry.Ref)
 		delete(wanted, *entry.Ref)
 	}
 	if len(wanted) != 0 {
 		return nativeArchiveProof{}, ErrPublicHistoryCoverage
 	}
+	if err := verifyNativeArchiveSupplements(ctx, projector, entries, roots); err != nil {
+		return nativeArchiveProof{}, err
+	}
 	return proof, nil
+}
+
+func validateNativeArchiveFrontier(index *publicIndexReader, frontier publicIndexHeader) error {
+	current := index.header
+	if frontier.Generation != current.Generation || frontier.Revision > current.Revision ||
+		frontier.Count < 0 || frontier.Count > current.Count || frontier.Bytes < 0 || frontier.Bytes > current.Bytes {
+		return ErrPublicHistoryCoverage
+	}
+	if frontier.Count == 0 {
+		if frontier.Bytes != 0 || frontier.Digest != emptyHistoryDigest {
+			return ErrPublicHistoryCoverage
+		}
+		return nil
+	}
+	last, err := index.record(frontier.Count - 1)
+	if err != nil || last.Offset+last.Length != frontier.Bytes || publicIndexRecordDigest(last) != frontier.Digest {
+		return errors.Join(ErrPublicHistoryCoverage, err)
+	}
+	return nil
+}
+
+func verifyNativeArchiveSupplements(ctx context.Context, projector PublicHistoryProjector, entries []PublicHistoryEntry, roots map[string]bool) error {
+	children := make(map[string][]string)
+	byID := make(map[string]PublicHistoryEntry, len(entries))
+	for _, entry := range entries {
+		byID[entry.ID] = entry
+		for _, parent := range []string{entry.AnchorID, entry.BoundaryID} {
+			if parent != "" {
+				children[parent] = append(children[parent], entry.ID)
+			}
+		}
+	}
+	queue := make([]string, 0, len(roots))
+	for id := range roots {
+		queue = append(queue, id)
+	}
+	for position := 0; position < len(queue); position++ {
+		for _, id := range children[queue[position]] {
+			if !roots[id] {
+				roots[id] = true
+				queue = append(queue, id)
+				if err := verifyNativePublicMessage(ctx, projector, byID[id].Message); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func verifyNativePublicMessage(ctx context.Context, projector PublicHistoryProjector, message providers.Message) error {

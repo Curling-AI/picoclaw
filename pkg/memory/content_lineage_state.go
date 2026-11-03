@@ -37,11 +37,12 @@ type contentSnapshot struct {
 }
 
 type contentPending struct {
-	Transition ContentTransition       `json:"transition"`
-	PlanDigest string                  `json:"planDigest"`
-	Before     contentSnapshot         `json:"before"`
-	After      contentSnapshot         `json:"after"`
-	Mutation   *contentMutationPending `json:"mutation,omitempty"`
+	NativeArchiveFrontier *publicIndexHeader      `json:"nativeArchiveFrontier,omitempty"`
+	Transition            ContentTransition       `json:"transition"`
+	PlanDigest            string                  `json:"planDigest"`
+	Before                contentSnapshot         `json:"before"`
+	After                 contentSnapshot         `json:"after"`
+	Mutation              *contentMutationPending `json:"mutation,omitempty"`
 }
 
 type contentAcknowledged struct {
@@ -513,7 +514,7 @@ func (s *JSONLStore) frameForContentImage(ctx context.Context, key string, image
 			frame.Entries[i].Ref = &ref
 			public := decodedPublicMessage(row.Raw)
 			if public != nil && !validPublicProjection(row.Message, *public) {
-				return ContentFrame{}, ErrPublicHistoryCoverage
+				public = nil
 			}
 			frame.Entries[i].Message.HistoryPublicMessage = public
 		}
