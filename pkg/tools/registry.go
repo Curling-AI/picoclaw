@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/redact"
+	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
 
 type ToolEntry struct {
@@ -413,6 +414,9 @@ func (r *ToolRegistry) ExecuteWithContext(
 		})
 
 	tool, ok := r.Get(name)
+	if _, restricted := toolshared.ExecutionPolicySkills(ctx); restricted {
+		tool, ok = r.GetRegistered(name)
+	}
 	if !ok {
 		logger.ErrorCF("tool", "Tool not found",
 			map[string]any{
@@ -421,6 +425,9 @@ func (r *ToolRegistry) ExecuteWithContext(
 		return ErrorResult(
 			fmt.Sprintf("tool %q not found", name),
 		).WithError(fmt.Errorf("tool not found"))
+	}
+	if !toolshared.ExecutionPolicyAllowsTool(ctx, tool) {
+		return ErrorResult(fmt.Sprintf("Tool %q is not allowed for this execution.", name))
 	}
 
 	// Validate arguments against the tool's declared schema, after coercing
@@ -438,6 +445,11 @@ func (r *ToolRegistry) ExecuteWithContext(
 	// Inject channel/chatID into ctx so tools read them via ToolChannel(ctx)/ToolChatID(ctx).
 	// Always inject — tools validate what they require.
 	ctx = WithToolContext(ctx, channel, chatID)
+	var policyErr error
+	ctx, policyErr = toolshared.BeforeExecutionTool(ctx, tool)
+	if policyErr != nil {
+		return ErrorResult(policyErr.Error()).WithError(policyErr)
+	}
 
 	// If tool implements AsyncExecutor and callback is provided, use ExecuteAsync.
 	// The callback is a call parameter, not mutable state on the tool instance.
@@ -487,6 +499,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 	}
 
 	result = normalizeToolResult(result, name, r.mediaStore, channel, chatID)
+	toolshared.AfterExecutionTool(ctx, tool, result)
 
 	duration := time.Since(start)
 

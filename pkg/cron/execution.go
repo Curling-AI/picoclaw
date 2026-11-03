@@ -1,6 +1,10 @@
 package cron
 
-import "context"
+import (
+	"context"
+	"errors"
+	"time"
+)
 
 type Trigger string
 
@@ -9,13 +13,23 @@ const (
 	Manual    Trigger = "manual"
 )
 
+var (
+	ErrDuplicateExecution  = errors.New("duplicate cron execution")
+	ErrExecutionSuperseded = errors.New("cron job changed before execution effects")
+)
+
 // Execution identifies one dispatch after admission and the idle check. Job IDs
 // remain opaque; the UUID identifies this run even when a one-shot job is deleted.
 type Execution struct {
-	Progress func(stage string)
-	RunID    string
-	Trigger  Trigger
-	Job      *CronJob
+	Progress       func(stage string)
+	RunID          string
+	StartedAt      time.Time
+	ManualIdentity bool
+	Trigger        Trigger
+	Job            *CronJob
+	// BeginEffects durably claims effects for an admission-aware embedder.
+	BeginEffects func() error
+	Deferred     bool
 }
 
 type ExecutionHandler func(context.Context, Execution) (string, error)
@@ -27,4 +41,13 @@ func (cs *CronService) SetOnExecution(ctx context.Context, handler ExecutionHand
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.executionContext, cs.onExecution = ctx, handler
+	cs.durableAdmission = false
+}
+
+// SetOnExecutionWithAdmission opts into durable admission retries. The handler
+// must call BeginEffects before executing work, and may defer only before it.
+func (cs *CronService) SetOnExecutionWithAdmission(ctx context.Context, handler ExecutionHandler) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.executionContext, cs.onExecution, cs.durableAdmission = ctx, handler, true
 }

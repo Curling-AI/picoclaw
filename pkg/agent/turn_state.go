@@ -1039,6 +1039,9 @@ func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	msg.CreatedAt = nil
 	msg.JoinedSends = ""
 	msg.HistoryCallID = ""
+	// History reads omit receipt metadata; it must not hide the active prompt.
+	msg.HistoryID, msg.HistoryRunID, msg.HistoryStreamID = "", "", ""
+	msg.HistoryOrderVersion, msg.HistorySequence = 0, 0
 	if msg.Delivery != nil {
 		delivery := *msg.Delivery
 		delivery.ID = "" // Persistence identity is absent from the turn's input copy.

@@ -23,6 +23,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 var (
@@ -293,6 +294,10 @@ func (t *ExecTool) Parameters() map[string]any {
 }
 
 func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+	if protocoltypes.RestrictedExecution(ctx) {
+		err := errors.New("raw commands and scripts are unavailable in restricted executions")
+		return ErrorResult(err.Error()).WithError(err)
+	}
 	action, _ := args["action"].(string)
 	if action == "" {
 		if cmd, _ := args["command"].(string); cmd != "" {
