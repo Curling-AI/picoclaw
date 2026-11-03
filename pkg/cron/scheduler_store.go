@@ -25,7 +25,8 @@ func (cs *CronService) schedulerStoreUnsafe() (*CronStore, func(), error) {
 func (cs *CronService) claimDueJobsUnsafe(now int64) ([]string, error) {
 	var candidates map[string]int64
 	for _, job := range cs.store.Jobs {
-		if job.Enabled && !cs.hasAdmissionRetry(job.ID) && job.State.NextRunAtMS != nil && *job.State.NextRunAtMS <= now {
+		if job.Enabled && !cs.hasAdmissionRetry(job.ID) && job.State.NextRunAtMS != nil &&
+			*job.State.NextRunAtMS <= now {
 			if candidates == nil {
 				candidates = make(map[string]int64)
 			}
