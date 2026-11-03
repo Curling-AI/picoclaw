@@ -20,6 +20,12 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 	for attempt := 0; attempt < 2; attempt++ {
 		history, historyErr := s.ReadPublicHistory(ctx, key)
 		if historyErr != nil {
+			if errors.Is(historyErr, ErrPublicHistoryCoverage) {
+				historyErr = s.recordPreparingPublicMedia(ctx, key, runID, content)
+				if errors.Is(historyErr, ErrPublicHistoryCoverage) {
+					continue
+				}
+			}
 			return historyErr
 		}
 		var anchor *PublicHistoryEntry
@@ -37,8 +43,17 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 		if anchor == nil {
 			return ErrPublicHistoryCoverage
 		}
-		digest := sha256.Sum256([]byte(runID + ":" + content))
+		digest := sha256.Sum256([]byte(runID + ":" + anchor.ID + ":" + content))
 		importID := "media:" + hex.EncodeToString(digest[:])
+		legacyDigest := sha256.Sum256([]byte(runID + ":" + content))
+		legacyID := "media:" + hex.EncodeToString(legacyDigest[:])
+		for _, previous := range history.Entries {
+			// Keep published retry identities only for their original native occurrence.
+			if previous.ImportID == legacyID && previous.AnchorID == anchor.ID {
+				importID = legacyID
+				break
+			}
+		}
 		entry := PublicHistoryEntry{
 			ID:          uuid.NewSHA1(uuid.NameSpaceOID, []byte(importID)).String(),
 			RunID:       runID,
@@ -48,7 +63,7 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 			AnchorOrder: anchor.Order,
 			Message:     providers.Message{Role: "assistant", Content: content},
 		}
-		_, historyErr = s.ImportPublicHistory(
+		_, historyErr = s.importPublicHistory(
 			ctx,
 			PublicHistoryImport{
 				Key:        key,
@@ -57,6 +72,7 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 				AfterID:    afterID,
 				Entries:    []PublicHistoryEntry{entry},
 			},
+			publicImportNativeMedia,
 		)
 		if !errors.Is(historyErr, ErrPublicHistoryCoverage) {
 			return historyErr

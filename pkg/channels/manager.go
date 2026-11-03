@@ -28,6 +28,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/health"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -688,9 +689,11 @@ func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionK
 
 	if m.config != nil && m.config.Agents.Defaults.SplitOnMarker {
 		return &splitMarkerStreamer{
-			current:     streamer,
-			reasoning:   reasoningStreamerFrom(streamer),
-			begin:       func(beginCtx context.Context) (bus.Streamer, error) { return sc.BeginStream(beginCtx, chatID) },
+			current:   streamer,
+			reasoning: reasoningStreamerFrom(streamer),
+			begin: func(beginCtx context.Context) (bus.Streamer, error) {
+				return sc.BeginStream(providers.WithHistoryCall(beginCtx, providers.HistoryCall(ctx)), chatID)
+			},
 			onFinalize:  onFinalize,
 			clearMarker: clearMarker,
 		}, true

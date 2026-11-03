@@ -33,6 +33,9 @@ func (s *JSONLStore) preparePublicIndex(
 		return publicHistoryChange{}, operationErr0
 	}
 	if change.Recovery.Offset != nil {
+		if len(change.Recovery.Data) > 0 {
+			return s.preparePublicIndexTail(key, original, next, change, header)
+		}
 		return s.preparePublicIndexAppend(key, original, next, change, header)
 	}
 	records, digest, operationErr0 := publicIndexRecords(
@@ -133,5 +136,8 @@ func (s *JSONLStore) restorePublicIndex(key string, recovery *publicIndexRecover
 		}
 		return operationErr4
 	}
-	return s.writePublicIndex(key, &publicIndexChange{Header: recovery.Header, Offset: recovery.Offset})
+	return s.writePublicIndex(
+		key,
+		&publicIndexChange{Header: recovery.Header, Records: recovery.Data, Offset: recovery.Offset},
+	)
 }

@@ -126,6 +126,7 @@ func (s *JSONLStore) preparePublicRewrite(
 		next.PublicHistoryPreparation = nil
 		next.PublicHistoryGeneration = newHistoryID()
 		next.PublicHistoryComplete = true
+		next.PublicHistoryNonLocalImports = false
 		return s.replacePublicEntries(key, nil, next)
 	}
 	if original.PublicHistoryVersion < 0 || next.PublicHistoryVersion < 0 {
@@ -182,6 +183,12 @@ func (s *JSONLStore) preparePublicRewrite(
 			previous, readErr := s.readPublicEntries(key, readMeta)
 			if readErr != nil {
 				return publicHistoryChange{}, readErr
+			}
+			if state := original.PublicHistoryPreparation; state != nil && state.MediaCount > 0 {
+				previous, entries, readErr = mergePreparingPublicMedia(previous, entries, state.MediaCount)
+				if readErr != nil {
+					return publicHistoryChange{}, readErr
+				}
 			}
 			// Previously committed supplements and compacted source entries have
 			// no remaining source row. Preserve their exact identifiers/bytes.
@@ -312,6 +319,11 @@ func (s *JSONLStore) restorePublicHistory(key string, recovery *publicHistoryRec
 		if operationErr6 := file.Truncate(*recovery.Offset); operationErr6 != nil {
 			return operationErr6
 		}
+		if len(recovery.Data) > 0 {
+			if _, err := file.WriteAt(recovery.Data, *recovery.Offset); err != nil {
+				return err
+			}
+		}
 		if operationErr7 := file.Sync(); operationErr7 != nil {
 			return operationErr7
 		}
@@ -356,6 +368,9 @@ func (s *JSONLStore) commitPublicChange(
 	oldErr9 = s.writePublicChange(key, indexed)
 	if oldErr9 == nil {
 		oldErr9 = s.writeMeta(key, next)
+	}
+	if oldErr9 == nil && old.PublicHistoryNonLocalImports != next.PublicHistoryNonLocalImports {
+		oldErr9 = s.ensureContentDomain(key, old, next)
 	}
 	if oldErr9 == nil {
 		oldErr9 = s.finishHistoryWrite(key)

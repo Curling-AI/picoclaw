@@ -79,6 +79,9 @@ func (s *JSONLStore) replaceHistory(
 			if message.CreatedAt == nil {
 				message.CreatedAt = old[index].CreatedAt
 			}
+			if message.HistoryPublicMessage != nil && !validPublicProjection(message, *message.HistoryPublicMessage) {
+				message.HistoryPublicMessage = nil
+			}
 			if common == index {
 				common++
 			}

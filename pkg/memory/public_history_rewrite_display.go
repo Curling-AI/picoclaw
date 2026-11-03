@@ -24,6 +24,9 @@ func (s *JSONLStore) rewritePublicDisplay(
 		changed[message.HistoryID] = message
 	}
 	replacements := publicHistoryEntries(messages, *next)
+	for i := range replacements {
+		replacements[i].CallID = ""
+	}
 	updated := make(map[string]PublicHistoryEntry, len(replacements))
 	for _, entry := range replacements {
 		updated[entry.ID] = entry
@@ -43,10 +46,14 @@ func (s *JSONLStore) rewritePublicDisplay(
 					continue
 				}
 			}
-		} else if _, wasActive := active[entry.ID]; wasActive {
+		} else if originalMessage, wasActive := active[entry.ID]; wasActive {
 			replacement, exists := updated[entry.ID]
 			if !exists {
 				continue
+			}
+			if original.HistoryGeneration != "" && next.HistoryGeneration == original.HistoryGeneration &&
+				sameHistoryCore(originalMessage, changed[entry.ID]) {
+				replacement.CallID = entry.CallID
 			}
 			entry = replacement
 		}

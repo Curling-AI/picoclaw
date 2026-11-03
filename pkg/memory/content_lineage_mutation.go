@@ -146,6 +146,7 @@ func (s *JSONLStore) prepareContentRewrite(key string, original SessionMeta, nex
 		next.ContentIdentity = &contentIdentityState{
 			Version:         ContentLineageVersion,
 			MutationVersion: original.ContentIdentity.MutationVersion,
+			ArchivePolicy:   original.ContentIdentity.ArchivePolicy,
 			DomainID:        uuid.NewString(),
 			StateToken:      uuid.NewString(),
 			SummaryDigest:   contentDigest([]byte(next.Summary)),
@@ -297,6 +298,7 @@ func (s *JSONLStore) appendHistoryContent(
 	}
 	detached.HistoryID = message.HistoryID
 	detached.HistoryRunID = message.HistoryRunID
+	detached.HistoryCallID = message.HistoryCallID
 	message = detached
 	var outcome historyAppendOutcome
 	receipts, appendErr := s.appendHistoryMessagesOutcome(

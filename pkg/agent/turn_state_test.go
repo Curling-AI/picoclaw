@@ -154,3 +154,39 @@ func TestTrimHistoryToFitContextWindow_WithProtectedTurnTailKeepsActiveTurn(t *t
 		t.Fatalf("messages[0].Content = %q, want protected current turn", messages[0].Content)
 	}
 }
+
+func TestSplitHistoryForActiveTurnPreservesNonserializedHistoryCall(t *testing.T) {
+	persisted := []providers.Message{
+		{Role: "user", Content: "current question"},
+		{
+			Role:          "assistant",
+			Content:       "working",
+			HistoryCallID: "req_550e8400-e29b-41d4-a716-446655440000",
+			ToolCalls: []providers.ToolCall{
+				{ID: "call", Type: "function", Function: &providers.FunctionCall{Name: "exec", Arguments: `{}`}},
+			},
+		},
+		{Role: "tool", ToolCallID: "call", Content: "result"},
+	}
+	encoded, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored []providers.Message
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		t.Fatal(err)
+	}
+	history := append([]providers.Message{{Role: "user", Content: "older"}}, stored...)
+	stable, protected := splitHistoryForActiveTurn(history, persisted)
+	if len(stable) != 1 || len(protected) != len(persisted) {
+		t.Fatalf("round trip hid active messages: stable=%d protected=%d", len(stable), len(protected))
+	}
+	changed := append([]providers.Message(nil), stored...)
+	changed[1].Content = "different"
+	if messageSlicesEquivalent(changed, persisted) {
+		t.Fatal("comparison ignored public content")
+	}
+	if persisted[1].HistoryCallID == "" {
+		t.Fatal("comparison cleared the producer proof")
+	}
+}

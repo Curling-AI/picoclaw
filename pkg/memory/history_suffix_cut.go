@@ -132,6 +132,9 @@ func (s *JSONLStore) preparePublicSuffixCut(
 		// checkpoints at/after it have already covered every remaining source row.
 		preparation.Ceiling = *next.HistoryBytes
 		preparation.Count = int64(next.Count)
+		if err := rebasePublicMediaTail(original, entries, kept, &preparation); err != nil {
+			return publicHistoryChange{}, err
+		}
 		if preparation.Offset >= preparation.Ceiling && preparation.Line >= preparation.Count {
 			next.PublicHistoryPreparation = nil
 			next.PublicHistoryComplete = original.PublicHistoryComplete || preparation.Prefix == 0

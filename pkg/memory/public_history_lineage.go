@@ -132,6 +132,10 @@ func (s *JSONLStore) rewritePublicContent(
 		if entry.Ref == nil || replacement.Ref == nil || entry.Ref.OccurrenceID != replacement.Ref.OccurrenceID {
 			return publicHistoryChange{}, ErrPublicHistoryCoverage
 		}
+		replacement.CallID = ""
+		if samePublicRef(entry.Ref, replacement.Ref) {
+			replacement.CallID = entry.CallID
+		}
 		kept = append(kept, replacement)
 	}
 	if next.HistoryGeneration != original.HistoryGeneration {
