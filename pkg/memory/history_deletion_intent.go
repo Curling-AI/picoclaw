@@ -196,7 +196,7 @@ func historyDeletionFingerprint(intent *historyDeletionIntent) string {
 func (s *JSONLStore) historyDeletionSourcePaths(key string) []string {
 	return append([]string{
 		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.historyDecisionPath(key),
-		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key), s.readRecoveryPath(key),
+		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
 	}, s.publicIndexFiles(key)...)
 }
 
