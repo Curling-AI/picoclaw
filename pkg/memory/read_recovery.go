@@ -199,9 +199,8 @@ func (s *JSONLStore) readOrderRecoveryProof(ctx context.Context, key string) (Re
 		return ReadOrderRecovery{}, err
 	}
 	raw, readErr := io.ReadAll(io.LimitReader(file, maxReadRecoveryBytes+1))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil {
-		return ReadOrderRecovery{}, errors.Join(readErr, closeErr)
+	if err := errors.Join(readErr, file.Close()); err != nil {
+		return ReadOrderRecovery{}, err
 	}
 	if len(raw) > maxReadRecoveryBytes || int64(len(raw)) != *meta.HistoryBytes {
 		return ReadOrderRecovery{}, ErrHistoryOrderUnavailable
