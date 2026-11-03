@@ -69,8 +69,10 @@ var (
 	// but the person's, and every read_file would log it. Matched with or
 	// without the uploads/ folder, since a command run inside it names the file
 	// alone. The prefix must start the token, so a pod or job name with a hex
-	// part stays.
-	uploadNameRe = regexp.MustCompile(`(^|[^A-Za-z0-9._-])([0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
+	// part stays. Text often arrives escaped (JSON of a command's output, a URL),
+	// so an escape before the prefix also starts a token.
+	uploadNameRe = regexp.MustCompile(
+		`(^|[^A-Za-z0-9._-]|\\[nrt]|\\u[0-9A-Fa-f]{4}|%[0-9A-Fa-f]{2})([0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
 	// The rest of a UUID after its first 8 hex digits, ending the token or
 	// followed by an extension or a separator. It names a run, a session or a
 	// media file, and logs are searched by it.
