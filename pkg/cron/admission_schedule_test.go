@@ -171,6 +171,36 @@ func TestSupersededAdmissionPreservesEditedOneShot(t *testing.T) {
 	}
 }
 
+func TestPreparedAdmissionRejectsChangedConnectors(t *testing.T) {
+	service, job := admissionOneShot(t)
+	run, started := uuid.NewString(), time.Now().UTC().Truncate(time.Microsecond)
+	service.SetOnExecutionWithAdmission(t.Context(), func(context.Context, Execution) (string, error) {
+		return "", RetryExecutionAfter(errors.New("fixture outage"), time.Second)
+	})
+	service.executeJobWithAdmission(job.ID, Scheduled, run, started, false)
+	edited, exists := service.GetJob(job.ID)
+	if !exists {
+		t.Fatal("pending admission consumed the one-shot")
+	}
+	edited.Payload.Connectors = []string{"github"}
+	if err := service.UpdateJob(edited); err != nil {
+		t.Fatal(err)
+	}
+	var claimErr error
+	service.SetOnExecutionWithAdmission(t.Context(), func(_ context.Context, execution Execution) (string, error) {
+		claimErr = execution.BeginEffects()
+		return "", claimErr
+	})
+	service.executeJobWithAdmission(job.ID, Scheduled, run, started, false)
+	if !errors.Is(claimErr, ErrExecutionSuperseded) {
+		t.Fatalf("claim error = %v, want ErrExecutionSuperseded", claimErr)
+	}
+	persisted, exists := NewCronService(service.storePath, nil).GetJob(job.ID)
+	if !exists || !reflect.DeepEqual(persisted.Payload.Connectors, edited.Payload.Connectors) {
+		t.Fatal("superseded admission did not preserve the saved connector edit")
+	}
+}
+
 func TestFinishedAdmissionRetryKeepsJobWhileStoreIsUnavailable(t *testing.T) {
 	winner, job := admissionOneShot(t)
 	loser := NewCronService(winner.storePath, nil)

@@ -132,7 +132,7 @@ func (cs *CronService) beginExecutionAdmission(execution Execution) (*executionA
 	}
 	claim := func() error {
 		current, exists := cs.GetJob(admission.Job.ID)
-		if !exists || current.Payload != admission.Job.Payload ||
+		if !exists || !samePayload(current.Payload, admission.Job.Payload) ||
 			!sameSchedule(current.Schedule, admission.Job.Schedule) ||
 			(admission.Trigger == Scheduled && !current.Enabled) {
 			return ErrExecutionSuperseded

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -54,6 +55,15 @@ func readContentCompactionView(ctx context.Context, agent *AgentInstance, key st
 	}
 	if err != nil {
 		return contentCompactionView{}, err
+	}
+	if native, ok := agent.Sessions.(memory.HistoryNativeContentArchive); ok {
+		if nativeErr := native.PrepareNativeHistoryArchive(
+			ctx,
+			canonical,
+		); nativeErr != nil &&
+			!errors.Is(nativeErr, memory.ErrHistoryUnsupported) {
+			return contentCompactionView{}, nativeErr
+		}
 	}
 	pending, err := api.ReadPendingHistoryCompaction(ctx, canonical)
 	if err != nil {
@@ -106,7 +116,14 @@ func (view contentCompactionView) commit(
 		SummaryInputs: refs[:cut], Retained: refs[cut:],
 	})
 	if err != nil {
-		return nil, err
+		if transition.Version == 0 || !errors.Is(err, memory.ErrHistoryInputCommitted) {
+			return nil, err
+		}
+		logger.WarnCF(
+			"agent",
+			"Content compaction committed with pending archive recovery",
+			map[string]any{"error": err.Error()},
+		)
 	}
 	return &transition, nil
 }
