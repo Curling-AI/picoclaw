@@ -112,20 +112,21 @@ var storeLockTimeout = 5 * time.Second
 var errStoreLocked = errors.New("cron store locked by another process")
 
 type CronService struct {
-	storePath        string
-	store            *CronStore
-	onJob            JobHandler
-	onExecution      ExecutionHandler
-	durableAdmission bool
-	admissionRetries map[string]executionAdmission
-	executionContext context.Context
-	mu               sync.RWMutex
-	running          bool
-	stopChan         chan struct{}
-	wakeChan         chan struct{}
-	gronx            *gronx.Gronx
-	execSlots        chan struct{}
-	idleProbe        IdleProbe
+	storePath            string
+	store                *CronStore
+	onJob                JobHandler
+	onExecution          ExecutionHandler
+	durableAdmission     bool
+	admissionRetries     map[string]executionAdmission
+	nextAdmissionSweepMS int64
+	executionContext     context.Context
+	mu                   sync.RWMutex
+	running              bool
+	stopChan             chan struct{}
+	wakeChan             chan struct{}
+	gronx                *gronx.Gronx
+	execSlots            chan struct{}
+	idleProbe            IdleProbe
 }
 
 // SetIdleProbe instala (ou remove, com nil) a fonte de "houve atividade?".
@@ -335,6 +336,10 @@ func (cs *CronService) checkJobs() {
 	}
 
 	now := time.Now().UnixMilli()
+	pruneAdmissions := cs.durableAdmission && cs.nextAdmissionSweepMS <= now
+	if pruneAdmissions {
+		cs.nextAdmissionSweepMS = now + admissionSweepInterval.Milliseconds()
+	}
 	var dueJobIDs []string
 
 	// Collect jobs that are due (we need to copy them to execute outside lock)
@@ -366,6 +371,9 @@ func (cs *CronService) checkJobs() {
 
 	cs.dispatch(dueJobIDs)
 	cs.dispatchExecutionAdmissions(retries)
+	if pruneAdmissions {
+		cs.pruneExecutionAdmissions(time.UnixMilli(now))
+	}
 }
 
 // dispatch runs jobs whose NextRunAtMS was already cleared and saved, each in
@@ -648,6 +656,10 @@ func missedRun(state CronJobState, nowMS int64) (time.Duration, bool) {
 
 func (cs *CronService) getNextWakeMS() *int64 {
 	var nextWake *int64
+	if cs.durableAdmission && cs.nextAdmissionSweepMS != 0 {
+		at := cs.nextAdmissionSweepMS
+		nextWake = &at
+	}
 	for _, job := range cs.store.Jobs {
 		if job.Enabled && !cs.hasAdmissionRetry(job.ID) && job.State.NextRunAtMS != nil {
 			if nextWake == nil || *job.State.NextRunAtMS < *nextWake {

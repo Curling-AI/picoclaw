@@ -3,7 +3,7 @@ package cron
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	admissionPrepared  = "prepared"
-	admissionExecuting = "executing"
-	admissionFinished  = "finished"
-	admissionRetention = 7 * 24 * time.Hour
+	admissionPrepared      = "prepared"
+	admissionExecuting     = "executing"
+	admissionFinished      = "finished"
+	admissionRetention     = 7 * 24 * time.Hour
+	admissionSweepInterval = time.Hour
 )
 
 type deferredExecutionError struct {
@@ -178,6 +179,21 @@ func (cs *CronService) loadExecutionAdmissions() error {
 	if !cs.durableAdmission {
 		return nil
 	}
+	now := time.Now()
+	cs.nextAdmissionSweepMS = now.Add(admissionSweepInterval).UnixMilli()
+	return cs.scanExecutionAdmissions(func(path string, admission executionAdmission) {
+		if admission.State == admissionFinished {
+			cs.pruneExecutionAdmission(path, admission, now)
+			return
+		}
+		if admission.State == admissionExecuting || admission.RetryAtMS == 0 {
+			admission.RetryAtMS = now.UnixMilli()
+		}
+		cs.admissionRetries[admission.RunID] = admission
+	})
+}
+
+func (cs *CronService) scanExecutionAdmissions(visit func(string, executionAdmission)) error {
 	entries, err := os.ReadDir(cs.storePath + ".admissions")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -193,25 +209,57 @@ func (cs *CronService) loadExecutionAdmissions() error {
 		path := filepath.Join(cs.storePath+".admissions", entry.Name())
 		admission, err := readExecutionAdmission(path)
 		if err != nil {
-			return fmt.Errorf("read pending cron admission: %w", err)
-		}
-		if admission.State == admissionFinished {
-			if time.Since(admission.UpdatedAt) > admissionRetention {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-				if err := os.Remove(path + ".lock"); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
+			if !errors.Is(err, os.ErrNotExist) {
+				log.Printf("[cron] skipping invalid admission %s: %v", entry.Name(), err)
 			}
+			// Keep the original path so retries of this RunID remain fail-closed.
 			continue
 		}
-		if admission.State == admissionExecuting || admission.RetryAtMS == 0 {
-			admission.RetryAtMS = time.Now().UnixMilli()
-		}
-		cs.admissionRetries[admission.RunID] = admission
+		visit(path, admission)
 	}
 	return nil
+}
+
+func isExpiredFinishedAdmission(admission executionAdmission, now time.Time) bool {
+	return admission.State == admissionFinished && admission.Outcome != "indeterminate" &&
+		now.Sub(admission.UpdatedAt) > admissionRetention
+}
+
+func (cs *CronService) pruneExecutionAdmission(path string, admission executionAdmission, now time.Time) {
+	if !isExpiredFinishedAdmission(admission, now) {
+		return
+	}
+	unlock, err := lockStore(path, 0)
+	if errors.Is(err, errStoreLocked) {
+		return
+	}
+	if err != nil {
+		log.Printf("[cron] failed to lock expired admission %s: %v", filepath.Base(path), err)
+		return
+	}
+	defer unlock()
+	current, err := readExecutionAdmission(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		log.Printf("[cron] failed to recheck expired admission %s: %v", filepath.Base(path), err)
+		return
+	}
+	if isExpiredFinishedAdmission(current, now) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[cron] failed to remove expired admission %s: %v", filepath.Base(path), err)
+		}
+		// shortcut: keep lock inodes stable across versions; reclaim only with a shared lock lifecycle.
+	}
+}
+
+func (cs *CronService) pruneExecutionAdmissions(now time.Time) {
+	if err := cs.scanExecutionAdmissions(func(path string, admission executionAdmission) {
+		cs.pruneExecutionAdmission(path, admission, now)
+	}); err != nil {
+		log.Printf("[cron] failed to scan admissions for retention: %v", err)
+	}
 }
 
 func (cs *CronService) hasAdmissionRetry(jobID string) bool {
