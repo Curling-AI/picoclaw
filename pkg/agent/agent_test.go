@@ -47,13 +47,22 @@ func (f *fakeChannel) ReasoningChannelID() string                 { return f.id 
 
 type fakeMediaChannel struct {
 	fakeChannel
+	messagesMu   sync.Mutex
 	sentMessages []bus.OutboundMessage
 	sentMedia    []bus.OutboundMediaMessage
 }
 
 func (f *fakeMediaChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
+	f.messagesMu.Lock()
+	defer f.messagesMu.Unlock()
 	f.sentMessages = append(f.sentMessages, msg)
 	return nil, nil
+}
+
+func (f *fakeMediaChannel) messagesSnapshot() []bus.OutboundMessage {
+	f.messagesMu.Lock()
+	defer f.messagesMu.Unlock()
+	return slices.Clone(f.sentMessages)
 }
 
 func (f *fakeMediaChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) ([]string, error) {
@@ -2007,24 +2016,25 @@ func TestRunAgentLoop_ResponseHandledToolPublishesForUserWhenSendResponseDisable
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for len(telegramChannel.sentMessages) == 0 && time.Now().Before(deadline) {
+	messages := telegramChannel.messagesSnapshot()
+	for len(messages) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
+		messages = telegramChannel.messagesSnapshot()
 	}
-	if len(telegramChannel.sentMessages) != 1 {
-		t.Fatalf("expected exactly 1 sent text message, got %d", len(telegramChannel.sentMessages))
+	if len(messages) != 1 {
+		t.Fatalf("expected exactly 1 sent text message, got %d", len(messages))
 	}
-	if telegramChannel.sentMessages[0].Content != "Handled user output from tool." {
-		t.Fatalf("unexpected sent text message: %+v", telegramChannel.sentMessages[0])
+	if messages[0].Content != "Handled user output from tool." {
+		t.Fatalf("unexpected sent text message: %+v", messages[0])
 	}
-	if telegramChannel.sentMessages[0].AgentID != defaultAgent.ID {
-		t.Fatalf("sent text agent_id = %q, want %q", telegramChannel.sentMessages[0].AgentID, defaultAgent.ID)
+	if messages[0].AgentID != defaultAgent.ID {
+		t.Fatalf("sent text agent_id = %q, want %q", messages[0].AgentID, defaultAgent.ID)
 	}
-	if telegramChannel.sentMessages[0].SessionKey != "session-1" {
-		t.Fatalf("sent text session_key = %q, want session-1", telegramChannel.sentMessages[0].SessionKey)
+	if messages[0].SessionKey != "session-1" {
+		t.Fatalf("sent text session_key = %q, want session-1", messages[0].SessionKey)
 	}
-	if telegramChannel.sentMessages[0].Scope == nil ||
-		telegramChannel.sentMessages[0].Scope.Values["chat"] != "direct:chat1" {
-		t.Fatalf("unexpected sent text scope: %+v", telegramChannel.sentMessages[0].Scope)
+	if messages[0].Scope == nil || messages[0].Scope.Values["chat"] != "direct:chat1" {
+		t.Fatalf("unexpected sent text scope: %+v", messages[0].Scope)
 	}
 }
 

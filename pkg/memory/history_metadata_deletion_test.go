@@ -56,7 +56,7 @@ func TestMetadataUpsertRecoversPendingJournalBeforeRecreatingDeletedSource(t *te
 	next := before
 	next.Count++
 	if operationErr := s.beginHistoryWrite(
-		key,
+		t.Context(), key,
 		historyWriteRecovery{Meta: before, Next: next, AppendOffset: &offset},
 	); operationErr != nil {
 		t.Fatal(operationErr)
