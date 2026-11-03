@@ -190,6 +190,12 @@ func (t *CronTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Job ID (for get/update/remove/enable/disable)",
 			},
+			"connectors": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"maxItems":    cron.MaxConnectors,
+				"description": "Canonical connector IDs this task uses. Record only: it neither grants nor removes access. For update, omit to keep the list, pass [] to clear it, or pass a list to replace it.",
+			},
 		},
 		"required": []string{"action"},
 	}
@@ -293,25 +299,33 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		}
 	}
 
-	job, err := t.cronService.AddJob(
+	// Validate before creating: an error after AddJob makes the agent retry and duplicate the job.
+	connectors, _, errResult := connectorsPatch(args)
+	if errResult != nil {
+		return errResult
+	}
+
+	// One save: a second one could fail unseen, or write back a stale NextRunAtMS
+	// after the scheduler already claimed a job that was due at once. Model and the
+	// origin fields stay empty on purpose: only the platform sets them, never the agent.
+	job, err := t.cronService.AddJobWithPayload(
 		utils.AutomationName(name, message),
 		schedule,
-		message,
-		channel,
-		chatID,
+		cron.CronPayload{
+			Kind:       "agent_turn",
+			Message:    message,
+			Command:    command,
+			Channel:    channel,
+			To:         chatID,
+			Model:      "",
+			LoopSlug:   "",
+			RoundKind:  "",
+			GoalID:     "",
+			Connectors: connectors,
+		},
 	)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Error adding job: %v", err))
-	}
-
-	// Apply optional payload fields and persist in a single UpdateJob call
-	needsUpdate := false
-	if command != "" {
-		job.Payload.Command = command
-		needsUpdate = true
-	}
-	if needsUpdate {
-		t.cronService.UpdateJob(job)
 	}
 
 	return SilentResult(fmt.Sprintf("Cron job added: %s (id: %s)", job.Name, job.ID))
@@ -451,10 +465,19 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 		return errResult
 	}
 	if commandPresent {
-		if errResult := t.validateCommandMutation(ctx, args); errResult != nil {
-			return errResult
+		if denied := t.validateCommandMutation(ctx, args); denied != nil {
+			return denied
 		}
 		job.Payload.Command = command
+		patches++
+	}
+
+	connectors, connectorsPresent, errResult := connectorsPatch(args)
+	if errResult != nil {
+		return errResult
+	}
+	if connectorsPresent {
+		job.Payload.Connectors = connectors
 		patches++
 	}
 
@@ -527,6 +550,30 @@ func optionalString(args map[string]any, key string) (string, bool, *ToolResult)
 		return "", false, ErrorResult(fmt.Sprintf("%s must be a string", key))
 	}
 	return text, true, nil
+}
+
+func connectorsPatch(args map[string]any) ([]string, bool, *ToolResult) {
+	value, present := args["connectors"]
+	if !present {
+		return nil, false, nil
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return nil, false, ErrorResult("connectors must be an array of strings")
+	}
+	names := make([]string, 0, len(values))
+	for _, item := range values {
+		name, ok := item.(string)
+		if !ok {
+			return nil, false, ErrorResult("connectors must be an array of strings")
+		}
+		names = append(names, name)
+	}
+	connectors, err := cron.NormalizeConnectors(names)
+	if err != nil {
+		return nil, false, ErrorResult(err.Error())
+	}
+	return connectors, true, nil
 }
 
 func schedulePatch(args map[string]any) (cron.CronSchedule, bool, *ToolResult) {
@@ -715,6 +762,10 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 	job := execution.Job
 	if job == nil || uuid.Validate(execution.RunID) != nil {
 		err := errors.New("invalid cron execution identity")
+		return turnresult.Failure(err), err
+	}
+	if _, restricted := ExecutionPolicySkills(ctx); restricted && job.Payload.Command != "" {
+		err := errors.New("restricted automation cannot execute a raw command or script")
 		return turnresult.Failure(err), err
 	}
 	// Get channel/chatID from job payload

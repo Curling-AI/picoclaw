@@ -658,6 +658,7 @@ func (s *JSONLStore) readHistoryOrderOrigins(
 		}
 		message.HistoryID = decodedHistoryID(data, filepath.Base(file.Name()), int64(line-1))
 		message.HistoryRunID = decodedHistoryRunID(data)
+		message.HistoryPublicMessage = decodedPublicMessage(data)
 		messages = append(messages, messageWithHistoryOrder(message, order))
 	}
 	if err := scanner.Err(); err != nil {
@@ -686,6 +687,7 @@ func committedHistoryMessages(data []byte) ([]CommittedHistoryMessage, error) {
 		message := messageWithHistoryOrder(record.Message, *record.Order)
 		message.HistoryID = record.ID
 		message.HistoryRunID = decodedHistoryRunID(scanner.Bytes())
+		message.HistoryPublicMessage = decodedPublicMessage(scanner.Bytes())
 		receipts = append(receipts, CommittedHistoryMessage{Message: message, Order: *record.Order})
 	}
 	return receipts, scanner.Err()
