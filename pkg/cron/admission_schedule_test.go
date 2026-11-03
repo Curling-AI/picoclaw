@@ -16,11 +16,15 @@ import (
 func TestFinishedAdmissionRetryPreservesRecurringSchedule(t *testing.T) {
 	winner := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
 	every := time.Hour.Milliseconds()
-	job, err := winner.AddJob("Recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "fixture", "cli", "fixture")
+	job, err := winner.AddJob(
+		"Recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "fixture", "cli", "fixture",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := winner.AddJob("Another recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "other fixture", "cli", "fixture")
+	other, err := winner.AddJob(
+		"Another recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "other fixture", "cli", "fixture",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +123,8 @@ func TestFinishedAdmissionRetryPreservesRecurringSchedule(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if stored, ok := NewCronService(winner.storePath, nil).GetJob(job.ID); !ok || !reflect.DeepEqual(stored.State, completed.State) {
+	if stored, ok := NewCronService(winner.storePath, nil).GetJob(job.ID); !ok ||
+		!reflect.DeepEqual(stored.State, completed.State) {
 		t.Error("completing an unrelated job overwrote the winner's persisted result")
 	}
 
@@ -238,16 +243,19 @@ func TestFinishedAdmissionWithoutStoredResultRestoresOnlyRecurringSchedule(t *te
 		return "", nil
 	})
 	every := time.Hour.Milliseconds()
-	job, err := service.AddJob("Recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "fixture", "cli", "fixture")
+	job, err := service.AddJob(
+		"Recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "fixture", "cli", "fixture",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job.State.NextRunAtMS = nil
-	if err := service.UpdateJob(job); err != nil {
-		t.Fatal(err)
+	if updateErr := service.UpdateJob(job); updateErr != nil {
+		t.Fatal(updateErr)
 	}
-	if err := service.restoreCompletedJob(executionAdmission{Job: *job, StartedAt: time.Now()}); err != nil {
-		t.Fatal(err)
+	admission := executionAdmission{Job: *job, StartedAt: time.Now()}
+	if restoreErr := service.restoreCompletedJob(admission); restoreErr != nil {
+		t.Fatal(restoreErr)
 	}
 	current, exists := service.GetJob(job.ID)
 	if !exists || current.State.NextRunAtMS == nil ||
@@ -269,21 +277,23 @@ func TestFinishedAdmissionWithoutStoredResultRestoresOnlyRecurringSchedule(t *te
 func TestDurableSchedulersCannotBothClaimTheSameOccurrence(t *testing.T) {
 	first := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
 	every := time.Hour.Milliseconds()
-	job, err := first.AddJob("Shared recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "fixture", "cli", "fixture")
+	job, err := first.AddJob(
+		"Shared recurring fixture", CronSchedule{Kind: "every", EveryMS: &every}, "fixture", "cli", "fixture",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dueAt := time.Now().Add(-time.Second).UnixMilli()
 	job.State.NextRunAtMS = &dueAt
-	if err := first.UpdateJob(job); err != nil {
-		t.Fatal(err)
+	if updateErr := first.UpdateJob(job); updateErr != nil {
+		t.Fatal(updateErr)
 	}
 	second := NewCronService(first.storePath, nil)
 	effects := 0
 	for _, owner := range []*CronService{first, second} {
 		owner.SetOnExecutionWithAdmission(t.Context(), func(_ context.Context, execution Execution) (string, error) {
-			if err := execution.BeginEffects(); err != nil {
-				return "", err
+			if claimErr := execution.BeginEffects(); claimErr != nil {
+				return "", claimErr
 			}
 			effects++
 			return "done", nil
@@ -291,13 +301,13 @@ func TestDurableSchedulersCannotBothClaimTheSameOccurrence(t *testing.T) {
 	}
 	for i, owner := range []*CronService{first, second} {
 		owner.mu.Lock()
-		claimed, err := owner.claimDueJobsUnsafe(dueAt)
+		claimed, claimErr := owner.claimDueJobsUnsafe(dueAt)
 		owner.mu.Unlock()
-		if i == 0 && (err != nil || !reflect.DeepEqual(claimed, []string{job.ID})) {
-			t.Fatalf("first owner claimed %v with %v, want only %s", claimed, err, job.ID)
+		if i == 0 && (claimErr != nil || !reflect.DeepEqual(claimed, []string{job.ID})) {
+			t.Fatalf("first owner claimed %v with %v, want only %s", claimed, claimErr, job.ID)
 		}
-		if i == 1 && (len(claimed) != 0 || !errors.Is(err, errScheduledClaimInProgress)) {
-			t.Fatalf("second owner claimed %v with %v, want no claim and a pending owner", claimed, err)
+		if i == 1 && (len(claimed) != 0 || !errors.Is(claimErr, errScheduledClaimInProgress)) {
+			t.Fatalf("second owner claimed %v with %v, want no claim and a pending owner", claimed, claimErr)
 		}
 	}
 	first.executeJob(job.ID, Scheduled)

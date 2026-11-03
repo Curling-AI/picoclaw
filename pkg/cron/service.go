@@ -530,7 +530,8 @@ func (cs *CronService) executeJobWithAdmission(
 		log.Printf("[cron] job %s disappeared before state update", jobID)
 		return
 	}
-	if cs.durableAdmission && (!samePayload(job.Payload, callbackJob.Payload) || !sameSchedule(job.Schedule, callbackJob.Schedule)) {
+	if cs.durableAdmission &&
+		(!samePayload(job.Payload, callbackJob.Payload) || !sameSchedule(job.Schedule, callbackJob.Schedule)) {
 		// The old effect did not execute the new version of the job.
 		cs.syncStoredJobUnsafe(jobID, job)
 		cs.notify()
