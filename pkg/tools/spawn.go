@@ -121,7 +121,7 @@ func (t *SpawnTool) execute(
 		// enxergá-la desde o primeiro segundo (running → completed/failed).
 		taskID, onStep := "", func(SubTurnStep) func(bool) { return func(bool) {} }
 		if t.manager != nil {
-			taskID, onStep = t.manager.trackCall(ctx, task, label, targetAgentID)
+			taskID, onStep = t.manager.trackCall(ctx, task, label, targetAgentID, false)
 		}
 
 		// Launch async sub-turn in goroutine

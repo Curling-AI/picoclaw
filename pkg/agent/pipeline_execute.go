@@ -586,6 +586,7 @@ toolLoop:
 		)
 		root := ts.rootTurn()
 		execCtx = tools.WithExecOrigin(execCtx, root.sessionKey, root.turnID)
+		// A subagent's task is found by this id. (seucaranguejo fork)
 		execCtx = tools.WithToolCallID(execCtx, tc.ID)
 		// The model can still name a deferred tool whose promotion expired;
 		// honor the call instead of answering "tool not found".

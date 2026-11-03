@@ -69,7 +69,7 @@ func TestSubagentToolTracksItsTaskAndSteps(t *testing.T) {
 // cut by the end of the task changes nothing when it ends late.
 func TestSubagentStepsKeepTheLatest(t *testing.T) {
 	manager := NewSubagentManager(&MockLLMProvider{}, "test-model", t.TempDir())
-	taskID, onStep := manager.trackCall(WithToolCallID(t.Context(), "call-1"), "task", "", "")
+	taskID, onStep := manager.trackCall(WithToolCallID(t.Context(), "call-1"), "task", "", "", false)
 	first := onStep(SubTurnStep{Name: "s0"})
 	var last func(bool)
 	for i := 1; i < maxSubagentSteps+5; i++ {
@@ -94,5 +94,37 @@ func TestSubagentStepsKeepTheLatest(t *testing.T) {
 	got, _ = manager.GetTaskCopy(taskID)
 	if step := got.Steps[len(got.Steps)-1]; step.Status != "canceled" || got.Status != "failed" {
 		t.Fatalf("after the end: step %q, task %q; want canceled, failed", step.Status, got.Status)
+	}
+}
+
+// A copy is what the task was when it was taken: a step that ends or starts
+// later does not change it.
+func TestSubagentTaskCopyKeepsItsSteps(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "test-model", t.TempDir())
+	_, onStep := manager.trackCall(t.Context(), "task", "", "", false)
+	done := onStep(SubTurnStep{Name: "exec"})
+	before := manager.ListTaskCopies()[0]
+	done(false)
+	onStep(SubTurnStep{Name: "read_file"})
+	if len(before.Steps) != 1 || before.Steps[0].Status != "running" {
+		t.Fatalf("copy steps = %+v, want the one running step it was taken with", before.Steps)
+	}
+}
+
+// spawn_status reports on spawns: a subagent call the model waited on already
+// answered it, so it is listed for the web only.
+func TestSpawnStatusLeavesOutWaitedSubagents(t *testing.T) {
+	manager := NewSubagentManager(&MockLLMProvider{}, "test-model", t.TempDir())
+	tool := NewSubagentTool(manager)
+	tool.SetSpawner(&stepSpawner{})
+	ctx := WithToolContext(t.Context(), "grpc", "chat-1")
+	tool.Execute(ctx, map[string]any{"task": "list the files"})
+
+	if len(manager.ListTaskCopies()) != 1 {
+		t.Fatal("the subagent call is not tracked for the web")
+	}
+	got := NewSpawnStatusTool(manager).Execute(ctx, map[string]any{}).ForLLM
+	if got != "No subagents have been spawned yet." {
+		t.Fatalf("spawn_status = %q, want no spawns", got)
 	}
 }

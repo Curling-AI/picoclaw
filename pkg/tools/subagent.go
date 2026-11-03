@@ -105,6 +105,9 @@ type SubagentTask struct {
 	StepCount  int
 	Finished   int64  // unix ms; 0 while running
 	StopReason string // "time_limit" when its time limit stopped it
+	// Sync marks a subagent call the model waited on: spawn_status, which
+	// reports on spawns, leaves it out.
+	Sync bool
 }
 
 type SpawnSubTurnFunc func(
@@ -226,15 +229,24 @@ func (sm *SubagentManager) TrackTask(
 func (sm *SubagentManager) ResolveTask(taskID, status, result string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if task, ok := sm.tasks[taskID]; ok {
-		task.Status = status
-		task.Result = result
-		task.Finished = time.Now().UnixMilli()
-		// A step the turn left open (a stop cut it) will not end now.
-		for i := range task.Steps {
-			if task.Steps[i].Status == "running" {
-				task.Steps[i].Status = "canceled"
-			}
+	sm.resolveLocked(taskID, status, result, "")
+}
+
+// resolveLocked is ResolveTask with sm.mu held, so a reader never sees a task
+// finished without its stop reason.
+func (sm *SubagentManager) resolveLocked(taskID, status, result, stopReason string) {
+	task, ok := sm.tasks[taskID]
+	if !ok {
+		return
+	}
+	task.Status = status
+	task.Result = result
+	task.Finished = time.Now().UnixMilli()
+	task.StopReason = stopReason
+	// A step the turn left open (a stop cut it) will not end now.
+	for i := range task.Steps {
+		if task.Steps[i].Status == "running" {
+			task.Steps[i].Status = "canceled"
 		}
 	}
 }
@@ -244,10 +256,12 @@ func (sm *SubagentManager) ResolveTask(taskID, status, result string) {
 func (sm *SubagentManager) trackCall(
 	ctx context.Context,
 	task, label, agentID string,
+	sync bool,
 ) (string, func(SubTurnStep) func(bool)) {
 	taskID := sm.TrackTask(task, label, agentID, ToolChannel(ctx), ToolChatID(ctx))
 	sm.mu.Lock()
 	sm.tasks[taskID].ToolCallID = ToolCallID(ctx)
+	sm.tasks[taskID].Sync = sync
 	sm.mu.Unlock()
 	return taskID, sm.recordSteps(taskID)
 }
@@ -303,12 +317,13 @@ func (sm *SubagentManager) finishCall(taskID string, result *ToolResult, err err
 	if err != nil {
 		status = "failed"
 	}
-	sm.ResolveTask(taskID, status, text)
+	stopReason := ""
 	if errors.Is(err, ErrSubagentTimeLimit) {
-		sm.mu.Lock()
-		sm.tasks[taskID].StopReason = "time_limit"
-		sm.mu.Unlock()
+		stopReason = "time_limit"
 	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.resolveLocked(taskID, status, text, stopReason)
 }
 
 func (sm *SubagentManager) Spawn(
@@ -589,7 +604,7 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		// Tracked like a spawn: the web shows both the same way.
 		taskID, onStep := "", func(SubTurnStep) func(bool) { return func(bool) {} }
 		if t.manager != nil {
-			taskID, onStep = t.manager.trackCall(ctx, task, label, "")
+			taskID, onStep = t.manager.trackCall(ctx, task, label, "", true)
 		}
 		result, err := t.spawner.SpawnSubTurn(ctx, SubTurnConfig{
 			Model:        t.defaultModel,

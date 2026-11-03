@@ -31,21 +31,27 @@ func (p *oneToolCallProvider) Chat(
 
 func (p *oneToolCallProvider) GetDefaultModel() string { return "test-model" }
 
-type noteTool struct{}
+// noteTool writes a note and keeps the id of the call it ran under.
+type noteTool struct{ callID *string }
 
 func (noteTool) Name() string               { return "note" }
 func (noteTool) Description() string        { return "Writes a note" }
 func (noteTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
-func (noteTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+func (n noteTool) Execute(ctx context.Context, _ map[string]any) *tools.ToolResult {
+	if n.callID != nil {
+		*n.callID = tools.ToolCallID(ctx)
+	}
 	return tools.NewToolResult("noted")
 }
 
 // The tool calls a sub-turn runs reach its OnStep, start and end, with the
-// arguments the web shows for a tool call.
+// arguments the web shows for a tool call. A tool runs under its call's id:
+// that is how the web finds the task a subagent call started.
 func TestSpawnSubTurn_ReportsItsToolCallsAsSteps(t *testing.T) {
 	al, agent, cleanup := newTurnCoordTestLoop(t, &oneToolCallProvider{})
 	defer cleanup()
-	agent.Tools.Register(noteTool{})
+	var callID string
+	agent.Tools.Register(noteTool{callID: &callID})
 
 	var mu sync.Mutex
 	var started []tools.SubTurnStep
@@ -76,6 +82,9 @@ func TestSpawnSubTurn_ReportsItsToolCallsAsSteps(t *testing.T) {
 	}
 	if len(ended) != 1 || ended[0] {
 		t.Fatalf("ends = %v, want one successful end", ended)
+	}
+	if callID != "child-call" {
+		t.Fatalf("the tool ran under call %q, want child-call", callID)
 	}
 }
 

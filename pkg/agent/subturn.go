@@ -196,7 +196,7 @@ type SubTurnConfig struct {
 	// instead of the caller's. If empty, the sub-turn runs as the parent agent.
 	TargetAgentID string
 
-	// OnStep hears each tool call the sub-turn runs (tools.SubTurnConfig).
+	// OnStep hears each tool call the sub-turn runs (tools.SubTurnConfig). (seucaranguejo fork)
 	OnStep func(tools.SubTurnStep) func(failed bool)
 }
 
@@ -461,7 +461,7 @@ func spawnSubTurn(
 	// Set SubTurn-specific fields
 	childTS.cancelFunc = cancel
 	childTS.critical = cfg.Critical
-	childTS.onStep = cfg.OnStep
+	childTS.onStep = cfg.OnStep // (seucaranguejo fork)
 	childTS.depth = parentTS.depth + 1
 	childTS.parentTurnID = parentTS.turnID
 	childTS.parentTurnState = parentTS
