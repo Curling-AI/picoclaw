@@ -238,7 +238,8 @@ func validPublicEntry(entry PublicHistoryEntry) bool {
 	}
 	public, ok := publicHistoryMessage(entry.Message)
 	if !ok || entry.BoundaryID != "" || entry.CallID != "" || (entry.Ref != nil && !entry.Ref.Valid()) ||
-		(entry.AnchorRef != nil && !entry.AnchorRef.Valid()) || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
+		(entry.AnchorRef != nil && !entry.AnchorRef.Valid()) || uuid.Validate(entry.ID) != nil ||
+		(entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
 		(entry.AnchorID != "" && uuid.Validate(entry.AnchorID) != nil) ||
 		entry.ImportID == "" ||
 		len(entry.ImportID) > 256 {
@@ -268,7 +269,22 @@ func validPublicEntry(entry PublicHistoryEntry) bool {
 	return string(original) == string(clean)
 }
 
+type publicImportOrigin uint8
+
+const (
+	publicImportExternal publicImportOrigin = iota
+	publicImportNativeMedia
+)
+
 func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHistoryImport) (PublicHistory, error) {
+	return s.importPublicHistory(ctx, request, publicImportExternal)
+}
+
+func (s *JSONLStore) importPublicHistory(
+	ctx context.Context,
+	request PublicHistoryImport,
+	origin publicImportOrigin,
+) (PublicHistory, error) {
 	payload, payloadErr := json.Marshal(request)
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
@@ -325,6 +341,16 @@ func (s *JSONLStore) ImportPublicHistory(ctx context.Context, request PublicHist
 	}
 	if !changed {
 		return publicHistoryResult(meta, entries), nil
+	}
+	if origin == publicImportExternal && meta.ContentIdentity != nil &&
+		meta.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
+		if meta.ContentIdentity.Pending != nil && meta.ContentIdentity.Pending.Mutation == nil {
+			return PublicHistory{}, ErrContentLineagePending
+		}
+		if !meta.PublicHistoryNonLocalImports && meta.publicRefUnavailable {
+			return PublicHistory{}, ErrContentIdentityUnavailable
+		}
+		meta.PublicHistoryNonLocalImports = true
 	}
 	next, payloadErr = preparePublicImports(entries, next, meta)
 	if payloadErr != nil {

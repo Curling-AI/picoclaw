@@ -126,6 +126,7 @@ func (s *JSONLStore) preparePublicRewrite(
 		next.PublicHistoryPreparation = nil
 		next.PublicHistoryGeneration = newHistoryID()
 		next.PublicHistoryComplete = true
+		next.PublicHistoryNonLocalImports = false
 		return s.replacePublicEntries(key, nil, next)
 	}
 	if original.PublicHistoryVersion < 0 || next.PublicHistoryVersion < 0 {
@@ -356,6 +357,9 @@ func (s *JSONLStore) commitPublicChange(
 	oldErr9 = s.writePublicChange(key, indexed)
 	if oldErr9 == nil {
 		oldErr9 = s.writeMeta(key, next)
+	}
+	if oldErr9 == nil && old.PublicHistoryNonLocalImports != next.PublicHistoryNonLocalImports {
+		oldErr9 = s.ensureContentDomain(key, old, next)
 	}
 	if oldErr9 == nil {
 		oldErr9 = s.finishHistoryWrite(key)

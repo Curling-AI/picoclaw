@@ -57,7 +57,7 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 			AnchorOrder: anchor.Order,
 			Message:     providers.Message{Role: "assistant", Content: content},
 		}
-		_, historyErr = s.ImportPublicHistory(
+		_, historyErr = s.importPublicHistory(
 			ctx,
 			PublicHistoryImport{
 				Key:        key,
@@ -66,6 +66,7 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 				AfterID:    afterID,
 				Entries:    []PublicHistoryEntry{entry},
 			},
+			publicImportNativeMedia,
 		)
 		if !errors.Is(historyErr, ErrPublicHistoryCoverage) {
 			return historyErr

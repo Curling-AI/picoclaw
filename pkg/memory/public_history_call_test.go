@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
 
 func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
@@ -40,7 +41,8 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 	initializedContent(t, store, key)
 	before, err := store.ReadPublicHistory(ctx, key)
 	if err != nil || len(before.Entries) != 2 || before.Entries[0].CallID != call || before.Entries[0].RunID != run ||
-		before.Entries[0].Ref == nil || before.Entries[1].CallID != "" {
+		before.Entries[0].Ref == nil || before.Entries[1].CallID != "" ||
+		!messageutil.ValidSourceContentDigest(before.Entries[0].SourceDigest) {
 		t.Fatalf("producer occurrence lacks call proof: %+v %v", before, err)
 	}
 	if err = store.Compact(ctx, key); err != nil {
@@ -51,7 +53,8 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err := store.ReadPublicHistory(ctx, key)
-	if err != nil || after.Entries[0].CallID != call || !samePublicRef(after.Entries[0].Ref, before.Entries[0].Ref) {
+	if err != nil || after.Entries[0].CallID != call || !samePublicRef(after.Entries[0].Ref, before.Entries[0].Ref) ||
+		after.Entries[0].SourceDigest != before.Entries[0].SourceDigest {
 		t.Fatalf("compaction/restart changed producer proof: %+v %v", after, err)
 	}
 	frame, err := store.ReadHistoryContentFrame(ctx, key)
@@ -73,7 +76,8 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	edited, err := store.ReadPublicHistory(ctx, key)
-	if err != nil || edited.Entries[0].CallID != "" || samePublicRef(edited.Entries[0].Ref, before.Entries[0].Ref) {
+	if err != nil || edited.Entries[0].CallID != "" || samePublicRef(edited.Entries[0].Ref, before.Entries[0].Ref) ||
+		edited.Entries[0].SourceDigest == before.Entries[0].SourceDigest {
 		t.Fatalf("edit reused the producer call proof: %+v %v", edited, err)
 	}
 	if err = store.AcknowledgeHistoryContentMutation(ctx, key, typedAppliedAck(mutation.Transition)); err != nil {
@@ -98,7 +102,8 @@ func TestPublicHistoryCallProofSurvivesCompactionButNeverAnEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	repeated, err := store.ReadPublicHistory(ctx, key)
-	if err != nil || repeated.Entries[0].CallID != "" {
+	if err != nil || repeated.Entries[0].CallID != "" ||
+		repeated.Entries[0].SourceDigest != edited.Entries[0].SourceDigest {
 		t.Fatalf("unchanged rewrite restored retired call proof: %+v %v", repeated, err)
 	}
 	if err = store.AcknowledgeHistoryContentMutation(ctx, key, typedAppliedAck(mutation.Transition)); err != nil {
