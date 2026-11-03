@@ -191,7 +191,7 @@ func (s *JSONLStore) readOrderRecoveryProof(ctx context.Context, key string) (Re
 			proof.Messages = append(proof.Messages, CommittedHistoryMessage{Message: message, Order: order})
 		}
 	}
-	if count != proof.Frontier {
+	if count != proof.Frontier || len(proof.Messages) != meta.Count {
 		return ReadOrderRecovery{}, ErrHistoryOrderUnavailable
 	}
 	file, err := os.Open(s.jsonlPath(key))
@@ -202,7 +202,7 @@ func (s *JSONLStore) readOrderRecoveryProof(ctx context.Context, key string) (Re
 	if err := errors.Join(readErr, file.Close()); err != nil {
 		return ReadOrderRecovery{}, err
 	}
-	if len(raw) > maxReadRecoveryBytes || int64(len(raw)) != *meta.HistoryBytes {
+	if int64(len(raw)) != *meta.HistoryBytes {
 		return ReadOrderRecovery{}, ErrHistoryOrderUnavailable
 	}
 	encoded, err := json.Marshal(struct {

@@ -168,3 +168,27 @@ func TestReadRecoveryCannotSuspendWritersWithoutAdministrativeAdmission(t *testi
 		t.Fatal("unapproved operation installed a writer gate", active, err)
 	}
 }
+
+func TestReadRecoveryDoesNotPromoteAnUnprovenLegacyPrefix(t *testing.T) {
+	source := newTestStore(t)
+	key := "agent:main:read-recovery-legacy"
+	if err := os.WriteFile(source.jsonlPath(key), []byte("{\"role\":\"assistant\",\"content\":\"unproven legacy answer\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := source.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "ordered answer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	err = source.WithReadOrderRecovery(t.Context(), key, admittedReadRecovery(uuid.NewString()), func(ReadOrderRecovery) error { called = true; return nil })
+	if !errors.Is(err, ErrHistoryOrderUnavailable) || called {
+		t.Fatal("legacy content silently became complete private proof", called, err)
+	}
+	next, err := source.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "still writable"})
+	if err != nil || next.Order.StreamID != first.Order.StreamID || next.Order.Sequence != 2 {
+		t.Fatal("proof refusal changed content writer availability or ordering", next, err)
+	}
+}
