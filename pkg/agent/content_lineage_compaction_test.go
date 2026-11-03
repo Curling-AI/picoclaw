@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,5 +174,44 @@ func TestContentLineageContextCompactionWorksWithoutOrderWitness(t *testing.T) {
 	}
 	if _, err = store.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(err, memory.ErrHistoryReceiptUnavailable) {
 		t.Fatal("content compaction reopened order receipts", err)
+	}
+}
+
+type contentCompactionOutcomeStore struct {
+	memory.HistoryContentLineage
+	transition memory.ContentTransition
+	err        error
+}
+
+func (s contentCompactionOutcomeStore) CommitHistoryCompaction(
+	context.Context,
+	string,
+	memory.ContentCompactionPlan,
+) (memory.ContentTransition, error) {
+	return s.transition, s.err
+}
+
+func TestContentCompactionKeepsCommittedTransitionWhileArchiveRecoveryIsPending(t *testing.T) {
+	_, _, frame, key := newContentCompactionLoop(t)
+	for _, committed := range []bool{false, true} {
+		t.Run(fmt.Sprint(committed), func(t *testing.T) {
+			source := contentCompactionOutcomeStore{err: memory.ErrContentStateChanged}
+			if committed {
+				source.transition = memory.ContentTransition{
+					Version:      memory.ContentLineageVersion,
+					CanonicalKey: key,
+					MutationID:   "committed",
+				}
+				source.err = errors.Join(memory.ErrHistoryInputCommitted, os.ErrPermission)
+			}
+			view := contentCompactionView{frame: &frame, store: source}
+			transition, err := view.commit(t.Context(), key, "summary", 2)
+			if committed && (err != nil || transition == nil || transition.MutationID != "committed") {
+				t.Fatal("committed transition was discarded", transition, err)
+			}
+			if !committed && (err == nil || transition != nil) {
+				t.Fatal("rejected CAS was reported committed", transition, err)
+			}
+		})
 	}
 }

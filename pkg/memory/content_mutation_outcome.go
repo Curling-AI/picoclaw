@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -62,8 +63,12 @@ func (s *JSONLStore) prepareContentMutationOrderFence(key string, meta *SessionM
 // receipt helper, but a missing independent Order witness cannot negate a
 // content-only transition. It never treats operational recovery errors as a
 // successful publication or emits any receipt binding.
-func (s *JSONLStore) recoverExpectedHistoryContentCommit(key string, next SessionMeta) (bool, error) {
-	decision, recoveryErr := s.recoverHistoryWriteFor(key, historyFailedWrite)
+func (s *JSONLStore) recoverExpectedHistoryContentCommit(
+	ctx context.Context,
+	key string,
+	next SessionMeta,
+) (bool, error) {
+	decision, recoveryErr := s.recoverHistoryWriteFor(context.WithoutCancel(ctx), key, historyFailedWrite)
 	if decision != historyWriteNew {
 		return false, recoveryErr
 	}

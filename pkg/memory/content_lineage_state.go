@@ -37,11 +37,12 @@ type contentSnapshot struct {
 }
 
 type contentPending struct {
-	Transition ContentTransition       `json:"transition"`
-	PlanDigest string                  `json:"planDigest"`
-	Before     contentSnapshot         `json:"before"`
-	After      contentSnapshot         `json:"after"`
-	Mutation   *contentMutationPending `json:"mutation,omitempty"`
+	NativeArchiveFrontier *publicIndexHeader      `json:"nativeArchiveFrontier,omitempty"`
+	Transition            ContentTransition       `json:"transition"`
+	PlanDigest            string                  `json:"planDigest"`
+	Before                contentSnapshot         `json:"before"`
+	After                 contentSnapshot         `json:"after"`
+	Mutation              *contentMutationPending `json:"mutation,omitempty"`
 }
 
 type contentAcknowledged struct {
@@ -63,6 +64,7 @@ type contentIdentityState struct {
 	Pending         *contentPending      `json:"pending,omitempty"`
 	Last            *contentAcknowledged `json:"last,omitempty"`
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
+	ArchivePolicy   string               `json:"archivePolicy,omitempty"`
 	storage         *contentStorageState
 	opaque          json.RawMessage
 }
@@ -510,6 +512,11 @@ func (s *JSONLStore) frameForContentImage(ctx context.Context, key string, image
 		if known {
 			ref := state.Rows[i].Ref
 			frame.Entries[i].Ref = &ref
+			public := decodedPublicMessage(row.Raw)
+			if public != nil && !validPublicProjection(row.Message, *public) {
+				public = nil
+			}
+			frame.Entries[i].Message.HistoryPublicMessage = public
 		}
 	}
 	// No binding is inferred from decodedHistoryID. Only a persisted UUID and
@@ -610,6 +617,13 @@ func (s *JSONLStore) InitializeHistoryContentIdentity(
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()
+	return s.initializeContentIdentityLocked(ctx, key, observation, "")
+}
+
+func (s *JSONLStore) initializeContentIdentityLocked(
+	ctx context.Context,
+	key, observation, archivePolicy string,
+) (ContentFrame, error) {
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return ContentFrame{}, err
 	}
@@ -650,6 +664,7 @@ func (s *JSONLStore) InitializeHistoryContentIdentity(
 	ensureHistoryGeneration(&next, key)
 	next.Count = image.Count
 	state := &contentIdentityState{
+		ArchivePolicy: archivePolicy,
 		Version:       ContentLineageVersion,
 		DomainID:      uuid.NewString(),
 		StateToken:    uuid.NewString(),
@@ -695,15 +710,25 @@ func (s *JSONLStore) commitContentMetadata(
 	next.HistoryRecoveryRequired = next.HistoryRecoveryRequired || image.WriterRecovery
 	size := image.Bytes
 	next.HistoryBytes = &size
+	publicChange, err := s.bindPublicContentMetadata(key, image, &next)
+	if err != nil {
+		return err
+	}
 	storage, err := s.prepareContentStorage(key, image.Meta, &next, false)
 	if err != nil {
 		return err
 	}
-	recovery := historyWriteRecovery{Meta: image.Meta, Next: next, Existed: image.Exists, Storage: storage}
+	recovery := historyWriteRecovery{
+		Meta:    image.Meta,
+		Next:    next,
+		Existed: image.Exists,
+		Storage: storage,
+		Public:  publicChange.Recovery,
+	}
 	if image.Exists {
 		recovery.AppendOffset = &size
 	}
-	if err := s.beginHistoryWrite(key, recovery); err != nil {
+	if err := s.beginHistoryWrite(ctx, key, recovery); err != nil {
 		return err
 	}
 	if !image.Exists {
@@ -717,22 +742,26 @@ func (s *JSONLStore) commitContentMetadata(
 			return errors.Join(err, s.recoverFailedHistoryWrite(key))
 		}
 	}
+	if err := s.writePublicChange(key, publicChange); err != nil {
+		_, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
+		return errors.Join(err, recoveryErr)
+	}
 	if err := s.writeMeta(key, next); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
 		if committed {
 			return recoveryErr
 		}
 		return errors.Join(err, recoveryErr)
 	}
 	if err := s.ensureContentDomain(key, image.Meta, next); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
 		if committed {
 			return recoveryErr
 		}
 		return errors.Join(err, recoveryErr)
 	}
 	if err := s.finishHistoryWrite(key); err != nil {
-		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(key, next)
+		committed, recoveryErr := s.recoverExpectedHistoryContentCommit(ctx, key, next)
 		if committed {
 			return recoveryErr
 		}
