@@ -224,6 +224,9 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 }
 
 func (s *JSONLStore) beginHistoryWrite(ctx context.Context, key string, recovery historyWriteRecovery) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	recovery.PublicMediaCleanup = recovery.PublicMediaCleanup || s.requiresPublicHistoryCleanup()
 	// NEW is only a commit fingerprint; recovery preserves its actual disk
 	// metadata. Only OLD needs a summary backup, which can be large.

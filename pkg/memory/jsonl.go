@@ -106,6 +106,8 @@ type JSONLStore struct {
 	publicProjector    PublicHistoryProjector
 	dir                string
 	locks              [numLockShards]sync.Mutex
+	readRecoveryMu     sync.Mutex
+	readRecoveryCalls  map[string]bool
 	writeFile          func(string, []byte, os.FileMode) error
 	// Optional private seam for deterministic origin-reader I/O failures.
 	openHistoryFile func(string) (*os.File, error)
@@ -284,6 +286,9 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 // writeMeta atomically writes the metadata file using the project's
 // standard WriteFileAtomic (temp + fsync + rename).
 func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	if strings.TrimSpace(meta.Key) == "" {
 		meta.Key = key
 	}
@@ -595,6 +600,12 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 	scope json.RawMessage,
 	aliases []string,
 ) (bool, error) {
+	if err := s.requireNoReadRecovery(sessionKey); err != nil {
+		return false, err
+	}
+	if err := s.requireNoReadRecovery(alias); err != nil {
+		return false, err
+	}
 	canonicalMeta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return false, err
