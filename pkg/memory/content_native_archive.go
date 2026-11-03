@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -10,9 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-var nativeArchiveLocalLink = regexp.MustCompile(
-	`\]\(\s*(?:artifact:|sandbox:|media://|artifacts/|uploads/|tmp/|/|\.{1,2}/)`,
-)
+var nativeArchiveLinkTarget = regexp.MustCompile(`\]\(\s*<?([^\s)>]+)`)
 
 const (
 	nativePublicArchivePolicy = "picoclaw-public-history-v1"
@@ -299,8 +298,27 @@ func verifyNativePublicMessage(ctx context.Context, projector PublicHistoryProje
 	if projector != nil {
 		return projector.Verify(ctx, message)
 	}
-	if len(message.Media) != 0 || len(message.Attachments) != 0 || nativeArchiveLocalLink.MatchString(message.Content) {
+	if len(message.Media) != 0 || len(message.Attachments) != 0 {
 		return ErrPublicHistoryCoverage
+	}
+	for remaining := message.Content; ; {
+		match := nativeArchiveLinkTarget.FindStringSubmatchIndex(remaining)
+		if len(match) == 0 {
+			break
+		}
+		target, err := url.Parse(remaining[match[2]:match[3]])
+		if err != nil {
+			return ErrPublicHistoryCoverage
+		}
+		if target.Scheme == "" && target.Path == "" && target.RawQuery == "" && target.Fragment != "" {
+			remaining = remaining[match[1]:]
+			continue
+		}
+		switch strings.ToLower(target.Scheme) {
+		case "", "artifact", "sandbox", "media", "file":
+			return ErrPublicHistoryCoverage
+		}
+		remaining = remaining[match[1]:]
 	}
 	return ctx.Err()
 }
