@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -42,6 +43,9 @@ type CronPayload struct {
 	LoopSlug  string `json:"loop_slug,omitempty"`
 	RoundKind string `json:"round_kind,omitempty"`
 	GoalID    string `json:"goal_id,omitempty"`
+	// Connectors lists the canonical connector IDs this job uses. Record only:
+	// it neither grants nor removes access when the job runs.
+	Connectors []string `json:"connectors,omitempty"`
 }
 
 type CronJobState struct {
@@ -650,8 +654,8 @@ func (cs *CronService) AddJob(
 }
 
 // AddJobWithModel is AddJob plus a platform-fixed model override for the job's
-// agent turn (Payload.Model). Kept separate so the agent-facing cron tool can
-// only reach the no-model AddJob and never pick its own model.
+// agent turn (Payload.Model). The platform sets the model; the agent-facing
+// cron tool never does (it leaves Model empty in its own AddJobWithPayload call).
 func (cs *CronService) AddJobWithModel(
 	name string,
 	schedule CronSchedule,
@@ -675,18 +679,34 @@ func (cs *CronService) AddJobWithModel(
 	)
 }
 
-// AddJobWithPayload persists platform metadata atomically before the scheduler
-// can admit the job. The agent-facing tool continues using AddJob.
+// AddJobWithPayload persists the whole payload atomically before the scheduler
+// can admit the job. The agent-facing cron tool calls it too, and keeps the
+// platform-owned fields (Model, LoopSlug, RoundKind, GoalID) empty itself: the
+// boundary is that call site, not this API.
 func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, payload CronPayload) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	return cs.addJobUnsafe(cs.newJob(name, schedule, payload))
+}
 
+// AddPausedJobWithPayload is AddJobWithPayload for a job that starts paused, in
+// the same save: created enabled and paused after, a job due at once could run.
+func (cs *CronService) AddPausedJobWithPayload(
+	name string,
+	schedule CronSchedule,
+	payload CronPayload,
+) (*CronJob, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	job := cs.newJob(name, schedule, payload)
+	job.Enabled = false
+	job.State.NextRunAtMS = nil
+	return cs.addJobUnsafe(job)
+}
+
+func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPayload) CronJob {
 	now := time.Now().UnixMilli()
-
-	// One-time tasks (at) should be deleted after execution
-	deleteAfterRun := (schedule.Kind == "at")
-
-	job := CronJob{
+	return CronJob{
 		ID:       generateID(),
 		Name:     utils.AutomationName(name, payload.Message),
 		Enabled:  true,
@@ -695,13 +715,18 @@ func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, pay
 		State: CronJobState{
 			NextRunAtMS: cs.computeNextRun(&schedule, now),
 		},
-		CreatedAtMS:    now,
-		UpdatedAtMS:    now,
-		DeleteAfterRun: deleteAfterRun,
+		CreatedAtMS: now,
+		UpdatedAtMS: now,
+		// One-time tasks (at) should be deleted after execution
+		DeleteAfterRun: schedule.Kind == "at",
 	}
+}
 
+func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
+		// Left in memory, the unsaved job would run, and the caller's retry would duplicate it.
+		cs.store.Jobs = cs.store.Jobs[:len(cs.store.Jobs)-1]
 		return nil, err
 	}
 
@@ -775,6 +800,7 @@ func cloneCronJob(job CronJob) CronJob {
 		lastRunAtMS := *job.State.LastRunAtMS
 		clone.State.LastRunAtMS = &lastRunAtMS
 	}
+	clone.Payload.Connectors = slices.Clone(job.Payload.Connectors)
 	return clone
 }
 
