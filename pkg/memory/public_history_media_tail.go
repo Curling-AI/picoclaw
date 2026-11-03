@@ -350,6 +350,11 @@ func (s *JSONLStore) dedupePreparedPublicEntries(
 			if owned.RunID != entry.RunID || contentJSONDigest(owned.Message) != contentJSONDigest(entry.Message) {
 				return nil, ErrPublicHistoryCoverage
 			}
+			if projector := s.historyPublicProjector(); projector != nil {
+				if verifyErr := projector.Verify(ctx, owned.Message); verifyErr != nil {
+					return nil, verifyErr
+				}
+			}
 			continue
 		}
 		unseen = append(unseen, entry)
