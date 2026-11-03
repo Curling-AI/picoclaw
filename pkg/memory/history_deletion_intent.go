@@ -187,7 +187,7 @@ func historyDeletionFingerprint(intent *historyDeletionIntent) string {
 func (s *JSONLStore) historyDeletionSourcePaths(key string) []string {
 	return []string{
 		s.metaPath(key), s.jsonlPath(key), s.historyDecisionPath(key),
-		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
+		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key), s.readRecoveryPath(key),
 	}
 }
 

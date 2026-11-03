@@ -12,6 +12,9 @@ import (
 // and unqualified history replacements retain their stricter retention guards.
 // The caller holds the source lock, including the pair lock used for aliases.
 func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, ownedAlias ...bool) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

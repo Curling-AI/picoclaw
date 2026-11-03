@@ -215,6 +215,9 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 }
 
 func (s *JSONLStore) beginHistoryWrite(key string, recovery historyWriteRecovery) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	// NEW is only a commit fingerprint; recovery preserves its actual disk
 	// metadata. Only OLD needs a summary backup, which can be large.
 	// Legacy metadata-only summary/truncation changes remain valid after an
