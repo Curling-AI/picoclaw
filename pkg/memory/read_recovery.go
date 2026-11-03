@@ -66,52 +66,101 @@ func (s *JSONLStore) WithReadOrderRecovery(
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return err
 	}
-	canonical := key
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
+	releaseCall, claimErr := s.claimReadRecoveryCall(key)
+	if claimErr != nil {
+		return claimErr
+	}
+	defer releaseCall()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Admission may call the controller. No session stripe can be held across
+	// callbacks: colon-key ownership resolution visits unrelated stripes too.
 	if err := request.Admit(ctx); err != nil {
 		return err
 	}
-	proof, err := s.readOrderRecoveryProof(ctx, canonical)
+	proof, err := s.prepareReadOrderRecovery(ctx, key, attempt)
 	if err != nil {
 		return err
 	}
-	gate := readRecoveryGate{AttemptID: attempt, Digest: proof.Digest}
-	data, err := os.ReadFile(s.readRecoveryPath(canonical))
-	switch {
-	case err == nil:
-		var previous readRecoveryGate
-		if json.Unmarshal(data, &previous) != nil || previous != gate {
-			return ErrHistoryRecoveryRequired
-		}
-	case errors.Is(err, os.ErrNotExist):
-		encoded, encodeErr := json.Marshal(gate)
-		if encodeErr != nil {
-			return encodeErr
-		}
-		if writeErr := s.writeSessionFile(s.readRecoveryPath(canonical), encoded, 0o600); writeErr != nil {
-			return writeErr
-		}
-	default:
+	if err := ctx.Err(); err != nil {
 		return err
-	}
-	if syncErr := s.syncHistoryFile(s.readRecoveryPath(canonical)); syncErr != nil {
-		return syncErr
 	}
 	if applyErr := apply(proof); applyErr != nil {
 		return applyErr
 	}
-	return s.releaseReadOrderRecovery(canonical, attempt)
+	lock := s.sessionLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.releaseReadOrderRecovery(key, attempt)
+}
+
+// A call claim serializes callbacks and explicit releases for one physical
+// session without keeping a stripe locked during controller I/O. It exists
+// only while a call runs; the durable gate fences writers after interruption.
+func (s *JSONLStore) claimReadRecoveryCall(key string) (func(), error) {
+	physical := sanitizeKey(key)
+	s.readRecoveryMu.Lock()
+	defer s.readRecoveryMu.Unlock()
+	if s.readRecoveryCalls[physical] {
+		return nil, ErrHistoryRecoveryRequired
+	}
+	if s.readRecoveryCalls == nil {
+		s.readRecoveryCalls = make(map[string]bool)
+	}
+	s.readRecoveryCalls[physical] = true
+	return func() {
+		s.readRecoveryMu.Lock()
+		delete(s.readRecoveryCalls, physical)
+		s.readRecoveryMu.Unlock()
+	}, nil
+}
+
+func (s *JSONLStore) prepareReadOrderRecovery(ctx context.Context, key, attempt string) (ReadOrderRecovery, error) {
+	lock := s.sessionLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := s.canonicalContentKey(ctx, key); err != nil {
+		return ReadOrderRecovery{}, err
+	}
+	proof, err := s.readOrderRecoveryProof(ctx, key)
+	if err != nil {
+		return ReadOrderRecovery{}, err
+	}
+	gate := readRecoveryGate{AttemptID: attempt, Digest: proof.Digest}
+	data, err := os.ReadFile(s.readRecoveryPath(key))
+	switch {
+	case err == nil:
+		var previous readRecoveryGate
+		if json.Unmarshal(data, &previous) != nil || previous != gate {
+			return ReadOrderRecovery{}, ErrHistoryRecoveryRequired
+		}
+	case errors.Is(err, os.ErrNotExist):
+		encoded, encodeErr := json.Marshal(gate)
+		if encodeErr != nil {
+			return ReadOrderRecovery{}, encodeErr
+		}
+		if writeErr := s.writeSessionFile(s.readRecoveryPath(key), encoded, 0o600); writeErr != nil {
+			return ReadOrderRecovery{}, writeErr
+		}
+	default:
+		return ReadOrderRecovery{}, err
+	}
+	if syncErr := s.syncHistoryFile(s.readRecoveryPath(key)); syncErr != nil {
+		return ReadOrderRecovery{}, syncErr
+	}
+	return proof, nil
 }
 
 func (s *JSONLStore) ReleaseReadOrderRecovery(ctx context.Context, key, attempt string) error {
 	if uuid.Validate(attempt) != nil {
 		return ErrHistoryOrderUnavailable
 	}
+	releaseCall, claimErr := s.claimReadRecoveryCall(key)
+	if claimErr != nil {
+		return claimErr
+	}
+	defer releaseCall()
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()

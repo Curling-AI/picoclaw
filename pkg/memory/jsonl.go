@@ -106,6 +106,8 @@ type JSONLStore struct {
 	publicProjector    PublicHistoryProjector
 	dir                string
 	locks              [numLockShards]sync.Mutex
+	readRecoveryMu     sync.Mutex
+	readRecoveryCalls  map[string]bool
 	writeFile          func(string, []byte, os.FileMode) error
 	// Optional private seam for deterministic origin-reader I/O failures.
 	openHistoryFile func(string) (*os.File, error)
