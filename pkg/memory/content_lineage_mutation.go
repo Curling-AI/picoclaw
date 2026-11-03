@@ -297,6 +297,7 @@ func (s *JSONLStore) appendHistoryContent(
 	}
 	detached.HistoryID = message.HistoryID
 	detached.HistoryRunID = message.HistoryRunID
+	detached.HistoryCallID = message.HistoryCallID
 	message = detached
 	var outcome historyAppendOutcome
 	receipts, appendErr := s.appendHistoryMessagesOutcome(

@@ -36,6 +36,7 @@ type PublicHistoryEntry struct {
 	BoundaryID           string            `json:"boundaryId,omitempty"`
 	ID                   string            `json:"id"`
 	RunID                string            `json:"runId,omitempty"`
+	CallID               string            `json:"callId,omitempty"`
 	Message              providers.Message `json:"message"`
 	Order                HistoryOrderProof `json:"order"`
 	LegacyBeforeStreamID string            `json:"legacyBeforeStreamId,omitempty"`
@@ -102,6 +103,9 @@ func publicHistoryEntriesAt(messages []providers.Message, meta SessionMeta, star
 			RunID:   message.HistoryRunID,
 			Message: public,
 			Order:   messageHistoryOrder(message),
+		}
+		if providers.ValidHistoryCallID(message.HistoryCallID) {
+			entry.CallID = message.HistoryCallID
 		}
 		if entry.Order.Valid() {
 			entry.SourceDigest = publicSourceDigest(message)
@@ -233,7 +237,7 @@ func validPublicEntry(entry PublicHistoryEntry) bool {
 		return false
 	}
 	public, ok := publicHistoryMessage(entry.Message)
-	if !ok || entry.BoundaryID != "" || (entry.Ref != nil && !entry.Ref.Valid()) ||
+	if !ok || entry.BoundaryID != "" || entry.CallID != "" || (entry.Ref != nil && !entry.Ref.Valid()) ||
 		(entry.AnchorRef != nil && !entry.AnchorRef.Valid()) || uuid.Validate(entry.ID) != nil || (entry.RunID != "" && uuid.Validate(entry.RunID) != nil) ||
 		(entry.AnchorID != "" && uuid.Validate(entry.AnchorID) != nil) ||
 		entry.ImportID == "" ||
