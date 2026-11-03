@@ -438,6 +438,11 @@ func spawnSubTurn(
 	if !opts.TurnProfile.Enabled {
 		opts.TurnProfile = parentTS.opts.TurnProfile
 	}
+	// Delegated work runs on the model the person picked for the parent turn;
+	// another agent's tiers are not this conversation's. (seucaranguejo fork)
+	if cfg.TargetAgentID == "" {
+		opts.ModelTier = parentTS.modelTier
+	}
 	var policyErr error
 	opts, policyErr = executionPolicyOptions(childCtx, &agent, opts)
 	if policyErr != nil {
