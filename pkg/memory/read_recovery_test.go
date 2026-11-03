@@ -37,6 +37,9 @@ func TestReadRecoveryIncludesSkippedProofAndSurvivesInterruptedCallback(t *testi
 	if _, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "must wait"}); !errors.Is(err, ErrHistoryRecoveryRequired) {
 		t.Fatal("pending recovery allowed a writer", err)
 	}
+	if err := s.DeleteSession(t.Context(), key); !errors.Is(err, ErrHistoryRecoveryRequired) {
+		t.Fatal("deletion released a pending administrative gate", err)
+	}
 	if content, err := s.ReadHistoryContent(t.Context(), key); err != nil || len(content) != 1 {
 		t.Fatal("recovery hid readable content", content, err)
 	}
