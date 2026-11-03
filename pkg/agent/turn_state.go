@@ -401,9 +401,11 @@ type turnState struct {
 	cancelFunc      context.CancelFunc // Cancel function for this turn's context
 	critical        bool               // Whether this SubTurn should continue after parent ends
 	parentTurnState *turnState         // Reference to parent turnState
-	parentEnded     atomic.Bool        // Whether parent has ended
-	closeOnce       sync.Once          // Ensures pendingResults channel is closed once
-	finishedChan    chan struct{}      // Closed when turn finishes
+	// onStep hears this sub-turn's tool calls, for the live view (spawnSubTurn).
+	onStep       func(tools.SubTurnStep) func(failed bool)
+	parentEnded  atomic.Bool   // Whether parent has ended
+	closeOnce    sync.Once     // Ensures pendingResults channel is closed once
+	finishedChan chan struct{} // Closed when turn finishes
 
 	// Token budget tracking
 	tokenBudget      *atomic.Int64        // Shared token budget counter

@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +61,32 @@ type SubTurnConfig struct {
 	InitialMessages    []providers.Message
 	InitialTokenBudget *atomic.Int64 // Shared token budget for team members; nil if no budget
 	TargetAgentID      string        // If set, run as this agent (its workspace, model, tools)
+	// OnStep, when set, hears each tool call the sub-turn starts and returns
+	// what to call when it ends. (seucaranguejo fork)
+	OnStep func(SubTurnStep) (done func(failed bool))
+}
+
+// SubTurnStep is a tool call a sub-turn starts, as the web shows tool calls.
+type SubTurnStep struct {
+	Name      string
+	Arguments string
+}
+
+// ErrSubagentTimeLimit starts the error of a sub-turn stopped by its own time
+// limit. It lives here so a tool can tell it apart; pkg/agent returns it.
+var ErrSubagentTimeLimit = errors.New("subagent stopped by its time limit")
+
+// maxSubagentSteps bounds the steps a task keeps: the live view shows the
+// latest, and StepCount still counts them all.
+const maxSubagentSteps = 20
+
+// SubagentStep is a tool call a subagent ran, for the live view.
+type SubagentStep struct {
+	Name       string
+	Arguments  string
+	Status     string // "running" | "done" | "error" | "canceled"
+	Started    int64  // unix ms
+	DurationMs int64
 }
 
 type SubagentTask struct {
@@ -71,6 +99,12 @@ type SubagentTask struct {
 	Status        string
 	Result        string
 	Created       int64
+	// ToolCallID is the call that started the task; "" for the legacy Spawn.
+	ToolCallID string
+	Steps      []SubagentStep
+	StepCount  int
+	Finished   int64  // unix ms; 0 while running
+	StopReason string // "time_limit" when its time limit stopped it
 }
 
 type SpawnSubTurnFunc func(
@@ -195,6 +229,85 @@ func (sm *SubagentManager) ResolveTask(taskID, status, result string) {
 	if task, ok := sm.tasks[taskID]; ok {
 		task.Status = status
 		task.Result = result
+		task.Finished = time.Now().UnixMilli()
+		// A step the turn left open (a stop cut it) will not end now.
+		for i := range task.Steps {
+			if task.Steps[i].Status == "running" {
+				task.Steps[i].Status = "canceled"
+			}
+		}
+	}
+}
+
+// trackCall registers the task the current tool call starts, under the call's
+// id, and returns the task id and the recorder of its steps.
+func (sm *SubagentManager) trackCall(
+	ctx context.Context,
+	task, label, agentID string,
+) (string, func(SubTurnStep) func(bool)) {
+	taskID := sm.TrackTask(task, label, agentID, ToolChannel(ctx), ToolChatID(ctx))
+	sm.mu.Lock()
+	sm.tasks[taskID].ToolCallID = ToolCallID(ctx)
+	sm.mu.Unlock()
+	return taskID, sm.recordSteps(taskID)
+}
+
+// recordSteps is the SubTurnConfig.OnStep that keeps taskID's steps.
+func (sm *SubagentManager) recordSteps(taskID string) func(SubTurnStep) func(bool) {
+	return func(step SubTurnStep) func(bool) {
+		sm.mu.Lock()
+		defer sm.mu.Unlock()
+		task, ok := sm.tasks[taskID]
+		if !ok {
+			return func(bool) {}
+		}
+		started := time.Now()
+		task.StepCount++
+		seq := task.StepCount
+		task.Steps = append(task.Steps, SubagentStep{
+			Name:      step.Name,
+			Arguments: step.Arguments,
+			Status:    "running",
+			Started:   started.UnixMilli(),
+		})
+		if extra := len(task.Steps) - maxSubagentSteps; extra > 0 {
+			task.Steps = slices.Delete(task.Steps, 0, extra)
+		}
+		return func(failed bool) {
+			sm.mu.Lock()
+			defer sm.mu.Unlock()
+			// Steps are kept in start order: this one sits StepCount-seq from the end.
+			i := len(task.Steps) - 1 - (task.StepCount - seq)
+			if i < 0 || task.Steps[i].Status != "running" {
+				return
+			}
+			task.Steps[i].Status = "done"
+			if failed {
+				task.Steps[i].Status = "error"
+			}
+			task.Steps[i].DurationMs = time.Since(started).Milliseconds()
+		}
+	}
+}
+
+// finishCall resolves a task trackCall registered from what its sub-turn
+// returned.
+func (sm *SubagentManager) finishCall(taskID string, result *ToolResult, err error) {
+	status, text := "completed", ""
+	if result != nil {
+		text = result.ForLLM
+		if result.IsError {
+			status = "failed"
+		}
+	}
+	if err != nil {
+		status = "failed"
+	}
+	sm.ResolveTask(taskID, status, text)
+	if errors.Is(err, ErrSubagentTimeLimit) {
+		sm.mu.Lock()
+		sm.tasks[taskID].StopReason = "time_limit"
+		sm.mu.Unlock()
 	}
 }
 
@@ -371,7 +484,14 @@ func (sm *SubagentManager) GetTaskCopy(taskID string) (SubagentTask, bool) {
 	if !ok {
 		return SubagentTask{}, false
 	}
-	return *task, true
+	return copyTask(task), true
+}
+
+// copyTask is a snapshot of task that shares nothing the manager still writes.
+func copyTask(task *SubagentTask) SubagentTask {
+	c := *task
+	c.Steps = slices.Clone(task.Steps)
+	return c
 }
 
 func (sm *SubagentManager) ListTasks() []*SubagentTask {
@@ -393,7 +513,7 @@ func (sm *SubagentManager) ListTaskCopies() []SubagentTask {
 
 	copies := make([]SubagentTask, 0, len(sm.tasks))
 	for _, task := range sm.tasks {
-		copies = append(copies, *task)
+		copies = append(copies, copyTask(task))
 	}
 	return copies
 }
@@ -402,6 +522,7 @@ func (sm *SubagentManager) ListTaskCopies() []SubagentTask {
 // It directly calls SubTurnSpawner with Async=false for synchronous execution.
 type SubagentTool struct {
 	spawner      SubTurnSpawner
+	manager      *SubagentManager
 	defaultModel string
 	maxTokens    int
 	temperature  float64
@@ -412,6 +533,7 @@ func NewSubagentTool(manager *SubagentManager) *SubagentTool {
 		return &SubagentTool{}
 	}
 	return &SubagentTool{
+		manager:      manager,
 		defaultModel: manager.defaultModel,
 		maxTokens:    manager.maxTokens,
 		temperature:  manager.temperature,
@@ -464,6 +586,11 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
+		// Tracked like a spawn: the web shows both the same way.
+		taskID, onStep := "", func(SubTurnStep) func(bool) { return func(bool) {} }
+		if t.manager != nil {
+			taskID, onStep = t.manager.trackCall(ctx, task, label, "")
+		}
 		result, err := t.spawner.SpawnSubTurn(ctx, SubTurnConfig{
 			Model:        t.defaultModel,
 			Tools:        nil, // Will inherit from parent via context
@@ -471,7 +598,11 @@ func (t *SubagentTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 			MaxTokens:    t.maxTokens,
 			Temperature:  t.temperature,
 			Async:        false, // Synchronous execution
+			OnStep:       onStep,
 		})
+		if t.manager != nil {
+			t.manager.finishCall(taskID, result, err)
+		}
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)
 		}
