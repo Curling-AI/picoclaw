@@ -982,6 +982,9 @@ func (p *Pipeline) CallLLM(
 	if shouldPublishPicoToolCallInterim {
 		// Pico tool-call turns publish their reasoning/content/tool summary as a
 		// structured sequence after the tool-call payload is normalized below.
+	} else if structuredInterimChannel && ts.parentTurnID != "" {
+		// A subagent's thoughts are not the conversation's: the web shows its
+		// steps under the subagent card. (seucaranguejo fork)
 	} else if structuredInterimChannel {
 		if exec.streamingPublisher != nil && exec.streamingPublisher.ReasoningPublished() {
 			if err := exec.streamingPublisher.FinalizeReasoning(turnCtx, reasoningContent); err != nil {

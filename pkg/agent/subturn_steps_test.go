@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -18,14 +19,14 @@ func (p *oneToolCallProvider) Chat(
 	context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
 ) (*providers.LLMResponse, error) {
 	if p.calls.Add(1) == 1 {
-		return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
+		return &providers.LLMResponse{ReasoningContent: "which note?", ToolCalls: []providers.ToolCall{{
 			ID:        "child-call",
 			Type:      "function",
 			Name:      "note",
 			Arguments: map[string]any{"text": "olá"},
 		}}}, nil
 	}
-	return &providers.LLMResponse{Content: "done"}, nil
+	return &providers.LLMResponse{ReasoningContent: "noted, answering", Content: "done"}, nil
 }
 
 func (p *oneToolCallProvider) GetDefaultModel() string { return "test-model" }
@@ -75,5 +76,48 @@ func TestSpawnSubTurn_ReportsItsToolCallsAsSteps(t *testing.T) {
 	}
 	if len(ended) != 1 || ended[0] {
 		t.Fatalf("ends = %v, want one successful end", ended)
+	}
+}
+
+// A subagent's thoughts do not reach the web conversation as the assistant's:
+// its steps show under the subagent card instead.
+func TestSpawnSubTurn_KeepsItsReasoningOutOfTheConversation(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &oneToolCallProvider{})
+	defer cleanup()
+	agent.Tools.Register(noteTool{})
+	parent := newStopTestParent(agent)
+	parent.opts.Dispatch.InboundContext = &bus.InboundContext{Channel: "grpc", ChatID: "web-chat"}
+
+	msgBus, ok := al.bus.(*bus.MessageBus)
+	if !ok {
+		t.Fatalf("bus is %T", al.bus)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	var thoughts atomic.Int32
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		for {
+			select {
+			case msg := <-msgBus.OutboundChan():
+				if msg.Context.Raw[metadataKeyMessageKind] == messageKindThought {
+					thoughts.Add(1)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	_, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+		Model:        "test-model",
+		SystemPrompt: "write a note",
+	})
+	stop()
+	<-read
+	if err != nil {
+		t.Fatalf("spawnSubTurn: %v", err)
+	}
+	if n := thoughts.Load(); n != 0 {
+		t.Fatalf("%d thoughts reached the conversation, want none", n)
 	}
 }
