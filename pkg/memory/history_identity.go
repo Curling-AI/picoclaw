@@ -12,6 +12,7 @@ import (
 )
 
 type historyRecord struct {
+	PublicMessage *providers.Message `json:"history_public_message,omitempty"`
 	providers.Message
 	ID             string `json:"history_id"`
 	RunID          string `json:"history_run_id,omitempty"`
@@ -53,6 +54,7 @@ func marshalHistoryMessage(message providers.Message, meta SessionMeta) ([]byte,
 	return json.Marshal(
 		historyRecord{
 			Message:              message,
+			PublicMessage:        message.HistoryPublicMessage,
 			ID:                   id,
 			RunID:                message.HistoryRunID,
 			Generation:           meta.HistoryGeneration,
@@ -85,7 +87,9 @@ func historyLineageMatches(data []byte, meta SessionMeta, key string) bool {
 		return false
 	}
 	if record.Generation == "" && record.FileGeneration == "" {
-		return meta.HistoryEpoch == 0 && meta.HistoryFileEpoch == 0 &&
+		// FileEpoch also advances for an exact raw suffix cut. The legacy
+		// generation still fences every rewrite that actually moved rows.
+		return meta.HistoryEpoch == 0 &&
 			meta.HistoryFileGeneration == legacyHistoryGeneration(key)
 	}
 	return record.Generation == meta.HistoryGeneration && record.FileGeneration == meta.HistoryFileGeneration

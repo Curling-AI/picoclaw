@@ -28,6 +28,11 @@ type ContentMutationRetainPrefixIntent struct {
 	Retained []ContentRef `json:"retained"`
 }
 
+type ContentMutationPublicView struct {
+	Generation string `json:"generation"`
+	Revision   uint64 `json:"revision"`
+}
+
 // ContentMutationPlan is fixed by one command admission before its first
 // commit. An absent replay result never authorizes replanning the same ID.
 // Only a complete, exact plan can commit a new checked edit or prefix cut.
@@ -39,6 +44,7 @@ type ContentMutationPlan struct {
 	Kind         ContentMutationKind                `json:"kind"`
 	Edit         *ContentMutationEditIntent         `json:"edit,omitempty"`
 	RetainPrefix *ContentMutationRetainPrefixIntent `json:"retainPrefix,omitempty"`
+	PublicView   *ContentMutationPublicView         `json:"publicView,omitempty"`
 }
 
 // ContentMutationTransition is a frozen content pair, independent of later

@@ -74,6 +74,8 @@ type AgentLoop struct {
 	mirror deliveryMirror
 	mu     sync.RWMutex
 
+	publicHistoryMu                     sync.RWMutex
+	publicHistoryFactory                func(string) memory.PublicHistoryProjector
 	sessionHistoryObserverMu            sync.RWMutex
 	sessionHistoryObserver              func(string)
 	sessionHistoryReceiptObserver       func(string, []memory.CommittedHistoryMessage)
@@ -508,6 +510,8 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
+
+	al.projectPublicHistoryRegistry(registry)
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair

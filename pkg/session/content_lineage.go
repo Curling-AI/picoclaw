@@ -11,6 +11,22 @@ import (
 // Merely implementing this optional interface does not activate it for old callers.
 type HistoryContentLineage = memory.HistoryContentLineage
 
+func (b *JSONLBackend) InitializeNewHistoryContentIdentity(ctx context.Context, key string) error {
+	store, ok := b.store.(memory.HistoryContentInitializer)
+	if !ok {
+		return memory.ErrHistoryUnsupported
+	}
+	return store.InitializeNewHistoryContentIdentity(ctx, key)
+}
+
+func (b *JSONLBackend) PrepareNativeHistoryArchive(ctx context.Context, key string) error {
+	store, ok := b.store.(memory.HistoryNativeContentArchive)
+	if !ok {
+		return memory.ErrHistoryUnsupported
+	}
+	return store.PrepareNativeHistoryArchive(ctx, key)
+}
+
 func (b *JSONLBackend) AcknowledgeHistoryCompactionCoverage(
 	ctx context.Context,
 	key string,

@@ -1423,6 +1423,7 @@ func (p *Pipeline) CallLLM(
 		ModelName:        exec.llmModelName,
 		ReasoningContent: reasoningContent,
 		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
+		HistoryCallID:    exec.historyCallID,
 	}
 	for _, tc := range exec.normalizedToolCalls {
 		argumentsJSON, _ := json.Marshal(tc.Arguments)

@@ -253,6 +253,7 @@ type turnExecution struct {
 	llmModelName              string
 	llmOpts                   map[string]any
 	llmRequestID              string
+	historyCallID             string
 	gracefulTerminal          bool
 	useNativeSearch           bool
 	ownedProviders            []providers.LLMProvider
@@ -1037,6 +1038,7 @@ func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	// delivery's time comes back without the clock and in a fixed zone.
 	msg.CreatedAt = nil
 	msg.JoinedSends = ""
+	msg.HistoryCallID = ""
 	if msg.Delivery != nil {
 		delivery := *msg.Delivery
 		delivery.ID = "" // Persistence identity is absent from the turn's input copy.

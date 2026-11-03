@@ -116,6 +116,7 @@ func assistantReply(exec *turnExecution, content string) providers.Message {
 		ModelName:        exec.llmModelName,
 		ReasoningContent: responseReasoningContent(exec.response),
 		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
+		HistoryCallID:    exec.historyCallID,
 	}
 }
 

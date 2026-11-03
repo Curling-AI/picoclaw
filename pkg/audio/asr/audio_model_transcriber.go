@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -22,8 +23,13 @@ type AudioModelTranscriber struct {
 	prompt   string
 }
 
+// (seucaranguejo fork) Sem o marcador, o silêncio volta como recusa ou fala
+// inventada, e isso entra na conversa como fala da pessoa. Pedir resposta vazia
+// não serve: o modelo responde mesmo assim, e o Hulk trata saída vazia como falha.
 const (
-	defaultTranscriptionPrompt = "Transcribe this audio."
+	noSpeechMarker             = "NO_SPEECH"
+	defaultTranscriptionPrompt = "Transcribe this audio. Reply only with the words spoken. " +
+		"If no words are spoken, reply with exactly " + noSpeechMarker + "."
 )
 
 func NewAudioModelTranscriber(modelCfg *config.ModelConfig) *AudioModelTranscriber {
@@ -111,11 +117,21 @@ func (t *AudioModelTranscriber) Transcribe(ctx context.Context, audioFilePath st
 	}
 
 	text := strings.TrimSpace(resp.Content)
+	if isNoSpeech(text) {
+		text = ""
+	}
 	logger.InfoCF("voice", "Audio model transcription completed successfully", map[string]any{
 		"text_length": len(text),
 	})
 
 	return &TranscriptionResponse{Text: text}, nil
+}
+
+// isNoSpeech tolera caixa e pontuação nas pontas: o marcador dentro de uma frase
+// é fala.
+func isNoSpeech(text string) bool {
+	bare := strings.TrimFunc(text, unicode.IsPunct)
+	return strings.EqualFold(bare, noSpeechMarker)
 }
 
 func (t *AudioModelTranscriber) Name() string {

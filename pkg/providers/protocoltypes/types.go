@@ -179,9 +179,13 @@ type Attachment struct {
 }
 
 type Message struct {
+	// HistoryPublicMessage is a private immutable display-version witness.
+	// It never enters provider JSON or the model session projection.
+	HistoryPublicMessage *Message `json:"-"`
 	// HistoryID belongs to persistence; provider request encoders never receive it.
 	HistoryID        string         `json:"-"`
 	HistoryRunID     string         `json:"-"`
+	HistoryCallID    string         `json:"-"`
 	Role             string         `json:"role"`
 	Content          string         `json:"content"`
 	ModelName        string         `json:"model_name,omitempty"`
