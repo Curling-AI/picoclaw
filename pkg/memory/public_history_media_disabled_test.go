@@ -86,7 +86,10 @@ type disabledOwnedPrefixProjector struct {
 }
 
 func (p *disabledOwnedPrefixProjector) Commit(message providers.Message) (PublicHistoryProjectionResult, error) {
-	return PublicHistoryProjectionResult{Message: message, HasVersionedReferences: p.frozen && message.Content == "old owned artifact"}, nil
+	return PublicHistoryProjectionResult{
+		Message:                message,
+		HasVersionedReferences: p.frozen && message.Content == "old owned artifact",
+	}, nil
 }
 
 func (p *disabledOwnedPrefixProjector) Legacy(message providers.Message) (PublicHistoryProjectionResult, error) {
@@ -110,69 +113,72 @@ func TestPublicMediaDisabledOwnedGapRechecksOldProofWithoutDuplicatingItsNativeR
 			mode = "frozen"
 		}
 		for _, newRAW := range []bool{false, true} {
-			t.Run(mode+"/"+map[bool]string{false: "published_anchor", true: "new_RAW_anchor"}[newRAW], func(t *testing.T) {
-				store, key := newTestStore(t), "agent:web:disabled-owned-gap"
-				run := uuid.NewString()
-				ctx := providers.WithHistoryRun(t.Context(), run)
-				projector := &disabledOwnedPrefixProjector{frozen: frozen}
-				store.SetPublicHistoryProjector(projector)
-				if err := store.AddMessage(ctx, key, "assistant", "old owned artifact"); err != nil {
-					t.Fatal(err)
-				}
-				meta, err := store.readMeta(key)
-				if err != nil {
-					t.Fatal(err)
-				}
-				meta.PublicHistoryVersion = -1
-				// Empty JSONL lines do not create source occurrences.
-				raw, err := os.ReadFile(store.jsonlPath(key))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if bytes.Contains(raw, []byte("history_public_message")) != frozen {
-					t.Fatal("fixture does not exercise the intended frozen projection path")
-				}
-				raw = append([]byte{'\n'}, raw...)
-				if err = os.WriteFile(store.jsonlPath(key), raw, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				*meta.HistoryBytes = int64(len(raw))
-				if err = store.writeMeta(key, meta); err != nil {
-					t.Fatal(err)
-				}
-				projector.unavailable = true
-				if newRAW {
-					if err = store.AddMessage(ctx, key, "user", "new native run"); err != nil {
+			t.Run(
+				mode+"/"+map[bool]string{false: "published_anchor", true: "new_RAW_anchor"}[newRAW],
+				func(t *testing.T) {
+					store, key := newTestStore(t), "agent:web:disabled-owned-gap"
+					run := uuid.NewString()
+					ctx := providers.WithHistoryRun(t.Context(), run)
+					projector := &disabledOwnedPrefixProjector{frozen: frozen}
+					store.SetPublicHistoryProjector(projector)
+					if err := store.AddMessage(ctx, key, "assistant", "old owned artifact"); err != nil {
 						t.Fatal(err)
 					}
-				}
-				if err = store.RecordPublicMedia(ctx, key, run, "[new](artifact:new.pdf)"); err != nil {
-					t.Fatal(err)
-				}
-				preparation, err := store.PreparePublicHistory(ctx, key, "")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err = store.PreparePublicHistory(ctx, key, preparation.Cursor); err == nil {
-					t.Fatal("old owned artifact was not rechecked")
-				}
-				blocked, metaErr := store.readMeta(key)
-				if metaErr != nil || blocked.PublicHistoryPreparation == nil || blocked.PublicHistoryComplete {
-					t.Fatal("missing old proof promoted preparation", blocked, metaErr)
-				}
-				if _, readErr := store.ReadPublicHistory(ctx, key); !errors.Is(readErr, ErrPublicHistoryCoverage) {
-					t.Fatal("missing old proof exposed a ready history", readErr)
-				}
-				projector.unavailable = false
-				result := finishDeferredMedia(t, store, key)
-				want := 2
-				if newRAW {
-					want++
-				}
-				if len(result.Entries) != want {
-					t.Fatal("recovery duplicated an owned native row", len(result.Entries))
-				}
-			})
+					meta, err := store.readMeta(key)
+					if err != nil {
+						t.Fatal(err)
+					}
+					meta.PublicHistoryVersion = -1
+					// Empty JSONL lines do not create source occurrences.
+					raw, err := os.ReadFile(store.jsonlPath(key))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Contains(raw, []byte("history_public_message")) != frozen {
+						t.Fatal("fixture does not exercise the intended frozen projection path")
+					}
+					raw = append([]byte{'\n'}, raw...)
+					if err = os.WriteFile(store.jsonlPath(key), raw, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					*meta.HistoryBytes = int64(len(raw))
+					if err = store.writeMeta(key, meta); err != nil {
+						t.Fatal(err)
+					}
+					projector.unavailable = true
+					if newRAW {
+						if err = store.AddMessage(ctx, key, "user", "new native run"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err = store.RecordPublicMedia(ctx, key, run, "[new](artifact:new.pdf)"); err != nil {
+						t.Fatal(err)
+					}
+					preparation, err := store.PreparePublicHistory(ctx, key, "")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = store.PreparePublicHistory(ctx, key, preparation.Cursor); err == nil {
+						t.Fatal("old owned artifact was not rechecked")
+					}
+					blocked, metaErr := store.readMeta(key)
+					if metaErr != nil || blocked.PublicHistoryPreparation == nil || blocked.PublicHistoryComplete {
+						t.Fatal("missing old proof promoted preparation", blocked, metaErr)
+					}
+					if _, readErr := store.ReadPublicHistory(ctx, key); !errors.Is(readErr, ErrPublicHistoryCoverage) {
+						t.Fatal("missing old proof exposed a ready history", readErr)
+					}
+					projector.unavailable = false
+					result := finishDeferredMedia(t, store, key)
+					want := 2
+					if newRAW {
+						want++
+					}
+					if len(result.Entries) != want {
+						t.Fatal("recovery duplicated an owned native row", len(result.Entries))
+					}
+				},
+			)
 		}
 	}
 }
