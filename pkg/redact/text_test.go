@@ -314,6 +314,31 @@ func TestText_MasksUploadNames(t *testing.T) {
 			in:   `uploads/ab12cd34-2026-11-03`,
 			want: `uploads/ab12cd34-[REDACTED]`,
 		},
+		{
+			name: "after an escaped newline",
+			in:   `ls:\nab12cd34-Joao_Silva.pdf`,
+			want: `ls:\nab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "every name of an ls serialized to JSON",
+			in:   `{"output":"ab12cd34-A.pdf\nab12cd34-B.pdf"}`,
+			want: `{"output":"ab12cd34-[REDACTED].pdf\nab12cd34-[REDACTED].pdf"}`,
+		},
+		{
+			name: "after an escaped tab",
+			in:   `a\tab12cd34-X.pdf`,
+			want: `a\tab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "after a percent-encoded slash",
+			in:   `uploads%2Fab12cd34-X.pdf`,
+			want: `uploads%2Fab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "after a JSON unicode escape",
+			in:   `\u003cab12cd34-X.pdf\u003e`,
+			want: `\u003cab12cd34-[REDACTED].pdf\u003e`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -335,6 +360,8 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		`chat 3f2c1a9e-1b2c-4d5e-8f90-123456789abc.`,
 		`media/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
 		`job 3f2c1a9e-1b2c-4d5e-8f90-123456789abc_retry`,
+		`ls:\n3f2c1a9e-1b2c-4d5e-8f90-123456789abc.jsonl`,
+		`media%2F3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
 		`{"session_id":"3f2c1a9e-1b2c-4d5e-8f90-123456789abc"}`,
 		// A hex part inside a longer name does not start the token.
 		`pod maestro-gateway-ab12cd34-x9k2p ready`,
