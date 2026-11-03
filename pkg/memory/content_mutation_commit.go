@@ -81,10 +81,23 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 	if frame.DomainID != plan.DomainID || frame.StateToken != plan.BeforeState {
 		return ContentMutationResult{}, ErrContentStateChanged
 	}
+	// Typed replacement physically retires the skipped source. Qualify that
+	// independent display coverage before creating any immutable preimage.
+	// Context-only restoration uses its separate retained-source writer.
+	if image.Meta.PublicHistoryVersion < 0 {
+		return ContentMutationResult{}, ErrPublicHistoryCoverage
+	}
+	if image.Meta.Skip > 0 && image.Meta.PublicHistoryVersion == PublicHistoryVersion &&
+		image.Meta.PublicHistoryPreparation == nil {
+		if coverageErr := s.verifyPublicPrefix(ctx, key, image.Meta); coverageErr != nil {
+			return ContentMutationResult{}, coverageErr
+		}
+	}
 	next, prepared, err := s.prepareTypedContentMutation(ctx, key, plan, image, frame)
 	if err != nil {
 		return ContentMutationResult{}, err
 	}
+	prepared = s.projectPublicCommits(prepared, &next)
 	// Build new physical locators BEFORE any durable publication. The rewrite
 	// helper will recompute the same locators from these exact prepared rows.
 	data, err := marshalHistoryJSONL(prepared, next)
@@ -97,6 +110,15 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 		return ContentMutationResult{}, err
 	}
 	next.ContentIdentity.Rows = rows
+	dataBytes := int64(len(data))
+	next.HistoryBytes = &dataBytes
+	// Qualify and freeze the same public rewrite before allocating a preimage.
+	// Legacy/preparing sources may materialize Ready in this existing atomic
+	// path; no version-only gate or second projection/read is needed.
+	publicChange, err := s.preparePublicRewrite(key, image.Meta, &next, prepared)
+	if err != nil {
+		return ContentMutationResult{}, err
+	}
 	transition := ContentMutationTransition{
 		Version: ContentLineageVersion, CanonicalKey: key, DomainID: frame.DomainID,
 		MutationID: plan.MutationID, IntentDigest: plan.IntentDigest, Kind: plan.Kind,
@@ -142,7 +164,13 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 	if err = s.createContentPreimage(ctx, *preimage, previous); err != nil {
 		return ContentMutationResult{}, err
 	}
-	if err = s.commitHistoryRewriteFor(key, prepared, next, true); err != nil {
+	if err = s.commitHistoryRewriteData(
+		key,
+		prepared,
+		next,
+		true,
+		&historyRawRewrite{data: data, publicChange: &publicChange},
+	); err != nil {
 		return ContentMutationResult{}, err
 	}
 	// Do not reread a possibly cleanup-fenced source and turn confirmed NEW
@@ -258,6 +286,9 @@ func (s *JSONLStore) prepareTypedContentMutation(
 		var raw historyRecord
 		if json.Unmarshal(active[i].Raw, &raw) != nil {
 			return SessionMeta{}, nil, ErrContentIdentityUnavailable
+		}
+		if ref == *entry.Ref {
+			prepared[i].HistoryPublicMessage = raw.PublicMessage
 		}
 		prepared[i].HistoryID = decodedHistoryID(
 			active[i].Raw,

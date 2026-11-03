@@ -15,3 +15,13 @@ func (b *JSONLBackend) AppendHistoryContext(ctx context.Context, key string, mes
 func (b *JSONLBackend) SetHistoryContext(ctx context.Context, key string, messages []providers.Message) error {
 	return b.store.SetHistory(ctx, b.resolveSessionKey(key), messages)
 }
+
+// ClearHistoryContext carries explicit owner intent without discarding scope or aliases.
+func (b *JSONLBackend) ClearHistoryContext(ctx context.Context, key string) error {
+	if clearer, ok := b.store.(interface {
+		ClearHistory(ctx context.Context, key string) error
+	}); ok {
+		return clearer.ClearHistory(ctx, b.resolveSessionKey(key))
+	}
+	return b.SetHistoryContext(ctx, key, nil)
+}
