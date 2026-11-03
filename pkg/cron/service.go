@@ -686,13 +686,27 @@ func (cs *CronService) AddJobWithModel(
 func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, payload CronPayload) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	return cs.addJobUnsafe(cs.newJob(name, schedule, payload))
+}
 
+// AddPausedJobWithPayload is AddJobWithPayload for a job that starts paused, in
+// the same save: created enabled and paused after, a job due at once could run.
+func (cs *CronService) AddPausedJobWithPayload(
+	name string,
+	schedule CronSchedule,
+	payload CronPayload,
+) (*CronJob, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	job := cs.newJob(name, schedule, payload)
+	job.Enabled = false
+	job.State.NextRunAtMS = nil
+	return cs.addJobUnsafe(job)
+}
+
+func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPayload) CronJob {
 	now := time.Now().UnixMilli()
-
-	// One-time tasks (at) should be deleted after execution
-	deleteAfterRun := (schedule.Kind == "at")
-
-	job := CronJob{
+	return CronJob{
 		ID:       generateID(),
 		Name:     utils.AutomationName(name, payload.Message),
 		Enabled:  true,
@@ -701,11 +715,14 @@ func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, pay
 		State: CronJobState{
 			NextRunAtMS: cs.computeNextRun(&schedule, now),
 		},
-		CreatedAtMS:    now,
-		UpdatedAtMS:    now,
-		DeleteAfterRun: deleteAfterRun,
+		CreatedAtMS: now,
+		UpdatedAtMS: now,
+		// One-time tasks (at) should be deleted after execution
+		DeleteAfterRun: schedule.Kind == "at",
 	}
+}
 
+func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		return nil, err

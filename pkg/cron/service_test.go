@@ -122,6 +122,31 @@ func TestCronService_CRUD(t *testing.T) {
 	}
 }
 
+func TestCronService_AddPausedJobWithPayloadStartsPaused(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	atMS := time.Now().Add(time.Second).UnixMilli()
+	job, err := cs.AddPausedJobWithPayload(
+		"Task1",
+		CronSchedule{Kind: "at", AtMS: &atMS},
+		CronPayload{Kind: "agent_turn", Message: "msg", Connectors: []string{"gmail"}},
+	)
+	if err != nil {
+		t.Fatalf("AddPausedJobWithPayload failed: %v", err)
+	}
+	stored, ok := cs.GetJob(job.ID)
+	if !ok {
+		t.Fatal("job not stored")
+	}
+	if stored.Enabled || stored.State.NextRunAtMS != nil {
+		t.Fatalf("enabled=%v next=%v, want a paused job with no next run", stored.Enabled, stored.State.NextRunAtMS)
+	}
+	if !slices.Equal(stored.Payload.Connectors, []string{"gmail"}) {
+		t.Fatalf("connectors = %v", stored.Payload.Connectors)
+	}
+}
+
 func TestCronService_GetJobReturnsCopy(t *testing.T) {
 	cs, path := setupService(nil)
 	defer os.Remove(path)
