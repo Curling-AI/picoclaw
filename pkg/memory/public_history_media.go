@@ -37,8 +37,17 @@ func (s *JSONLStore) RecordPublicMedia(ctx context.Context, key, runID, content 
 		if anchor == nil {
 			return ErrPublicHistoryCoverage
 		}
-		digest := sha256.Sum256([]byte(runID + ":" + content))
+		digest := sha256.Sum256([]byte(runID + ":" + anchor.ID + ":" + content))
 		importID := "media:" + hex.EncodeToString(digest[:])
+		legacyDigest := sha256.Sum256([]byte(runID + ":" + content))
+		legacyID := "media:" + hex.EncodeToString(legacyDigest[:])
+		for _, previous := range history.Entries {
+			// Keep published retry identities only for their original native occurrence.
+			if previous.ImportID == legacyID && previous.AnchorID == anchor.ID {
+				importID = legacyID
+				break
+			}
+		}
 		entry := PublicHistoryEntry{
 			ID:          uuid.NewSHA1(uuid.NameSpaceOID, []byte(importID)).String(),
 			RunID:       runID,
