@@ -305,29 +305,26 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		return errResult
 	}
 
-	job, err := t.cronService.AddJob(
+	// One save: a second one could fail unseen, or write back a stale NextRunAtMS
+	// after the scheduler already claimed a job that was due at once.
+	job, err := t.cronService.AddJobWithPayload(
 		utils.AutomationName(name, message),
 		schedule,
-		message,
-		channel,
-		chatID,
+		cron.CronPayload{
+			Kind:       "agent_turn",
+			Message:    message,
+			Command:    command,
+			Channel:    channel,
+			To:         chatID,
+			Model:      "",
+			LoopSlug:   "",
+			RoundKind:  "",
+			GoalID:     "",
+			Connectors: connectors,
+		},
 	)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Error adding job: %v", err))
-	}
-
-	// Apply optional payload fields and persist in a single UpdateJob call
-	needsUpdate := false
-	if command != "" {
-		job.Payload.Command = command
-		needsUpdate = true
-	}
-	if len(connectors) > 0 {
-		job.Payload.Connectors = connectors
-		needsUpdate = true
-	}
-	if needsUpdate {
-		t.cronService.UpdateJob(job)
 	}
 
 	return SilentResult(fmt.Sprintf("Cron job added: %s (id: %s)", job.Name, job.ID))
