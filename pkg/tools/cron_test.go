@@ -1565,8 +1565,14 @@ func TestCronTool_RegistryRefusesNullConnectors(t *testing.T) {
 		name string
 		args map[string]any
 	}{
-		{name: "add", args: map[string]any{"action": "add", "message": "m", "every_seconds": float64(60), "connectors": nil}},
-		{name: "update", args: map[string]any{"action": "update", "job_id": job.ID, "message": "changed", "connectors": nil}},
+		{
+			name: "add",
+			args: map[string]any{"action": "add", "message": "m", "every_seconds": float64(60), "connectors": nil},
+		},
+		{
+			name: "update",
+			args: map[string]any{"action": "update", "job_id": job.ID, "message": "changed", "connectors": nil},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
