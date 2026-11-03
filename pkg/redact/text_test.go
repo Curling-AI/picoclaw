@@ -228,8 +228,144 @@ func TestText_MasksCredentials(t *testing.T) {
 	}
 }
 
+func TestText_MasksUploadNames(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "relative path",
+			in:   `uploads/ab12cd34-Contrato_Acme_2026.pdf`,
+			want: `uploads/ab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "absolute path",
+			in:   `/home/ethos/.assistant/workspace/uploads/ab12cd34-Contrato_Acme.docx`,
+			want: `/home/ethos/.assistant/workspace/uploads/ab12cd34-[REDACTED].docx`,
+		},
+		{
+			name: "tool call preview",
+			in:   `Tool call: read_file({"path":"uploads/ab12cd34-Contrato_Acme.pdf"})`,
+			want: `Tool call: read_file({"path":"uploads/ab12cd34-[REDACTED].pdf"})`,
+		},
+		{
+			name: "shell command",
+			in:   `pdftotext uploads/ab12cd34-Contrato_Acme.pdf -`,
+			want: `pdftotext uploads/ab12cd34-[REDACTED].pdf -`,
+		},
+		{
+			name: "two uploads in one line",
+			in:   `cat uploads/ab12cd34-a_b.txt uploads/00ff00ff-c_d.csv`,
+			want: `cat uploads/ab12cd34-[REDACTED].txt uploads/00ff00ff-[REDACTED].csv`,
+		},
+		{
+			name: "no extension",
+			in:   `uploads/ab12cd34-Contrato_Acme`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "text after a dot is not an extension",
+			in:   `uploads/ab12cd34-Contrato.Acme_Sigiloso`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "only the last extension stays",
+			in:   `uploads/ab12cd34-Contrato.Acme.tar.gz`,
+			want: `uploads/ab12cd34-[REDACTED].gz`,
+		},
+		{
+			name: "masking twice changes nothing",
+			in:   `uploads/ab12cd34-[REDACTED].pdf`,
+			want: `uploads/ab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "a command run inside uploads/",
+			in:   `cd uploads && pdftotext ab12cd34-Contrato_Acme.pdf -`,
+			want: `cd uploads && pdftotext ab12cd34-[REDACTED].pdf -`,
+		},
+		{
+			name: "an exec whose cwd is uploads/",
+			in:   `{"command":"cat ab12cd34-Contrato_Acme.txt","cwd":"uploads"}`,
+			want: `{"command":"cat ab12cd34-[REDACTED].txt","cwd":"uploads"}`,
+		},
+		{
+			name: "a suffix that is part of the name",
+			in:   `uploads/ab12cd34-Laudo.Silva`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "a number after the dot",
+			in:   `uploads/ab12cd34-NF.12345`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "an extension in capitals",
+			in:   `uploads/ab12cd34-Foto_Silva.JPG`,
+			want: `uploads/ab12cd34-[REDACTED].JPG`,
+		},
+		{
+			name: "a name of digits, like a CPF",
+			in:   `uploads/ab12cd34-12345678900`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "a name like a date",
+			in:   `uploads/ab12cd34-2026-11-03`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "after an escaped newline",
+			in:   `ls:\nab12cd34-Joao_Silva.pdf`,
+			want: `ls:\nab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "every name of an ls serialized to JSON",
+			in:   `{"output":"ab12cd34-A.pdf\nab12cd34-B.pdf"}`,
+			want: `{"output":"ab12cd34-[REDACTED].pdf\nab12cd34-[REDACTED].pdf"}`,
+		},
+		{
+			name: "after an escaped tab",
+			in:   `a\tab12cd34-X.pdf`,
+			want: `a\tab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "after a percent-encoded slash",
+			in:   `uploads%2Fab12cd34-X.pdf`,
+			want: `uploads%2Fab12cd34-[REDACTED].pdf`,
+		},
+		{
+			name: "after a JSON unicode escape",
+			in:   `\u003cab12cd34-X.pdf\u003e`,
+			want: `\u003cab12cd34-[REDACTED].pdf\u003e`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Text(tt.in); got != tt.want {
+				t.Fatalf("Text(%q)\n got  %q\n want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestText_LeavesNonSecretsAlone(t *testing.T) {
 	tests := []string{
+		`ls uploads/`,
+		`uploads/notes.txt`,
+		`uploads/ab12cd34`,
+		// A UUID names a run or a session; its tail is hex and dashes.
+		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc started`,
+		`/ws/sessions/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.jsonl`,
+		`chat 3f2c1a9e-1b2c-4d5e-8f90-123456789abc.`,
+		`media/3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
+		`job 3f2c1a9e-1b2c-4d5e-8f90-123456789abc_retry`,
+		`ls:\n3f2c1a9e-1b2c-4d5e-8f90-123456789abc.jsonl`,
+		`media%2F3f2c1a9e-1b2c-4d5e-8f90-123456789abc.ogg`,
+		`{"session_id":"3f2c1a9e-1b2c-4d5e-8f90-123456789abc"}`,
+		// A hex part inside a longer name does not start the token.
+		`pod maestro-gateway-ab12cd34-x9k2p ready`,
+		`agent:cron-job-17800000-0000-4000-8000-000000000031`,
 		`curl -H "Authorization: Bearer $TOKEN" https://x`,
 		`TOKEN=$(cat work/token.txt); curl -H "Authorization: Bearer ${TOKEN}" https://x`,
 		`{"model":"x","max_tokens":100,"token_count":512}`,
@@ -251,5 +387,19 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		if got := Text(in); got != in {
 			t.Errorf("Text(%q) = %q, want it unchanged", in, got)
 		}
+	}
+}
+
+func BenchmarkText(b *testing.B) {
+	for _, line := range []string{
+		`Tool call: exec({"command":"ls -la work/2026-11-03","session_id":"pc-12"})`,
+		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc finished in 1.2s`,
+		`Tool call: read_file({"path":"uploads/ab12cd34-Contrato_Acme.pdf"})`,
+	} {
+		b.Run(line[:20], func(b *testing.B) {
+			for b.Loop() {
+				Text(line)
+			}
+		})
 	}
 }
