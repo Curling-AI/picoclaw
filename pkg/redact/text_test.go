@@ -279,6 +279,31 @@ func TestText_MasksUploadNames(t *testing.T) {
 			in:   `uploads/ab12cd34-[REDACTED].pdf`,
 			want: `uploads/ab12cd34-[REDACTED].pdf`,
 		},
+		{
+			name: "a command run inside uploads/",
+			in:   `cd uploads && pdftotext ab12cd34-Contrato_Acme.pdf -`,
+			want: `cd uploads && pdftotext ab12cd34-[REDACTED].pdf -`,
+		},
+		{
+			name: "an exec whose cwd is uploads/",
+			in:   `{"command":"cat ab12cd34-Contrato_Acme.txt","cwd":"uploads"}`,
+			want: `{"command":"cat ab12cd34-[REDACTED].txt","cwd":"uploads"}`,
+		},
+		{
+			name: "a suffix that is part of the name",
+			in:   `uploads/ab12cd34-Laudo.Silva`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "a number after the dot",
+			in:   `uploads/ab12cd34-NF.12345`,
+			want: `uploads/ab12cd34-[REDACTED]`,
+		},
+		{
+			name: "an extension in capitals",
+			in:   `uploads/ab12cd34-Foto_Silva.JPG`,
+			want: `uploads/ab12cd34-[REDACTED].JPG`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,6 +319,12 @@ func TestText_LeavesNonSecretsAlone(t *testing.T) {
 		`ls uploads/`,
 		`uploads/notes.txt`,
 		`uploads/ab12cd34`,
+		// A UUID names a run or a session; its tail is hex and dashes.
+		`run 3f2c1a9e-1b2c-4d5e-8f90-123456789abc started`,
+		`{"session_id":"3f2c1a9e-1b2c-4d5e-8f90-123456789abc"}`,
+		// A hex part inside a longer name does not start the token.
+		`pod maestro-gateway-ab12cd34-x9k2p ready`,
+		`agent:cron-job-17800000-0000-4000-8000-000000000031`,
 		`curl -H "Authorization: Bearer $TOKEN" https://x`,
 		`TOKEN=$(cat work/token.txt); curl -H "Authorization: Bearer ${TOKEN}" https://x`,
 		`{"model":"x","max_tokens":100,"token_count":512}`,
