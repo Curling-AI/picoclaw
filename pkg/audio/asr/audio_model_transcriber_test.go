@@ -233,6 +233,55 @@ func TestAudioModelTranscriberSendsTheMIMEType(t *testing.T) {
 	}
 }
 
+// Sem fala o modelo responde o marcador do prompt, e Transcribe devolve texto
+// vazio, que vira a nota de "sem fala" no agente. Fala parecida com o marcador
+// segue como fala (MST-575).
+func TestAudioModelTranscriberNoSpeechMarkerBecomesEmptyText(t *testing.T) {
+	audioPath := filepath.Join(t.TempDir(), "clip.ogg")
+	if err := os.WriteFile(audioPath, []byte("fake-audio"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]struct{ reply, want string }{
+		"marker":                 {"NO_SPEECH", ""},
+		"surrounding whitespace": {" NO_SPEECH\n", ""},
+		"lower case":             {"no_speech", ""},
+		"trailing period":        {"NO_SPEECH.", ""},
+		"brackets":               {"[NO_SPEECH]", ""},
+		"quotes":                 {`"NO_SPEECH"`, ""},
+		"plain speech":           {"Faça uma pesquisa", "Faça uma pesquisa"},
+		"spoken words":           {"No speech.", "No speech."},
+		"marker inside speech":   {"O erro dizia NO_SPEECH ontem", "O erro dizia NO_SPEECH ontem"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tr := &AudioModelTranscriber{
+				provider: &fakeLLMProvider{
+					chatFunc: func(
+						context.Context,
+						[]providers.Message,
+						[]providers.ToolDefinition,
+						string,
+						map[string]any,
+					) (*providers.LLMResponse, error) {
+						return &providers.LLMResponse{Content: tc.reply}, nil
+					},
+				},
+				modelID: "gemini-2.5-flash",
+				prompt:  defaultTranscriptionPrompt,
+			}
+
+			resp, err := tr.Transcribe(context.Background(), audioPath)
+			if err != nil {
+				t.Fatalf("Transcribe() error: %v", err)
+			}
+			if resp.Text != tc.want {
+				t.Fatalf("Text = %q, want %q", resp.Text, tc.want)
+			}
+		})
+	}
+}
+
 // O caminho que o ASR usa de verdade: entrada da model_list até o corpo enviado.
 func TestTranscriberFromModelConfigHonorsAudioFileParts(t *testing.T) {
 	audioPath := filepath.Join(t.TempDir(), "clip.ogg")
