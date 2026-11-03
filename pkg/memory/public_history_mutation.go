@@ -184,6 +184,12 @@ func (s *JSONLStore) preparePublicRewrite(
 			if readErr != nil {
 				return publicHistoryChange{}, readErr
 			}
+			if state := original.PublicHistoryPreparation; state != nil && state.MediaCount > 0 {
+				previous, entries, readErr = mergePreparingPublicMedia(previous, entries, state.MediaCount)
+				if readErr != nil {
+					return publicHistoryChange{}, readErr
+				}
+			}
 			// Previously committed supplements and compacted source entries have
 			// no remaining source row. Preserve their exact identifiers/bytes.
 			seen := make(map[string]bool, len(previous))
@@ -312,6 +318,11 @@ func (s *JSONLStore) restorePublicHistory(key string, recovery *publicHistoryRec
 		defer func() { resultErr = errors.Join(resultErr, file.Close()) }()
 		if operationErr6 := file.Truncate(*recovery.Offset); operationErr6 != nil {
 			return operationErr6
+		}
+		if len(recovery.Data) > 0 {
+			if _, err := file.WriteAt(recovery.Data, *recovery.Offset); err != nil {
+				return err
+			}
 		}
 		if operationErr7 := file.Sync(); operationErr7 != nil {
 			return operationErr7
