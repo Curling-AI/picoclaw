@@ -725,6 +725,8 @@ func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPa
 func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
+		// Left in memory, the unsaved job would run, and the caller's retry would duplicate it.
+		cs.store.Jobs = cs.store.Jobs[:len(cs.store.Jobs)-1]
 		return nil, err
 	}
 

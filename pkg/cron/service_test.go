@@ -668,6 +668,20 @@ func TestFailedSaveLeavesTheJobUnchanged(t *testing.T) {
 			t.Fatalf("job was paused in memory although the store was not saved: %+v", got)
 		}
 	})
+	t.Run("add", func(t *testing.T) {
+		cs, _ := serviceWithFailingSave(t)
+		before := len(cs.ListJobs(true))
+		payload := CronPayload{Kind: "agent_turn", Message: "b"}
+		if got, err := cs.AddJobWithPayload("b", CronSchedule{Kind: "cron", Expr: "0 9 * * *"}, payload); err == nil || got != nil {
+			t.Fatalf("AddJobWithPayload = %v, %v; want nil and the save error", got, err)
+		}
+		if got, err := cs.AddPausedJobWithPayload("b", CronSchedule{Kind: "cron", Expr: "0 9 * * *"}, payload); err == nil || got != nil {
+			t.Fatalf("AddPausedJobWithPayload = %v, %v; want nil and the save error", got, err)
+		}
+		if after := len(cs.ListJobs(true)); after != before {
+			t.Fatalf("jobs in memory = %d, want %d: an unsaved add stayed", after, before)
+		}
+	})
 	t.Run("update", func(t *testing.T) {
 		cs, job := serviceWithFailingSave(t)
 		edited, _ := cs.GetJob(job.ID)
