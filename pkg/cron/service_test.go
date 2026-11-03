@@ -672,10 +672,20 @@ func TestFailedSaveLeavesTheJobUnchanged(t *testing.T) {
 		cs, _ := serviceWithFailingSave(t)
 		before := len(cs.ListJobs(true))
 		payload := CronPayload{Kind: "agent_turn", Message: "b"}
-		if got, err := cs.AddJobWithPayload("b", CronSchedule{Kind: "cron", Expr: "0 9 * * *"}, payload); err == nil || got != nil {
+		if got, err := cs.AddJobWithPayload(
+			"b",
+			CronSchedule{Kind: "cron", Expr: "0 9 * * *"},
+			payload,
+		); err == nil ||
+			got != nil {
 			t.Fatalf("AddJobWithPayload = %v, %v; want nil and the save error", got, err)
 		}
-		if got, err := cs.AddPausedJobWithPayload("b", CronSchedule{Kind: "cron", Expr: "0 9 * * *"}, payload); err == nil || got != nil {
+		if got, err := cs.AddPausedJobWithPayload(
+			"b",
+			CronSchedule{Kind: "cron", Expr: "0 9 * * *"},
+			payload,
+		); err == nil ||
+			got != nil {
 			t.Fatalf("AddPausedJobWithPayload = %v, %v; want nil and the save error", got, err)
 		}
 		if after := len(cs.ListJobs(true)); after != before {
