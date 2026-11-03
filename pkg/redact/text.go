@@ -63,14 +63,28 @@ var (
 		`(?i)((?:password|passwd|senha|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)` +
 			`(\\?["']?\s*(?:=>|[:=])\s*)` +
 			`(\\"(?:[^"\\]|\\[^"])*|"(?:[^"\\]|\\.)*|'[^']*|[^\s"'\\&,;}]+)`)
-	// An upload as the pod stores it: a random prefix and the person's file
-	// name, which UploadFile reduces to these characters. Not a credential, but
-	// the person's, and every read_file would log it.
-	uploadNameRe = regexp.MustCompile(`(uploads/[0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
-	// The part of the name that stays: it says what kind of file failed. Short,
-	// so the end of a name with dots does not pass for an extension.
-	uploadExtensionRe = regexp.MustCompile(`\.[A-Za-z0-9]{1,5}$`)
+	// An upload as the pod stores it: a random 8-hex prefix and the person's
+	// file name, which UploadFile reduces to these characters. Not a credential,
+	// but the person's, and every read_file would log it. Matched with or
+	// without the uploads/ folder, since a command run inside it names the file
+	// alone. The prefix must start the token, so a pod or job name with a hex
+	// part stays.
+	uploadNameRe = regexp.MustCompile(`(^|[^A-Za-z0-9._-])([0-9a-f]{8}-)([A-Za-z0-9._-]+)`)
 )
+
+// uploadExtensions are the extensions kept after a masked upload name: they say
+// what kind of file failed. Anything else after a dot may be part of the name,
+// such as an invoice number.
+var uploadExtensions = map[string]bool{
+	".pdf": true, ".doc": true, ".docx": true, ".odt": true, ".rtf": true, ".epub": true,
+	".xls": true, ".xlsx": true, ".ods": true, ".csv": true, ".ppt": true, ".pptx": true, ".odp": true,
+	".txt": true, ".md": true, ".json": true, ".xml": true, ".html": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".heic": true, ".svg": true,
+	".ogg": true, ".oga": true, ".opus": true, ".mp3": true, ".m4a": true, ".wav": true, ".aac": true,
+	".amr": true, ".flac": true, ".wma": true,
+	".mp4": true, ".mov": true, ".webm": true,
+	".zip": true, ".gz": true, ".tar": true, ".rar": true, ".7z": true,
+}
 
 // textRule runs mask only when the lowercased text holds one of its hints.
 // Text runs on every log line and most lines carry no credential, so a few
@@ -108,7 +122,7 @@ var textRules = []textRule{
 		},
 		func(s string) string { return assignmentRe.ReplaceAllStringFunc(s, maskAssignment) },
 	},
-	{[]string{"uploads/"}, maskUploadNames},
+	{[]string{"-"}, maskUploadNames},
 }
 
 // Text masks the credentials found in free text, and the file name in the path
@@ -164,13 +178,25 @@ func maskCredentialWord(re *regexp.Regexp, s string) string {
 	})
 }
 
-// maskUploadNames keeps the prefix, which tells two uploads apart, and the
-// extension.
+// maskUploadNames keeps the prefix, which tells two uploads apart, and a known
+// extension. A tail of hex and dashes is a UUID, which names a run or a session.
 func maskUploadNames(s string) string {
 	return uploadNameRe.ReplaceAllStringFunc(s, func(match string) string {
 		parts := uploadNameRe.FindStringSubmatch(match)
-		return parts[1] + Mask + uploadExtensionRe.FindString(parts[2])
+		name := parts[3]
+		if strings.Trim(name, "0123456789abcdef-") == "" {
+			return match
+		}
+		return parts[1] + parts[2] + Mask + uploadExtension(name)
 	})
+}
+
+func uploadExtension(name string) string {
+	dot := strings.LastIndexByte(name, '.')
+	if dot < 0 || !uploadExtensions[strings.ToLower(name[dot:])] {
+		return ""
+	}
+	return name[dot:]
 }
 
 func maskAssignment(match string) string {
