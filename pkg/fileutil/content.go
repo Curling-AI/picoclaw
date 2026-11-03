@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -138,12 +139,14 @@ func WriteFileIfContentInRoot(root *os.Root, path string, data []byte, expected 
 type rootAtomicOps struct {
 	chmod  func(*os.File, os.FileMode) error
 	rename func(string, string) error
+	remove func(string) error
 }
 
 func writeFileAtomicInRoot(root *os.Root, name string, data []byte, perm os.FileMode) error {
 	return writeFileAtomicInRootWith(root, name, data, perm, rootAtomicOps{
 		chmod:  (*os.File).Chmod,
 		rename: root.Rename,
+		remove: root.Remove,
 	})
 }
 
@@ -167,8 +170,12 @@ func writeFileAtomicInRootWith(
 	defer func() {
 		_ = file.Close()
 		if !renamed {
-			if cleanupErr := root.Remove(temporary); cleanupErr != nil && !errors.Is(cleanupErr, fs.ErrNotExist) {
-				err = errors.Join(err, fmt.Errorf("remove temp file: %w", cleanupErr))
+			if cleanupErr := ops.remove(temporary); cleanupErr != nil && !errors.Is(cleanupErr, fs.ErrNotExist) {
+				if err != nil {
+					err = errors.Join(err, fmt.Errorf("remove temp file: %w", cleanupErr))
+				} else {
+					slog.Warn("could not remove committed write's temporary file", "file", temporary, "error", cleanupErr)
+				}
 			}
 		}
 	}()

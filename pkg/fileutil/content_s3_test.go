@@ -21,7 +21,7 @@ func TestRootedCASFallsBackForUnsupportedAtomicOperations(t *testing.T) {
 				if err := root.WriteFile("MEMORY.md", []byte("old"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				ops := rootAtomicOps{chmod: (*os.File).Chmod, rename: root.Rename}
+				ops := rootAtomicOps{chmod: (*os.File).Chmod, rename: root.Rename, remove: root.Remove}
 				if operation == "chmod" {
 					ops.chmod = func(*os.File, os.FileMode) error { return unsupported }
 				} else {
@@ -57,6 +57,29 @@ func TestRootedCASFallsBackForUnsupportedAtomicOperations(t *testing.T) {
 	}
 }
 
+func TestRootedCASReportsCommittedFallbackWhenTempCleanupFails(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.WriteFile("MEMORY.md", []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := rootAtomicOps{
+		chmod:  (*os.File).Chmod,
+		rename: func(string, string) error { return syscall.EPERM },
+		remove: func(string) error { return syscall.EPERM },
+	}
+	writeErr := writeFileAtomicInRootWith(root, "MEMORY.md", []byte("new"), 0o600, ops)
+	if got, err := root.ReadFile("MEMORY.md"); err != nil || string(got) != "new" {
+		t.Fatalf("fallback did not commit: bytes = %q, error = %v", got, err)
+	}
+	if writeErr != nil {
+		t.Fatalf("committed fallback reported a write failure: %v", writeErr)
+	}
+}
+
 func TestRootedCASDoesNotFallbackOnPermissionOrIOFailure(t *testing.T) {
 	for _, operation := range []string{"chmod", "rename"} {
 		for _, cause := range []error{syscall.EACCES, syscall.EIO, syscall.ENOSPC} {
@@ -70,7 +93,7 @@ func TestRootedCASDoesNotFallbackOnPermissionOrIOFailure(t *testing.T) {
 				if err := root.WriteFile("MEMORY.md", []byte("old"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				ops := rootAtomicOps{chmod: (*os.File).Chmod, rename: root.Rename}
+				ops := rootAtomicOps{chmod: (*os.File).Chmod, rename: root.Rename, remove: root.Remove}
 				if operation == "chmod" {
 					ops.chmod = func(*os.File, os.FileMode) error { return cause }
 				} else {
@@ -109,7 +132,8 @@ func TestRootedCASFallbackRejectsAReplacedFinalSymlink(t *testing.T) {
 	}
 	defer root.Close()
 	ops := rootAtomicOps{
-		chmod: (*os.File).Chmod,
+		chmod:  (*os.File).Chmod,
+		remove: root.Remove,
 		rename: func(string, string) error {
 			if err := os.Symlink(target, filepath.Join(workspace, "MEMORY.md")); err != nil {
 				t.Fatal(err)
@@ -152,7 +176,11 @@ func TestRootedCASFallbackKeepsPinnedParentAfterItsNameChanges(t *testing.T) {
 	if err := os.Symlink(outside, parentPath); err != nil {
 		t.Skipf("directory aliases unavailable: %v", err)
 	}
-	ops := rootAtomicOps{chmod: (*os.File).Chmod, rename: func(string, string) error { return syscall.EPERM }}
+	ops := rootAtomicOps{
+		chmod:  (*os.File).Chmod,
+		rename: func(string, string) error { return syscall.EPERM },
+		remove: root.Remove,
+	}
 	if err := writeFileAtomicInRootWith(root, "MEMORY.md", []byte("inside"), 0o600, ops); err != nil {
 		t.Fatal(err)
 	}
