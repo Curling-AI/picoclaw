@@ -399,6 +399,13 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 		return
 	}
 
+	// A claimed occurrence may wait for an execution slot while its owner
+	// disables the job. Manual runs deliberately keep their existing semantics.
+	if trigger == Scheduled && !callbackJob.Enabled {
+		log.Printf("[cron] job %s disabled before execution, skipping", jobID)
+		return
+	}
+
 	if cs.devePular(callbackJob) {
 		// Reagenda sem executar: o job continua vivo, só não gastou um turno
 		// para descobrir que não havia trabalho.
