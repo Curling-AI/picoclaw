@@ -24,14 +24,15 @@ const (
 // files. It contains descriptors and file fingerprints, never message bodies.
 // It shares the existing history journal discovery and pending-write fence.
 type historyDeletionIntent struct {
-	Version     uint8                       `json:"version"`
-	Key         string                      `json:"key"`
-	Purpose     string                      `json:"purpose"`
-	Directory   contentFileIdentity         `json:"directory"`
-	Files       []historyDeletionFile       `json:"files"`
-	Fingerprint string                      `json:"fingerprint"`
-	Images      []*contentPreimage          `json:"images,omitempty"`
-	Artifacts   []contentArtifactDescriptor `json:"artifacts,omitempty"`
+	PublicMediaCleanup bool                        `json:"publicMediaCleanup,omitempty"`
+	Version            uint8                       `json:"version"`
+	Key                string                      `json:"key"`
+	Purpose            string                      `json:"purpose"`
+	Directory          contentFileIdentity         `json:"directory"`
+	Files              []historyDeletionFile       `json:"files"`
+	Fingerprint        string                      `json:"fingerprint"`
+	Images             []*contentPreimage          `json:"images,omitempty"`
+	Artifacts          []contentArtifactDescriptor `json:"artifacts,omitempty"`
 }
 
 type contentFileIdentity struct {
@@ -66,7 +67,13 @@ func (s *JSONLStore) beginHistoryDeletion(
 	if err != nil {
 		return err
 	}
-	intent := &historyDeletionIntent{Version: historyDeletionVersion, Key: key, Purpose: purpose, Directory: directory}
+	intent := &historyDeletionIntent{
+		Version:            historyDeletionVersion,
+		Key:                key,
+		Purpose:            purpose,
+		Directory:          directory,
+		PublicMediaCleanup: s.requiresPublicHistoryCleanup(),
+	}
 	files := make(map[string]historyDeletionFile)
 	for _, image := range images {
 		if image == nil || !image.valid(key, image.DomainID, image.MutationID) {
@@ -171,24 +178,26 @@ func (s *JSONLStore) abortHistoryDeletionCreate(file *os.File, key string) error
 }
 
 func historyDeletionFingerprint(intent *historyDeletionIntent) string {
-	return contentJSONDigest(
-		[]any{
-			intent.Version,
-			intent.Key,
-			intent.Purpose,
-			intent.Directory,
-			intent.Files,
-			intent.Images,
-			intent.Artifacts,
-		},
-	)
+	fields := []any{
+		intent.Version,
+		intent.Key,
+		intent.Purpose,
+		intent.Directory,
+		intent.Files,
+		intent.Images,
+		intent.Artifacts,
+	}
+	if intent.PublicMediaCleanup {
+		fields = append(fields, "public-media-cleanup", true)
+	}
+	return contentJSONDigest(fields)
 }
 
 func (s *JSONLStore) historyDeletionSourcePaths(key string) []string {
-	return []string{
-		s.metaPath(key), s.jsonlPath(key), s.historyDecisionPath(key),
+	return append([]string{
+		s.metaPath(key), s.jsonlPath(key), s.publicHistoryPath(key), s.historyDecisionPath(key),
 		s.historyRecoveryRequiredPath(key), s.contentDomainPath(key), s.historyOrderWitnessPath(key),
-	}
+	}, s.publicIndexFiles(key)...)
 }
 
 func (s *JSONLStore) validHistoryDeletion(key string, intent *historyDeletionIntent) error {
@@ -224,6 +233,7 @@ func (s *JSONLStore) validHistoryDeletion(key string, intent *historyDeletionInt
 		rootArtifacts[name] = artifact
 	}
 	private := false
+	ownedSource := false
 	for _, file := range intent.Files {
 		if file.Name == "" || filepath.Base(file.Name) != file.Name || seen[file.Name] || file.Bytes < 0 {
 			return ErrContentIdentityUnavailable
@@ -265,6 +275,9 @@ func (s *JSONLStore) validHistoryDeletion(key string, intent *historyDeletionInt
 				return ErrContentIdentityUnavailable
 			}
 		case file.Artifact == nil && file.Image == nil:
+			if !file.Absent {
+				ownedSource = true
+			}
 			if !sources[file.Name] {
 				return ErrContentIdentityUnavailable
 			}
@@ -272,11 +285,20 @@ func (s *JSONLStore) validHistoryDeletion(key string, intent *historyDeletionInt
 			return ErrContentIdentityUnavailable
 		}
 	}
-	if !private {
+	if !private && !(intent.PublicMediaCleanup && ownedSource) {
 		return ErrContentIdentityUnavailable
 	}
+	optional := make(map[string]bool)
+	for _, path := range s.publicIndexFiles(key) {
+		optional[filepath.Base(path)] = true
+	}
 	for name := range sources {
-		if !seen[name] {
+		if !seen[name] && !optional[name] {
+			if name == filepath.Base(s.publicHistoryPath(intent.Key)) {
+				if _, err := os.Lstat(s.publicHistoryPath(intent.Key)); errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+			}
 			return ErrContentIdentityUnavailable
 		}
 	}
@@ -342,7 +364,7 @@ func (s *JSONLStore) syncHistoryDeletionIntent(file, dir *os.File, key string) e
 	return dir.Sync()
 }
 
-func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
+func (s *JSONLStore) recoverHistoryDeletion(ctx context.Context, key string, data []byte) error {
 	if len(data) > maxHistoryDeletionJournal {
 		return ErrContentIdentityUnavailable
 	}
@@ -351,6 +373,9 @@ func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
 		return err
 	}
 	if err := s.validHistoryDeletion(key, record.Deletion); err != nil {
+		return err
+	}
+	if err := s.checkPublicIndexDeletion(ctx, key, record.Deletion.Files); err != nil {
 		return err
 	}
 	intent := record.Deletion
@@ -383,7 +408,7 @@ func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
 	// Validate the entire remaining set before unlinking any file. Missing
 	// entries are allowed only by this already durable, exact authorization.
 	for _, file := range intent.Files {
-		current, present, operationErr := s.captureHistoryDeletionFile(context.Background(), file)
+		current, present, operationErr := s.captureHistoryDeletionFile(ctx, file)
 		if operationErr != nil {
 			return operationErr
 		}
@@ -391,6 +416,9 @@ func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
 			(file.Absent || current.Identity != file.Identity || current.Bytes != file.Bytes || current.Digest != file.Digest) {
 			return ErrContentIdentityUnavailable
 		}
+	}
+	if intent.PublicMediaCleanup && !s.requiresPublicHistoryCleanup() {
+		return errPublicHistoryCleanupUnavailable
 	}
 	for _, file := range intent.Files {
 		if file.Absent {
@@ -416,6 +444,11 @@ func (s *JSONLStore) recoverHistoryDeletion(key string, data []byte) error {
 			}
 		}
 		if err != nil {
+			return err
+		}
+	}
+	if intent.PublicMediaCleanup {
+		if err = s.deletePublicHistoryArtifacts(intent.Key); err != nil {
 			return err
 		}
 	}
@@ -477,7 +510,7 @@ func (s *JSONLStore) resumeHistoryDeletion(key string) (bool, error) {
 		return false, nil
 	}
 	s.markHistoryPending(key)
-	return true, s.recoverHistoryDeletion(key, data)
+	return true, s.recoverHistoryDeletion(context.Background(), key, data)
 }
 
 // Discovery grants nothing: only a known, bounded, intact deletion variant is

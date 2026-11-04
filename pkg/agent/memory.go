@@ -63,7 +63,9 @@ func (ms *MemoryStore) ReadLongTerm() string {
 func (ms *MemoryStore) WriteLongTerm(content string) error {
 	// Use unified atomic write utility with explicit sync for flash storage reliability.
 	// Using 0o600 (owner read/write only) for secure default permissions.
-	return fileutil.WriteFileAtomic(ms.memoryFile, []byte(content), 0o600)
+	return fileutil.WithFileLock(ms.memoryFile, func() error {
+		return fileutil.WriteFileAtomic(ms.memoryFile, []byte(content), 0o600)
+	})
 }
 
 // ReadToday reads today's daily note.
