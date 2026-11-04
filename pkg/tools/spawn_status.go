@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -115,7 +116,8 @@ func (t *SpawnStatusTool) Execute(ctx context.Context, args map[string]any) *Too
 	}
 
 	// ListTaskCopies returns consistent snapshots under the manager lock.
-	origTasks := t.manager.ListTaskCopies()
+	// The subagent calls the model waited on already answered it.
+	origTasks := slices.DeleteFunc(t.manager.ListTaskCopies(), func(task SubagentTask) bool { return task.Sync })
 	if len(origTasks) == 0 {
 		return NewToolResult("No subagents have been spawned yet.")
 	}

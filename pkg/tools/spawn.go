@@ -119,9 +119,9 @@ func (t *SpawnTool) execute(
 	if t.spawner != nil {
 		// Registra a task no manager ANTES de disparar, para o spawn_status
 		// enxergá-la desde o primeiro segundo (running → completed/failed).
-		taskID := ""
+		taskID, onStep := "", func(SubTurnStep) func(bool) { return func(bool) {} }
 		if t.manager != nil {
-			taskID = t.manager.TrackTask(task, label, targetAgentID, ToolChannel(ctx), ToolChatID(ctx))
+			taskID, onStep = t.manager.trackCall(ctx, task, label, targetAgentID, false)
 		}
 
 		// Launch async sub-turn in goroutine
@@ -135,24 +135,14 @@ func (t *SpawnTool) execute(
 				Async:         true, // Async execution
 				Critical:      true, // Background spawn should survive parent turn completion
 				TargetAgentID: targetAgentID,
+				OnStep:        onStep,
 			})
 			if err != nil {
 				result = ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
 			}
 
 			if t.manager != nil && taskID != "" {
-				status := "completed"
-				resultText := ""
-				if result != nil {
-					resultText = result.ForLLM
-					if result.IsError {
-						status = "failed"
-					}
-				}
-				if err != nil {
-					status = "failed"
-				}
-				t.manager.ResolveTask(taskID, status, resultText)
+				t.manager.finishCall(taskID, result, err)
 			}
 
 			// Call callback if provided

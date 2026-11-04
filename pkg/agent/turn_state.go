@@ -405,6 +405,8 @@ type turnState struct {
 	parentEnded     atomic.Bool        // Whether parent has ended
 	closeOnce       sync.Once          // Ensures pendingResults channel is closed once
 	finishedChan    chan struct{}      // Closed when turn finishes
+	// onStep hears this sub-turn's tool calls, for the live view. (seucaranguejo fork)
+	onStep func(tools.SubTurnStep) func(failed bool)
 
 	// Token budget tracking
 	tokenBudget      *atomic.Int64        // Shared token budget counter
