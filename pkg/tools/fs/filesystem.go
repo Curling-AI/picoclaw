@@ -1044,27 +1044,26 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 
 	overwrite, _ := args["overwrite"].(bool)
 
-	if !overwrite {
-		if _, err := t.fs.Open(path); err == nil {
-			if phrase := t.altToolsPhrase(); phrase != "" {
-				return ErrorResult(
-					fmt.Sprintf(
+	err := t.fs.withWriteLock(path, func() error {
+		if !overwrite {
+			if existing, err := t.fs.Open(path); err == nil {
+				_ = existing.Close()
+				if phrase := t.altToolsPhrase(); phrase != "" {
+					return fmt.Errorf(
 						"file: %s already exists. To add to it or change part of it without losing the current contents, use %s. Only set overwrite=true if you intend to replace the entire file.",
 						path,
 						phrase,
-					),
-				)
-			}
-			return ErrorResult(
-				fmt.Sprintf(
+					)
+				}
+				return fmt.Errorf(
 					"file: %s already exists. Set overwrite=true only if you intend to replace the entire file, which discards its current contents.",
 					path,
-				),
-			)
+				)
+			}
 		}
-	}
-
-	if err := t.fs.WriteFile(path, []byte(content)); err != nil {
+		return t.fs.WriteFile(path, []byte(content))
+	})
+	if err != nil {
 		return ErrorResult(err.Error())
 	}
 
@@ -1138,10 +1137,15 @@ type fileSystem interface {
 	WriteFile(path string, data []byte) error
 	ReadDir(path string) ([]os.DirEntry, error)
 	Open(path string) (fs.File, error)
+	withWriteLock(path string, write func() error) error
 }
 
 // hostFs is an unrestricted fileReadWriter that operates directly on the host filesystem.
 type hostFs struct{}
+
+func (h *hostFs) withWriteLock(path string, write func() error) error {
+	return fileutil.WithFileLock(path, write)
+}
 
 func (h *hostFs) ReadFile(path string) ([]byte, error) {
 	content, err := os.ReadFile(path)
@@ -1184,6 +1188,14 @@ func (h *hostFs) Open(path string) (fs.File, error) {
 // sandboxFs is a sandboxed fileSystem that operates within a strictly defined workspace using os.Root.
 type sandboxFs struct {
 	workspace string
+}
+
+func (r *sandboxFs) withWriteLock(path string, write func() error) error {
+	relative, err := getSafeRelPath(r.workspace, path)
+	if err != nil {
+		return err
+	}
+	return fileutil.WithFileLock(filepath.Join(r.workspace, relative), write)
 }
 
 func (r *sandboxFs) execute(path string, fn func(root *os.Root, relPath string) error) error {
@@ -1335,6 +1347,13 @@ type whitelistFs struct {
 
 func (w *whitelistFs) matches(path string) bool {
 	return isAllowedPath(path, w.patterns)
+}
+
+func (w *whitelistFs) withWriteLock(path string, write func() error) error {
+	if w.matches(path) {
+		return w.host.withWriteLock(path, write)
+	}
+	return w.sandbox.withWriteLock(path, write)
 }
 
 func (w *whitelistFs) ReadFile(path string) ([]byte, error) {

@@ -447,6 +447,11 @@ func spawnSubTurn(
 	if cfg.TargetAgentID == "" {
 		opts.ModelTier = parentTS.modelTier
 	}
+	var policyErr error
+	opts, policyErr = executionPolicyOptions(childCtx, &agent, opts)
+	if policyErr != nil {
+		return tools.ErrorResult(policyErr.Error()).WithError(policyErr), policyErr
+	}
 
 	// Create event scope for the child turn
 	scope := al.newTurnEventScope(
