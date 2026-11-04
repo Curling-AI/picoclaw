@@ -137,32 +137,38 @@ func (t *AppendFileTool) Execute(ctx context.Context, args map[string]any) *Tool
 // editFile reads the file via sysFs, performs the replacement, and writes back.
 // It uses a fileSystem interface, allowing the same logic for both restricted and unrestricted modes.
 func editFile(sysFs fileSystem, path, oldText, newText string) ([]byte, []byte, error) {
-	content, err := sysFs.ReadFile(path)
-	if err != nil {
-		return nil, nil, err
-	}
+	var before, after []byte
+	err := sysFs.withWriteLock(path, func() error {
+		content, err := sysFs.ReadFile(path)
+		if err != nil {
+			return err
+		}
 
-	newContent, err := replaceEditContent(content, oldText, newText)
-	if err != nil {
-		return nil, nil, err
-	}
+		newContent, err := replaceEditContent(content, oldText, newText)
+		if err != nil {
+			return err
+		}
 
-	if err := sysFs.WriteFile(path, newContent); err != nil {
-		return nil, nil, err
-	}
-
-	return content, newContent, nil
+		if err := sysFs.WriteFile(path, newContent); err != nil {
+			return err
+		}
+		before, after = content, newContent
+		return nil
+	})
+	return before, after, err
 }
 
 // appendFile reads the existing content (if any) via sysFs, appends new content, and writes back.
 func appendFile(sysFs fileSystem, path, appendContent string) error {
-	content, err := sysFs.ReadFile(path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
+	return sysFs.withWriteLock(path, func() error {
+		content, err := sysFs.ReadFile(path)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
 
-	newContent := append(content, []byte(appendContent)...)
-	return sysFs.WriteFile(path, newContent)
+		newContent := append(content, []byte(appendContent)...)
+		return sysFs.WriteFile(path, newContent)
+	})
 }
 
 // replaceEditContent handles the core logic of finding and replacing a single occurrence of oldText.

@@ -233,7 +233,6 @@ func TestAudioModelTranscriberSendsTheMIMEType(t *testing.T) {
 	}
 }
 
-// O caminho que o ASR usa de verdade: entrada da model_list até o corpo enviado.
 // Sem fala o modelo responde o marcador do prompt, e Transcribe devolve texto
 // vazio, que vira a nota de "sem fala" no agente. Fala parecida com o marcador
 // segue como fala (MST-575).
@@ -283,6 +282,7 @@ func TestAudioModelTranscriberNoSpeechMarkerBecomesEmptyText(t *testing.T) {
 	}
 }
 
+// O caminho que o ASR usa de verdade: entrada da model_list até o corpo enviado.
 func TestTranscriberFromModelConfigHonorsAudioFileParts(t *testing.T) {
 	audioPath := filepath.Join(t.TempDir(), "clip.ogg")
 	if err := os.WriteFile(audioPath, []byte("fake-ogg"), 0o600); err != nil {
