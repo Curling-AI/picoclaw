@@ -565,7 +565,7 @@ func (t *SubagentTool) Name() string {
 }
 
 func (t *SubagentTool) Description() string {
-	return "Execute a subagent task synchronously and return the result. Use this for delegating specific tasks to an independent agent instance. Returns execution summary to user and full details to LLM."
+	return "Run a subagent on one part of the task and wait for its result. Use it only for a part that is independent of the rest, or that would read so much material (dozens of files or pages) that only its conclusion should come back; otherwise do the work yourself, and never delegate what a few tool calls do. The task must be a complete brief: the subagent sees nothing else."
 }
 
 func (t *SubagentTool) Parameters() map[string]any {
