@@ -179,7 +179,8 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 		return
 	}
 
-	if strings.TrimSpace(reasoningContent) != "" {
+	// A subagent's thoughts are not the conversation's (see CallLLM). (seucaranguejo fork)
+	if strings.TrimSpace(reasoningContent) != "" && ts.parentTurnID == "" {
 		pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
 		err := al.bus.PublishOutbound(
 			pubCtx,

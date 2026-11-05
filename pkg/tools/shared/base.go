@@ -86,7 +86,20 @@ var (
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
 	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
 	ctxKeyExecOrigin       = &toolCtxKey{"execOrigin"}
+	ctxKeyToolCallID       = &toolCtxKey{"toolCallID"}
 )
+
+// WithToolCallID returns a child context carrying the id of the tool call being
+// run: a subagent's task is found from the card of the call that started it.
+func WithToolCallID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, ctxKeyToolCallID, id)
+}
+
+// ToolCallID is what WithToolCallID set, or "".
+func ToolCallID(ctx context.Context) string {
+	v, _ := ctx.Value(ctxKeyToolCallID).(string)
+	return v
+}
 
 // WithToolContext returns a child context carrying channel and chatID.
 func WithToolContext(ctx context.Context, channel, chatID string) context.Context {
