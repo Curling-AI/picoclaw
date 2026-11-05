@@ -10,8 +10,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -45,6 +47,29 @@ var transientRetryInterval = 30 * time.Second
 // that the schedule applies whatever the failures are.
 const transientRetryMax = 20
 
+// toolsListRetryHoldMin and toolsListRetryHoldSpread bound the wait before the
+// first retry of a server whose tools/list the transport turned away at load
+// (MST-630). That happens to the assistants woken together two to four minutes
+// ahead of a crowded cron minute, all on Composio's per-minute quota for the
+// whole account: retried on the pace above, thousands of them kept that quota
+// taken through the first minutes of the cron run, when its own tool calls
+// need it. Held for at least six minutes, they come back after the run's first
+// calls; spread over six more, they retry below the quota instead of at once.
+// Variables so tests can shrink them.
+var (
+	toolsListRetryHoldMin    = 6 * time.Minute
+	toolsListRetryHoldSpread = 6 * time.Minute
+)
+
+// toolsListRetryHold draws the hold once per retry loop: a pod's held servers
+// go together, and pods woken for the same minute spread over the window.
+func toolsListRetryHold() time.Duration {
+	if toolsListRetryHoldSpread <= 0 {
+		return toolsListRetryHoldMin
+	}
+	return toolsListRetryHoldMin + rand.N(toolsListRetryHoldSpread)
+}
+
 // codeRejectedByTransport is the JSON-RPC code the SDK puts on a request its
 // HTTP transport could not get answered: an HTTP 429/5xx, or no response.
 const codeRejectedByTransport = -32005
@@ -69,20 +94,55 @@ func (m *Manager) RetryPendingServers(
 		}
 	}
 
+	// Servers whose tools/list was turned away wait out the hold before their
+	// first retry; the others keep the pace of retryDelay meanwhile.
+	held := make(map[string]bool)
+	for _, name := range remaining {
+		if m.toolsListTurnedAway(name) {
+			held[name] = true
+		}
+	}
+	var releaseAt time.Time
+	if len(held) > 0 {
+		hold := toolsListRetryHold()
+		releaseAt = time.Now().Add(hold)
+		logger.InfoCF("mcp", "Holding MCP servers whose tools/list was turned away before retrying",
+			map[string]any{
+				"servers": slices.Sorted(maps.Keys(held)),
+				"hold":    hold.String(),
+			})
+	}
+
 	transient := false
 	for attempt := 1; len(remaining) > 0; attempt++ {
+		wait := retryDelay(attempt, transient)
+		if len(held) > 0 {
+			// Only held servers left: nothing to do before the release. Otherwise
+			// the release is not delayed by a long step of the schedule.
+			untilRelease := max(time.Until(releaseAt), 0)
+			if len(held) == len(remaining) || untilRelease < wait {
+				wait = untilRelease
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(retryDelay(attempt, transient)):
+		case <-time.After(wait):
 		}
 		if m.closed.Load() {
 			return
+		}
+		if len(held) > 0 && !time.Now().Before(releaseAt) {
+			clear(held)
 		}
 
 		transient = false
 		still := remaining[:0]
 		for _, name := range remaining {
+			if held[name] {
+				still = append(still, name)
+				continue
+			}
 			serverCfg, ok := mcpCfg.Servers[name]
 			if !ok {
 				continue
