@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -54,19 +55,33 @@ func NewJSONLBackend(store memory.Store) *JSONLBackend {
 }
 
 func (b *JSONLBackend) resolveSessionKey(sessionKey string) string {
+	resolved, err := b.resolveSessionKeyContext(context.Background(), sessionKey)
+	if err != nil {
+		log.Printf("session: %v", err)
+		return sessionKey
+	}
+	return resolved
+}
+
+func (b *JSONLBackend) resolveSessionKeyContext(ctx context.Context, sessionKey string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("resolve session key: %w", err)
+	}
 	metaStore, ok := b.store.(metaAwareStore)
 	if !ok {
-		return sessionKey
+		return sessionKey, nil
 	}
-	resolved, found, err := metaStore.ResolveSessionKey(context.Background(), sessionKey)
+	resolved, found, err := metaStore.ResolveSessionKey(ctx, sessionKey)
+	if contextErr := ctx.Err(); contextErr != nil {
+		return "", fmt.Errorf("resolve session key: %w", contextErr)
+	}
 	if err != nil {
-		log.Printf("session: resolve session key: %v", err)
-		return sessionKey
+		return "", fmt.Errorf("resolve session key: %w", err)
 	}
 	if found && resolved != "" {
-		return resolved
+		return resolved, nil
 	}
-	return sessionKey
+	return sessionKey, nil
 }
 
 // ResolveSessionKey maps aliases onto their canonical session key when the
