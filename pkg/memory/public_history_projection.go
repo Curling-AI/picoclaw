@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"log/slog"
+	"os"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -69,7 +72,8 @@ func (s *JSONLStore) projectPublicCommits(messages []providers.Message, meta *Se
 		}
 		if resultErr != nil || !validPublicProjection(message, result.Message) {
 			meta.publicProjectionUnavailable = true
-			slog.Warn("public history projection unavailable", "operation", "commit_public_history")
+			slog.Warn("public history projection unavailable", "operation", "commit_public_history",
+				"error_class", publicProjectionErrorClass(resultErr))
 			return projected
 		}
 		if result.HasVersionedReferences {
@@ -78,6 +82,30 @@ func (s *JSONLStore) projectPublicCommits(messages []providers.Message, meta *Se
 		}
 	}
 	return projected
+}
+
+// Projector errors can contain private paths and content; emit only fixed classes.
+func publicProjectionErrorClass(err error) string {
+	switch {
+	case err == nil:
+		return "invalid_projection"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, ErrHistoryCapacity):
+		return "capacity"
+	case errors.Is(err, ErrPublicHistoryCoverage):
+		return "coverage_unavailable"
+	case errors.Is(err, os.ErrNotExist):
+		return "not_found"
+	case errors.Is(err, os.ErrPermission):
+		return "permission_denied"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "invalid_data"
+	default:
+		return "projector_error"
+	}
 }
 
 func decodedPublicMessage(data []byte) *providers.Message {
