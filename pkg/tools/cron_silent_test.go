@@ -87,7 +87,12 @@ func TestCronSilentCommandJobPublishesOnlyFailures(t *testing.T) {
 
 			_, _ = tool.ExecuteJobWithResult(
 				context.Background(),
-				cron.Execution{Progress: nil, RunID: "11111111-1111-4111-8111-111111111111", Trigger: cron.Scheduled, Job: &job},
+				cron.Execution{
+					Progress: nil,
+					RunID:    "11111111-1111-4111-8111-111111111111",
+					Trigger:  cron.Scheduled,
+					Job:      &job,
+				},
 			)
 
 			var published bool
