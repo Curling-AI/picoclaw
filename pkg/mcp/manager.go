@@ -338,9 +338,6 @@ func (m *Manager) recordListTurnedAway(name string, err error) {
 		delete(m.listTurnedAway, name)
 		return
 	}
-	if m.listTurnedAway == nil {
-		m.listTurnedAway = make(map[string]bool)
-	}
 	m.listTurnedAway[name] = true
 }
 
