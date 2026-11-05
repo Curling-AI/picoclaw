@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -137,6 +138,8 @@ type Manager struct {
 	// because the transport turned tools/list away; RetryPendingServers holds
 	// them back before the first retry.
 	listTurnedAway map[string]bool
+	// listReleaseAt is when those servers get their first retry.
+	listReleaseAt time.Time
 }
 
 var connectServerFunc = connectServer
