@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,29 @@ func TestSanitizeHistoryForProvider_MultiToolCalls(t *testing.T) {
 		t.Fatalf("expected 5 messages, got %d: %+v", len(result), roles(result))
 	}
 	assertRoles(t, result, "user", "assistant", "tool", "tool", "assistant")
+}
+
+// A conversation a delivery opened must not reach the provider starting with
+// the assistant; a history that only lost its start keeps it as it was.
+func TestSanitizeHistoryForProvider_OpensADeliveredConversationWithAUserTurn(t *testing.T) {
+	delivered := providers.Message{
+		Role:     "assistant",
+		Content:  "Lembrete: reunião às 14h.",
+		Delivery: &providers.Delivery{Origin: "agent:cron-job1-6f1c"},
+	}
+	result := sanitizeHistoryForProvider([]providers.Message{delivered, msg("user", "pode remarcar")})
+	assertRoles(t, result, "user", "assistant", "user")
+	if result[0].Content != deliveryOpening {
+		t.Fatalf("opening = %q, want %q", result[0].Content, deliveryOpening)
+	}
+	if !strings.Contains(result[1].Content, "Lembrete: reunião às 14h.") {
+		t.Fatalf("the delivery lost its text: %q", result[1].Content)
+	}
+
+	cut := sanitizeHistoryForProvider(
+		[]providers.Message{msg("assistant", "o resto da resposta"), msg("user", "e agora?")},
+	)
+	assertRoles(t, cut, "assistant", "user")
 }
 
 func TestSanitizeHistoryForProvider_AssistantToolCallAfterPlainAssistant(t *testing.T) {

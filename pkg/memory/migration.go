@@ -51,7 +51,7 @@ func MigrateFromJSON(
 		// Skip JSONL metadata files. They are part of the new storage format,
 		// not legacy session snapshots, and re-importing them would overwrite
 		// the paired .jsonl history with an empty message list.
-		if strings.HasSuffix(name, ".meta.json") {
+		if strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".jsonl.commit.json") {
 			continue
 		}
 		// Skip already-migrated files.

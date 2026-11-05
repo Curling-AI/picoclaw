@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -47,6 +49,9 @@ type CronPayload struct {
 	LoopSlug  string `json:"loop_slug,omitempty"`
 	RoundKind string `json:"round_kind,omitempty"`
 	GoalID    string `json:"goal_id,omitempty"`
+	// Connectors lists the canonical connector IDs this job uses. Record only:
+	// it neither grants nor removes access when the job runs.
+	Connectors []string `json:"connectors,omitempty"`
 }
 
 type CronJobState struct {
@@ -106,19 +111,32 @@ const idleProbeTimeout = 10 * time.Second
 // The bound keeps a burst of due jobs from stampeding the LLM provider.
 const maxConcurrentJobs = 4
 
+// missedRunGrace is how late a run may still fire when the service starts after
+// its minute (a pod woken for it booted late). Older runs are stale: skipped.
+const missedRunGrace = time.Hour
+
+// storeLockTimeout bounds how long Start waits for another process's store
+// lock; past it the service starts without replaying missed runs.
+var storeLockTimeout = 5 * time.Second
+
+var errStoreLocked = errors.New("cron store locked by another process")
+
 type CronService struct {
-	storePath        string
-	store            *CronStore
-	onJob            JobHandler
-	onExecution      ExecutionHandler
-	executionContext context.Context
-	mu               sync.RWMutex
-	running          bool
-	stopChan         chan struct{}
-	wakeChan         chan struct{}
-	gronx            *gronx.Gronx
-	execSlots        chan struct{}
-	idleProbe        IdleProbe
+	storePath            string
+	store                *CronStore
+	onJob                JobHandler
+	onExecution          ExecutionHandler
+	durableAdmission     bool
+	admissionRetries     map[string]executionAdmission
+	nextAdmissionSweepMS int64
+	executionContext     context.Context
+	mu                   sync.RWMutex
+	running              bool
+	stopChan             chan struct{}
+	wakeChan             chan struct{}
+	gronx                *gronx.Gronx
+	execSlots            chan struct{}
+	idleProbe            IdleProbe
 }
 
 // SetIdleProbe instala (ou remove, com nil) a fonte de "houve atividade?".
@@ -143,20 +161,7 @@ func (cs *CronService) SetIdleProbe(p IdleProbe) {
 // cairia fora da janela da próxima consulta, e essa memória nunca seria
 // curada — o gate teria trocado gasto por perda silenciosa.
 func (cs *CronService) reagendarSemExecutar(jobID string) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	for i := range cs.store.Jobs {
-		job := &cs.store.Jobs[i]
-		if job.ID != jobID {
-			continue
-		}
-		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
-		job.UpdatedAtMS = time.Now().UnixMilli()
-		if err := cs.saveStoreUnsafe(); err != nil {
-			log.Printf("[cron] falha ao salvar reagendamento de '%s': %v", job.Name, err)
-		}
-		return
-	}
+	cs.rescheduleWithoutExecution(jobID, false)
 }
 
 func (cs *CronService) devePular(job *CronJob) bool {
@@ -211,13 +216,9 @@ func (cs *CronService) Start() error {
 		return nil
 	}
 
-	if err := cs.loadStore(); err != nil {
-		return fmt.Errorf("failed to load store: %w", err)
-	}
-
-	cs.recomputeNextRuns()
-	if err := cs.saveStoreUnsafe(); err != nil {
-		return fmt.Errorf("failed to save store: %w", err)
+	missed, err := cs.loadAndClaimMissedRuns()
+	if err != nil {
+		return err
 	}
 
 	cs.stopChan = make(chan struct{})
@@ -226,8 +227,39 @@ func (cs *CronService) Start() error {
 	}
 	cs.running = true
 	go cs.runLoop(cs.stopChan)
+	cs.dispatch(missed)
 
 	return nil
+}
+
+// loadAndClaimMissedRuns holds the store lock from read to write so a second
+// process starting over the same jobs.json (a rollout) reads the claim and
+// does not replay the same missed occurrence.
+func (cs *CronService) loadAndClaimMissedRuns() ([]string, error) {
+	grace := missedRunGrace
+	unlock, err := lockStore(cs.storePath, storeLockTimeout)
+	switch {
+	case errors.Is(err, errStoreLocked):
+		// Without the claim another process may be replaying them: skipping
+		// loses one catch-up, never doubles it or blocks the boot.
+		log.Printf("[cron] store still locked after %s; skipping missed runs", storeLockTimeout)
+		grace, unlock = 0, func() {}
+	case err != nil:
+		return nil, fmt.Errorf("failed to lock store: %w", err)
+	}
+	defer unlock()
+
+	if err := cs.loadStore(); err != nil {
+		return nil, fmt.Errorf("failed to load store: %w", err)
+	}
+	if err := cs.loadExecutionAdmissions(); err != nil {
+		return nil, fmt.Errorf("load pending cron admissions: %w", err)
+	}
+	missed := cs.recomputeNextRuns(grace)
+	if err := cs.saveStoreUnsafe(); err != nil {
+		return nil, fmt.Errorf("failed to save store: %w", err)
+	}
+	return missed, nil
 }
 
 func (cs *CronService) Stop() {
@@ -287,52 +319,58 @@ func (cs *CronService) runLoop(stopChan chan struct{}) {
 			}
 			continue
 		case <-timer.C:
-			cs.checkJobs()
+			if err := cs.checkJobs(); err != nil {
+				// A due job can remain due while a claim is unavailable or
+				// another owner is running. Back off instead of spinning.
+				timer.Reset(time.Second)
+				select {
+				case <-stopChan:
+					return
+				case <-timer.C:
+				}
+			}
 		}
 	}
 }
 
-func (cs *CronService) checkJobs() {
+func (cs *CronService) checkJobs() error {
 	cs.mu.Lock()
 
 	if !cs.running {
 		cs.mu.Unlock()
-		return
+		return nil
 	}
 
 	now := time.Now().UnixMilli()
-	var dueJobIDs []string
-
-	// Collect jobs that are due (we need to copy them to execute outside lock)
-	for i := range cs.store.Jobs {
-		job := &cs.store.Jobs[i]
-		if job.Enabled && job.State.NextRunAtMS != nil && *job.State.NextRunAtMS <= now {
-			dueJobIDs = append(dueJobIDs, job.ID)
+	pruneAdmissions := cs.durableAdmission && cs.nextAdmissionSweepMS <= now
+	if pruneAdmissions {
+		cs.nextAdmissionSweepMS = now + admissionSweepInterval.Milliseconds()
+	}
+	dueJobIDs, claimErr := cs.claimDueJobsUnsafe(now)
+	retries := cs.dueExecutionAdmissions(now)
+	if claimErr != nil && !errors.Is(claimErr, errScheduledClaimInProgress) {
+		log.Printf("[cron] failed to save due job claims: %v", claimErr)
+		if !cs.durableAdmission {
+			claimErr = nil
 		}
-	}
-
-	// Reset next run for due jobs before unlocking to avoid duplicate execution.
-	dueMap := make(map[string]bool, len(dueJobIDs))
-	for _, jobID := range dueJobIDs {
-		dueMap[jobID] = true
-	}
-	for i := range cs.store.Jobs {
-		if dueMap[cs.store.Jobs[i].ID] {
-			cs.store.Jobs[i].State.NextRunAtMS = nil
-		}
-	}
-
-	if err := cs.saveStoreUnsafe(); err != nil {
-		log.Printf("[cron] failed to save store: %v", err)
 	}
 
 	cs.mu.Unlock()
 
-	// Execute jobs outside the lock, each in its own goroutine so the
-	// scheduler loop keeps ticking while jobs run. Self-overlap of a single
-	// job is impossible by construction: its NextRunAtMS is cleared above and
-	// only recomputed after executeJobByID completes.
-	for _, jobID := range dueJobIDs {
+	cs.dispatch(dueJobIDs)
+	cs.dispatchExecutionAdmissions(retries)
+	if pruneAdmissions {
+		cs.pruneExecutionAdmissions(time.UnixMilli(now))
+	}
+	return claimErr
+}
+
+// dispatch runs jobs whose NextRunAtMS was already cleared and saved, each in
+// its own goroutine so the scheduler loop keeps ticking while jobs run.
+// Self-overlap of a single job is impossible by construction: its NextRunAtMS
+// is only recomputed after executeJob completes.
+func (cs *CronService) dispatch(jobIDs []string) {
+	for _, jobID := range jobIDs {
 		go func(id string) {
 			cs.execSlots <- struct{}{}
 			defer func() { <-cs.execSlots }()
@@ -346,10 +384,24 @@ func (cs *CronService) executeJobByID(jobID string) {
 }
 
 func (cs *CronService) executeJob(jobID string, trigger Trigger) {
+	cs.executeJobWithIdentity(jobID, trigger, "", time.Time{})
+}
+
+func (cs *CronService) executeJobWithIdentity(jobID string, trigger Trigger, runID string, startedAt time.Time) {
+	cs.executeJobWithAdmission(jobID, trigger, runID, startedAt, runID != "")
+}
+
+func (cs *CronService) executeJobWithAdmission(
+	jobID string,
+	trigger Trigger,
+	runID string,
+	startedAt time.Time,
+	manualIdentity bool,
+) {
 	startTime := time.Now().UnixMilli()
 
 	cs.mu.RLock()
-	handler, legacy, executionContext := cs.onExecution, cs.onJob, cs.executionContext
+	handler, legacy, executionContext, durable := cs.onExecution, cs.onJob, cs.executionContext, cs.durableAdmission
 	var callbackJob *CronJob
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
@@ -366,7 +418,9 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 		return
 	}
 
-	if cs.devePular(callbackJob) {
+	// Explicit manual runs express fresh user intent even when the recurring
+	// background job has no activity to process. Idle optimization is scheduled-only.
+	if trigger == Scheduled && (!durable || runID == "") && cs.devePular(callbackJob) {
 		// Reagenda sem executar: o job continua vivo, só não gastou um turno
 		// para descobrir que não havia trabalho.
 		log.Printf("[cron] ⏭ pulando job '%s' (id: %s): nada aconteceu desde a última execução",
@@ -381,15 +435,75 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 
 	var err error
 	if handler != nil {
+		if runID == "" {
+			runID = uuid.NewString()
+		}
+		if startedAt.IsZero() {
+			startedAt = time.Now().UTC().Truncate(time.Microsecond)
+		}
 		if executionContext == nil {
 			executionContext = context.Background()
 		}
-		_, err = handler(
-			executionContext,
-			Execution{Progress: nil, RunID: uuid.NewString(), Trigger: trigger, Job: callbackJob},
-		)
+		execution := Execution{
+			Progress:       nil,
+			RunID:          runID,
+			StartedAt:      startedAt,
+			ManualIdentity: manualIdentity,
+			Trigger:        trigger,
+			Job:            callbackJob,
+		}
+		var admission *executionAdmission
+		if durable {
+			var release func()
+			admission, execution.BeginEffects, release, err = cs.beginExecutionAdmission(execution)
+			if release != nil {
+				defer release()
+			}
+			if errors.Is(err, errExecutionAdmissionFinished) {
+				if trigger == Scheduled {
+					if restoreErr := cs.restoreCompletedJob(*admission); restoreErr != nil {
+						log.Printf("[cron] failed to restore completed job %s: %v", jobID, restoreErr)
+						admission.RetryAtMS = time.Now().Add(time.Second).UnixMilli()
+						cs.queueExecutionAdmission(*admission)
+					}
+				}
+				return
+			}
+			if admission != nil {
+				execution.Deferred = admission.Retried
+			}
+		}
+		if err == nil {
+			_, err = handler(executionContext, execution)
+		}
+		if admission != nil {
+			if deferred := new(
+				deferredExecutionError,
+			); errors.As(err, &deferred) &&
+				admission.State == admissionPrepared {
+				if deferredErr := cs.deferExecutionAdmission(admission, deferred.delay); deferredErr == nil {
+					return
+				} else {
+					err = errors.Join(err, deferredErr)
+				}
+			}
+			if err == nil && admission.State != admissionExecuting {
+				err = errors.New("cron effects were not claimed")
+			}
+			err = errors.Join(err, cs.finishExecutionAdmission(admission))
+		}
 	} else if legacy != nil {
 		_, err = legacy(callbackJob)
+	}
+	if errors.Is(err, ErrDuplicateExecution) {
+		log.Printf("[cron] duplicate execution skipped for job %s", jobID)
+		return
+	}
+	if errors.Is(err, ErrExecutionSuperseded) {
+		if trigger == Scheduled {
+			cs.rescheduleWithoutExecution(jobID, true)
+		}
+		return
 	}
 
 	execDuration := time.Now().UnixMilli() - startTime
@@ -398,18 +512,39 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
+	stored, unlock, storeErr := cs.schedulerStoreUnsafe()
+	if storeErr != nil {
+		log.Printf("[cron] failed to load store for completed job %s: %v", jobID, storeErr)
+		return
+	}
+	defer unlock()
+
 	var job *CronJob
-	for i := range cs.store.Jobs {
-		if cs.store.Jobs[i].ID == jobID {
-			job = &cs.store.Jobs[i]
+	var jobIndex int
+	for i := range stored.Jobs {
+		if stored.Jobs[i].ID == jobID {
+			job = &stored.Jobs[i]
+			jobIndex = i
 			break
 		}
 	}
 	if job == nil {
+		if cs.durableAdmission {
+			cs.syncStoredJobUnsafe(jobID, nil)
+			cs.notify()
+		}
 		log.Printf("[cron] job %s disappeared before state update", jobID)
 		return
 	}
+	if cs.durableAdmission &&
+		(!samePayload(job.Payload, callbackJob.Payload) || !sameSchedule(job.Schedule, callbackJob.Schedule)) {
+		// The old effect did not execute the new version of the job.
+		cs.syncStoredJobUnsafe(jobID, job)
+		cs.notify()
+		return
+	}
 
+	jobName := job.Name
 	job.State.LastRunAtMS = &startTime
 	job.UpdatedAtMS = time.Now().UnixMilli()
 
@@ -426,7 +561,8 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 	var nextRunStr string
 	if job.Schedule.Kind == "at" {
 		if job.DeleteAfterRun {
-			cs.removeJobUnsafe(job.ID)
+			stored.Jobs = slices.Delete(stored.Jobs, jobIndex, jobIndex+1)
+			job = nil
 			nextRunStr = "(deleted)"
 		} else {
 			job.Enabled = false
@@ -449,16 +585,95 @@ func (cs *CronService) executeJob(jobID string, trigger Trigger) {
 	}
 
 	if err == nil {
-		log.Printf("[cron] ✓ job '%s' completed in %dms, next run: %s", job.Name, execDuration, nextRunStr)
+		log.Printf("[cron] ✓ job '%s' completed in %dms, next run: %s", jobName, execDuration, nextRunStr)
 	}
 
-	if err := cs.saveStoreUnsafe(); err != nil {
+	if err := writeCronStore(cs.storePath, stored); err != nil {
 		log.Printf("[cron] failed to save store: %v", err)
+	}
+	if cs.durableAdmission {
+		cs.syncStoredJobUnsafe(jobID, job)
 	}
 
 	// Jobs complete asynchronously now: the scheduler loop may be sleeping on
 	// a stale horizon that predates this job's freshly computed next run.
 	cs.notify()
+}
+
+// Hold the admission lock so a live winner has finished updating the store.
+func (cs *CronService) restoreCompletedJob(admission executionAdmission) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	stored, unlock, err := cs.schedulerStoreUnsafe()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	jobID := admission.Job.ID
+	for i := range stored.Jobs {
+		job := &stored.Jobs[i]
+		if job.ID != jobID {
+			continue
+		}
+		// The journal can reach finished before the winner saves the store.
+		// Recover only the recurring schedule if that write never landed.
+		if job.Enabled && job.Schedule.Kind != "at" && job.State.NextRunAtMS == nil &&
+			(job.State.LastRunAtMS == nil || *job.State.LastRunAtMS < admission.StartedAt.UnixMilli()) {
+			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
+			if job.State.NextRunAtMS != nil {
+				if err := writeCronStore(cs.storePath, stored); err != nil {
+					return err
+				}
+			}
+		}
+		cs.syncStoredJobUnsafe(jobID, job)
+		cs.notify()
+		return nil
+	}
+	// A completed one-shot may already have been removed by the winner.
+	cs.syncStoredJobUnsafe(jobID, nil)
+	cs.notify()
+	return nil
+}
+
+func (cs *CronService) rescheduleWithoutExecution(jobID string, onlyMissing bool) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	stored, unlock, err := cs.schedulerStoreUnsafe()
+	if err != nil {
+		log.Printf("[cron] failed to load store for rescheduling job %s: %v", jobID, err)
+		return
+	}
+	defer unlock()
+	for i := range stored.Jobs {
+		job := &stored.Jobs[i]
+		if job.ID != jobID {
+			continue
+		}
+		if (job.Enabled || !cs.durableAdmission && !onlyMissing) && (!onlyMissing || job.State.NextRunAtMS == nil) {
+			now := time.Now().UnixMilli()
+			if next := cs.computeNextRun(&job.Schedule, now); !onlyMissing || next != nil {
+				job.State.NextRunAtMS = next
+				if !onlyMissing {
+					job.UpdatedAtMS = now
+				}
+				if err := writeCronStore(cs.storePath, stored); err != nil {
+					log.Printf("[cron] failed to save rescheduled job %s: %v", jobID, err)
+				}
+			}
+		}
+		if cs.durableAdmission {
+			cs.syncStoredJobUnsafe(jobID, job)
+		}
+		cs.notify()
+		return
+	}
+	if cs.durableAdmission {
+		cs.syncStoredJobUnsafe(jobID, nil)
+		cs.notify()
+	}
 }
 
 func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int64 {
@@ -504,23 +719,64 @@ func (cs *CronService) notify() {
 	}
 }
 
-func (cs *CronService) recomputeNextRuns() {
+// recomputeNextRuns returns the missed runs it claimed, those less than grace
+// late, for the caller to dispatch once the claim is saved.
+func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
 	now := time.Now().UnixMilli()
+	var missed []string
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
-		if job.Enabled {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		if !job.Enabled || cs.hasAdmissionRetry(job.ID) {
+			continue
 		}
+		if late, ok := missedRun(job.State, now); ok {
+			if late < grace {
+				// Claimed like checkJobs does: cleared, and only recomputed
+				// after the run, so a process reading it next skips it.
+				log.Printf("[cron] job '%s' missed its run by %s; running it now", job.Name, late.Round(time.Second))
+				job.State.NextRunAtMS = nil
+				missed = append(missed, job.ID)
+				continue
+			}
+			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
+				job.Name, late.Round(time.Second), grace)
+		}
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
 	}
+	return missed
+}
+
+// missedRun reports how late the stored run is when it is due and never ran.
+//
+// checkJobs clears NextRunAtMS and saves before executing, so a run that
+// started — even one cut short by a restart — is never repeated here.
+func missedRun(state CronJobState, nowMS int64) (time.Duration, bool) {
+	if state.NextRunAtMS == nil || *state.NextRunAtMS > nowMS {
+		return 0, false
+	}
+	if state.LastRunAtMS != nil && *state.LastRunAtMS >= *state.NextRunAtMS {
+		return 0, false
+	}
+	return time.Duration(nowMS-*state.NextRunAtMS) * time.Millisecond, true
 }
 
 func (cs *CronService) getNextWakeMS() *int64 {
 	var nextWake *int64
+	if cs.durableAdmission && cs.nextAdmissionSweepMS != 0 {
+		at := cs.nextAdmissionSweepMS
+		nextWake = &at
+	}
 	for _, job := range cs.store.Jobs {
-		if job.Enabled && job.State.NextRunAtMS != nil {
+		if job.Enabled && !cs.hasAdmissionRetry(job.ID) && job.State.NextRunAtMS != nil {
 			if nextWake == nil || *job.State.NextRunAtMS < *nextWake {
 				nextWake = job.State.NextRunAtMS
 			}
+		}
+	}
+	for _, admission := range cs.admissionRetries {
+		if cs.admissionJobEnabled(admission) && (nextWake == nil || admission.RetryAtMS < *nextWake) {
+			at := admission.RetryAtMS
+			nextWake = &at
 		}
 	}
 	return nextWake
@@ -538,21 +794,26 @@ func (cs *CronService) SetOnJob(handler JobHandler) {
 	cs.onJob = handler
 }
 
-func (cs *CronService) loadStore() error {
-	cs.store = &CronStore{
+func readCronStore(path string) (*CronStore, error) {
+	store := &CronStore{
 		Version: 1,
 		Jobs:    []CronJob{},
 	}
 
-	data, err := os.ReadFile(cs.storePath)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
+		return store, err
 	}
+	return store, json.Unmarshal(data, store)
+}
 
-	if err := json.Unmarshal(data, cs.store); err != nil {
+func (cs *CronService) loadStore() error {
+	store, err := readCronStore(cs.storePath)
+	cs.store = store
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
 	// Start persists the loaded store before scheduling any execution. Repair
@@ -567,13 +828,17 @@ func (cs *CronService) loadStore() error {
 }
 
 func (cs *CronService) saveStoreUnsafe() error {
-	data, err := json.MarshalIndent(cs.store, "", "  ")
+	return writeCronStore(cs.storePath, cs.store)
+}
+
+func writeCronStore(path string, store *CronStore) error {
+	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
 	}
 
 	// Use unified atomic write utility with explicit sync for flash storage reliability.
-	return fileutil.WriteFileAtomic(cs.storePath, data, 0o600)
+	return fileutil.WriteFileAtomic(path, data, 0o600)
 }
 
 func (cs *CronService) AddJob(
@@ -586,8 +851,8 @@ func (cs *CronService) AddJob(
 }
 
 // AddJobWithModel is AddJob plus a platform-fixed model override for the job's
-// agent turn (Payload.Model). Kept separate so the agent-facing cron tool can
-// only reach the no-model AddJob and never pick its own model.
+// agent turn (Payload.Model). The platform sets the model; the agent-facing
+// cron tool never does (it leaves Model empty in its own AddJobWithPayload call).
 func (cs *CronService) AddJobWithModel(
 	name string,
 	schedule CronSchedule,
@@ -612,18 +877,34 @@ func (cs *CronService) AddJobWithModel(
 	)
 }
 
-// AddJobWithPayload persists platform metadata atomically before the scheduler
-// can admit the job. The agent-facing tool continues using AddJob.
+// AddJobWithPayload persists the whole payload atomically before the scheduler
+// can admit the job. The agent-facing cron tool calls it too, and keeps the
+// platform-owned fields (Model, LoopSlug, RoundKind, GoalID) empty itself: the
+// boundary is that call site, not this API.
 func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, payload CronPayload) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	return cs.addJobUnsafe(cs.newJob(name, schedule, payload))
+}
 
+// AddPausedJobWithPayload is AddJobWithPayload for a job that starts paused, in
+// the same save: created enabled and paused after, a job due at once could run.
+func (cs *CronService) AddPausedJobWithPayload(
+	name string,
+	schedule CronSchedule,
+	payload CronPayload,
+) (*CronJob, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	job := cs.newJob(name, schedule, payload)
+	job.Enabled = false
+	job.State.NextRunAtMS = nil
+	return cs.addJobUnsafe(job)
+}
+
+func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPayload) CronJob {
 	now := time.Now().UnixMilli()
-
-	// One-time tasks (at) should be deleted after execution
-	deleteAfterRun := (schedule.Kind == "at")
-
-	job := CronJob{
+	return CronJob{
 		ID:       generateID(),
 		Name:     utils.AutomationName(name, payload.Message),
 		Enabled:  true,
@@ -632,13 +913,18 @@ func (cs *CronService) AddJobWithPayload(name string, schedule CronSchedule, pay
 		State: CronJobState{
 			NextRunAtMS: cs.computeNextRun(&schedule, now),
 		},
-		CreatedAtMS:    now,
-		UpdatedAtMS:    now,
-		DeleteAfterRun: deleteAfterRun,
+		CreatedAtMS: now,
+		UpdatedAtMS: now,
+		// One-time tasks (at) should be deleted after execution
+		DeleteAfterRun: schedule.Kind == "at",
 	}
+}
 
+func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
+		// Left in memory, the unsaved job would run, and the caller's retry would duplicate it.
+		cs.store.Jobs = cs.store.Jobs[:len(cs.store.Jobs)-1]
 		return nil, err
 	}
 
@@ -712,7 +998,15 @@ func cloneCronJob(job CronJob) CronJob {
 		lastRunAtMS := *job.State.LastRunAtMS
 		clone.State.LastRunAtMS = &lastRunAtMS
 	}
+	clone.Payload.Connectors = slices.Clone(job.Payload.Connectors)
 	return clone
+}
+
+func samePayload(a, b CronPayload) bool {
+	return a.Kind == b.Kind && a.Message == b.Message && a.Command == b.Command &&
+		a.Channel == b.Channel && a.To == b.To && a.Model == b.Model &&
+		a.LoopSlug == b.LoopSlug && a.RoundKind == b.RoundKind && a.GoalID == b.GoalID &&
+		slices.Equal(a.Connectors, b.Connectors)
 }
 
 func sameSchedule(a, b CronSchedule) bool {
@@ -803,6 +1097,23 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 // agora" não deve des-pausar um job pausado (nem re-agendar: o pós-execução
 // respeita Enabled). Respeita o limite de execuções concorrentes.
 func (cs *CronService) RunNow(jobID string) bool {
+	return cs.runNowWithIdentity(jobID, "", time.Time{})
+}
+
+func (cs *CronService) RunNowWithIdentity(jobID, runID string, startedAt time.Time) bool {
+	if uuid.Validate(runID) != nil || runID == uuid.Nil.String() || startedAt.IsZero() {
+		return false
+	}
+	cs.mu.RLock()
+	hasHandler := cs.onExecution != nil
+	cs.mu.RUnlock()
+	if !hasHandler {
+		return false
+	}
+	return cs.runNowWithIdentity(jobID, runID, startedAt)
+}
+
+func (cs *CronService) runNowWithIdentity(jobID, runID string, startedAt time.Time) bool {
 	cs.mu.Lock()
 	found := false
 	for i := range cs.store.Jobs {
@@ -819,7 +1130,7 @@ func (cs *CronService) RunNow(jobID string) bool {
 	go func() {
 		cs.execSlots <- struct{}{}
 		defer func() { <-cs.execSlots }()
-		cs.executeJob(jobID, Manual)
+		cs.executeJobWithIdentity(jobID, Manual, runID, startedAt)
 	}()
 	return true
 }

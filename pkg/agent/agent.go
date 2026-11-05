@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -24,12 +25,12 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
-	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 type AgentLoop struct {
@@ -73,8 +74,14 @@ type AgentLoop struct {
 	mirror deliveryMirror
 	mu     sync.RWMutex
 
-	sessionHistoryObserverMu sync.RWMutex
-	sessionHistoryObserver   func(string)
+	publicHistoryMu                     sync.RWMutex
+	publicHistoryFactory                func(string) memory.PublicHistoryProjector
+	sessionHistoryObserverMu            sync.RWMutex
+	sessionHistoryObserver              func(string)
+	sessionHistoryReceiptObserver       func(string, []memory.CommittedHistoryMessage)
+	sessionHistoryContentObserver       func(string, []memory.ContentEntry)
+	sessionHistoryContentCommitObserver func(string, []memory.ContentAppendResult)
+	sessionHistoryContentInputObserver  func(string, []memory.ContentEntry)
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -111,6 +118,7 @@ type processOptions struct {
 	SenderDisplayName string          // Current sender display name for dynamic context
 	UserMessage       string          // User message content (may include prefix)
 	ForcedSkills      []string        // Skills explicitly requested for this message
+	ObserveSkill      func(string)
 	// ModelTier is the user-picked tier for THIS message (composer selector).
 	// Empty = main model. Validated by the caller; unknown values are a no-op.
 	// (seucaranguejo fork)
@@ -433,6 +441,24 @@ type turnEventScope struct {
 // ReloadProviderAndConfig atomically swaps the provider and config with proper synchronization.
 // It uses a context to allow timeout control from the caller.
 // Returns an error if the reload fails or context is canceled.
+// openSessionStores lets the registry a reload builds keep the session stores
+// the current agents have open, by directory. A second store on the same
+// directory is a second writer, with locks, a meta cache and history writer
+// state of its own: work still running on the old store (a sweep, a turn) would
+// not exclude writes through the new one, and a meta one store had cached would
+// outlive a delete through the other.
+func (al *AgentLoop) openSessionStores() openSessionStores {
+	open := make(map[string]session.SessionStore)
+	if current := al.GetRegistry(); current != nil {
+		for _, id := range current.ListAgentIDs() {
+			if agent, ok := current.GetAgent(id); ok && agent.Sessions != nil {
+				open[filepath.Clean(filepath.Join(agent.Workspace, "sessions"))] = agent.Sessions
+			}
+		}
+	}
+	return func(dir string) session.SessionStore { return open[filepath.Clean(dir)] }
+}
+
 func (al *AgentLoop) ReloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
@@ -456,7 +482,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				registry = nil
 			}
 		}()
-		registry = NewAgentRegistry(cfg, provider)
+		registry = newAgentRegistry(cfg, provider, al.openSessionStores())
 	}()
 	if registry == nil {
 		if err := ctx.Err(); err != nil {
@@ -489,6 +515,8 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
+
+	al.projectPublicHistoryRegistry(registry)
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair
@@ -629,6 +657,10 @@ func (al *AgentLoop) runAgentLoopResult(
 	if err != nil {
 		return turnresult.Failure(err), err
 	}
+	opts, err = executionPolicyOptions(ctx, agent, opts)
+	if err != nil {
+		return turnresult.Failure(err), err
+	}
 
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
 	if opts.Dispatch.Channel() != "" &&
@@ -729,8 +761,7 @@ func (al *AgentLoop) runAgentLoopResult(
 	}
 
 	if result.finalContent != "" {
-		responsePreview := utils.Truncate(result.finalContent, 120)
-		logger.InfoCF("agent", fmt.Sprintf("Response: %s", responsePreview),
+		logger.InfoCF("agent", "Response ready",
 			map[string]any{
 				"agent_id":     agent.ID,
 				"session_key":  opts.Dispatch.SessionKey,

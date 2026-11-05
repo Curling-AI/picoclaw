@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,5 +431,59 @@ func TestGetPackageNameFromFile(t *testing.T) {
 				t.Errorf("getPackageNameFromFile(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLogMessage_MasksCredentialsInMessageAndFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "redact.log")
+	prevLevel := GetLevel()
+	DisableFileLogging()
+	SetLevel(INFO)
+	if err := EnableFileLogging(path); err != nil {
+		t.Fatalf("EnableFileLogging() error = %v", err)
+	}
+	defer func() {
+		DisableFileLogging()
+		SetLevel(prevLevel)
+	}()
+
+	InfoCF("test", "running curl -u admin:hunter2 https://x", map[string]any{
+		"args":    map[string]any{"password": "hunter3", "path": "notes.txt"},
+		"error":   errors.New("401 for Bearer abcdefghijklmnop1234"),
+		"token":   "hunter4",
+		"command": "curl -H 'Authorization: Bearer abcdefghijklmnop5678' https://x",
+		"tokens":  12,
+	})
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	logs := string(data)
+	for _, secret := range []string{"hunter2", "hunter3", "hunter4", "abcdefghijklmnop1234", "abcdefghijklmnop5678"} {
+		if strings.Contains(logs, secret) {
+			t.Errorf("log contains %q:\n%s", secret, logs)
+		}
+	}
+	for _, kept := range []string{"notes.txt", `"tokens":12`, "running curl -u admin:"} {
+		if !strings.Contains(logs, kept) {
+			t.Errorf("log lost %q:\n%s", kept, logs)
+		}
+	}
+}
+
+func TestStandardLibraryLogIsMasked(t *testing.T) {
+	if _, ok := log.Writer().(redactingWriter); !ok {
+		t.Fatalf("log.Writer() = %T, want redactingWriter", log.Writer())
+	}
+
+	var buf bytes.Buffer
+	line := []byte("common: invalid proxy URL \"http://u:hunter2@proxy:3128\"\n")
+	n, err := redactingWriter{out: &buf}.Write(line)
+	if err != nil || n != len(line) {
+		t.Fatalf("Write() = %d, %v; want %d, nil", n, err, len(line))
+	}
+	if strings.Contains(buf.String(), "hunter2") {
+		t.Fatalf("stdlib log line = %q, still has the password", buf.String())
 	}
 }

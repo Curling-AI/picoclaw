@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -123,7 +125,7 @@ type turnExecution struct {
 	summary          string
 	currentTurnStart int
 
-	// emptyResponseRetries counts same-turn retries after the model returned
+	// emptyResponseRetries counts retries in a row after the model returned
 	// neither content nor tool calls (reasoning-only glitches on thinking
 	// models). Capped so a persistently silent model still ends the turn.
 	emptyResponseRetries int
@@ -251,6 +253,7 @@ type turnExecution struct {
 	llmModelName              string
 	llmOpts                   map[string]any
 	llmRequestID              string
+	historyCallID             string
 	gracefulTerminal          bool
 	useNativeSearch           bool
 	ownedProviders            []providers.LLMProvider
@@ -333,8 +336,12 @@ type turnState struct {
 	userMessage string
 	media       []string
 
-	phase        TurnPhase
-	iteration    int
+	phase     TurnPhase
+	iteration int
+	// budgetStart is the iteration the turn last read a message the person
+	// sent: the cap counts from there, so a request that joins the work gets
+	// the whole budget. (seucaranguejo fork)
+	budgetStart  int
 	startedAt    time.Time
 	finalContent string
 
@@ -365,7 +372,7 @@ type turnState struct {
 	backgroundFailed     bool
 	backgroundHandedOver bool
 
-	restorePointHistory []providers.Message
+	restorePointHistory []providers.Message // nil until a reliable snapshot has been captured.
 	restorePointSummary string
 	persistedMessages   []providers.Message
 	// savedToolOutputs are the full outputs this turn saved; see
@@ -390,6 +397,7 @@ type turnState struct {
 	initialHistoryLength int                    // Snapshot of history length at turn start
 
 	// Additional SubTurn fields
+	historyRunID    string
 	ctx             context.Context    // Context for this turn
 	cancelFunc      context.CancelFunc // Cancel function for this turn's context
 	critical        bool               // Whether this SubTurn should continue after parent ends
@@ -397,6 +405,8 @@ type turnState struct {
 	parentEnded     atomic.Bool        // Whether parent has ended
 	closeOnce       sync.Once          // Ensures pendingResults channel is closed once
 	finishedChan    chan struct{}      // Closed when turn finishes
+	// onStep hears this sub-turn's tool calls, for the live view. (seucaranguejo fork)
+	onStep func(tools.SubTurnStep) func(failed bool)
 
 	// Token budget tracking
 	tokenBudget      *atomic.Int64        // Shared token budget counter
@@ -441,10 +451,8 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 	// Bind session store and capture initial history length for rollback logic
 	if agent != nil && agent.Sessions != nil {
 		ts.session = agent.Sessions
-		history := agent.Sessions.GetHistory(opts.Dispatch.SessionKey)
-		ts.initialHistoryLength = len(history)
-		ts.restorePointHistory = append([]providers.Message(nil), history...)
-		ts.restorePointSummary = agent.Sessions.GetSummary(opts.Dispatch.SessionKey)
+		ts.refreshRestorePointFromSession(agent)
+		ts.initialHistoryLength = len(ts.restorePointHistory)
 	}
 
 	return ts
@@ -591,7 +599,24 @@ func (ts *turnState) currentIteration() int {
 // fallback replaces the reply the retry was meant to fix.
 func (ts *turnState) atIterationCap(iteration int) bool {
 	maxIter := ts.maxIterations()
-	return maxIter > 0 && iteration >= maxIter
+	return maxIter > 0 && ts.budgetUsed(iteration) >= maxIter
+}
+
+// restartBudget gives the turn its whole budget again, counting iteration as
+// the first: the turn just read a message the person sent. (seucaranguejo
+// fork)
+func (ts *turnState) restartBudget(iteration int) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.budgetStart = iteration - 1
+}
+
+// budgetUsed is how many iterations up to iteration count against the cap:
+// the ones since the person's latest message. (seucaranguejo fork)
+func (ts *turnState) budgetUsed(iteration int) int {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	return iteration - ts.budgetStart
 }
 
 func (ts *turnState) maxIterations() int {
@@ -856,7 +881,7 @@ func (ts *turnState) eventMeta(source, tracePath string) HookMeta {
 func (ts *turnState) captureRestorePoint(history []providers.Message, summary string) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.restorePointHistory = append([]providers.Message(nil), history...)
+	ts.restorePointHistory = append([]providers.Message{}, history...)
 	ts.restorePointSummary = summary
 }
 
@@ -891,8 +916,17 @@ func (ts *turnState) persistedMessagesSnapshot() []providers.Message {
 }
 
 func (ts *turnState) refreshRestorePointFromSession(agent *AgentInstance) {
-	history := agent.Sessions.GetHistory(ts.sessionKey)
-	summary := agent.Sessions.GetSummary(ts.sessionKey)
+	if agent == nil || agent.Sessions == nil {
+		return
+	}
+	history, summary, err := readRestorePoint(agent.Sessions, ts.sessionKey)
+	if err != nil {
+		logger.WarnCF("agent", "Cannot capture session restore point", map[string]any{
+			"session_key": ts.sessionKey,
+			"error":       err.Error(),
+		})
+		return
+	}
 
 	persisted := ts.persistedMessagesSnapshot()
 
@@ -901,6 +935,27 @@ func (ts *turnState) refreshRestorePointFromSession(agent *AgentInstance) {
 	}
 
 	ts.captureRestorePoint(history, summary)
+}
+
+func readRestorePoint(store session.SessionStore, key string) ([]providers.Message, string, error) {
+	if reader, ok := store.(memory.HistoryContentLineage); ok {
+		canonical := key
+		if resolver, supported := store.(interface{ ResolveSessionKey(key string) string }); supported {
+			canonical = resolver.ResolveSessionKey(key)
+		}
+		frame, err := reader.ReadHistoryContentFrame(context.Background(), canonical)
+		if !errors.Is(err, memory.ErrHistoryUnsupported) {
+			if err != nil {
+				return nil, "", err
+			}
+			history := make([]providers.Message, len(frame.Entries))
+			for i, entry := range frame.Entries {
+				history[i] = entry.Message
+			}
+			return history, frame.Summary, nil
+		}
+	}
+	return store.GetHistory(key), store.GetSummary(key), nil
 }
 
 // ingestMessage calls the ContextManager's Ingest method for a persisted message.
@@ -920,15 +975,23 @@ func (ts *turnState) ingestMessage(ctx context.Context, al *AgentLoop, msg provi
 	}
 }
 
-func (ts *turnState) restoreSession(agent *AgentInstance) error {
+// The bool confirms history replacement even when the later Save fails.
+func (ts *turnState) restoreSession(agent *AgentInstance) (bool, error) {
 	ts.mu.RLock()
+	if ts.restorePointHistory == nil {
+		ts.mu.RUnlock()
+		return false, nil
+	}
 	history := append([]providers.Message(nil), ts.restorePointHistory...)
 	summary := ts.restorePointSummary
 	ts.mu.RUnlock()
 
-	agent.Sessions.SetHistory(ts.sessionKey, history)
+	err := ts.replaceHistory(agent.Sessions, history)
+	if err != nil && !errors.Is(err, memory.ErrHistoryInputCommitted) {
+		return false, err
+	}
 	agent.Sessions.SetSummary(ts.sessionKey, summary)
-	return agent.Sessions.Save(ts.sessionKey)
+	return true, errors.Join(err, agent.Sessions.Save(ts.sessionKey))
 }
 
 func matchingTurnMessageTail(history, persisted []providers.Message) int {
@@ -977,8 +1040,13 @@ func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	// delivery's time comes back without the clock and in a fixed zone.
 	msg.CreatedAt = nil
 	msg.JoinedSends = ""
+	msg.HistoryCallID = ""
+	// History reads omit receipt metadata; it must not hide the active prompt.
+	msg.HistoryID, msg.HistoryRunID, msg.HistoryStreamID = "", "", ""
+	msg.HistoryOrderVersion, msg.HistorySequence = 0, 0
 	if msg.Delivery != nil {
 		delivery := *msg.Delivery
+		delivery.ID = "" // Persistence identity is absent from the turn's input copy.
 		delivery.At = delivery.At.UTC().Round(0)
 		msg.Delivery = &delivery
 	}

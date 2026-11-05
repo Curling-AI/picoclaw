@@ -648,6 +648,31 @@ func TestContextBuilder_ActiveSkillsBlockEmbedsSelectedSkillContent(t *testing.T
 	}
 }
 
+func TestContextBuilderObservedSkillsKeepTheOriginalSeparators(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	workspace := t.TempDir()
+	for _, name := range []string{"first-fixture", "second-fixture"} {
+		writeTurnProfileSkill(
+			t,
+			workspace,
+			name,
+			"---\nname: "+name+"\ndescription: Synthetic skill\n---\n# "+name+"\n\nControlled instructions.",
+		)
+	}
+	cb := NewContextBuilder(workspace)
+	names := []string{"first-fixture", "second-fixture"}
+	var observed []string
+	actual := cb.buildActiveSkillsContextObserved(
+		names,
+		LoopScope{},
+		func(name string) { observed = append(observed, name) },
+	)
+	expected := cb.buildActiveSkillsContext(names, LoopScope{})
+	if actual != expected || len(observed) != 2 {
+		t.Fatal("observing skills changed their prompt content or separators")
+	}
+}
+
 func TestContextBuilder_NoActiveSkillsProducesNoBlock(t *testing.T) {
 	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
 	workspace := t.TempDir()

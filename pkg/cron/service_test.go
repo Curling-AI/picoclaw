@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -121,6 +122,31 @@ func TestCronService_CRUD(t *testing.T) {
 	}
 }
 
+func TestCronService_AddPausedJobWithPayloadStartsPaused(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	atMS := time.Now().Add(time.Second).UnixMilli()
+	job, err := cs.AddPausedJobWithPayload(
+		"Task1",
+		CronSchedule{Kind: "at", AtMS: &atMS},
+		CronPayload{Kind: "agent_turn", Message: "msg", Connectors: []string{"gmail"}},
+	)
+	if err != nil {
+		t.Fatalf("AddPausedJobWithPayload failed: %v", err)
+	}
+	stored, ok := cs.GetJob(job.ID)
+	if !ok {
+		t.Fatal("job not stored")
+	}
+	if stored.Enabled || stored.State.NextRunAtMS != nil {
+		t.Fatalf("enabled=%v next=%v, want a paused job with no next run", stored.Enabled, stored.State.NextRunAtMS)
+	}
+	if !slices.Equal(stored.Payload.Connectors, []string{"gmail"}) {
+		t.Fatalf("connectors = %v", stored.Payload.Connectors)
+	}
+}
+
 func TestCronService_GetJobReturnsCopy(t *testing.T) {
 	cs, path := setupService(nil)
 	defer os.Remove(path)
@@ -160,6 +186,79 @@ func TestCronService_GetJobReturnsCopy(t *testing.T) {
 	}
 	if again.State.NextRunAtMS == nil || *again.State.NextRunAtMS != nextRun {
 		t.Fatalf("GetJob should not alias state pointers, got %+v", again.State)
+	}
+}
+
+func TestCronService_GetJobDoesNotShareConnectors(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: int64Ptr(60_000)}, "msg", "ch", "to")
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+	job.Payload.Connectors = []string{"gmail"}
+	if err := cs.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob failed: %v", err)
+	}
+
+	got, _ := cs.GetJob(job.ID)
+	got.Payload.Connectors[0] = "mutated"
+
+	again, _ := cs.GetJob(job.ID)
+	if again.Payload.Connectors[0] != "gmail" {
+		t.Fatalf("GetJob shares the connector list with the store: %v", again.Payload.Connectors)
+	}
+}
+
+func TestCronService_ConnectorsSurviveLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	cs := NewCronService(path, func(*CronJob) (string, error) { return "ok", nil })
+
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: int64Ptr(60_000)}, "msg", "ch", "to")
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+	job.Payload.Connectors = []string{"gmail", "slack"}
+	if err := cs.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob failed: %v", err)
+	}
+
+	assertKept := func(step string, service *CronService) {
+		t.Helper()
+		got, ok := service.GetJob(job.ID)
+		if !ok || !slices.Equal(got.Payload.Connectors, []string{"gmail", "slack"}) {
+			t.Fatalf("%s lost the connectors: %+v", step, got)
+		}
+	}
+	if _, err := cs.EnableJob(job.ID, false); err != nil {
+		t.Fatalf("EnableJob(false) failed: %v", err)
+	}
+	assertKept("disable", cs)
+	if _, err := cs.EnableJob(job.ID, true); err != nil {
+		t.Fatalf("EnableJob(true) failed: %v", err)
+	}
+	assertKept("enable", cs)
+	cs.executeJob(job.ID, Manual)
+	assertKept("run", cs)
+	assertKept("reload", NewCronService(path, nil))
+}
+
+func TestCronService_StoreWithoutConnectorsLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	stored := `{"version":1,"jobs":[{"id":"old","name":"Old","enabled":true,` +
+		`"schedule":{"kind":"every","everyMs":60000},` +
+		`"payload":{"kind":"agent_turn","message":"msg"},"state":{}}]}`
+	if err := os.WriteFile(path, []byte(stored), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := NewCronService(path, nil).GetJob("old")
+	if !ok {
+		t.Fatal("job from the older store is missing")
+	}
+	if got.Payload.Connectors != nil {
+		t.Fatalf("older store grew connectors: %v", got.Payload.Connectors)
 	}
 }
 
@@ -567,6 +666,30 @@ func TestFailedSaveLeavesTheJobUnchanged(t *testing.T) {
 		}
 		if got, _ := cs.GetJob(job.ID); !got.Enabled || got.State.NextRunAtMS == nil {
 			t.Fatalf("job was paused in memory although the store was not saved: %+v", got)
+		}
+	})
+	t.Run("add", func(t *testing.T) {
+		cs, _ := serviceWithFailingSave(t)
+		before := len(cs.ListJobs(true))
+		payload := CronPayload{Kind: "agent_turn", Message: "b"}
+		if got, err := cs.AddJobWithPayload(
+			"b",
+			CronSchedule{Kind: "cron", Expr: "0 9 * * *"},
+			payload,
+		); err == nil ||
+			got != nil {
+			t.Fatalf("AddJobWithPayload = %v, %v; want nil and the save error", got, err)
+		}
+		if got, err := cs.AddPausedJobWithPayload(
+			"b",
+			CronSchedule{Kind: "cron", Expr: "0 9 * * *"},
+			payload,
+		); err == nil ||
+			got != nil {
+			t.Fatalf("AddPausedJobWithPayload = %v, %v; want nil and the save error", got, err)
+		}
+		if after := len(cs.ListJobs(true)); after != before {
+			t.Fatalf("jobs in memory = %d, want %d: an unsaved add stayed", after, before)
 		}
 	})
 	t.Run("update", func(t *testing.T) {

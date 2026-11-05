@@ -19,6 +19,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // promptCacheKeyForSession names the upstream cache partition of one session.
@@ -97,9 +98,12 @@ func promptCacheScopeForSession(sessionKey string) string {
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
 // Returns Control indicating what the coordinator should do next.
-// maxEmptyResponseRetries caps same-turn retries for empty (no content, no
-// tool calls) LLM responses. One retry recovers the transient reasoning-only
-// glitch; more would just stall visibly silent turns.
+// maxEmptyResponseRetries caps retries in a row for empty (no content, no tool
+// calls) LLM responses. One retry recovers the transient reasoning-only glitch;
+// more would just stall visibly silent turns. The count starts over once the
+// model emits a real call: a provider's content filter can fire more than once
+// on a long turn, and a turn-wide budget of one ended it on the second
+// (prod, 2026-10-29).
 const maxEmptyResponseRetries = 1
 
 // largeToolCount is where a turn's tools array is worth a warning: several
@@ -170,6 +174,14 @@ const maxDegenerateResponseRetries = 1
 const degenerateResponseNudge = "[System] Your last reply got stuck repeating the same phrase over and over " +
 	"instead of answering, and was discarded. Answer the question once, in your own words, and stop."
 
+// reasoningCapNudge goes with the retry of a call that spent its whole output
+// limit thinking. Resent unchanged, the request rerolls the same loop: prod,
+// 2026-10-28, two calls of 32768 reasoning tokens in a row on GLM, the second
+// a cycle of the same few hundred lines.
+const reasoningCapNudge = "[System] Your last reply spent your whole output limit on internal reasoning and " +
+	"never got to the answer, so nothing reached the user. Keep your reasoning short this time: do not enumerate " +
+	"or brainstorm long lists in it, and write the answer to the user."
+
 // announcesUndeliveredCall is the condition of the guard that keeps a promise
 // of a tool call out of the answer: only before the first tool of the turn,
 // with tools offered and no interruption. (seucaranguejo fork)
@@ -226,6 +238,9 @@ func (p *Pipeline) CallLLM(
 	// Verified via A/B replay: with the referenced defs absent, glm-5.2
 	// returned empty 6/6; with them present, it acted 48/48.
 	ts.seedOfferedTools(ts.agent.Tools)
+	if _, restricted := tools.ExecutionPolicySkills(turnCtx); restricted {
+		ts.offerTools(ts.profile.AllowedTools)
+	}
 	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
 		ts.offerTools(referenced)
 		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
@@ -973,6 +988,9 @@ func (p *Pipeline) CallLLM(
 	if shouldPublishPicoToolCallInterim {
 		// Pico tool-call turns publish their reasoning/content/tool summary as a
 		// structured sequence after the tool-call payload is normalized below.
+	} else if structuredInterimChannel && ts.parentTurnID != "" {
+		// A subagent's thoughts are not the conversation's: the web shows its
+		// steps under the subagent card. (seucaranguejo fork)
 	} else if structuredInterimChannel {
 		if exec.streamingPublisher != nil && exec.streamingPublisher.ReasoningPublished() {
 			if err := exec.streamingPublisher.FinalizeReasoning(turnCtx, reasoningContent); err != nil {
@@ -1028,6 +1046,13 @@ func (p *Pipeline) CallLLM(
 		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
+
+	// The output-cap nudge rides on the one empty-response retry only. Whatever
+	// that retry brought back, "your last reply" now means another reply, and the
+	// turn can still send more calls (steering, or a retry from a guard below).
+	if exec.emptyResponseRetries > 0 {
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, reasoningCapNudge)
+	}
 
 	// A completion that ends in the same block over and over is a generation
 	// loop: the model stopped answering and spent the rest of its budget on one
@@ -1147,6 +1172,13 @@ func (p *Pipeline) CallLLM(
 			exec.emptyResponseRetries++
 			cancelConfiguredStreamingLLM(turnCtx, exec)
 			p.reviveDiscoveredTools(ts, exec, iteration)
+			outputCapHit := responseHitOutputCap(exec.response, ts.agent.MaxTokens)
+			if outputCapHit {
+				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+					Role:    "user",
+					Content: reasoningCapNudge,
+				})
+			}
 			logger.WarnCF("agent", "LLM returned empty response (no content, no tool calls); retrying", map[string]any{
 				"agent_id":               ts.agent.ID,
 				"iteration":              iteration,
@@ -1154,6 +1186,7 @@ func (p *Pipeline) CallLLM(
 				"has_reasoning":          exec.response.ReasoningContent != "" || exec.response.Reasoning != "",
 				"finish_reason":          exec.response.FinishReason,
 				"finish_reason_reported": !exec.response.FinishReasonMissing,
+				"output_cap_hit":         outputCapHit,
 				"completion_tokens":      responseCompletionTokens(exec.response),
 				"request_id":             exec.response.ProviderRequestID,
 				"upstream_id":            exec.response.UpstreamID,
@@ -1167,10 +1200,32 @@ func (p *Pipeline) CallLLM(
 		// Providers surface it either as reasoning_content (DeepSeek-style)
 		// or reasoning (OpenRouter/AI-Gateway-style); check both.
 		// Nem o raciocínio vira resposta num turno silencioso. (seucaranguejo fork)
+		//
+		// Not when the call stopped at the output limit or the provider's content
+		// filter: that thinking was cut mid-thought and is no answer. In prod
+		// (2026-10-28) it went out as a 73k-character loop of the same list, after
+		// a 20-minute turn; on 2026-10-29, as half a sentence in English.
 		if responseContent == "" && ts.channel != "pico" && !ts.opts.Silent {
-			if exec.response.ReasoningContent != "" {
+			switch {
+			case responseHitOutputCap(exec.response, ts.agent.MaxTokens),
+				exec.response.FinishReason == "content_filter":
+				logger.WarnCF(
+					"agent",
+					"LLM was cut off without answering; not using its reasoning as the reply",
+					map[string]any{
+						"agent_id":          ts.agent.ID,
+						"iteration":         iteration,
+						"finish_reason":     exec.response.FinishReason,
+						"completion_tokens": responseCompletionTokens(exec.response),
+						"reasoning_chars":   len(responseReasoningContent(exec.response)),
+						"request_id":        exec.response.ProviderRequestID,
+						"upstream_id":       exec.response.UpstreamID,
+						"resolved_provider": exec.response.ResolvedProvider,
+					},
+				)
+			case exec.response.ReasoningContent != "":
 				responseContent = exec.response.ReasoningContent
-			} else if exec.response.Reasoning != "" {
+			case exec.response.Reasoning != "":
 				responseContent = exec.response.Reasoning
 			}
 		}
@@ -1315,6 +1370,8 @@ func (p *Pipeline) CallLLM(
 				"agent_id":      ts.agent.ID,
 				"iteration":     iteration,
 				"content_chars": len(exec.finalContent),
+				"finish_reason": exec.response.FinishReason,
+				"request_id":    exec.response.ProviderRequestID,
 			})
 		return ControlBreak, nil
 	}
@@ -1354,6 +1411,7 @@ func (p *Pipeline) CallLLM(
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, truncatedToolCallNudge)
 	}
 	exec.interruptedStreamRetries = 0
+	exec.emptyResponseRetries = 0
 	if exec.danglingColonRetries > 0 {
 		exec.danglingColonRetries = 0
 		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, exec.danglingColonNudge)
@@ -1380,6 +1438,7 @@ func (p *Pipeline) CallLLM(
 		ModelName:        exec.llmModelName,
 		ReasoningContent: reasoningContent,
 		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
+		HistoryCallID:    exec.historyCallID,
 	}
 	for _, tc := range exec.normalizedToolCalls {
 		argumentsJSON, _ := json.Marshal(tc.Arguments)
@@ -1414,7 +1473,7 @@ func (p *Pipeline) CallLLM(
 	}
 	exec.messages = append(exec.messages, assistantMsg)
 	if !ts.opts.NoHistory {
-		ts.agent.Sessions.AddFullMessage(ts.sessionKey, assistantMsg)
+		ts.appendHistoryMessage(assistantMsg)
 		ts.recordPersistedMessage(assistantMsg)
 		ts.ingestMessage(turnCtx, al, assistantMsg)
 	}

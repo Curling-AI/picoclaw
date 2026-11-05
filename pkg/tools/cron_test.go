@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1442,5 +1444,163 @@ func TestCronTool_ReportsAFailedSave(t *testing.T) {
 		if result := tool.Execute(ctx, map[string]any{"action": action, "job_id": job.ID}); !result.IsError {
 			t.Fatalf("%s reported success although the store was not saved: %s", action, result.ForLLM)
 		}
+	}
+}
+
+func TestCronTool_AddConnectors(t *testing.T) {
+	tests := []struct {
+		name       string
+		connectors any
+		want       []string
+		wantErr    bool
+	}{
+		{name: "omitted", want: nil},
+		{name: "empty", connectors: []any{}, want: nil},
+		{name: "normalized list", connectors: []any{" Gmail ", "slack", "gmail"}, want: []string{"gmail", "slack"}},
+		{name: "invalid name", connectors: []any{"gmail!"}, wantErr: true},
+		{name: "wrong item type", connectors: []any{float64(1)}, wantErr: true},
+		{name: "wrong type", connectors: "gmail", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := newTestCronTool(t)
+			args := map[string]any{"action": "add", "message": "m", "every_seconds": float64(60)}
+			if tt.connectors != nil {
+				args["connectors"] = tt.connectors
+			}
+			result := tool.Execute(WithToolContext(context.Background(), "cli", "direct"), args)
+			jobs := tool.cronService.ListJobs(true)
+			if tt.wantErr {
+				if !result.IsError || len(jobs) != 0 {
+					t.Fatalf("invalid connectors must create nothing: %+v, jobs=%d", result, len(jobs))
+				}
+				return
+			}
+			if result.IsError || len(jobs) != 1 {
+				t.Fatalf("add failed: %+v, jobs=%d", result, len(jobs))
+			}
+			if !slices.Equal(jobs[0].Payload.Connectors, tt.want) {
+				t.Fatalf("connectors = %v, want %v", jobs[0].Payload.Connectors, tt.want)
+			}
+		})
+	}
+}
+
+func TestCronTool_UpdateConnectors(t *testing.T) {
+	saved := []string{"gmail", "slack"}
+	tests := []struct {
+		name       string
+		args       map[string]any
+		want       []string
+		wantErr    string
+		wantPrompt string
+	}{
+		{
+			name:       "omitted with another field preserves",
+			args:       map[string]any{"message": "changed"},
+			want:       saved,
+			wantPrompt: "changed",
+		},
+		{name: "empty clears as the only patch", args: map[string]any{"connectors": []any{}}, want: nil},
+		{name: "list replaces", args: map[string]any{"connectors": []any{"Notion"}}, want: []string{"notion"}},
+		{
+			name:    "invalid saves nothing",
+			args:    map[string]any{"message": "changed", "connectors": []any{"no spaces"}},
+			want:    saved,
+			wantErr: "invalid connector",
+		},
+		{
+			name:    "wrong type saves nothing",
+			args:    map[string]any{"message": "changed", "connectors": "gmail"},
+			want:    saved,
+			wantErr: "array of strings",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := newTestCronTool(t)
+			job := addTestCronJob(t, tool, "job", "cli", "direct", "")
+			job.Payload.Connectors = saved
+			if err := tool.cronService.UpdateJob(job); err != nil {
+				t.Fatalf("UpdateJob() error: %v", err)
+			}
+			prompt := tt.wantPrompt
+			if prompt == "" {
+				prompt = job.Payload.Message
+			}
+
+			args := map[string]any{"action": "update", "job_id": job.ID}
+			maps.Copy(args, tt.args)
+			result := tool.Execute(WithToolContext(context.Background(), "cli", "direct"), args)
+
+			if (tt.wantErr != "") != result.IsError || !strings.Contains(result.ForLLM, tt.wantErr) {
+				t.Fatalf("result = %+v, want error containing %q", result, tt.wantErr)
+			}
+			got, ok := tool.cronService.GetJob(job.ID)
+			if !ok {
+				t.Fatal("job is missing")
+			}
+			if !slices.Equal(got.Payload.Connectors, tt.want) {
+				t.Fatalf("connectors = %v, want %v", got.Payload.Connectors, tt.want)
+			}
+			if got.Payload.Message != prompt {
+				t.Fatalf("message = %q, want %q", got.Payload.Message, prompt)
+			}
+		})
+	}
+}
+
+// The schema check runs before the tool, so null is refused rather than read as "omitted".
+func TestCronTool_RegistryRefusesNullConnectors(t *testing.T) {
+	tool := newTestCronTool(t)
+	registry := NewToolRegistry()
+	registry.Register(tool)
+	job := addTestCronJob(t, tool, "job", "cli", "direct", "")
+	job.Payload.Connectors = []string{"gmail"}
+	if err := tool.cronService.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob() error: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{
+			name: "add",
+			args: map[string]any{"action": "add", "message": "m", "every_seconds": float64(60), "connectors": nil},
+		},
+		{
+			name: "update",
+			args: map[string]any{"action": "update", "job_id": job.ID, "message": "changed", "connectors": nil},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := registry.ExecuteWithContext(context.Background(), "cron", tt.args, "cli", "direct", nil)
+			if !result.IsError || !strings.Contains(result.ForLLM, `"connectors": expected array`) {
+				t.Fatalf("null connectors must be refused by the schema: %+v", result)
+			}
+			jobs := tool.cronService.ListJobs(true)
+			if len(jobs) != 1 || jobs[0].Payload.Message != job.Payload.Message ||
+				!slices.Equal(jobs[0].Payload.Connectors, []string{"gmail"}) {
+				t.Fatalf("a refused call changed the store: %+v", jobs)
+			}
+		})
+	}
+}
+
+func TestCronTool_GetReturnsConnectors(t *testing.T) {
+	tool := newTestCronTool(t)
+	job := addTestCronJob(t, tool, "job", "cli", "direct", "")
+	job.Payload.Connectors = []string{"gmail"}
+	if err := tool.cronService.UpdateJob(job); err != nil {
+		t.Fatalf("UpdateJob() error: %v", err)
+	}
+	result := tool.Execute(
+		WithToolContext(context.Background(), "cli", "direct"),
+		map[string]any{"action": "get", "job_id": job.ID},
+	)
+	if got := parseCronJobResult(t, result); !slices.Equal(got.Payload.Connectors, []string{"gmail"}) {
+		t.Fatalf("get lost the connectors: %s", result.ForLLM)
 	}
 }

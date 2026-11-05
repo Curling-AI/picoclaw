@@ -1,8 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
@@ -234,5 +240,117 @@ func TestTranscribeAudioInMessage_TranscribedAudioBecomesVoiceText(t *testing.T)
 
 	if msg.Content != "[voice: olá]" || len(msg.Media) != 0 {
 		t.Fatalf("got content %q media %v", msg.Content, msg.Media)
+	}
+}
+
+// silentAudioModel answers the way the transcription model answers silence: the
+// marker when the prompt asks for it, otherwise the refusal that reached the
+// conversation as the person's speech in the 2026-11-02 test (MST-575).
+func silentAudioModel(t *testing.T) *asr.AudioModelTranscriber {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		reply := "I'm sorry, but I cannot transcribe the audio you provided."
+		if bytes.Contains(body, []byte("reply with exactly NO_SPEECH")) {
+			reply = "NO_SPEECH"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]any{"content": reply},
+				"finish_reason": "stop",
+			}},
+		}); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.ModelConfig{
+		ModelName:      "maestro-transcribe",
+		Model:          "litellm/maestro-transcribe",
+		APIBase:        server.URL,
+		AudioFileParts: true,
+	}
+	cfg.SetAPIKey("test-key")
+	tr := asr.NewAudioModelTranscriber(cfg)
+	if tr == nil {
+		t.Fatal("NewAudioModelTranscriber() = nil")
+	}
+	return tr
+}
+
+func TestTranscribeAudioInMessage_SilenceBecomesTheNoSpeechNote(t *testing.T) {
+	store := media.NewFileMediaStore()
+	ref := storeAudio(t, store, "voice.ogg", "audio/ogg")
+	al := &AgentLoop{cfg: &config.Config{}, mediaStore: store, transcriber: silentAudioModel(t)}
+
+	msg := al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{
+		Content: "[voice]",
+		Media:   []string{ref},
+	})
+
+	if msg.Content != noSpeechAudioNote {
+		t.Fatalf("got content %q, want the no-speech note", msg.Content)
+	}
+}
+
+// A web upload's path carries the person's file name, which says what the audio
+// is about: it must not reach the pod's log when the transcription fails.
+func TestTranscribeFailureLogOmitsTheFileName(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "pod.log")
+	if err := logger.EnableFileLogging(logPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(logger.DisableFileLogging)
+	dir := filepath.Join(t.TempDir(), "uploads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audio := filepath.Join(dir, "1a2b3c4d-consulta-fulana-hiv.ogg")
+	if err := os.WriteFile(audio, []byte("OggS"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: failingTranscriber{}}
+
+	al.transcribeAudioInMessage(context.Background(), bus.InboundMessage{Content: "[voice]", Media: []string{audio}})
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Transcription failed") {
+		t.Fatalf("the failure was not logged: %q", data)
+	}
+	if strings.Contains(string(data), "consulta-fulana") {
+		t.Fatalf("the log carries the file name: %q", data)
+	}
+}
+
+func TestSetTranscriber_ConcurrentWithTurn(t *testing.T) {
+	al := &AgentLoop{cfg: &config.Config{}}
+	fake := &fixedTranscriber{text: "olá"}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			if i%2 == 0 {
+				al.SetTranscriber(fake)
+			} else {
+				al.SetTranscriber(nil)
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_, _ = al.transcribeAudio(context.Background(), "voice.ogg")
+		}
 	}
 }

@@ -554,6 +554,7 @@ func TestHardAbortSessionRollback(t *testing.T) {
 		depth:                0,
 		session:              sess,
 		initialHistoryLength: 2, // Snapshot: 2 messages
+		restorePointHistory:  append([]providers.Message{}, sess.GetHistory("")...),
 		pendingResults:       make(chan *tools.ToolResult, 16),
 		concurrencySem:       make(chan struct{}, 5),
 	}
@@ -739,6 +740,7 @@ func TestHardAbortOrderOfOperations(t *testing.T) {
 		depth:                0,
 		session:              sess,
 		initialHistoryLength: 1, // Snapshot: 1 message
+		restorePointHistory:  append([]providers.Message{}, sess.GetHistory("")[:1]...),
 		pendingResults:       make(chan *tools.ToolResult, 16),
 		concurrencySem:       make(chan struct{}, 5),
 	}
@@ -2236,6 +2238,50 @@ func TestSpawnSubTurn_TargetAgentID_UsesTargetAgent(t *testing.T) {
 	// used beta's model, not alpha's.
 	if got := rp.getLastModel(); got != "model-beta" {
 		t.Errorf("child turn used model %q, want %q", got, "model-beta")
+	}
+}
+
+// A sub-turn works on the model the person picked for the parent turn, not on
+// the agent's main one; delegating to another agent keeps that agent's model.
+func TestSpawnSubTurn_InheritsTheParentsModelTier(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, want string
+	}{
+		{"own agent", "", "model-sol"},
+		{"another agent", "beta", "model-beta"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rp := &modelRecordingProvider{}
+			al, cleanup := newMultiAgentLoop(t, rp)
+			defer cleanup()
+			alpha, _ := al.registry.GetAgent("alpha")
+			beta, _ := al.registry.GetAgent("beta")
+			// Both know the tier, so only the inheritance decides the model.
+			for _, a := range []*AgentInstance{alpha, beta} {
+				a.TierCandidates = map[string][]providers.FallbackCandidate{
+					"sol": {{Provider: a.Candidates[0].Provider, Model: "model-sol"}},
+				}
+			}
+			parent := &turnState{
+				ctx:            context.Background(),
+				turnID:         "parent-alpha",
+				pendingResults: make(chan *tools.ToolResult, 4),
+				concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+				session:        &ephemeralSessionStore{},
+				agent:          alpha,
+				modelTier:      "sol",
+			}
+			if _, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+				Model:         "model-alpha",
+				TargetAgentID: tc.target,
+				SystemPrompt:  "task",
+			}); err != nil {
+				t.Fatalf("spawnSubTurn: %v", err)
+			}
+			if got := rp.getLastModel(); got != tc.want {
+				t.Fatalf("child turn used model %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

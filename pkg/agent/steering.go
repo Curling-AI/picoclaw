@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -196,8 +197,9 @@ func (sq *steeringQueue) getMode() SteeringMode {
 }
 
 // Steer enqueues a user message to be injected into the currently running
-// agent loop. The message will be picked up after the current tool finishes
-// executing, causing any remaining tool calls in the batch to be skipped.
+// agent loop. The message will be picked up once the batch of tool calls in
+// flight finishes (seucaranguejo fork: the rest of the batch is no longer
+// skipped, see steering_join.go).
 func (al *AgentLoop) Steer(msg providers.Message) error {
 	scope := ""
 	agentID := ""
@@ -571,7 +573,11 @@ func (al *AgentLoop) HardAbort(sessionKey string) error {
 // delivery stripe, so such a write lands either behind the turn (queued, written
 // when it ends) or after this cut.
 func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
-	if ts.session == nil {
+	ts.mu.RLock()
+	hasRestorePoint := ts.restorePointHistory != nil
+	historyLength := len(ts.restorePointHistory)
+	ts.mu.RUnlock()
+	if ts.session == nil || !hasRestorePoint {
 		return
 	}
 	stripe := al.mirror.stripe(sessionKey)
@@ -581,12 +587,14 @@ func (al *AgentLoop) rollBackAbortedTurn(sessionKey string, ts *turnState) {
 		return
 	}
 	history := ts.session.GetHistory(sessionKey)
-	if ts.initialHistoryLength < len(history) {
-		ts.session.SetHistory(sessionKey, history[:ts.initialHistoryLength])
+	if historyLength < len(history) {
+		if err := ts.replaceHistory(ts.session, history[:historyLength]); err != nil &&
+			!errors.Is(err, memory.ErrHistoryInputCommitted) {
+			return
+		}
+		// Only a confirmed cut releases the sends for the turn's final flush.
+		ts.selfWritten = 0
 	}
-	// The cut takes what the turn's scripts sent; the turn's end queues them
-	// again. (seucaranguejo fork — see self_delivery.go)
-	ts.selfWritten = 0
 }
 
 // ====================== Follow-Up Injection ======================

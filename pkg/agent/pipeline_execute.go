@@ -16,6 +16,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/redact"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -187,7 +188,7 @@ toolLoop:
 				if toolReq != nil && toolReq.HookResult != nil {
 					hookResult := toolReq.HookResult
 
-					argsJSON, _ := json.Marshal(toolArgs)
+					argsJSON, _ := json.Marshal(redact.ToolArgs(toolName, toolArgs))
 					argsPreview := utils.Truncate(string(argsJSON), 200)
 					logger.InfoCF("agent", fmt.Sprintf("Tool call (hook respond): %s(%s)", toolName, argsPreview),
 						map[string]any{
@@ -336,7 +337,7 @@ toolLoop:
 
 					messages = append(messages, toolResultMsg)
 					if !ts.opts.NoHistory {
-						ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
+						ts.appendHistoryMessage(toolResultMsg)
 						ts.recordPersistedMessage(toolResultMsg)
 						ts.ingestMessage(turnCtx, al, toolResultMsg)
 					}
@@ -366,16 +367,16 @@ toolLoop:
 						return finishToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:])
 					}
 
+					// A message the person sent joins the work: the rest of the
+					// batch still runs, and the message is read right after it.
+					// (seucaranguejo fork)
 					if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 						exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 					}
 
 					skipReason := ""
 					skipMessage := ""
-					if len(exec.pendingMessages) > 0 {
-						skipReason = "queued user steering message"
-						skipMessage = "Skipped due to queued user message."
-					} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
+					if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
 						skipReason = "graceful interrupt requested"
 						skipMessage = "Skipped due to graceful interrupt."
 					}
@@ -404,7 +405,7 @@ toolLoop:
 								msg := subTurnResultPromptMessage(content)
 								messages = append(messages, msg)
 								if !ts.opts.NoHistory {
-									ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+									ts.appendHistoryMessage(msg)
 								}
 							}
 						default:
@@ -485,7 +486,7 @@ toolLoop:
 			continue
 		}
 
-		argsJSON, _ := json.Marshal(toolArgs)
+		argsJSON, _ := json.Marshal(redact.ToolArgs(toolName, toolArgs))
 		argsPreview := utils.Truncate(string(argsJSON), 200)
 		logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", toolName, argsPreview),
 			map[string]any{
@@ -569,6 +570,7 @@ toolLoop:
 		}
 
 		toolStart := time.Now()
+		stepDone := ts.startStep(tc, al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength())
 		execCtx := tools.WithToolInboundContext(
 			turnCtx,
 			ts.channel,
@@ -584,6 +586,8 @@ toolLoop:
 		)
 		root := ts.rootTurn()
 		execCtx = tools.WithExecOrigin(execCtx, root.sessionKey, root.turnID)
+		// A subagent's task is found by this id. (seucaranguejo fork)
+		execCtx = tools.WithToolCallID(execCtx, tc.ID)
 		// The model can still name a deferred tool whose promotion expired;
 		// honor the call instead of answering "tool not found".
 		if revived := ts.agent.Tools.EnsureVisible([]string{toolName}, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
@@ -607,6 +611,7 @@ toolLoop:
 			ts.offerTools(tools.ParseDiscoveryResult(toolResult.ContentForLLM()))
 		}
 		toolDuration := time.Since(toolStart)
+		stepDone(toolResult == nil || toolResult.IsError)
 		// Read before an AfterTool hook can replace the result (repeat guard).
 		outcomeUnknown := toolResult != nil && toolResult.OutcomeUnknown
 
@@ -757,7 +762,7 @@ toolLoop:
 		}
 		messages = append(messages, toolResultMsg)
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
+			ts.appendHistoryMessage(toolResultMsg)
 			ts.recordPersistedMessage(toolResultMsg)
 			ts.ingestMessage(turnCtx, al, toolResultMsg)
 		}
@@ -817,16 +822,17 @@ toolLoop:
 			}
 		}
 
+		// A message the person sent joins the work: the rest of the batch still
+		// runs, and the message is read right after it. Skipped, the calls the
+		// model made for the earlier request were lost, and it did not always
+		// make them again. (seucaranguejo fork)
 		if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 			exec.pendingMessages = append(exec.pendingMessages, steerMsgs...)
 		}
 
 		skipReason := ""
 		skipMessage := ""
-		if len(exec.pendingMessages) > 0 {
-			skipReason = "queued user steering message"
-			skipMessage = "Skipped due to queued user message."
-		} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
+		if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
 			skipReason = "graceful interrupt requested"
 			skipMessage = "Skipped due to graceful interrupt."
 		}
@@ -855,7 +861,7 @@ toolLoop:
 					msg := subTurnResultPromptMessage(content)
 					messages = append(messages, msg)
 					if !ts.opts.NoHistory {
-						ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+						ts.appendHistoryMessage(msg)
 					}
 				}
 			default:
@@ -899,7 +905,7 @@ toolLoop:
 			Attachments: append([]providers.Attachment(nil), handledAttachments...),
 		}
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, summaryMsg)
+			ts.appendHistoryMessage(summaryMsg)
 			ts.recordPersistedMessage(summaryMsg)
 			ts.ingestMessage(turnCtx, al, summaryMsg)
 			if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
@@ -975,7 +981,7 @@ func (al *AgentLoop) skipToolCalls(
 		}
 		answered = append(answered, skippedMsg)
 		if !ts.opts.NoHistory {
-			ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+			ts.appendHistoryMessage(skippedMsg)
 			ts.recordPersistedMessage(skippedMsg)
 		}
 	}
@@ -1059,4 +1065,15 @@ func toolDeclaresRawArgument(registry *tools.ToolRegistry, name string) bool {
 	props, _ := tool.Parameters()["properties"].(map[string]any)
 	_, declared := props["raw"]
 	return declared
+}
+
+// startStep tells a sub-turn's recorder (spawnSubTurn) that a tool call started,
+// with the arguments the web would show for it, and returns what ends the step.
+// (seucaranguejo fork)
+func (ts *turnState) startStep(tc providers.ToolCall, maxArgsLen int) func(failed bool) {
+	visible := utils.BuildVisibleToolCalls([]providers.ToolCall{tc}, maxArgsLen)
+	if ts.onStep == nil || len(visible) == 0 || visible[0].Function == nil {
+		return func(bool) {}
+	}
+	return ts.onStep(tools.SubTurnStep{Name: visible[0].Function.Name, Arguments: visible[0].Function.Arguments})
 }

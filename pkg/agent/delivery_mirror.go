@@ -10,6 +10,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -40,6 +41,11 @@ import (
 // processadas. "" = chat sem conversa para espelhar.
 type DeliverySessionResolver func(channel, chatID string) string
 
+// DeliveryConversationKept tells whether sessionKey is a conversation the
+// control plane keeps before its first message (the light mode's main one),
+// which a delivery may open. Any other target needs a conversation in course.
+type DeliveryConversationKept func(sessionKey string) bool
+
 // mirrorStripes é o número de faixas de lock do espelho. Uma faixa segura, para
 // as sessões que caem nela, a checagem "a sessão está num turno?" junto com a
 // escrita, e o registro de turno. São faixas, e não um lock por chave, porque
@@ -55,6 +61,7 @@ type deliveryMirror struct {
 	// antes do mu.
 	mu      sync.Mutex
 	resolve DeliverySessionResolver
+	kept    DeliveryConversationKept
 	// pending segura o que chegou com um turno ativo na sessão de destino. O
 	// turno grava o histórico aos pedaços (tool_calls, depois cada resultado) e
 	// restaura o snapshot inicial quando é abortado: escrever no meio dele pode
@@ -125,6 +132,16 @@ func (al *AgentLoop) SetDeliverySessionResolver(fn DeliverySessionResolver) {
 	al.mirror.resolve = fn
 }
 
+// SetDeliveryConversationKept names the conversations a delivery may open.
+func (al *AgentLoop) SetDeliveryConversationKept(fn DeliveryConversationKept) {
+	if al == nil {
+		return
+	}
+	al.mirror.mu.Lock()
+	defer al.mirror.mu.Unlock()
+	al.mirror.kept = fn
+}
+
 // MirrorDelivery records a delivery made outside the agent loop: the output a
 // command cron job published, or what a script sent through the chat's API and
 // a proxy in the pod saw go by.
@@ -148,6 +165,9 @@ func (al *AgentLoop) mirrorDelivery(origin, channel, chatID, text string) {
 }
 
 func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool) {
+	// Admission precedes resolver/storage I/O: retirement can finish while an
+	// existing conversation lookup is suspended before taking its stripe.
+	admittedAt := time.Now().Round(0)
 	origin, text := d.Origin, strings.TrimSpace(d.Text)
 	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
 	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
@@ -156,7 +176,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 		return
 	}
 	al.mirror.mu.Lock()
-	resolve := al.mirror.resolve
+	resolve, kept := al.mirror.resolve, al.mirror.kept
 	al.mirror.mu.Unlock()
 	if resolve == nil {
 		return
@@ -178,14 +198,14 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 	}
 	// Resolvidos fora do lock: tocam o disco (EFS em produção).
 	agent := al.agentForSession(target)
-	if agent == nil || !hasConversation(agent.Sessions, target) {
+	if agent == nil || !(hasConversation(agent.Sessions, target) || kept != nil && kept(target)) {
 		return
 	}
 
 	msg := providers.Message{
 		Role:     "assistant",
 		Content:  text,
-		Delivery: &providers.Delivery{Origin: origin, At: time.Now().Round(0), Self: self},
+		Delivery: &providers.Delivery{Origin: origin, At: admittedAt, Self: self},
 	}
 	heldByTurn := self && al.holdForOwnTurn(target, d.TurnID, msg)
 	deferred := heldByTurn
@@ -261,6 +281,9 @@ func (al *AgentLoop) deliverToConversationLocked(
 	sessionKey string,
 	msg providers.Message,
 ) (deferred bool, err error) {
+	if msg.Delivery != nil && !msg.Delivery.At.IsZero() && al.clearedSince(sessionKey, msg.Delivery.At) {
+		return false, errClearedSinceLaunch
+	}
 	al.mirror.mu.Lock()
 	if al.mirrorBusyLocked(sessionKey) {
 		al.queueMirroredLocked(sessionKey, msg)
@@ -283,6 +306,10 @@ func (al *AgentLoop) dropMirroredDeliveries(sessionKey string) {
 	stripe := al.mirror.stripe(sessionKey)
 	stripe.Lock()
 	defer stripe.Unlock()
+	al.dropMirroredDeliveriesLocked(sessionKey)
+}
+
+func (al *AgentLoop) dropMirroredDeliveriesLocked(sessionKey string) {
 	al.mirror.mu.Lock()
 	dropped := len(al.mirror.pending[sessionKey]) + len(al.mirror.parked[sessionKey])
 	delete(al.mirror.pending, sessionKey)
@@ -341,13 +368,159 @@ func (al *AgentLoop) queueMirroredLocked(sessionKey string, msg providers.Messag
 // única cópia (resultado de subagente numa conversa web, nota de um /stop).
 func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs []providers.Message) error {
 	var lost []error
+	var committed []memory.CommittedHistoryMessage
+	var content []memory.ContentEntry
+	var contentCommits []memory.ContentAppendResult
+	var inputs []memory.ContentEntry
+	var inputConfirmed []bool
+	var ingested []providers.Message
+	var ingestConfirmed []bool
 	written := 0
+	unproven := 0
+	confirmedWrites, confirmedUnproven, pendingSave := 0, 0, 0
+	_, checkedPersistence := agent.Sessions.(session.CheckedAppender)
+	observeContent := al.observesSessionHistoryContent()
+	observeInput := al.observesSessionHistoryContentInput()
 	for _, msg := range msgs {
-		if err := appendToSession(agent.Sessions, sessionKey, msg); err != nil {
-			lost = append(lost, err)
+		if observeContent || observeInput {
+			result, err := appendObservedHistoryContent(agent.Sessions, sessionKey, msg, observeContent)
+			if errors.Is(err, memory.ErrHistoryInputCommitted) || !errors.Is(err, memory.ErrHistoryUnsupported) {
+				if err != nil {
+					if errors.Is(err, memory.ErrHistoryInputCommitted) && result.Entry.Message.Role != "" {
+						warnCommittedHistoryRecovery(sessionKey, err)
+					} else {
+						lost = append(lost, err)
+						continue
+					}
+				}
+				if result.Entry.Message.Role == "" {
+					continue
+				}
+				content = append(content, result.Entry)
+				contentCommits = append(contentCommits, result)
+				inputs = append(inputs, result.Entry)
+				inputConfirmed = append(inputConfirmed, true)
+				if result.Receipt != nil && result.Receipt.Order.Valid() {
+					committed = append(committed, *result.Receipt)
+				} else {
+					unproven++
+					confirmedUnproven++
+				}
+				written++
+				confirmedWrites++
+				ingested = append(ingested, result.Entry.Message)
+				ingestConfirmed = append(ingestConfirmed, true)
+				continue
+			}
+		}
+		var appendErr error
+		hasReceipt := false
+		durable := checkedPersistence
+		if receiptStore, ok := agent.Sessions.(session.HistoryReceiptStore); ok {
+			receipt, receiptErr := receiptStore.AppendHistoryReceipt(context.Background(), sessionKey, msg)
+			appendErr = receiptErr
+			if receiptErr == nil && receipt.Order.Valid() {
+				committed = append(committed, receipt)
+				hasReceipt = true
+				durable = true
+			} else if receiptErr == nil {
+				if receipt.Message.Role == "" {
+					continue // Filtered transient thought: no commit or notification.
+				}
+				appendErr = memory.ErrHistoryOrderUnavailable
+			}
+			if errors.Is(receiptErr, memory.ErrHistoryInputCommitted) {
+				warnCommittedHistoryRecovery(sessionKey, receiptErr)
+				appendErr = nil
+				durable = true
+			} else if errors.Is(receiptErr, memory.ErrHistoryUnsupported) ||
+				errors.Is(receiptErr, memory.ErrHistoryOwnershipUnavailable) ||
+				errors.Is(receiptErr, memory.ErrHistoryReceiptUnavailable) {
+				// Receipt eligibility failed before this message's write began.
+				// Keep the legacy persistence/notification contract; never retry
+				// a failed or uncertain commit through this fallback.
+				appendErr = appendToSession(agent.Sessions, sessionKey, msg)
+			}
+		} else {
+			appendErr = appendToSession(agent.Sessions, sessionKey, msg)
+		}
+		if errors.Is(appendErr, memory.ErrHistoryInputCommitted) {
+			warnCommittedHistoryRecovery(sessionKey, appendErr)
+			appendErr = nil
+			durable = true
+		}
+		if appendErr != nil {
+			lost = append(lost, appendErr)
 			continue
 		}
 		written++
+		if durable {
+			confirmedWrites++
+		} else {
+			pendingSave++
+		}
+		if !hasReceipt {
+			unproven++
+			if durable {
+				confirmedUnproven++
+			}
+		}
+		ingested = append(ingested, msg)
+		ingestConfirmed = append(ingestConfirmed, durable)
+		if observeInput {
+			inputs = append(inputs, memory.ContentEntry{Message: msg})
+			inputConfirmed = append(inputConfirmed, durable)
+		}
+	}
+	// A non-Checked JSON fallback may still exist only in RAM. Persist once
+	// before promising an accepted input or allowing ingestion to block. A
+	// failed Save cannot hide the other members already confirmed by a durable
+	// append/receipt capability.
+	savedBeforeIngest := false
+	if observeInput && pendingSave > 0 {
+		savedBeforeIngest = true
+		if saveErr := agent.Sessions.Save(sessionKey); saveErr != nil {
+			lost = append(lost, saveErr)
+			written, unproven = confirmedWrites, confirmedUnproven
+			retainedInputs := inputs[:0]
+			for i, input := range inputs {
+				if inputConfirmed[i] {
+					retainedInputs = append(retainedInputs, input)
+				}
+			}
+			inputs = retainedInputs
+			retainedMessages := ingested[:0]
+			for i, message := range ingested {
+				if ingestConfirmed[i] {
+					retainedMessages = append(retainedMessages, message)
+				}
+			}
+			ingested = retainedMessages
+		}
+	}
+	if len(inputs) > 0 {
+		if err := al.notifySessionHistoryContentInputs(sessionKey, inputs); err != nil {
+			logger.WarnCF("agent", "Could not retain accepted history wake-up", map[string]any{
+				"session_key": sessionKey, "error": err.Error(),
+			})
+		}
+	}
+	// A failed member does not discard later successful writes (a,c when b
+	// fails). Deliver exact receipts before ingestion can enqueue network work.
+	if observeContent && len(contentCommits) > 0 {
+		if err := al.notifySessionHistoryContentCommits(sessionKey, contentCommits); err != nil {
+			logger.WarnCF("agent", "Could not snapshot committed history for observer", map[string]any{
+				"session_key": sessionKey, "error": err.Error(),
+			})
+		}
+	}
+	if observeContent && len(content) > 0 {
+		al.notifySessionHistoryContent(sessionKey, content)
+	}
+	if len(committed) > 0 {
+		al.notifySessionHistoryReceipts(sessionKey, committed)
+	}
+	for _, msg := range ingested {
 		if al.contextManager == nil {
 			continue
 		}
@@ -370,22 +543,63 @@ func (al *AgentLoop) writeMirrored(agent *AgentInstance, sessionKey string, msgs
 	// O backend JSON (fallback quando o JSONL não sobe) só persiste no Save; no
 	// JSONL cada mensagem já foi gravada e o Save só compacta, como no fim de
 	// todo turno: lá uma falha do Save não perde o que o append confirmou.
-	if err := agent.Sessions.Save(sessionKey); err != nil {
+	if err := saveMirroredOnce(agent.Sessions, sessionKey, savedBeforeIngest); err != nil {
 		logger.WarnCF("agent", "Failed to save mirrored delivery", map[string]any{
 			"session_key": sessionKey,
 			"error":       err.Error(),
 		})
-		if _, checked := agent.Sessions.(session.CheckedAppender); !checked {
+		if pendingSave > 0 {
 			lost = append(lost, err)
-			written = 0
+			written, unproven = confirmedWrites, confirmedUnproven
 		}
 	}
 	// What got written is in the history even when other messages of the
 	// batch were lost; whoever keeps a copy of it must hear so.
 	if written > 0 {
+		if unproven > 0 {
+			// No raw input is labeled a receipt. The legacy notification remains
+			// useful for source amendment after Save/checked persistence only.
+			al.notifySessionHistoryReceipts(sessionKey, nil)
+		}
 		al.notifySessionHistoryChanged(sessionKey)
 	}
 	return errors.Join(lost...)
+}
+
+func saveMirroredOnce(store session.SessionStore, key string, alreadySaved bool) error {
+	if alreadySaved {
+		return nil
+	}
+	return store.Save(key)
+}
+
+func appendObservedHistoryContent(
+	store session.SessionStore,
+	key string,
+	message providers.Message,
+	qualified bool,
+) (memory.ContentAppendResult, error) {
+	if !qualified {
+		if appender, ok := store.(memory.HistoryContentInputAppender); ok {
+			result, err := appender.AppendHistoryContentInput(context.Background(), key, message)
+			if errors.Is(err, memory.ErrHistoryInputCommitted) || !errors.Is(err, memory.ErrHistoryUnsupported) {
+				return result, err
+			}
+		}
+	}
+	if appender, ok := store.(memory.HistoryContentAppender); ok {
+		return appender.AppendHistoryContent(context.Background(), key, message)
+	}
+	return memory.ContentAppendResult{}, memory.ErrHistoryUnsupported
+}
+
+// The source exposes the I/O cause, but this member is already in history.
+// Report recovery separately instead of inviting the delivery caller to append
+// it again. There is no receipt or extra read confirmation for this outcome.
+func warnCommittedHistoryRecovery(sessionKey string, err error) {
+	logger.WarnCF("agent", "History input committed with pending operational recovery", map[string]any{
+		"session_key": sessionKey, "error": err.Error(),
+	})
 }
 
 // appendToSession appends msg and reports a failed write when the store can
@@ -462,6 +676,10 @@ func historyContent(msg providers.Message) string {
 // selfDeliveryLine opens the history line of a send of the conversation's own
 // script.
 const selfDeliveryLine = "[Sent to this chat by a script this conversation started"
+
+// deliveryOpening is the user turn the provider gets before a conversation a
+// delivery opened.
+const deliveryOpening = "[The conversation starts with a message sent to this chat]"
 
 // heartbeatSessionKey is the session heartbeat turns run in (agent_message.go).
 const heartbeatSessionKey = "heartbeat"

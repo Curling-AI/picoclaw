@@ -62,6 +62,13 @@ Omit `command` to preserve it, set `command` to a non-empty string to replace
 it, or set `command` to `""` to clear it. Command updates require the same
 channel allowlist and confirmation gates as command creation.
 
+`add` and `update` also accept `connectors`, the canonical IDs of the connectors
+the job uses (for example `["gmail", "slack"]`). It is only a record: it neither
+grants nor removes access when the job runs. Each ID is trimmed, lowercased and
+must match `^[a-z0-9][a-z0-9_-]{0,63}$`; duplicates are dropped and a list holds
+at most 32 IDs. On `update`, omit `connectors` to keep the list, set it to `[]`
+to clear it, or set a list to replace it.
+
 ## Execution Modes
 
 Jobs are stored with a message payload and can execute in three stable user-facing modes:

@@ -540,17 +540,13 @@ func listServerTools(
 
 	for tool, err := range session.Tools(ctx, nil) {
 		if err != nil {
-			// Listing stops at the first error; past the deadline that
-			// would pass for a server with fewer tools.
+			// Listing stops at the first error, so what came before it would
+			// pass for the server's whole list: a 429 on the first page left a
+			// connected server with no tools, out of the retry loop's reach.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, fmt.Errorf("listing tools: %w: %w", ctxErr, err)
 			}
-			logger.WarnCF("mcp", "Error listing tool",
-				map[string]any{
-					"server": name,
-					"error":  err.Error(),
-				})
-			continue
+			return nil, fmt.Errorf("listing tools: %w", err)
 		}
 		tools = append(tools, tool)
 	}
