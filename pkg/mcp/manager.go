@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -133,6 +134,15 @@ type Manager struct {
 	mu            sync.RWMutex
 	closed        atomic.Bool    // changed from bool to atomic.Bool to avoid TOCTOU race
 	wg            sync.WaitGroup // tracks in-flight CallTool calls
+	// listTurnedAway holds the servers whose last connection attempt failed
+	// because the transport turned tools/list away; RetryPendingServers holds
+	// them back before the first retry.
+	listTurnedAway map[string]bool
+	// listReleaseAt is when the servers held together get their first retry.
+	listReleaseAt time.Time
+	// listHeldUntil is when each held server's hold ends; it stays until the
+	// server connects, so a server is held once per outage.
+	listHeldUntil map[string]time.Time
 }
 
 var connectServerFunc = connectServer
@@ -161,7 +171,9 @@ type ServerEventPayload struct {
 // NewManager creates a new MCP manager
 func NewManager(opts ...ManagerOption) *Manager {
 	m := &Manager{
-		servers: make(map[string]*ServerConnection),
+		servers:        make(map[string]*ServerConnection),
+		listTurnedAway: make(map[string]bool),
+		listHeldUntil:  make(map[string]time.Time),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -295,6 +307,7 @@ func (m *Manager) ConnectServer(
 ) error {
 	m.publishServerEvent(runtimeevents.KindMCPServerConnecting, name, cfg, 0, nil)
 	conn, err := connectServerFunc(ctx, name, cfg)
+	m.recordListTurnedAway(name, err)
 	if err != nil {
 		m.publishServerEvent(runtimeevents.KindMCPServerFailed, name, cfg, 0, err)
 		return err
@@ -319,6 +332,29 @@ func (m *Manager) ConnectServer(
 	}
 	m.publishServerEvent(runtimeevents.KindMCPServerConnected, name, cfg, len(conn.Tools), nil)
 	return nil
+}
+
+// recordListTurnedAway remembers whether name's last connection attempt failed
+// on a tools/list the transport turned away (429/5xx); any other outcome,
+// success included, clears it. Connecting also ends the server's hold.
+func (m *Manager) recordListTurnedAway(name string, err error) {
+	turnedAway := errors.Is(err, errListingTools) && rejectedByTransport(err)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.listHeldUntil, name)
+	}
+	if !turnedAway {
+		delete(m.listTurnedAway, name)
+		return
+	}
+	m.listTurnedAway[name] = true
+}
+
+func (m *Manager) toolsListTurnedAway(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.listTurnedAway[name]
 }
 
 func connectServer(
@@ -527,6 +563,10 @@ func (m *Manager) CallTool(
 	return result, nil
 }
 
+// errListingTools marks a connection that initialize let through and tools/list
+// then failed, so the retry loop can tell it from a failed handshake.
+var errListingTools = errors.New("listing tools")
+
 func listServerTools(
 	ctx context.Context,
 	name string,
@@ -546,7 +586,7 @@ func listServerTools(
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, fmt.Errorf("listing tools: %w: %w", ctxErr, err)
 			}
-			return nil, fmt.Errorf("listing tools: %w", err)
+			return nil, fmt.Errorf("%w: %w", errListingTools, err)
 		}
 		tools = append(tools, tool)
 	}
