@@ -16,6 +16,10 @@ func (b *JSONLBackend) ReadPublicHistoryPage(
 	if !ok {
 		return memory.PublicHistoryPage{}, memory.ErrHistoryUnsupported
 	}
-	request.Key = b.resolveSessionKey(request.Key)
+	key, err := b.resolveSessionKeyContext(ctx, request.Key)
+	if err != nil {
+		return memory.PublicHistoryPage{}, err
+	}
+	request.Key = key
 	return store.ReadPublicHistoryPage(ctx, request)
 }
