@@ -138,8 +138,11 @@ type Manager struct {
 	// because the transport turned tools/list away; RetryPendingServers holds
 	// them back before the first retry.
 	listTurnedAway map[string]bool
-	// listReleaseAt is when those servers get their first retry.
+	// listReleaseAt is when the servers held together get their first retry.
 	listReleaseAt time.Time
+	// listHeldUntil is when each held server's hold ends; it stays until the
+	// server connects, so a server is held once per outage.
+	listHeldUntil map[string]time.Time
 }
 
 var connectServerFunc = connectServer
@@ -170,6 +173,7 @@ func NewManager(opts ...ManagerOption) *Manager {
 	m := &Manager{
 		servers:        make(map[string]*ServerConnection),
 		listTurnedAway: make(map[string]bool),
+		listHeldUntil:  make(map[string]time.Time),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -332,11 +336,14 @@ func (m *Manager) ConnectServer(
 
 // recordListTurnedAway remembers whether name's last connection attempt failed
 // on a tools/list the transport turned away (429/5xx); any other outcome,
-// success included, clears it.
+// success included, clears it. Connecting also ends the server's hold.
 func (m *Manager) recordListTurnedAway(name string, err error) {
 	turnedAway := errors.Is(err, errListingTools) && rejectedByTransport(err)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err == nil {
+		delete(m.listHeldUntil, name)
+	}
 	if !turnedAway {
 		delete(m.listTurnedAway, name)
 		return

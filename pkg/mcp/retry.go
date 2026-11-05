@@ -66,17 +66,26 @@ func toolsListRetryHold() time.Duration {
 	return toolsListRetryHoldMin + rand.N(toolsListRetryHoldSpread)
 }
 
-// toolsListRelease returns when the held servers get their first retry, drawn
-// once per pod: a loop restarted while the previous release is still ahead (a
-// reload that keeps the connections) keeps it instead of drawing another, so
-// saves that leave MCP alone cannot keep a held server waiting.
-func (m *Manager) toolsListRelease(now time.Time) time.Time {
+// holdRelease reports whether name starts on the held track and when its hold
+// ends. A server whose tools/list was turned away is held once until it
+// connects again: a loop restarted during the hold (a reload that keeps the
+// connections) keeps its release, and one restarted after it leaves the
+// server on the transient pace. Servers held at the same time share the
+// release drawn for the first of them.
+func (m *Manager) holdRelease(name string, now time.Time) (time.Time, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.listTurnedAway[name] {
+		return time.Time{}, false
+	}
+	if until, ok := m.listHeldUntil[name]; ok {
+		return until, until.After(now)
+	}
 	if !m.listReleaseAt.After(now) {
 		m.listReleaseAt = now.Add(toolsListRetryHold())
 	}
-	return m.listReleaseAt
+	m.listHeldUntil[name] = m.listReleaseAt
+	return m.listReleaseAt, true
 }
 
 // codeRejectedByTransport is the JSON-RPC code the SDK puts on a request its
@@ -100,20 +109,20 @@ func (m *Manager) RetryPendingServers(
 	// release; the others keep the schedule from now. Each track counts its own
 	// rounds, so neither moves the other's deadline or fast rounds.
 	var ordinary, held retryTrack
+	now := time.Now()
 	for _, name := range pending {
 		if _, ok := m.GetServer(name); ok {
 			continue
 		}
-		if m.toolsListTurnedAway(name) {
+		if release, ok := m.holdRelease(name, now); ok {
 			held.names = append(held.names, name)
+			held.next = release
 		} else {
 			ordinary.names = append(ordinary.names, name)
 		}
 	}
-	now := time.Now()
 	ordinary.next = now.Add(retryDelay(1, false))
 	if len(held.names) > 0 {
-		held.next = m.toolsListRelease(now)
 		logger.InfoCF("mcp", "Holding MCP servers whose tools/list was turned away before retrying",
 			map[string]any{
 				"servers": slices.Sorted(slices.Values(held.names)),

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,13 +431,9 @@ func TestRetryPendingServersHoldsOnlyAToolsListRejection(t *testing.T) {
 		_ = mgr.ConnectServer(context.Background(), name, cfg)
 	}
 	loading = false
-	mcpCfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg, "calendar": cfg}}
 
 	start = time.Now()
-	runWithin(t, 5*time.Second, func() struct{} {
-		mgr.RetryPendingServers(context.Background(), mcpCfg, t.TempDir(), []string{"gmail", "calendar"}, nil)
-		return struct{}{}
-	})
+	retryUntilDone(t, mgr, cfg, "gmail", "calendar")
 	if got := attemptedAt["calendar"]; got >= toolsListRetryHoldMin {
 		t.Errorf("calendar first retried after %s, want it on the transient pace, before the %s hold",
 			got, toolsListRetryHoldMin)
@@ -514,12 +511,7 @@ func TestRetryPendingServersKeepsTheTransientPaceAfterTheHold(t *testing.T) {
 	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
 	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
 
-	runWithin(t, 5*time.Second, func() struct{} {
-		mgr.RetryPendingServers(context.Background(),
-			config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg}},
-			t.TempDir(), []string{"gmail"}, nil)
-		return struct{}{}
-	})
+	retryUntilDone(t, mgr, cfg, "gmail")
 	if len(attempts) != 3 {
 		t.Fatalf("connect attempts = %d, want 3 (load, held retry, transient retry)", len(attempts))
 	}
@@ -558,22 +550,8 @@ func TestRetryPendingServersReleasesTheHoldBetweenScheduleSteps(t *testing.T) {
 	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
 	loading = false
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	workspace := t.TempDir()
 	start = time.Now()
-	go func() {
-		defer close(done)
-		mgr.RetryPendingServers(ctx,
-			config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg, "supabase": cfg}},
-			workspace, []string{"gmail", "supabase"}, nil)
-	}()
-	// Registered last, so it runs first: the loop is gone before the globals
-	// it reads are put back.
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	runRetryLoop(t, mgr, cfg, "gmail", "supabase")
 
 	select {
 	case got := <-gmailBack:
@@ -620,21 +598,7 @@ func TestRetryPendingServersRestartsTheFastRoundsAtTheRelease(t *testing.T) {
 		_ = mgr.ConnectServer(context.Background(), name, cfg)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	workspace := t.TempDir()
-	go func() {
-		defer close(done)
-		mgr.RetryPendingServers(ctx,
-			config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg, "calendar": cfg}},
-			workspace, []string{"gmail", "calendar"}, nil)
-	}()
-	// Registered last, so it runs first: the loop is gone before the globals
-	// it reads are put back.
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	runRetryLoop(t, mgr, cfg, "gmail", "calendar")
 
 	select {
 	case <-gmailBack:
@@ -673,20 +637,7 @@ func TestRetryPendingServersDoesNotAdvanceTheScheduleDuringTheHold(t *testing.T)
 	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
 	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	workspace := t.TempDir()
-	go func() {
-		defer close(done)
-		mgr.RetryPendingServers(ctx, config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg}},
-			workspace, []string{"gmail"}, nil)
-	}()
-	// Registered last, so it runs first: the loop is gone before the globals
-	// it reads are put back.
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	runRetryLoop(t, mgr, cfg, "gmail")
 
 	select {
 	case <-back:
@@ -705,19 +656,46 @@ func setToolsListRetryHold(t *testing.T, minimum, spread time.Duration) {
 	})
 }
 
-// runRetryLoop runs RetryPendingServers in the background until the test ends.
-func runRetryLoop(t *testing.T, mgr *Manager, cfg config.MCPServerConfig, names ...string) context.CancelFunc {
-	t.Helper()
+// retryConfig is an MCP config with cfg under each of names.
+func retryConfig(cfg config.MCPServerConfig, names []string) config.MCPConfig {
 	servers := make(map[string]config.MCPServerConfig, len(names))
 	for _, name := range names {
 		servers[name] = cfg
 	}
+	return config.MCPConfig{Servers: servers}
+}
+
+// retryUntilDone runs RetryPendingServers until it returns. On a timeout it
+// cancels the loop and waits for it before failing, so the loop never outlives
+// the globals the test set.
+func retryUntilDone(t *testing.T, mgr *Manager, cfg config.MCPServerConfig, names ...string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	workspace := t.TempDir()
+	go func() {
+		defer close(done)
+		mgr.RetryPendingServers(ctx, retryConfig(cfg, names), workspace, names, nil)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("RetryPendingServers still running after 5s")
+	}
+}
+
+// runRetryLoop runs RetryPendingServers in the background until the test ends.
+func runRetryLoop(t *testing.T, mgr *Manager, cfg config.MCPServerConfig, names ...string) context.CancelFunc {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	workspace := t.TempDir()
 	go func() {
 		defer close(done)
-		mgr.RetryPendingServers(ctx, config.MCPConfig{Servers: servers}, workspace, names, nil)
+		mgr.RetryPendingServers(ctx, retryConfig(cfg, names), workspace, names, nil)
 	}()
 	stop := func() {
 		cancel()
@@ -878,13 +856,124 @@ func TestRetryPendingServersWaitsTheFirstStepBeforeTheFirstRetry(t *testing.T) {
 	}
 	mgr := NewManager()
 	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
-	runWithin(t, 5*time.Second, func() struct{} {
-		mgr.RetryPendingServers(context.Background(),
-			config.MCPConfig{Servers: map[string]config.MCPServerConfig{"drive": cfg}},
-			t.TempDir(), []string{"drive"}, nil)
-		return struct{}{}
-	})
+	retryUntilDone(t, mgr, cfg, "drive")
 	if firstAt < 100*time.Millisecond {
 		t.Errorf("first retry after %s, want at least half the schedule's first step (100ms)", firstAt)
+	}
+}
+
+// A loop restarted after the release (a reload that keeps the connections)
+// does not hold again a server still turned away: it stays on the transient
+// pace.
+func TestRetryPendingServersDoesNotHoldAgainAfterTheRelease(t *testing.T) {
+	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
+	originalConnectServerFunc := connectServerFunc
+	retryBackoffSchedule = []time.Duration{time.Millisecond, time.Hour}
+	transientRetryInterval = 20 * time.Millisecond
+	setToolsListRetryHold(t, 100*time.Millisecond, time.Millisecond)
+	t.Cleanup(func() {
+		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var mu sync.Mutex
+	var attempts []time.Time
+	connectServerFunc = func(context.Context, string, config.MCPServerConfig) (*ServerConnection, error) {
+		mu.Lock()
+		attempts = append(attempts, time.Now())
+		mu.Unlock()
+		return nil, toolsListRejection()
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+
+	stopFirst := runRetryLoop(t, mgr, cfg, "gmail")
+	time.Sleep(200 * time.Millisecond)
+	stopFirst()
+	restart := time.Now()
+	runRetryLoop(t, mgr, cfg, "gmail")
+	time.Sleep(150 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	var next time.Time
+	for _, at := range attempts {
+		if at.After(restart) {
+			next = at
+			break
+		}
+	}
+	if next.IsZero() {
+		t.Fatalf("no retry within 150ms of the restart: the second loop held gmail again")
+	}
+	if got := next.Sub(restart); got >= toolsListRetryHoldMin {
+		t.Errorf("first retry %s after the restart, want the transient pace, under the %s hold",
+			got, toolsListRetryHoldMin)
+	}
+}
+
+// A server is held once until it connects: a reload during the hold keeps its
+// release, one after it does not hold it again, and connecting clears it so a
+// later rejection is held anew.
+func TestHoldReleaseHoldsOnceUntilTheServerConnects(t *testing.T) {
+	originalConnectServerFunc := connectServerFunc
+	setToolsListRetryHold(t, time.Minute, time.Millisecond)
+	t.Cleanup(func() {
+		connectServerFunc = originalConnectServerFunc
+	})
+	reject := true
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		if reject {
+			return nil, toolsListRejection()
+		}
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+
+	now := time.Now()
+	release, held := mgr.holdRelease("gmail", now)
+	if !held || release.Before(now.Add(time.Minute)) {
+		t.Fatalf("holdRelease = (%s, %v), want held a minute or more", release.Sub(now), held)
+	}
+	if again, held := mgr.holdRelease("gmail", now.Add(time.Second)); !held || !again.Equal(release) {
+		t.Errorf("during the hold: (%v, %v), want the same release, held", again.Sub(now), held)
+	}
+	if _, held := mgr.holdRelease("gmail", release.Add(time.Second)); held {
+		t.Error("after the release: held again, want it on the transient pace")
+	}
+
+	reject = false
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+	reject = true
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+	later := release.Add(time.Hour)
+	if renewed, held := mgr.holdRelease("gmail", later); !held || !renewed.After(later) {
+		t.Errorf("after connecting and a new rejection: (%v, %v), want a new hold", renewed.Sub(later), held)
+	}
+}
+
+// A server turned away while another one's hold is still ahead shares that
+// release: a pod's held servers go back together.
+func TestHoldReleaseSharesTheReleaseWhileItIsAhead(t *testing.T) {
+	originalConnectServerFunc := connectServerFunc
+	setToolsListRetryHold(t, time.Minute, time.Minute)
+	t.Cleanup(func() {
+		connectServerFunc = originalConnectServerFunc
+	})
+	connectServerFunc = func(context.Context, string, config.MCPServerConfig) (*ServerConnection, error) {
+		return nil, toolsListRejection()
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+	now := time.Now()
+	first, _ := mgr.holdRelease("gmail", now)
+
+	_ = mgr.ConnectServer(context.Background(), "calendar", cfg)
+	if second, held := mgr.holdRelease("calendar", now.Add(10*time.Second)); !held || !second.Equal(first) {
+		t.Errorf("calendar held until %s, want gmail's release (%s)", second.Sub(now), first.Sub(now))
 	}
 }
