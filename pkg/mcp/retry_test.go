@@ -196,9 +196,9 @@ func TestRejectedByTransportRecognizesTheHandshakeStatus(t *testing.T) {
 func TestRetryDelaySpreadsEveryStep(t *testing.T) {
 	seen := map[time.Duration]bool{}
 	for range 200 {
-		d := retryDelay(1, 1, false)
+		d := retryDelay(1, false)
 		if d < 7500*time.Millisecond || d >= 22500*time.Millisecond {
-			t.Fatalf("retryDelay(1, 1, false) = %s, want within [7.5s, 22.5s)", d)
+			t.Fatalf("retryDelay(1, false) = %s, want within [7.5s, 22.5s)", d)
 		}
 		seen[d] = true
 	}
@@ -210,17 +210,16 @@ func TestRetryDelaySpreadsEveryStep(t *testing.T) {
 func TestRetryDelayKeepsTransientFailuresOnTheShortInterval(t *testing.T) {
 	half := transientRetryInterval / 2
 	for _, attempt := range []int{2, 5, transientRetryMax} {
-		if d := retryDelay(attempt, attempt, true); d < half || d >= 3*half {
-			t.Errorf("retryDelay(%d, %d, true) = %s, want within [%s, %s)", attempt, attempt, d, half, 3*half)
+		if d := retryDelay(attempt, true); d < half || d >= 3*half {
+			t.Errorf("retryDelay(%d, true) = %s, want within [%s, %s)", attempt, d, half, 3*half)
 		}
 	}
 	// Past the cap a server still turned away is treated like any failure.
-	if d := retryDelay(transientRetryMax+1, transientRetryMax+1, true); d < 150*time.Second {
-		t.Errorf("retryDelay(%d, %d, true) = %s, want the schedule's last step (5m, spread)",
-			transientRetryMax+1, transientRetryMax+1, d)
+	if d := retryDelay(transientRetryMax+1, true); d < 150*time.Second {
+		t.Errorf("retryDelay(%d, true) = %s, want the schedule's last step (5m, spread)", transientRetryMax+1, d)
 	}
-	if d := retryDelay(5, 5, false); d < 150*time.Second {
-		t.Errorf("retryDelay(5, 5, false) = %s, want the schedule's 5m step, spread", d)
+	if d := retryDelay(5, false); d < 150*time.Second {
+		t.Errorf("retryDelay(5, false) = %s, want the schedule's 5m step, spread", d)
 	}
 }
 
@@ -397,18 +396,16 @@ func TestConnectServerClearsAToolsListRejectionOnceItConnects(t *testing.T) {
 }
 
 // A server whose tools/list was turned away at load waits out the hold before
-// its first retry; one whose initialize was turned away keeps the MST-325
+// its first retry; one whose initialize was turned away keeps the transient
 // pace and is not held behind it.
 func TestRetryPendingServersHoldsOnlyAToolsListRejection(t *testing.T) {
 	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
-	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
 	originalConnectServerFunc := connectServerFunc
 	retryBackoffSchedule = []time.Duration{time.Millisecond}
 	transientRetryInterval = time.Millisecond
-	toolsListRetryHoldMin, toolsListRetryHoldSpread = 300*time.Millisecond, time.Millisecond
+	setToolsListRetryHold(t, 300*time.Millisecond, time.Millisecond)
 	t.Cleanup(func() {
 		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
-		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
 		connectServerFunc = originalConnectServerFunc
 	})
 
@@ -441,7 +438,7 @@ func TestRetryPendingServersHoldsOnlyAToolsListRejection(t *testing.T) {
 		return struct{}{}
 	})
 	if got := attemptedAt["calendar"]; got >= toolsListRetryHoldMin {
-		t.Errorf("calendar first retried after %s, want it on the MST-325 pace, before the %s hold",
+		t.Errorf("calendar first retried after %s, want it on the transient pace, before the %s hold",
 			got, toolsListRetryHoldMin)
 	}
 	if got := attemptedAt["gmail"]; got < toolsListRetryHoldMin {
@@ -492,29 +489,16 @@ func TestConnectServerMarksOnlyAToolsListTheTransportTurnedAway(t *testing.T) {
 	}
 }
 
-func TestToolsListRetryHoldWithoutSpreadIsTheMinimum(t *testing.T) {
-	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
-	toolsListRetryHoldMin, toolsListRetryHoldSpread = time.Second, 0
-	t.Cleanup(func() {
-		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
-	})
-	if got := toolsListRetryHold(); got != time.Second {
-		t.Errorf("toolsListRetryHold() = %s, want 1s", got)
-	}
-}
-
-// After the hold, a server turned away again keeps the MST-325 transient pace:
+// After the hold, a server turned away again keeps the transient pace:
 // waiting out the hold must not use up the fast rounds.
 func TestRetryPendingServersKeepsTheTransientPaceAfterTheHold(t *testing.T) {
 	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
-	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
 	originalConnectServerFunc := connectServerFunc
 	retryBackoffSchedule = []time.Duration{time.Millisecond}
 	transientRetryInterval = 100 * time.Millisecond
-	toolsListRetryHoldMin, toolsListRetryHoldSpread = 200*time.Millisecond, time.Millisecond
+	setToolsListRetryHold(t, 200*time.Millisecond, time.Millisecond)
 	t.Cleanup(func() {
 		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
-		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
 		connectServerFunc = originalConnectServerFunc
 	})
 
@@ -548,13 +532,11 @@ func TestRetryPendingServersKeepsTheTransientPaceAfterTheHold(t *testing.T) {
 // still released when its hold ends.
 func TestRetryPendingServersReleasesTheHoldBetweenScheduleSteps(t *testing.T) {
 	originalSchedule := retryBackoffSchedule
-	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
 	originalConnectServerFunc := connectServerFunc
 	retryBackoffSchedule = []time.Duration{time.Millisecond, 10 * time.Second}
-	toolsListRetryHoldMin, toolsListRetryHoldSpread = 100*time.Millisecond, time.Millisecond
+	setToolsListRetryHold(t, 100*time.Millisecond, time.Millisecond)
 	t.Cleanup(func() {
 		retryBackoffSchedule = originalSchedule
-		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
 		connectServerFunc = originalConnectServerFunc
 	})
 
@@ -609,14 +591,12 @@ func TestRetryPendingServersReleasesTheHoldBetweenScheduleSteps(t *testing.T) {
 // next 429.
 func TestRetryPendingServersRestartsTheFastRoundsAtTheRelease(t *testing.T) {
 	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
-	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
 	originalConnectServerFunc := connectServerFunc
 	retryBackoffSchedule = []time.Duration{time.Millisecond, time.Hour}
 	transientRetryInterval = 4 * time.Millisecond
-	toolsListRetryHoldMin, toolsListRetryHoldSpread = 300*time.Millisecond, time.Millisecond
+	setToolsListRetryHold(t, 300*time.Millisecond, time.Millisecond)
 	t.Cleanup(func() {
 		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
-		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
 		connectServerFunc = originalConnectServerFunc
 	})
 
@@ -668,13 +648,11 @@ func TestRetryPendingServersRestartsTheFastRoundsAtTheRelease(t *testing.T) {
 // fails for another reason retries on the schedule's first steps.
 func TestRetryPendingServersDoesNotAdvanceTheScheduleDuringTheHold(t *testing.T) {
 	originalSchedule := retryBackoffSchedule
-	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
 	originalConnectServerFunc := connectServerFunc
 	retryBackoffSchedule = []time.Duration{time.Millisecond, 20 * time.Millisecond, time.Hour}
-	toolsListRetryHoldMin, toolsListRetryHoldSpread = 300*time.Millisecond, time.Millisecond
+	setToolsListRetryHold(t, 300*time.Millisecond, time.Millisecond)
 	t.Cleanup(func() {
 		retryBackoffSchedule = originalSchedule
-		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
 		connectServerFunc = originalConnectServerFunc
 	})
 
@@ -714,5 +692,199 @@ func TestRetryPendingServersDoesNotAdvanceTheScheduleDuringTheHold(t *testing.T)
 	case <-back:
 	case <-time.After(3 * time.Second):
 		t.Fatalf("gmail not back 3s in (%d attempts): the hold advanced the schedule to its 1h step", attempts.Load())
+	}
+}
+
+// setToolsListRetryHold sets the hold window for one test.
+func setToolsListRetryHold(t *testing.T, minimum, spread time.Duration) {
+	t.Helper()
+	originalMin, originalSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
+	toolsListRetryHoldMin, toolsListRetryHoldSpread = minimum, spread
+	t.Cleanup(func() {
+		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalMin, originalSpread
+	})
+}
+
+// runRetryLoop runs RetryPendingServers in the background until the test ends.
+func runRetryLoop(t *testing.T, mgr *Manager, cfg config.MCPServerConfig, names ...string) context.CancelFunc {
+	t.Helper()
+	servers := make(map[string]config.MCPServerConfig, len(names))
+	for _, name := range names {
+		servers[name] = cfg
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	workspace := t.TempDir()
+	go func() {
+		defer close(done)
+		mgr.RetryPendingServers(ctx, config.MCPConfig{Servers: servers}, workspace, names, nil)
+	}()
+	stop := func() {
+		cancel()
+		<-done
+	}
+	// Registered after the globals' cleanups, so it runs first: the loop is
+	// gone before what it reads is put back.
+	t.Cleanup(stop)
+	return stop
+}
+
+// The release runs only the held servers: another pending server keeps its own
+// deadline instead of being retried early along with them.
+func TestRetryPendingServersKeepsTheOthersDeadlineAtTheRelease(t *testing.T) {
+	originalSchedule := retryBackoffSchedule
+	originalConnectServerFunc := connectServerFunc
+	retryBackoffSchedule = []time.Duration{time.Millisecond, 400 * time.Millisecond, time.Hour}
+	setToolsListRetryHold(t, 100*time.Millisecond, time.Millisecond)
+	t.Cleanup(func() {
+		retryBackoffSchedule = originalSchedule
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var supabaseAttempts atomic.Int32
+	gmailLoaded := false
+	gmailBack := make(chan struct{})
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		if name == "supabase" {
+			supabaseAttempts.Add(1)
+			return nil, fmt.Errorf(`failed to connect: calling "initialize": sending "initialize": Unauthorized`)
+		}
+		if !gmailLoaded {
+			gmailLoaded = true
+			return nil, toolsListRejection()
+		}
+		close(gmailBack)
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+	supabaseAttempts.Store(0)
+	runRetryLoop(t, mgr, cfg, "gmail", "supabase")
+
+	select {
+	case <-gmailBack:
+	case <-time.After(3 * time.Second):
+		t.Fatal("gmail not back after its hold")
+	}
+	// supabase failed its first retry at ~1ms; its second is due 200-600ms
+	// later, so at ~150ms it must not have run again.
+	time.Sleep(50 * time.Millisecond)
+	if got := supabaseAttempts.Load(); got != 1 {
+		t.Errorf("supabase retried %d times by the release, want 1: the release ran it ahead of its schedule", got)
+	}
+}
+
+// A server turned away on initialize all through the hold keeps its own budget
+// of fast rounds: the release does not hand it new ones.
+func TestRetryPendingServersKeepsTheOthersFastRoundsAtTheRelease(t *testing.T) {
+	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
+	originalConnectServerFunc := connectServerFunc
+	retryBackoffSchedule = []time.Duration{time.Millisecond, time.Hour}
+	transientRetryInterval = 2 * time.Millisecond
+	setToolsListRetryHold(t, 150*time.Millisecond, time.Millisecond)
+	t.Cleanup(func() {
+		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var calendarAttempts atomic.Int32
+	gmailLoaded := false
+	gmailBack := make(chan struct{})
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		if name == "calendar" {
+			calendarAttempts.Add(1)
+			return nil, initializeRejection()
+		}
+		if !gmailLoaded {
+			gmailLoaded = true
+			return nil, toolsListRejection()
+		}
+		close(gmailBack)
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+	runRetryLoop(t, mgr, cfg, "gmail", "calendar")
+
+	select {
+	case <-gmailBack:
+	case <-time.After(3 * time.Second):
+		t.Fatal("gmail not back after its hold")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := calendarAttempts.Load(); got != transientRetryMax {
+		t.Errorf("calendar retried %d times, want %d: the release gave it new fast rounds", got, transientRetryMax)
+	}
+}
+
+// A reload restarts the retry loop. The new loop keeps the release the first
+// one drew instead of drawing another, so saves that leave MCP alone cannot
+// keep a held server waiting.
+func TestRetryPendingServersKeepsTheReleaseAcrossLoops(t *testing.T) {
+	originalConnectServerFunc := connectServerFunc
+	setToolsListRetryHold(t, 300*time.Millisecond, time.Millisecond)
+	t.Cleanup(func() {
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	gmailLoaded := false
+	gmailBack := make(chan time.Time, 1)
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		if !gmailLoaded {
+			gmailLoaded = true
+			return nil, toolsListRejection()
+		}
+		gmailBack <- time.Now()
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+
+	start := time.Now()
+	stopFirst := runRetryLoop(t, mgr, cfg, "gmail")
+	time.Sleep(150 * time.Millisecond)
+	stopFirst()
+	runRetryLoop(t, mgr, cfg, "gmail")
+
+	select {
+	case at := <-gmailBack:
+		if got := at.Sub(start); got > 400*time.Millisecond {
+			t.Errorf("gmail back %s after the first loop started, want ~300ms: the second loop drew a new hold", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("gmail not back after its hold")
+	}
+}
+
+// The first retry waits the schedule's first step: pods that failed together at
+// load do not all retry at once.
+func TestRetryPendingServersWaitsTheFirstStepBeforeTheFirstRetry(t *testing.T) {
+	originalSchedule := retryBackoffSchedule
+	originalConnectServerFunc := connectServerFunc
+	retryBackoffSchedule = []time.Duration{200 * time.Millisecond}
+	t.Cleanup(func() {
+		retryBackoffSchedule = originalSchedule
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var firstAt time.Duration
+	start := time.Now()
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		firstAt = time.Since(start)
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	runWithin(t, 5*time.Second, func() struct{} {
+		mgr.RetryPendingServers(context.Background(),
+			config.MCPConfig{Servers: map[string]config.MCPServerConfig{"drive": cfg}},
+			t.TempDir(), []string{"drive"}, nil)
+		return struct{}{}
+	})
+	if firstAt < 100*time.Millisecond {
+		t.Errorf("first retry after %s, want at least half the schedule's first step (100ms)", firstAt)
 	}
 }

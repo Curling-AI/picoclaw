@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"path/filepath"
 	"slices"
@@ -39,7 +38,7 @@ var retryBackoffSchedule = []time.Duration{
 // the schedule above is sized for a credential someone has to fix: stepping a
 // rate-limited server up to minutes kept its tools away long after the
 // upstream had capacity again. The pace is per round: while any pending server
-// is being turned away, the others are retried on it too. A variable so tests
+// is being turned away, the others on its track are retried on it too. A variable so tests
 // can shrink it.
 var transientRetryInterval = 30 * time.Second
 
@@ -48,26 +47,36 @@ var transientRetryInterval = 30 * time.Second
 const transientRetryMax = 20
 
 // toolsListRetryHoldMin and toolsListRetryHoldSpread bound the wait before the
-// first retry of a server whose tools/list the transport turned away at load
-// (MST-630). That happens to the assistants woken together two to four minutes
-// ahead of a crowded cron minute, all on Composio's per-minute quota for the
-// whole account: retried on the pace above, thousands of them kept that quota
-// taken through the first minutes of the cron run, when its own tool calls
-// need it. Held for at least six minutes, they come back after the run's first
-// calls; spread over six more, they retry below the quota instead of at once.
-// Variables so tests can shrink them.
+// first retry of a server whose tools/list the transport turned away. That
+// happens to the assistants woken together two to four minutes ahead of a
+// crowded cron minute, all on Composio's per-minute quota for the whole
+// account: retried on the pace above, thousands of them kept that quota taken
+// through the first minutes of the cron run, when its own tool calls need it.
+// Held for at least six minutes, they come back after the run's first calls,
+// spread over six more instead of all at once. Variables so tests can shrink
+// them.
 var (
 	toolsListRetryHoldMin    = 6 * time.Minute
 	toolsListRetryHoldSpread = 6 * time.Minute
 )
 
-// toolsListRetryHold draws the hold once per retry loop: a pod's held servers
-// go together, and pods woken for the same minute spread over the window.
+// toolsListRetryHold draws a hold from the window, so pods woken for the same
+// minute spread over it.
 func toolsListRetryHold() time.Duration {
-	if toolsListRetryHoldSpread <= 0 {
-		return toolsListRetryHoldMin
-	}
 	return toolsListRetryHoldMin + rand.N(toolsListRetryHoldSpread)
+}
+
+// toolsListRelease returns when the held servers get their first retry, drawn
+// once per pod: a loop restarted while the previous release is still ahead (a
+// reload that keeps the connections) keeps it instead of drawing another, so
+// saves that leave MCP alone cannot keep a held server waiting.
+func (m *Manager) toolsListRelease(now time.Time) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.listReleaseAt.After(now) {
+		m.listReleaseAt = now.Add(toolsListRetryHold())
+	}
+	return m.listReleaseAt
 }
 
 // codeRejectedByTransport is the JSON-RPC code the SDK puts on a request its
@@ -87,117 +96,130 @@ func (m *Manager) RetryPendingServers(
 	pending []string,
 	onConnected func(name string, conn *ServerConnection),
 ) {
-	remaining := make([]string, 0, len(pending))
+	// Servers whose tools/list was turned away start on their own track at the
+	// release; the others keep the schedule from now. Each track counts its own
+	// rounds, so neither moves the other's deadline or fast rounds.
+	var ordinary, held retryTrack
 	for _, name := range pending {
-		if _, ok := m.GetServer(name); !ok {
-			remaining = append(remaining, name)
+		if _, ok := m.GetServer(name); ok {
+			continue
 		}
-	}
-
-	// Servers whose tools/list was turned away wait out the hold before their
-	// first retry; the others keep the pace of retryDelay meanwhile.
-	held := make(map[string]bool)
-	for _, name := range remaining {
 		if m.toolsListTurnedAway(name) {
-			held[name] = true
+			held.names = append(held.names, name)
+		} else {
+			ordinary.names = append(ordinary.names, name)
 		}
 	}
-	var releaseAt time.Time
-	if len(held) > 0 {
-		hold := toolsListRetryHold()
-		releaseAt = time.Now().Add(hold)
+	now := time.Now()
+	ordinary.next = now.Add(retryDelay(1, false))
+	if len(held.names) > 0 {
+		held.next = m.toolsListRelease(now)
 		logger.InfoCF("mcp", "Holding MCP servers whose tools/list was turned away before retrying",
 			map[string]any{
-				"servers": slices.Sorted(maps.Keys(held)),
-				"hold":    hold.String(),
+				"servers": slices.Sorted(slices.Values(held.names)),
+				"hold":    held.next.Sub(now).String(),
 			})
 	}
 
-	transient := false
-	// fastFrom is the round the transientRetryMax fast rounds count from. The
-	// release moves it: another server turned away meanwhile may have used them
-	// up, and the held ones come back on the transient pace all the same.
-	fastFrom := 0
-	for attempt := 1; len(remaining) > 0; attempt++ {
-		wait := retryDelay(attempt, attempt-fastFrom, transient)
-		if len(held) > 0 {
-			// Only held servers left: nothing to do before the release. Otherwise
-			// the release is not delayed by a long step of the schedule.
-			untilRelease := max(time.Until(releaseAt), 0)
-			if len(held) == len(remaining) || untilRelease < wait {
-				wait = untilRelease
-			}
+	for {
+		track := nextTrack(&ordinary, &held)
+		if track == nil {
+			return
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(wait):
+		case <-time.After(max(time.Until(track.next), 0)):
 		}
-		if m.closed.Load() {
+		if m.closed.Load() || !m.retryRound(ctx, mcpCfg, workspacePath, track, onConnected) {
 			return
 		}
-		if len(held) > 0 && !time.Now().Before(releaseAt) {
-			clear(held)
-			fastFrom = attempt
-		}
-
-		transient = false
-		still := remaining[:0]
-		for _, name := range remaining {
-			if held[name] {
-				still = append(still, name)
-				continue
-			}
-			serverCfg, ok := mcpCfg.Servers[name]
-			if !ok {
-				continue
-			}
-			resolved, err := resolveServerEnvFile(serverCfg, workspacePath)
-			if err == nil {
-				// connectServer bounds the handshake with mcpHandshakeTimeout.
-				err = m.ConnectServer(ctx, name, resolved)
-			}
-			if err != nil {
-				if ctx.Err() != nil || m.closed.Load() {
-					return
-				}
-				transient = transient || rejectedByTransport(err)
-				// WARN sparingly: at the backoff cap this loop runs for as long
-				// as a credential stays broken, and one line per attempt would
-				// flood the pod logs.
-				fields := map[string]any{
-					"server":  name,
-					"attempt": attempt,
-					"error":   err.Error(),
-				}
-				if attempt == 1 || attempt%10 == 0 {
-					logger.WarnCF("mcp", "MCP server retry failed, will keep retrying", fields)
-				} else {
-					logger.DebugCF("mcp", "MCP server retry failed", fields)
-				}
-				still = append(still, name)
-				continue
-			}
-			logger.InfoCF("mcp", "MCP server connected after retry",
-				map[string]any{
-					"server":   name,
-					"attempts": attempt,
-				})
-			if conn, ok := m.GetServer(name); ok && onConnected != nil {
-				onConnected(name, conn)
-			}
-		}
-		remaining = still
 	}
 }
 
-// retryDelay is the wait before attempt, the fastRound-th round counted toward
-// transientRetryMax. Every delay is spread over [d/2, 3d/2): assistants woken
-// for the same cron minute fail together, and without the spread they retried
-// together into the same exhausted quota.
-func retryDelay(attempt, fastRound int, transient bool) time.Duration {
+// retryTrack is a set of pending servers retried together, on its own round
+// count and pace.
+type retryTrack struct {
+	names   []string
+	attempt int
+	next    time.Time
+}
+
+// nextTrack is the track with servers left whose round comes first.
+func nextTrack(tracks ...*retryTrack) *retryTrack {
+	var first *retryTrack
+	for _, track := range tracks {
+		if len(track.names) > 0 && (first == nil || track.next.Before(first.next)) {
+			first = track
+		}
+	}
+	return first
+}
+
+// retryRound tries each server of track once and schedules the track's next
+// round. It reports false when ctx was canceled or the manager closed meanwhile.
+func (m *Manager) retryRound(
+	ctx context.Context,
+	mcpCfg config.MCPConfig,
+	workspacePath string,
+	track *retryTrack,
+	onConnected func(name string, conn *ServerConnection),
+) bool {
+	track.attempt++
+	attempt := track.attempt
+	transient := false
+	still := track.names[:0]
+	for _, name := range track.names {
+		serverCfg, ok := mcpCfg.Servers[name]
+		if !ok {
+			continue
+		}
+		resolved, err := resolveServerEnvFile(serverCfg, workspacePath)
+		if err == nil {
+			// connectServer bounds the handshake with mcpHandshakeTimeout.
+			err = m.ConnectServer(ctx, name, resolved)
+		}
+		if err != nil {
+			if ctx.Err() != nil || m.closed.Load() {
+				return false
+			}
+			transient = transient || rejectedByTransport(err)
+			// WARN sparingly: at the backoff cap this loop runs for as long
+			// as a credential stays broken, and one line per attempt would
+			// flood the pod logs.
+			fields := map[string]any{
+				"server":  name,
+				"attempt": attempt,
+				"error":   err.Error(),
+			}
+			if attempt == 1 || attempt%10 == 0 {
+				logger.WarnCF("mcp", "MCP server retry failed, will keep retrying", fields)
+			} else {
+				logger.DebugCF("mcp", "MCP server retry failed", fields)
+			}
+			still = append(still, name)
+			continue
+		}
+		logger.InfoCF("mcp", "MCP server connected after retry",
+			map[string]any{
+				"server":   name,
+				"attempts": attempt,
+			})
+		if conn, ok := m.GetServer(name); ok && onConnected != nil {
+			onConnected(name, conn)
+		}
+	}
+	track.names = still
+	track.next = time.Now().Add(retryDelay(attempt+1, transient))
+	return true
+}
+
+// retryDelay is the wait before attempt. Every delay is spread over [d/2, 3d/2):
+// assistants woken for the same cron minute fail together, and without the
+// spread they retried together into the same exhausted quota.
+func retryDelay(attempt int, transient bool) time.Duration {
 	d := retryBackoffAt(attempt)
-	if transient && fastRound <= transientRetryMax {
+	if transient && attempt <= transientRetryMax {
 		d = transientRetryInterval
 	}
 	if d <= 0 {
