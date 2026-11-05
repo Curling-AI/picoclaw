@@ -114,8 +114,12 @@ func (m *Manager) RetryPendingServers(
 	}
 
 	transient := false
+	// fastFrom is the round the transientRetryMax fast rounds count from. The
+	// release moves it: another server turned away meanwhile may have used them
+	// up, and the held ones come back on the transient pace all the same.
+	fastFrom := 0
 	for attempt := 1; len(remaining) > 0; attempt++ {
-		wait := retryDelay(attempt, transient)
+		wait := retryDelay(attempt, attempt-fastFrom, transient)
 		if len(held) > 0 {
 			// Only held servers left: nothing to do before the release. Otherwise
 			// the release is not delayed by a long step of the schedule.
@@ -134,6 +138,7 @@ func (m *Manager) RetryPendingServers(
 		}
 		if len(held) > 0 && !time.Now().Before(releaseAt) {
 			clear(held)
+			fastFrom = attempt
 		}
 
 		transient = false
@@ -186,12 +191,13 @@ func (m *Manager) RetryPendingServers(
 	}
 }
 
-// retryDelay is the wait before attempt. Every delay is spread over [d/2, 3d/2):
-// assistants woken for the same cron minute fail together, and without the
-// spread they retried together into the same exhausted quota.
-func retryDelay(attempt int, transient bool) time.Duration {
+// retryDelay is the wait before attempt, the fastRound-th round counted toward
+// transientRetryMax. Every delay is spread over [d/2, 3d/2): assistants woken
+// for the same cron minute fail together, and without the spread they retried
+// together into the same exhausted quota.
+func retryDelay(attempt, fastRound int, transient bool) time.Duration {
 	d := retryBackoffAt(attempt)
-	if transient && attempt <= transientRetryMax {
+	if transient && fastRound <= transientRetryMax {
 		d = transientRetryInterval
 	}
 	if d <= 0 {

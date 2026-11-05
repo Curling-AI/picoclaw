@@ -196,9 +196,9 @@ func TestRejectedByTransportRecognizesTheHandshakeStatus(t *testing.T) {
 func TestRetryDelaySpreadsEveryStep(t *testing.T) {
 	seen := map[time.Duration]bool{}
 	for range 200 {
-		d := retryDelay(1, false)
+		d := retryDelay(1, 1, false)
 		if d < 7500*time.Millisecond || d >= 22500*time.Millisecond {
-			t.Fatalf("retryDelay(1, false) = %s, want within [7.5s, 22.5s)", d)
+			t.Fatalf("retryDelay(1, 1, false) = %s, want within [7.5s, 22.5s)", d)
 		}
 		seen[d] = true
 	}
@@ -210,16 +210,17 @@ func TestRetryDelaySpreadsEveryStep(t *testing.T) {
 func TestRetryDelayKeepsTransientFailuresOnTheShortInterval(t *testing.T) {
 	half := transientRetryInterval / 2
 	for _, attempt := range []int{2, 5, transientRetryMax} {
-		if d := retryDelay(attempt, true); d < half || d >= 3*half {
-			t.Errorf("retryDelay(%d, true) = %s, want within [%s, %s)", attempt, d, half, 3*half)
+		if d := retryDelay(attempt, attempt, true); d < half || d >= 3*half {
+			t.Errorf("retryDelay(%d, %d, true) = %s, want within [%s, %s)", attempt, attempt, d, half, 3*half)
 		}
 	}
 	// Past the cap a server still turned away is treated like any failure.
-	if d := retryDelay(transientRetryMax+1, true); d < 150*time.Second {
-		t.Errorf("retryDelay(%d, true) = %s, want the schedule's last step (5m, spread)", transientRetryMax+1, d)
+	if d := retryDelay(transientRetryMax+1, transientRetryMax+1, true); d < 150*time.Second {
+		t.Errorf("retryDelay(%d, %d, true) = %s, want the schedule's last step (5m, spread)",
+			transientRetryMax+1, transientRetryMax+1, d)
 	}
-	if d := retryDelay(5, false); d < 150*time.Second {
-		t.Errorf("retryDelay(5, false) = %s, want the schedule's 5m step, spread", d)
+	if d := retryDelay(5, 5, false); d < 150*time.Second {
+		t.Errorf("retryDelay(5, 5, false) = %s, want the schedule's 5m step, spread", d)
 	}
 }
 
@@ -599,5 +600,119 @@ func TestRetryPendingServersReleasesTheHoldBetweenScheduleSteps(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("gmail still held after 2s: the release waited for the schedule's 10s step")
+	}
+}
+
+// Another server turned away on initialize keeps the round on the transient
+// pace while the held one waits. The held server still gets the fast rounds
+// after its release, instead of falling to the schedule's long step on its
+// next 429.
+func TestRetryPendingServersRestartsTheFastRoundsAtTheRelease(t *testing.T) {
+	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
+	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
+	originalConnectServerFunc := connectServerFunc
+	retryBackoffSchedule = []time.Duration{time.Millisecond, time.Hour}
+	transientRetryInterval = 4 * time.Millisecond
+	toolsListRetryHoldMin, toolsListRetryHoldSpread = 300*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
+		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var gmailAttempts atomic.Int32
+	gmailBack := make(chan struct{})
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		if name == "calendar" {
+			return nil, initializeRejection()
+		}
+		// Load and the first retry after the hold are turned away; the next one
+		// connects.
+		if gmailAttempts.Add(1) <= 2 {
+			return nil, toolsListRejection()
+		}
+		close(gmailBack)
+		return &ServerConnection{Name: name, Config: cfg}, nil
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	for _, name := range []string{"gmail", "calendar"} {
+		_ = mgr.ConnectServer(context.Background(), name, cfg)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	workspace := t.TempDir()
+	go func() {
+		defer close(done)
+		mgr.RetryPendingServers(ctx,
+			config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg, "calendar": cfg}},
+			workspace, []string{"gmail", "calendar"}, nil)
+	}()
+	// Registered last, so it runs first: the loop is gone before the globals
+	// it reads are put back.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	select {
+	case <-gmailBack:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("gmail not back 3s in (%d attempts): its retry after the hold fell to the schedule's 1h step",
+			gmailAttempts.Load())
+	}
+}
+
+// Waiting out the hold does not advance the schedule: a held server that then
+// fails for another reason retries on the schedule's first steps.
+func TestRetryPendingServersDoesNotAdvanceTheScheduleDuringTheHold(t *testing.T) {
+	originalSchedule := retryBackoffSchedule
+	originalHoldMin, originalHoldSpread := toolsListRetryHoldMin, toolsListRetryHoldSpread
+	originalConnectServerFunc := connectServerFunc
+	retryBackoffSchedule = []time.Duration{time.Millisecond, 20 * time.Millisecond, time.Hour}
+	toolsListRetryHoldMin, toolsListRetryHoldSpread = 300*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		retryBackoffSchedule = originalSchedule
+		toolsListRetryHoldMin, toolsListRetryHoldSpread = originalHoldMin, originalHoldSpread
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	var attempts atomic.Int32
+	back := make(chan struct{})
+	connectServerFunc = func(_ context.Context, name string, cfg config.MCPServerConfig) (*ServerConnection, error) {
+		switch attempts.Add(1) {
+		case 1:
+			return nil, toolsListRejection()
+		case 2:
+			return nil, fmt.Errorf(`failed to connect: calling "initialize": sending "initialize": Unauthorized`)
+		default:
+			close(back)
+			return &ServerConnection{Name: name, Config: cfg}, nil
+		}
+	}
+	mgr := NewManager()
+	cfg := config.MCPServerConfig{Enabled: true, Type: "http", URL: "http://example.test/mcp"}
+	_ = mgr.ConnectServer(context.Background(), "gmail", cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	workspace := t.TempDir()
+	go func() {
+		defer close(done)
+		mgr.RetryPendingServers(ctx, config.MCPConfig{Servers: map[string]config.MCPServerConfig{"gmail": cfg}},
+			workspace, []string{"gmail"}, nil)
+	}()
+	// Registered last, so it runs first: the loop is gone before the globals
+	// it reads are put back.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	select {
+	case <-back:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("gmail not back 3s in (%d attempts): the hold advanced the schedule to its 1h step", attempts.Load())
 	}
 }
