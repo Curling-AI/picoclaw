@@ -33,7 +33,7 @@ var (
 	ErrConcurrencyTimeout   = errors.New("timeout waiting for concurrency slot")
 	// ErrSubTurnTimeout starts the error of a sub-turn stopped by its own time
 	// limit (see deadlineSubTurnError).
-	ErrSubTurnTimeout = errors.New("subagent stopped by its time limit")
+	ErrSubTurnTimeout = tools.ErrSubagentTimeLimit
 	// ErrSubTurnParentCanceled is the error of a sub-turn stopped because the
 	// turn that launched it was: a synchronous one with its caller, an async
 	// one by a /stop. It stays in the history, so it tells the model not to
@@ -195,6 +195,9 @@ type SubTurnConfig struct {
 	// The target agent's workspace, model, tools, and system prompt are used
 	// instead of the caller's. If empty, the sub-turn runs as the parent agent.
 	TargetAgentID string
+
+	// OnStep hears each tool call the sub-turn runs (tools.SubTurnConfig). (seucaranguejo fork)
+	OnStep func(tools.SubTurnStep) func(failed bool)
 }
 
 // ====================== Context Keys ======================
@@ -253,6 +256,7 @@ func (s *AgentLoopSpawner) SpawnSubTurn(
 		Timeout:            cfg.Timeout,
 		MaxContextRunes:    cfg.MaxContextRunes,
 		TargetAgentID:      cfg.TargetAgentID,
+		OnStep:             cfg.OnStep,
 	}
 
 	return spawnSubTurn(ctx, s.al, parentTS, agentCfg)
@@ -438,6 +442,11 @@ func spawnSubTurn(
 	if !opts.TurnProfile.Enabled {
 		opts.TurnProfile = parentTS.opts.TurnProfile
 	}
+	// Delegated work runs on the model the person picked for the parent turn;
+	// another agent's tiers are not this conversation's. (seucaranguejo fork)
+	if cfg.TargetAgentID == "" {
+		opts.ModelTier = parentTS.modelTier
+	}
 	var policyErr error
 	opts, policyErr = executionPolicyOptions(childCtx, &agent, opts)
 	if policyErr != nil {
@@ -457,6 +466,7 @@ func spawnSubTurn(
 	// Set SubTurn-specific fields
 	childTS.cancelFunc = cancel
 	childTS.critical = cfg.Critical
+	childTS.onStep = cfg.OnStep // (seucaranguejo fork)
 	childTS.depth = parentTS.depth + 1
 	childTS.parentTurnID = parentTS.turnID
 	childTS.parentTurnState = parentTS

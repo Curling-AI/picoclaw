@@ -570,6 +570,7 @@ toolLoop:
 		}
 
 		toolStart := time.Now()
+		stepDone := ts.startStep(tc, al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength())
 		execCtx := tools.WithToolInboundContext(
 			turnCtx,
 			ts.channel,
@@ -585,6 +586,8 @@ toolLoop:
 		)
 		root := ts.rootTurn()
 		execCtx = tools.WithExecOrigin(execCtx, root.sessionKey, root.turnID)
+		// A subagent's task is found by this id. (seucaranguejo fork)
+		execCtx = tools.WithToolCallID(execCtx, tc.ID)
 		// The model can still name a deferred tool whose promotion expired;
 		// honor the call instead of answering "tool not found".
 		if revived := ts.agent.Tools.EnsureVisible([]string{toolName}, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
@@ -608,6 +611,7 @@ toolLoop:
 			ts.offerTools(tools.ParseDiscoveryResult(toolResult.ContentForLLM()))
 		}
 		toolDuration := time.Since(toolStart)
+		stepDone(toolResult == nil || toolResult.IsError)
 		// Read before an AfterTool hook can replace the result (repeat guard).
 		outcomeUnknown := toolResult != nil && toolResult.OutcomeUnknown
 
@@ -1061,4 +1065,15 @@ func toolDeclaresRawArgument(registry *tools.ToolRegistry, name string) bool {
 	props, _ := tool.Parameters()["properties"].(map[string]any)
 	_, declared := props["raw"]
 	return declared
+}
+
+// startStep tells a sub-turn's recorder (spawnSubTurn) that a tool call started,
+// with the arguments the web would show for it, and returns what ends the step.
+// (seucaranguejo fork)
+func (ts *turnState) startStep(tc providers.ToolCall, maxArgsLen int) func(failed bool) {
+	visible := utils.BuildVisibleToolCalls([]providers.ToolCall{tc}, maxArgsLen)
+	if ts.onStep == nil || len(visible) == 0 || visible[0].Function == nil {
+		return func(bool) {}
+	}
+	return ts.onStep(tools.SubTurnStep{Name: visible[0].Function.Name, Arguments: visible[0].Function.Arguments})
 }
