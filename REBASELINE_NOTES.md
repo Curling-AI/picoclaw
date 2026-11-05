@@ -3,6 +3,8 @@
 Working branch: `rebaseline/upstream-sync` (based on upstream/main `52320f48`).
 Goal: fork = upstream HEAD + preserved Curling-AI customizations, validated with evidence.
 
+- Hulk turn tags: preserve `protocoltypes.WithTurnID` in `pkg/agent/turn_coord.go` and `tagTurnRequest` in both `Chat` and `ChatStreamEvents` in `pkg/providers/openai_compat/provider.go`; implementations and tests live in the new `turn_context.go` and `turn_tags*.go` files.
+
 ## Baseline facts (verified)
 - Upstream is ~2091 commits / ~4 months ahead of the fork's old base (`aaf42b2`).
 - Upstream restructured `pkg/agent` (monolithic `loop.go` → pipeline: `pipeline_*.go`, `agent_*.go`), `pkg/channels/telegram` (→ subdir + `pkg/commands`), `pkg/tools` (→ `pkg/tools/fs`), `pkg/session`, and added `pkg/fileutil.WriteFileAtomic`.

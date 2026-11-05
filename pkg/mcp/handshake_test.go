@@ -515,3 +515,156 @@ func TestListServerToolsFailsOnceItsDeadlinePasses(t *testing.T) {
 		t.Fatalf("listServerTools() = (%d tools, %v), want context.Canceled", len(tools), err)
 	}
 }
+
+// rateLimitedToolsListServer serves one tool and answers the first limited
+// tools/list requests with 429, as Composio does once the account's
+// per-minute quota runs out between an initialize and the tools/list after it.
+func rateLimitedToolsListServer(t *testing.T, limited int32) *httptest.Server {
+	t.Helper()
+	return toolsListServer(t, 1, nil, func(call int32) bool { return call <= limited })
+}
+
+// toolsListServer serves toolCount tools and answers with 429 every
+// tools/list request, counted from 1, that refuse picks.
+func toolsListServer(
+	t *testing.T,
+	toolCount int,
+	opts *sdkmcp.ServerOptions,
+	refuse func(call int32) bool,
+) *httptest.Server {
+	t.Helper()
+	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "rate-limited-server", Version: "1.0.0"}, opts)
+	for i := range toolCount {
+		sdkmcp.AddTool(sdkServer, &sdkmcp.Tool{Name: fmt.Sprintf("echo%d", i), Description: "Echo test tool"},
+			func(context.Context, *sdkmcp.CallToolRequest, map[string]any) (*sdkmcp.CallToolResult, any, error) {
+				return &sdkmcp.CallToolResult{}, nil, nil
+			})
+	}
+	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
+		return sdkServer
+	}, nil)
+
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte(`"tools/list"`)) && refuse(calls.Add(1)) {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// A 429 on tools/list used to pass for a server without tools: it stayed
+// connected with none, and the retry loop, which only looks at servers without
+// a connection, never came back to it.
+func TestConnectServerFailsWhenToolsListIsRateLimited(t *testing.T) {
+	server := rateLimitedToolsListServer(t, 1)
+
+	var conn *ServerConnection
+	err := runWithin(t, 10*time.Second, func() error {
+		var err error
+		conn, err = connectServer(context.Background(), "gmail", config.MCPServerConfig{
+			Enabled: true,
+			Type:    "http",
+			URL:     server.URL,
+		})
+		return err
+	})
+	if conn != nil {
+		_ = conn.Session.Close()
+	}
+	if err == nil {
+		t.Fatalf("connectServer() = (%d tools, nil), want the 429 on tools/list", len(conn.Tools))
+	}
+	if !rejectedByTransport(err) {
+		t.Errorf("rejectedByTransport(%v) = false, want true so the retry keeps the transient pace", err)
+	}
+}
+
+// The SDK pages tools/list. An error on a later page used to keep the pages
+// before it as if they were the server's whole list.
+func TestConnectServerFailsWhenALaterToolsListPageIsRateLimited(t *testing.T) {
+	server := toolsListServer(t, 3, &sdkmcp.ServerOptions{PageSize: 2}, func(call int32) bool { return call == 2 })
+
+	var conn *ServerConnection
+	err := runWithin(t, 10*time.Second, func() error {
+		var err error
+		conn, err = connectServer(context.Background(), "gmail", config.MCPServerConfig{
+			Enabled: true,
+			Type:    "http",
+			URL:     server.URL,
+		})
+		return err
+	})
+	if conn != nil {
+		_ = conn.Session.Close()
+	}
+	if err == nil {
+		t.Fatalf("connectServer() = (%d tools, nil), want the 429 on the second page", len(conn.Tools))
+	}
+	if !rejectedByTransport(err) {
+		t.Errorf("rejectedByTransport(%v) = false, want true so the retry keeps the transient pace", err)
+	}
+}
+
+func TestLoadFromMCPConfigLeavesARateLimitedToolListUnconnected(t *testing.T) {
+	limited := rateLimitedToolsListServer(t, 1<<30)
+	healthy := rateLimitedToolsListServer(t, 0)
+	mcpCfg := config.MCPConfig{
+		ToolConfig: config.ToolConfig{Enabled: true},
+		Servers: map[string]config.MCPServerConfig{
+			"gmail":    {Enabled: true, Type: "http", URL: limited.URL},
+			"calendar": {Enabled: true, Type: "http", URL: healthy.URL},
+		},
+	}
+	mgr := NewManager()
+	t.Cleanup(func() {
+		_ = mgr.Close()
+	})
+
+	if err := runWithin(t, 10*time.Second, func() error {
+		return mgr.LoadFromMCPConfig(context.Background(), mcpCfg, t.TempDir())
+	}); err != nil {
+		t.Fatalf("LoadFromMCPConfig() error = %v", err)
+	}
+	if conn, ok := mgr.GetServer("gmail"); ok {
+		t.Errorf("gmail connected with %d tools, want it left for the retry loop", len(conn.Tools))
+	}
+	if conn, ok := mgr.GetServer("calendar"); !ok || len(conn.Tools) != 1 {
+		t.Errorf("calendar = (%v, connected %v), want connected with 1 tool", conn, ok)
+	}
+}
+
+func TestRetryPendingServersBringsBackToolsOnceToolsListIsAnswered(t *testing.T) {
+	originalSchedule, originalInterval := retryBackoffSchedule, transientRetryInterval
+	retryBackoffSchedule = []time.Duration{time.Millisecond}
+	transientRetryInterval = time.Millisecond
+	t.Cleanup(func() {
+		retryBackoffSchedule, transientRetryInterval = originalSchedule, originalInterval
+	})
+	server := rateLimitedToolsListServer(t, 2)
+	mcpCfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"gmail": {Enabled: true, Type: "http", URL: server.URL},
+	}}
+	mgr := NewManager()
+	t.Cleanup(func() {
+		_ = mgr.Close()
+	})
+
+	runWithin(t, 10*time.Second, func() struct{} {
+		mgr.RetryPendingServers(context.Background(), mcpCfg, t.TempDir(), []string{"gmail"}, nil)
+		return struct{}{}
+	})
+	conn, ok := mgr.GetServer("gmail")
+	if !ok {
+		t.Fatal("gmail not connected after the retry loop returned")
+	}
+	if len(conn.Tools) != 1 {
+		t.Errorf("gmail connected with %d tools, want 1", len(conn.Tools))
+	}
+}
