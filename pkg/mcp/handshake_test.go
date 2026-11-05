@@ -521,19 +521,33 @@ func TestListServerToolsFailsOnceItsDeadlinePasses(t *testing.T) {
 // per-minute quota runs out between an initialize and the tools/list after it.
 func rateLimitedToolsListServer(t *testing.T, limited int32) *httptest.Server {
 	t.Helper()
-	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "rate-limited-server", Version: "1.0.0"}, nil)
-	sdkmcp.AddTool(sdkServer, &sdkmcp.Tool{Name: "echo", Description: "Echo test tool"},
-		func(context.Context, *sdkmcp.CallToolRequest, map[string]any) (*sdkmcp.CallToolResult, any, error) {
-			return &sdkmcp.CallToolResult{}, nil, nil
-		})
+	return toolsListServer(t, 1, nil, func(call int32) bool { return call <= limited })
+}
+
+// toolsListServer serves toolCount tools and answers with 429 every
+// tools/list request, counted from 1, that refuse picks.
+func toolsListServer(
+	t *testing.T,
+	toolCount int,
+	opts *sdkmcp.ServerOptions,
+	refuse func(call int32) bool,
+) *httptest.Server {
+	t.Helper()
+	sdkServer := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "rate-limited-server", Version: "1.0.0"}, opts)
+	for i := range toolCount {
+		sdkmcp.AddTool(sdkServer, &sdkmcp.Tool{Name: fmt.Sprintf("echo%d", i), Description: "Echo test tool"},
+			func(context.Context, *sdkmcp.CallToolRequest, map[string]any) (*sdkmcp.CallToolResult, any, error) {
+				return &sdkmcp.CallToolResult{}, nil, nil
+			})
+	}
 	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
 		return sdkServer
 	}, nil)
 
-	var refused atomic.Int32
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		if bytes.Contains(body, []byte(`"tools/list"`)) && refused.Add(1) <= limited {
+		if bytes.Contains(body, []byte(`"tools/list"`)) && refuse(calls.Add(1)) {
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "rate limited", http.StatusTooManyRequests)
 			return
@@ -566,6 +580,32 @@ func TestConnectServerFailsWhenToolsListIsRateLimited(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatalf("connectServer() = (%d tools, nil), want the 429 on tools/list", len(conn.Tools))
+	}
+	if !rejectedByTransport(err) {
+		t.Errorf("rejectedByTransport(%v) = false, want true so the retry keeps the transient pace", err)
+	}
+}
+
+// The SDK pages tools/list. An error on a later page used to keep the pages
+// before it as if they were the server's whole list.
+func TestConnectServerFailsWhenALaterToolsListPageIsRateLimited(t *testing.T) {
+	server := toolsListServer(t, 3, &sdkmcp.ServerOptions{PageSize: 2}, func(call int32) bool { return call == 2 })
+
+	var conn *ServerConnection
+	err := runWithin(t, 10*time.Second, func() error {
+		var err error
+		conn, err = connectServer(context.Background(), "gmail", config.MCPServerConfig{
+			Enabled: true,
+			Type:    "http",
+			URL:     server.URL,
+		})
+		return err
+	})
+	if conn != nil {
+		_ = conn.Session.Close()
+	}
+	if err == nil {
+		t.Fatalf("connectServer() = (%d tools, nil), want the 429 on the second page", len(conn.Tools))
 	}
 	if !rejectedByTransport(err) {
 		t.Errorf("rejectedByTransport(%v) = false, want true so the retry keeps the transient pace", err)
