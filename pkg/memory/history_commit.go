@@ -393,6 +393,9 @@ func hasCompleteHistoryTail(file *os.File, offset, physicalBytes int64) (bool, e
 // physical count and durably propagate the latch before a legitimate rewrite.
 // The caller holds the session lock; our own journal is already resolved.
 func (s *JSONLStore) prepareHistoryMutation(key string, meta *SessionMeta) error {
+	if err := s.requireNoReadRecovery(key); err != nil {
+		return err
+	}
 	file, err := os.Open(s.jsonlPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

@@ -489,7 +489,7 @@ func (p *Provider) Chat(
 		return nil, fmt.Errorf("API base not configured")
 	}
 
-	requestBody := p.buildRequestBody(messages, tools, model, options)
+	requestBody := p.tagTurnRequest(ctx, p.buildRequestBody(messages, tools, model, options))
 
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -636,7 +636,7 @@ func (p *Provider) ChatStreamEvents(
 		return nil, fmt.Errorf("API base not configured")
 	}
 
-	requestBody := p.buildRequestBody(messages, tools, model, options)
+	requestBody := p.tagTurnRequest(ctx, p.buildRequestBody(messages, tools, model, options))
 	requestBody["stream"] = true
 
 	jsonData, err := json.Marshal(requestBody)
