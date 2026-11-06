@@ -4,14 +4,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
-)
-
-const (
-	// maxExecTimeout matches the turn's own wall-clock limit: a command cannot
-	// usefully outlive the turn waiting for it.
-	maxExecTimeout   = 600 * time.Second
-	pollWaitInterval = 500 * time.Millisecond
 )
 
 // webSchemes are URL schemes whose path components (starting with //) are exempt
@@ -28,6 +20,13 @@ var webSchemes = []string{
 // followed: `(cd a); cat ../x` runs back where it started.
 var leadingCDPattern = regexp.MustCompile(`^\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|<>()]+)\s*&&`)
 
+// laterDirChangePattern finds a directory change the guard does not follow.
+var laterDirChangePattern = regexp.MustCompile(`\b(cd|pushd|popd)\b`)
+
+// shellJoinReplacer removes what the shell removes when it joins one word, so a
+// path split across quotes is checked whole: `../'../x'` climbs twice.
+var shellJoinReplacer = strings.NewReplacer(`'`, "", `"`, "", "\\\n", "")
+
 // escapingDotDotPath returns the first path in cmd that climbs out of the
 // workspace, or "". Heredoc bodies are data (an import there is relative to the
 // file being written); quoted text is checked, because `cat "../../x"` is a real
@@ -41,7 +40,10 @@ func (t *ExecTool) escapingDotDotPath(cmd, cwdPath string) string {
 		}
 	}
 	base, rest := skipLeadingCDs(stripHeredocBodies(cmd), cwdPath, root)
-	for _, token := range strings.FieldsFunc(rest, isPathTokenBoundary) {
+	if laterDirChangePattern.MatchString(rest) {
+		base = root
+	}
+	for _, token := range strings.FieldsFunc(shellJoinReplacer.Replace(rest), isPathTokenBoundary) {
 		if isWebURL(token) {
 			continue
 		}
@@ -64,7 +66,8 @@ func skipLeadingCDs(text, cwdPath, root string) (string, string) {
 			return base, text
 		}
 		target := strings.Trim(match[1], `"'`)
-		if strings.ContainsAny(target, "$`") {
+		// Anything the shell expands lands somewhere this cannot tell.
+		if target == "-" || strings.ContainsAny(target, "$`~*?[\\") {
 			return base, text
 		}
 		next := climbPath(base, target)
@@ -92,8 +95,8 @@ func (t *ExecTool) dotDotPathEscapes(path, base, root string) bool {
 			return true
 		}
 	}
-	// A variable before the climb can be anywhere.
-	if lastClimb > 0 && strings.Contains(strings.Join(segments[:lastClimb], "/"), "$") {
+	// A variable or ~user before the climb can be anywhere.
+	if lastClimb > 0 && strings.ContainsAny(strings.Join(segments[:lastClimb], "/"), "$~") {
 		return true
 	}
 	resolved := climbPath(base, path)

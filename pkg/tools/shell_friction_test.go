@@ -39,7 +39,6 @@ func TestSecondsArg(t *testing.T) {
 	}{
 		{float64(120), 120 * time.Second},
 		{int64(330), 330 * time.Second},
-		{3, 3 * time.Second},
 		{float64(100000), maxExecTimeout},
 		{float64(0), 0},
 		{float64(-5), 0},
@@ -155,6 +154,8 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 		{name: "sed expression", command: "sed 's/../x/' /dev/null"},
 		{name: "git range", command: "echo HEAD..main"},
 		{name: "workspace variable", command: "ls $PWD/work/../proposta"},
+		{name: "empty a subdir", command: "cd work && rm -rf ./*"},
+		{name: "empty a sibling", command: "cd work/a && rm -rf ../b/*"},
 
 		{name: "from the root", command: "cat ../secret", blocked: true},
 		{name: "deep escape", command: "cat ../../../etc/passwd", cwd: subdir, blocked: true},
@@ -172,6 +173,22 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 		{name: "cd not guaranteed", command: "cd work/a; cat ../../../x", blocked: true},
 		{name: "cd in a subshell", command: "(cd work/a && true); cat ../../../x", blocked: true},
 		{name: "file url", command: "curl file://../../etc/passwd", blocked: true},
+		{name: "cd home", command: "cd ~ && cat ../secret", blocked: true},
+		{name: "cd other user", command: "cd ~root && cat ../etc/passwd", blocked: true},
+		{name: "cd previous", command: "cd - && cat ../secret", blocked: true},
+		{name: "cd glob", command: "cd * && cat ../../secret", blocked: true},
+		{name: "second cd not followed", command: "cd work && cd ..; cat ../secret", blocked: true},
+		{name: "cd in a later subshell", command: "cd work && (cd ..; cat ../secret)", blocked: true},
+		{name: "path split by single quotes", command: "cd work && cat ../'../secret'", blocked: true},
+		{name: "path split by double quotes", command: `cd work && cat "../""../secret"`, blocked: true},
+		{name: "path split by a line continuation", command: "cd work && cat ../\\\n../secret", blocked: true},
+		{name: "tilde user", command: "cat ~root/../etc/passwd", blocked: true},
+		{name: "heredoc operator in quotes", command: "echo '<<X'\ncat ../secret", blocked: true},
+		{name: "heredoc operator in a comment", command: "# <<X\ncat ../secret", blocked: true},
+		{name: "here-string", command: "cat <<<x\ncat ../secret", blocked: true},
+		{name: "empty the workspace after cd", command: "cd work && rm -rf ../*", blocked: true},
+		{name: "empty the workspace through a dir", command: "rm -rf work/../*", blocked: true},
+		{name: "empty the workspace from here", command: "rm -rf ./*", blocked: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

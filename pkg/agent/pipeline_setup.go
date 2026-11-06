@@ -16,6 +16,7 @@ import (
 func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution, error) {
 	cfg := p.Cfg
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+	ts.agent.Tools.RestoreRetiredMCP()
 
 	var history []providers.Message
 	var summary string

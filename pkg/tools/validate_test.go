@@ -630,3 +630,21 @@ func TestDropUnknownToolArgs_AdditionalTrueKeepsEverything(t *testing.T) {
 		t.Fatalf("dropped = %v, args = %v", dropped, args)
 	}
 }
+
+// validateToolArgs accepts extras in a nullable object, so the drop must leave them.
+func TestDropUnknownToolArgs_OnlyInsidePlainObjects(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"nullable": map[string]any{
+				"type":       []any{"object", "null"},
+				"properties": map[string]any{"known": map[string]any{"type": "string"}},
+			},
+		},
+	}
+	args := map[string]any{"nullable": map[string]any{"known": "k", "extra": "e"}}
+
+	if dropped := dropUnknownToolArgs(schema, args); len(dropped) != 0 {
+		t.Fatalf("dropped %v", dropped)
+	}
+}

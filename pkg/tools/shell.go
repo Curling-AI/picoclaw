@@ -239,7 +239,7 @@ func (t *ExecTool) Description() string {
 		wd = "your workspace"
 	}
 	return fmt.Sprintf(
-		`Execute shell commands. Commands already run in %s by default — do NOT prefix with "cd %s &&"; just use paths relative to it (or absolute). The shell session persists between calls (env vars and any directory change carry over). A foreground command is killed after a timeout; pass timeout (seconds, up to %d) when it needs longer. To wait for a long job, start it with background=true (returns sessionId) and call poll with wait instead of running sleep. Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`,
+		`Execute shell commands. Commands already run in %s by default — do NOT prefix with "cd %s &&"; just use paths relative to it (or absolute). Each call is a new shell that starts there: a cd or an exported variable does not carry over to the next call. A foreground command is killed after a timeout; pass timeout (seconds, up to %d) when it needs longer. To wait for a long job, start it with background=true (returns sessionId) and call poll with wait instead of running sleep. Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`,
 		wd,
 		wd,
 		int(maxExecTimeout/time.Second),
@@ -439,6 +439,12 @@ func (t *ExecTool) commandTimeout(args map[string]any) time.Duration {
 	return t.timeout
 }
 
+const (
+	// maxExecTimeout keeps one command from holding a turn for more than 10 minutes.
+	maxExecTimeout   = 600 * time.Second
+	pollWaitInterval = 500 * time.Millisecond
+)
+
 // secondsArg reads a duration in seconds, capped at maxExecTimeout. JSON hands
 // over a float64 and coerceToolArgs an int64.
 func secondsArg(args map[string]any, key string) time.Duration {
@@ -448,8 +454,6 @@ func secondsArg(args map[string]any, key string) time.Duration {
 		seconds = int64(v)
 	case int64:
 		seconds = v
-	case int:
-		seconds = int64(v)
 	}
 	if seconds <= 0 {
 		return 0
@@ -1270,7 +1274,7 @@ func stripHeredocBodies(cmd string) string {
 		bodyStart = m[1] + bodyStart + 1
 		// Find the terminator: a line that is exactly the word (allowing
 		// leading tabs for <<-).
-		end := len(cmd)
+		end := -1
 		for i := bodyStart; i <= len(cmd); {
 			lineEnd := strings.IndexByte(cmd[i:], '\n')
 			var line string
@@ -1375,22 +1379,18 @@ var recursiveRmRE = regexp.MustCompile(
 // resolvido e comparado com a raiz — que no seucaranguejo é EFS e guarda o
 // histórico e os entregáveis do usuário. (seucaranguejo fork)
 func deletesWorkspaceRoot(cmd, cwdPath string) bool {
+	base, _ := skipLeadingCDs(cmd, cwdPath, cwdPath)
 	for _, m := range recursiveRmRE.FindAllStringSubmatch(cmd, -1) {
 		alvo := strings.Trim(m[1], `"'`)
 		if alvo == "*" || alvo == "." || alvo == "./" || alvo == ".." {
 			return true
 		}
-		abs, err := commandPathAbs(alvo, cwdPath)
-		if err != nil {
-			continue
+		// `<dir>/*` empties <dir>, which for the workspace is the same loss.
+		if strings.HasSuffix(alvo, "/*") {
+			alvo = strings.TrimSuffix(alvo, "*")
 		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
-		raiz := cwdPath
-		if r, err := filepath.EvalSymlinks(raiz); err == nil {
-			raiz = r
-		}
+		abs := climbPath(base, alvo)
+		raiz := realPath(cwdPath)
 		// O próprio workspace, ou qualquer ancestral dele.
 		if abs == raiz {
 			return true
@@ -1515,6 +1515,13 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 		}
 
+		if path := t.escapingDotDotPath(cmd, cwdPath); path != "" {
+			return fmt.Sprintf(
+				"Command blocked by safety guard (path traversal detected: %s leaves the workspace)",
+				path,
+			)
+		}
+
 		// Heredoc bodies and quoted string literals are DATA, not filesystem
 		// references. `cat > f << 'EOF'` trips the scanner on `/*` or `</style>`;
 		// `python3 -c "cx = w // 2"` trips it on `//`, which reads as an absolute
@@ -1527,13 +1534,6 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 		// guard always allowed — and that detour is exactly what agents were
 		// doing to get around this. A path passed as a real argument stays
 		// unquoted (`python3 /etc/x.py`) and is still caught. (seucaranguejo fork)
-		if path := t.escapingDotDotPath(cmd, cwdPath); path != "" {
-			return fmt.Sprintf(
-				"Command blocked by safety guard (path traversal detected: %s leaves the workspace)",
-				path,
-			)
-		}
-
 		scanCmd := expandTilde(stripQuotedBodies(stripHeredocBodies(cmd)))
 
 		matchIndices := absolutePathPattern.FindAllStringIndex(scanCmd, -1)

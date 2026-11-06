@@ -29,6 +29,9 @@ func (al *AgentLoop) ConnectorReady(name string) bool {
 	if a == nil || !a.AllowsMCPServer(name) {
 		return false
 	}
+	if a.Tools.IsMCPServerRetired(name) {
+		return true
+	}
 	for _, tool := range conn.Tools {
 		if slices.Contains(a.Tools.List(), tools.NewMCPTool(manager, name, tool).Name()) {
 			return true

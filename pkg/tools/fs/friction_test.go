@@ -61,6 +61,47 @@ func TestWriteFile_ReplacesScratchAndOwnFilesWithoutFlag(t *testing.T) {
 	assert.Equal(t, "flag", read("todo.md"))
 }
 
+func TestWriteFile_OverwriteFlagDoesNotUnprotectAFile(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewWriteFileTool(workspace, true)
+	path := filepath.Join(workspace, "report.md")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o644))
+
+	assert.False(t, tool.Execute(context.Background(), map[string]any{
+		"path": "report.md", "content": "new", "overwrite": true,
+	}).IsError)
+	result := tool.Execute(context.Background(), map[string]any{"path": "report.md", "content": "again"})
+
+	assert.True(t, result.IsError, "the agent replaced this file, it did not create it")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(got))
+}
+
+func TestWriteFile_MemoryKeepsTheRefusalEvenWhenCreatedHere(t *testing.T) {
+	tool := NewWriteFileTool(t.TempDir(), true)
+	args := map[string]any{"path": "memory/MEMORY.md", "content": "first"}
+	assert.False(t, tool.Execute(context.Background(), args).IsError)
+	assert.True(t, tool.Execute(context.Background(), args).IsError)
+}
+
+func TestWriteFile_LinkInAScratchDirIsJudgedByWhereItLands(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewWriteFileTool(workspace, true)
+	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "artifacts"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "work"), 0o755))
+	report := filepath.Join(workspace, "artifacts", "report.md")
+	require.NoError(t, os.WriteFile(report, []byte("old"), 0o644))
+	require.NoError(t, os.Symlink("../artifacts", filepath.Join(workspace, "work", "m")))
+
+	result := tool.Execute(context.Background(), map[string]any{"path": "work/m/report.md", "content": "new"})
+
+	assert.True(t, result.IsError)
+	got, err := os.ReadFile(report)
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(got))
+}
+
 func TestSimilarFileNames(t *testing.T) {
 	names := []string{"s-01.png", "s-02.png", "S-03.PNG", "other.png", "notes.txt"}
 	assert.Equal(t, []string{"s-01.png", "s-02.png", "S-03.PNG"}, similarFileNames("s-1.png", names))

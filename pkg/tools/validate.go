@@ -116,6 +116,10 @@ func dropUnknownToolArgs(schema map[string]any, args map[string]any) []string {
 func dropUnknownNestedArgs(propSchema map[string]any, val any) []string {
 	switch v := val.(type) {
 	case map[string]any:
+		// validateToolArgs only looks inside a plain object schema; match it.
+		if propSchema["type"] != "object" {
+			return nil
+		}
 		return dropUnknownToolArgs(propSchema, v)
 	case []any:
 		itemSchema, ok := propSchema["items"].(map[string]any)

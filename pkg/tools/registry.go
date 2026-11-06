@@ -29,7 +29,14 @@ type ToolRegistry struct {
 	mediaStore media.MediaStore
 	allowlist  map[string]struct{}
 	// mcpRejections counts consecutive 401s per connector.
-	mcpRejections map[string]int
+	mcpRejections map[string]mcpRejection
+	// retiredMCP holds, per connector, the tools taken out until the next turn.
+	retiredMCP map[string]map[string]*ToolEntry
+}
+
+type mcpRejection struct {
+	count          int
+	countedInRound bool
 }
 
 type mediaStoreAware interface {
@@ -164,6 +171,10 @@ func (r *ToolRegistry) TickTTL() {
 		if !entry.IsCore && entry.TTL > 0 {
 			entry.TTL--
 		}
+	}
+	for server, rejection := range r.mcpRejections {
+		rejection.countedInRound = false
+		r.mcpRejections[server] = rejection
 	}
 }
 
@@ -547,36 +558,41 @@ func (r *ToolRegistry) ExecuteWithContext(
 	return result
 }
 
-// sortedToolNames returns tool names in sorted order for deterministic iteration.
-// This is critical for KV cache stability: non-deterministic map iteration would
-// produce different system prompts and tool definitions on each call, invalidating
-// the LLM's prefix cache even when no tools have changed.
 // dropsUnknownArgs says whether a stray argument is dropped rather than refused.
-// A connector tool that may change something keeps refusing: an e-mail sent
-// without a misnamed attachment is worse than one more iteration.
+// Whatever acts on something the call cannot take back keeps refusing, because the
+// stray argument can carry intent: write_file with append=true would replace the
+// log, an e-mail would go without a misnamed attachment.
 func dropsUnknownArgs(tool Tool) bool {
-	if _, isMCP := tool.(mcpServerTool); !isMCP {
-		return true
+	if _, isMCP := tool.(mcpServerTool); isMCP {
+		safety, ok := tool.(toolshared.SideEffectHinter)
+		return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
 	}
-	safety, ok := tool.(toolshared.SideEffectHinter)
-	return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
+	switch tool.Name() {
+	case "write_file", "append_file", "edit_file", "message", "send_file", "send_tts", "reaction",
+		"cron", "spawn", "subagent", "delegate":
+		return false
+	}
+	return true
 }
 
 type mcpServerTool interface {
 	MCPServerName() string
 }
 
-// mcpRejectionLimit is how many 401s in a row take a connector out: one can be a
-// token about to be refreshed.
+// mcpRejectionLimit is how many 401s in a row, in different rounds, take a
+// connector out: one can be a token about to be refreshed, and parallel calls of
+// one round all see the same token.
 const mcpRejectionLimit = 2
 
-// noteMCPAccount takes a connector whose account does not work out of the
-// registry, so the model stops spending iterations on its tools.
+// noteMCPAccount takes a connector whose account does not work out of the registry
+// for the rest of the turn, so the model stops spending iterations on its tools.
+// RestoreRetiredMCP brings it back: nothing tells the pod the user reconnected,
+// because that does not change its config.
 //
-// shortcut: lasts until the agent loop reloads or the pod restarts, and each
-// fresh pod pays one failed call to find out. Reading the account status when
-// the config is built would avoid that, at the cost of more calls on Composio's
-// shared per-minute quota; upgrade if the volume stays high.
+// shortcut: every turn that uses a dead connector pays one failed call, and the
+// change in the tool list costs the prompt cache once each way. Reading the account
+// status when the config is built would avoid both, at the cost of more calls on
+// Composio's shared per-minute quota; upgrade if the volume stays high.
 func (r *ToolRegistry) noteMCPAccount(tool Tool, result *ToolResult) {
 	scoped, ok := tool.(mcpServerTool)
 	if !ok {
@@ -588,11 +604,16 @@ func (r *ToolRegistry) noteMCPAccount(tool Tool, result *ToolResult) {
 	switch result.MCPAccount {
 	case toolshared.MCPAccountMissing:
 	case toolshared.MCPAccountRejected:
-		if r.mcpRejections == nil {
-			r.mcpRejections = map[string]int{}
+		rejection := r.mcpRejections[server]
+		if !rejection.countedInRound {
+			rejection.count++
+			rejection.countedInRound = true
 		}
-		r.mcpRejections[server]++
-		if r.mcpRejections[server] < mcpRejectionLimit {
+		if rejection.count < mcpRejectionLimit {
+			if r.mcpRejections == nil {
+				r.mcpRejections = map[string]mcpRejection{}
+			}
+			r.mcpRejections[server] = rejection
 			return
 		}
 	default:
@@ -602,17 +623,57 @@ func (r *ToolRegistry) noteMCPAccount(tool Tool, result *ToolResult) {
 		return
 	}
 	delete(r.mcpRejections, server)
+	retired := map[string]*ToolEntry{}
 	for name, entry := range r.tools {
 		if owned, ok := entry.Tool.(mcpServerTool); ok && owned.MCPServerName() == server {
+			retired[name] = entry
 			delete(r.tools, name)
 		}
 	}
+	if len(retired) == 0 {
+		return // a parallel call of the same round already took them out
+	}
+	if r.retiredMCP == nil {
+		r.retiredMCP = map[string]map[string]*ToolEntry{}
+	}
+	r.retiredMCP[server] = retired
 	r.version.Add(1)
-	logger.WarnCF("tool", "Connector tools removed: account not usable", map[string]any{"server": server})
-	result.ForLLM += fmt.Sprintf("\n\n[The account of the %s connector is not usable, so its tools were removed. "+
-		"Do not look for another of its tools: tell the user it needs to be connected again.]", server)
+	logger.WarnCF("tool", "Connector tools retired for this turn: account not usable", map[string]any{"server": server})
+	result.ForLLM += fmt.Sprintf("\n\n[The account of the %s connector is not usable, so its tools were removed for "+
+		"this turn. Do not look for another of its tools: tell the user it needs to be connected again.]", server)
 }
 
+// RestoreRetiredMCP brings back the connectors retired during the previous turn.
+func (r *ToolRegistry) RestoreRetiredMCP() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.retiredMCP) == 0 {
+		return
+	}
+	for _, retired := range r.retiredMCP {
+		for name, entry := range retired {
+			if _, registeredAgain := r.tools[name]; !registeredAgain {
+				r.tools[name] = entry
+			}
+		}
+	}
+	r.retiredMCP = nil
+	r.version.Add(1)
+}
+
+// IsMCPServerRetired says whether a connector's tools are out for this turn. They
+// are still registered as far as readiness is concerned.
+func (r *ToolRegistry) IsMCPServerRetired(server string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, retired := r.retiredMCP[server]
+	return retired
+}
+
+// sortedToolNames returns tool names in sorted order for deterministic iteration.
+// This is critical for KV cache stability: non-deterministic map iteration would
+// produce different system prompts and tool definitions on each call, invalidating
+// the LLM's prefix cache even when no tools have changed.
 func (r *ToolRegistry) sortedToolNames() []string {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {

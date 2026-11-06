@@ -68,17 +68,93 @@ func TestRegistry_RejectionTakesTwoInARow(t *testing.T) {
 		t.Fatal("one 401 may be a token about to refresh")
 	}
 
+	reg.TickTTL()
 	tool.result = NewToolResult("ok")
 	reg.Execute(context.Background(), "mcp_ig_a", nil)
+	reg.TickTTL()
 	tool.result = failedWith(toolshared.MCPAccountRejected)
 	reg.Execute(context.Background(), "mcp_ig_a", nil)
 	if !reg.HasRegistered("mcp_ig_a") {
 		t.Fatal("a success in between starts the count over")
 	}
 
+	reg.TickTTL()
 	reg.Execute(context.Background(), "mcp_ig_a", nil)
 	if reg.HasRegistered("mcp_ig_a") {
 		t.Fatal("two 401s in a row take it out")
+	}
+}
+
+func TestRegistry_ParallelRejectionsCountOnce(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&accountTool{name: "mcp_ig_a", server: "ig", result: failedWith(toolshared.MCPAccountRejected)})
+
+	reg.Execute(context.Background(), "mcp_ig_a", nil)
+	reg.Execute(context.Background(), "mcp_ig_a", nil)
+	if !reg.HasRegistered("mcp_ig_a") {
+		t.Fatal("calls of one round all see the same token")
+	}
+
+	reg.TickTTL()
+	reg.Execute(context.Background(), "mcp_ig_a", nil)
+	if reg.HasRegistered("mcp_ig_a") {
+		t.Fatal("the next round is the second strike")
+	}
+}
+
+func TestRegistry_RetiredConnectorComesBackNextTurn(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&accountTool{name: "mcp_gmail_a", server: "gmail", result: failedWith(toolshared.MCPAccountMissing)})
+	reg.Execute(context.Background(), "mcp_gmail_a", nil)
+	if !reg.IsMCPServerRetired("gmail") {
+		t.Fatal("readiness must still see the connector as registered")
+	}
+	before := reg.Version()
+
+	reg.RestoreRetiredMCP()
+
+	if !reg.HasRegistered("mcp_gmail_a") || reg.IsMCPServerRetired("gmail") {
+		t.Fatal("a reconnect does not reach the pod, so the tools must come back on their own")
+	}
+	if reg.Version() == before {
+		t.Fatal("the prompt cache must notice the tools changed")
+	}
+}
+
+// A reload that registers the connector again wins over the retired entry.
+func TestRegistry_RestoreKeepsAToolRegisteredAgain(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.Register(&accountTool{name: "mcp_gmail_a", server: "gmail", result: failedWith(toolshared.MCPAccountMissing)})
+	reg.Execute(context.Background(), "mcp_gmail_a", nil)
+	fresh := &accountTool{name: "mcp_gmail_a", server: "gmail", result: NewToolResult("ok")}
+	reg.Register(fresh)
+
+	reg.RestoreRetiredMCP()
+
+	if got, _ := reg.GetRegistered("mcp_gmail_a"); got != Tool(fresh) {
+		t.Fatal("the retired entry replaced the newer one")
+	}
+}
+
+type namedNativeTool struct{ name string }
+
+func (n namedNativeTool) Name() string               { return n.name }
+func (n namedNativeTool) Description() string        { return "" }
+func (n namedNativeTool) Parameters() map[string]any { return nil }
+func (n namedNativeTool) Execute(context.Context, map[string]any) *ToolResult {
+	return NewToolResult("ok")
+}
+
+func TestDropsUnknownArgs_NativeToolsThatActKeepRefusing(t *testing.T) {
+	for _, name := range []string{"write_file", "append_file", "edit_file", "message", "send_file", "cron", "spawn"} {
+		if dropsUnknownArgs(namedNativeTool{name}) {
+			t.Errorf("%s must refuse: the stray argument can carry intent", name)
+		}
+	}
+	for _, name := range []string{"read_file", "list_dir", "exec", "memory"} {
+		if !dropsUnknownArgs(namedNativeTool{name}) {
+			t.Errorf("%s should drop a stray argument", name)
+		}
 	}
 }
 

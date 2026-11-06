@@ -595,7 +595,7 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 
 	file, err := t.fs.Open(path)
 	if err != nil {
-		return ErrorResult(err.Error())
+		return ErrorResult(err.Error() + similarFilesHint(t.fs, path, err))
 	}
 	defer file.Close()
 
@@ -988,7 +988,15 @@ func (t *WriteFileTool) workspacePath(path string) string {
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(t.workspace, abs)
 	}
-	rel, err := filepath.Rel(t.workspace, filepath.Clean(abs))
+	workspace := t.workspace
+	// A link in a scratch dir can point at a deliverable: judge where it lands.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+		if root, rootErr := filepath.EvalSymlinks(workspace); rootErr == nil {
+			workspace = root
+		}
+	}
+	rel, err := filepath.Rel(workspace, filepath.Clean(abs))
 	if err != nil || !filepath.IsLocal(rel) {
 		return ""
 	}
@@ -996,8 +1004,8 @@ func (t *WriteFileTool) workspacePath(path string) string {
 }
 
 // replacesWithoutFlag says whether an existing file may be replaced without
-// overwrite=true: scratch files, and what the agent itself wrote. Everything else,
-// memory and deliverables from past turns above all, keeps the refusal.
+// overwrite=true: scratch files, and what the agent itself created. Everything
+// else, memory above all, keeps the refusal.
 func (t *WriteFileTool) replacesWithoutFlag(path string) bool {
 	rel := t.workspacePath(path)
 	if rel == "" {
@@ -1015,7 +1023,7 @@ func (t *WriteFileTool) replacesWithoutFlag(path string) bool {
 
 func (t *WriteFileTool) rememberWritten(path string) {
 	rel := t.workspacePath(path)
-	if rel == "" {
+	if rel == "" || rel == "memory" || strings.HasPrefix(rel, "memory/") {
 		return
 	}
 	t.writtenMu.Lock()
@@ -1104,15 +1112,14 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 
 	overwrite, _ := args["overwrite"].(bool)
 
-	replaced := false
+	replaced, created := false, false
 	err := t.fs.withWriteLock(path, func() error {
-		if !overwrite {
-			if existing, err := t.fs.Open(path); err == nil {
-				_ = existing.Close()
-				replaced = t.replacesWithoutFlag(path)
-				if replaced {
-					return t.fs.WriteFile(path, []byte(content))
-				}
+		existing, openErr := t.fs.Open(path)
+		created = openErr != nil
+		if openErr == nil {
+			_ = existing.Close()
+			replaced = !overwrite && t.replacesWithoutFlag(path)
+			if !overwrite && !replaced {
 				if phrase := t.altToolsPhrase(); phrase != "" {
 					return fmt.Errorf(
 						"file: %s already exists. To add to it or change part of it without losing the current contents, use %s. Only set overwrite=true if you intend to replace the entire file.",
@@ -1132,7 +1139,9 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 		return ErrorResult(err.Error())
 	}
 
-	t.rememberWritten(path)
+	if created {
+		t.rememberWritten(path)
+	}
 	if replaced {
 		return SilentResult(fmt.Sprintf("File replaced, its previous contents are gone: %s", path))
 	}
