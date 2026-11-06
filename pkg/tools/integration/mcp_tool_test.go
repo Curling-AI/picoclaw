@@ -999,3 +999,25 @@ func TestMCPTool_ServerToolName(t *testing.T) {
 		t.Errorf("Name() = %q, want the prefixed registry name", got)
 	}
 }
+
+func TestMCPAccountSignal(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want toolshared.MCPAccountSignal
+	}{
+		{"no account", "No connected account found for user ID abc for toolkit gmail", toolshared.MCPAccountMissing},
+		{"provider 401", `{"successfull":false,"data":{"status_code":401},"mercury_last_http_status_code":401}`, toolshared.MCPAccountRejected},
+		{"status only", `{"data":{"status_code": 401}}`, toolshared.MCPAccountRejected},
+		{"quota 403", `{"data":{"status_code":403},"mercury_last_http_status_code":403}`, toolshared.MCPAccountUnknown},
+		{"bad request", `{"data":{"status_code":400}}`, toolshared.MCPAccountUnknown},
+		{"longer number", `{"data":{"status_code":4011}}`, toolshared.MCPAccountUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := mcpAccountSignal(c.text); got != c.want {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}

@@ -37,10 +37,10 @@ func TestReadFileLinesTool_RegistryValidationSupportsMaxLinesAndRejectsLimit(t *
 		"start_line": 2,
 		"limit":      1,
 	})
-	if !result.IsError {
-		t.Fatalf("expected limit to be rejected, got success: %s", result.ForLLM)
+	if result.IsError {
+		t.Fatalf("expected limit to be ignored, got: %s", result.ForLLM)
 	}
-	if !strings.Contains(result.ForLLM, "unexpected property \"limit\"") {
-		t.Fatalf("expected registry validation error for limit, got: %s", result.ForLLM)
+	if !strings.Contains(result.ForLLM, "Ignored arguments this tool does not have: limit") {
+		t.Fatalf("expected the model to be told limit was ignored, got: %s", result.ForLLM)
 	}
 }

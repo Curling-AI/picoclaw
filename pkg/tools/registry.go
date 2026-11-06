@@ -28,6 +28,8 @@ type ToolRegistry struct {
 	version    atomic.Uint64 // incremented on Register/RegisterHidden for cache invalidation
 	mediaStore media.MediaStore
 	allowlist  map[string]struct{}
+	// mcpRejections counts consecutive 401s per connector.
+	mcpRejections map[string]int
 }
 
 type mediaStoreAware interface {
@@ -271,7 +273,11 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
 	coerced, _ := cloneJSONValue(args).(map[string]any)
 	if tool, ok := r.GetRegistered(name); ok {
-		coerceToolArgs(tool.Parameters(), coerced)
+		schema := tool.Parameters()
+		coerceToolArgs(schema, coerced)
+		if dropsUnknownArgs(tool) {
+			dropUnknownToolArgs(schema, coerced)
+		}
 	}
 	return coerced
 }
@@ -435,6 +441,10 @@ func (r *ToolRegistry) ExecuteWithContext(
 	// recoverable call doesn't cost the agent a whole iteration.
 	schema := tool.Parameters()
 	coerceToolArgs(schema, args)
+	var droppedArgs []string
+	if dropsUnknownArgs(tool) {
+		droppedArgs = dropUnknownToolArgs(schema, args)
+	}
 	if err := validateToolArgs(schema, args); err != nil {
 		logger.WarnCF("tool", "Tool argument validation failed",
 			map[string]any{"tool": name, "error": err.Error()})
@@ -500,6 +510,11 @@ func (r *ToolRegistry) ExecuteWithContext(
 
 	result = normalizeToolResult(result, name, r.mediaStore, channel, chatID)
 	toolshared.AfterExecutionTool(ctx, tool, result)
+	r.noteMCPAccount(tool, result)
+	if len(droppedArgs) > 0 {
+		logger.InfoCF("tool", "Tool arguments ignored", map[string]any{"tool": name, "args": droppedArgs})
+		result.ForLLM += fmt.Sprintf("\n\n[Ignored arguments this tool does not have: %s]", strings.Join(droppedArgs, ", "))
+	}
 
 	duration := time.Since(start)
 
@@ -533,6 +548,68 @@ func (r *ToolRegistry) ExecuteWithContext(
 // This is critical for KV cache stability: non-deterministic map iteration would
 // produce different system prompts and tool definitions on each call, invalidating
 // the LLM's prefix cache even when no tools have changed.
+// dropsUnknownArgs says whether a stray argument is dropped rather than refused.
+// A connector tool that may change something keeps refusing: an e-mail sent
+// without a misnamed attachment is worse than one more iteration.
+func dropsUnknownArgs(tool Tool) bool {
+	if _, isMCP := tool.(mcpServerTool); !isMCP {
+		return true
+	}
+	safety, ok := tool.(toolshared.SideEffectHinter)
+	return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
+}
+
+type mcpServerTool interface {
+	MCPServerName() string
+}
+
+// mcpRejectionLimit is how many 401s in a row take a connector out: one can be a
+// token about to be refreshed.
+const mcpRejectionLimit = 2
+
+// noteMCPAccount takes a connector whose account does not work out of the
+// registry, so the model stops spending iterations on its tools.
+//
+// shortcut: lasts until the agent loop reloads or the pod restarts, and each
+// fresh pod pays one failed call to find out. Reading the account status when
+// the config is built would avoid that, at the cost of more calls on Composio's
+// shared per-minute quota; upgrade if the volume stays high.
+func (r *ToolRegistry) noteMCPAccount(tool Tool, result *ToolResult) {
+	scoped, ok := tool.(mcpServerTool)
+	if !ok {
+		return
+	}
+	server := scoped.MCPServerName()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch result.MCPAccount {
+	case toolshared.MCPAccountMissing:
+	case toolshared.MCPAccountRejected:
+		if r.mcpRejections == nil {
+			r.mcpRejections = map[string]int{}
+		}
+		r.mcpRejections[server]++
+		if r.mcpRejections[server] < mcpRejectionLimit {
+			return
+		}
+	default:
+		if !result.IsError {
+			delete(r.mcpRejections, server)
+		}
+		return
+	}
+	delete(r.mcpRejections, server)
+	for name, entry := range r.tools {
+		if owned, ok := entry.Tool.(mcpServerTool); ok && owned.MCPServerName() == server {
+			delete(r.tools, name)
+		}
+	}
+	r.version.Add(1)
+	logger.WarnCF("tool", "Connector tools removed: account not usable", map[string]any{"server": server})
+	result.ForLLM += fmt.Sprintf("\n\n[The account of the %s connector is not usable, so its tools were removed. "+
+		"Do not look for another of its tools: tell the user it needs to be connected again.]", server)
+}
+
 func (r *ToolRegistry) sortedToolNames() []string {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {

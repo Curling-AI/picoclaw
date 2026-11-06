@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -175,6 +176,22 @@ func (t *MCPTool) ServerToolName() string {
 	return t.tool.Name
 }
 
+// mcpProviderUnauthorized matches the provider's own status in a managed
+// connector's error, which arrives as JSON text inside a 200. Only 401: a 403
+// there is usually about one call, such as a quota or a file of someone else.
+var mcpProviderUnauthorized = regexp.MustCompile(`"(?:mercury_last_http_status_code|status_code)":\s*401\b`)
+
+func mcpAccountSignal(errMsg string) toolshared.MCPAccountSignal {
+	switch {
+	case strings.Contains(errMsg, "No connected account found"):
+		return toolshared.MCPAccountMissing
+	case mcpProviderUnauthorized.MatchString(errMsg):
+		return toolshared.MCPAccountRejected
+	default:
+		return toolshared.MCPAccountUnknown
+	}
+}
+
 // RepeatSafety maps the server's annotations. Without them the MCP defaults
 // apply: the tool may change its environment, and running it again repeats the
 // change. The annotations are read once, when the pod connects to the server.
@@ -305,8 +322,10 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]any) (toolResult 
 	if result.IsError {
 		errMsg := extractContentText(result.Content)
 		t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallEnd, startedAt, true, errMsg)
-		return ErrorResult(fmt.Sprintf("MCP tool returned error: %s", errMsg)).
+		failed := ErrorResult(fmt.Sprintf("MCP tool returned error: %s", errMsg)).
 			WithError(fmt.Errorf("MCP tool error: %s", errMsg))
+		failed.MCPAccount = mcpAccountSignal(errMsg)
+		return failed
 	}
 
 	t.publishRuntimeEvent(ctx, runtimeevents.KindMCPToolCallEnd, startedAt, false, "")
