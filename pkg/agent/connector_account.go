@@ -93,13 +93,17 @@ func (ts *turnState) noteConnectorAccount(toolName string, result *tools.ToolRes
 	result.ForLLM += "\n\n" + connectorRetiredNote(server)
 }
 
+func (ts *turnState) isToolRetired(toolName string) bool {
+	return ts.connectors.isRetired(connectorServer(ts.agent.Tools, toolName))
+}
+
 func (ts *turnState) withoutRetiredConnectors(defs []providers.ToolDefinition) []providers.ToolDefinition {
 	if len(ts.connectors.retired) == 0 {
 		return defs
 	}
 	kept := make([]providers.ToolDefinition, 0, len(defs))
 	for _, def := range defs {
-		if !ts.connectors.isRetired(connectorServer(ts.agent.Tools, def.Function.Name)) {
+		if !ts.isToolRetired(def.Function.Name) {
 			kept = append(kept, def)
 		}
 	}

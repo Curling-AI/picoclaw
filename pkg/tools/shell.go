@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -467,18 +468,53 @@ var answerExitCommands = map[string]bool{
 	"test": true, "[": true, "[[": true, "diff": true, "cmp": true, "which": true,
 }
 
-var shellCommandSeparator = regexp.MustCompile(`\|\||&&|[;|\n]`)
+// shellCommandSeparator also takes the line break after an operator, which the
+// shell ignores there.
+var shellCommandSeparator = regexp.MustCompile(`(?:\|\||&&|\|)\s*|[;\n]`)
 
-// exitOneIsAnswer looks at the last command, the one whose exit code the shell
-// reports. A separator inside quotes makes it miss and report a failure, as before.
+// exitStatusOverridePattern finds what can end the shell, or fail it, before the
+// last command runs.
+var exitStatusOverridePattern = regexp.MustCompile(`\b(exit|set)\b`)
+
+func commandName(segment string) string {
+	fields := strings.Fields(segment)
+	if len(fields) == 0 {
+		return ""
+	}
+	return filepath.Base(strings.TrimLeft(fields[0], "("))
+}
+
+// exitOneIsAnswer says whether the exit 1 came from a command that answers with
+// it: the last one, unless a `&&` before it could have stopped the chain with a
+// silent exit 1 of its own. A cd fails on stderr, so it stays ruled out unless
+// redirected. A separator inside quotes makes it miss and report a failure, as before.
 func exitOneIsAnswer(command string) bool {
+	if exitStatusOverridePattern.MatchString(command) {
+		return false
+	}
 	segments := shellCommandSeparator.Split(command, -1)
-	for i := len(segments) - 1; i >= 0; i-- {
-		if fields := strings.Fields(segments[i]); len(fields) > 0 {
-			return answerExitCommands[filepath.Base(strings.TrimLeft(fields[0], "("))]
+	separators := shellCommandSeparator.FindAllString(command, -1)
+	last := len(segments) - 1
+	for last >= 0 && commandName(segments[last]) == "" {
+		last--
+	}
+	if last < 0 || !answerExitCommands[commandName(segments[last])] {
+		return false
+	}
+	for i := last; i > 0; i-- {
+		switch strings.TrimSpace(separators[i-1]) {
+		case "|": // An earlier member of the pipeline: the shell reports the last one.
+		case "&&":
+			name := commandName(segments[i-1])
+			silentCD := name == "cd" && strings.Contains(segments[i-1], ">")
+			if silentCD || (name != "cd" && !answerExitCommands[name]) {
+				return false
+			}
+		default:
+			return true
 		}
 	}
-	return false
+	return true
 }
 
 func (t *ExecTool) runSync(ctx context.Context, command, cwd string, timeout time.Duration) *ToolResult {
@@ -1401,9 +1437,15 @@ var rmCommandRE = regexp.MustCompile(`(?:^|[\s;&|(])rm\s+([^;|&\n]+)`)
 // resolvido e comparado com a raiz — que no seucaranguejo é EFS e guarda o
 // histórico e os entregáveis do usuário. (seucaranguejo fork)
 func deletesWorkspaceRoot(cmd, cwdPath string) bool {
-	base, _ := skipLeadingCDs(cmd, cwdPath, cwdPath)
+	starts, rest := skipLeadingCDs(cmd, cwdPath, cwdPath)
+	guaranteed, fallback := splitAfterAndChain(rest)
 	raiz := realPath(cwdPath)
-	for _, m := range rmCommandRE.FindAllStringSubmatch(cmd, -1) {
+	return rmDeletesRoot(guaranteed, starts[len(starts)-1:], raiz) || rmDeletesRoot(fallback, starts, raiz)
+}
+
+// rmDeletesRoot checks each recursive rm in text from every directory it may run in.
+func rmDeletesRoot(text string, starts []string, raiz string) bool {
+	for _, m := range rmCommandRE.FindAllStringSubmatch(text, -1) {
 		operands, recursive := rmOperands(m[1])
 		if !recursive {
 			continue
@@ -1416,17 +1458,24 @@ func deletesWorkspaceRoot(cmd, cwdPath string) bool {
 			if strings.HasSuffix(alvo, "/*") {
 				alvo = strings.TrimSuffix(alvo, "*")
 			}
-			abs := climbPath(base, alvo)
-			// O próprio workspace, ou qualquer ancestral dele.
-			if abs == raiz {
-				return true
-			}
-			if rel, err := filepath.Rel(abs, raiz); err == nil && !strings.HasPrefix(rel, "..") {
+			if slices.ContainsFunc(
+				starts,
+				func(start string) bool { return rmTargetContains(climbPath(start, alvo), raiz) },
+			) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// rmTargetContains: the workspace itself, or any ancestor of it.
+func rmTargetContains(target, raiz string) bool {
+	if target == raiz {
+		return true
+	}
+	rel, err := filepath.Rel(target, raiz)
+	return err == nil && !strings.HasPrefix(rel, "..")
 }
 
 // rmOperands splits the arguments of rm, with what the shell removes already gone.

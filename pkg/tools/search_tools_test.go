@@ -479,3 +479,44 @@ func TestParseDiscoveryResult(t *testing.T) {
 		})
 	}
 }
+
+func TestDiscoverySkipsToolsTheTurnCannotCall(t *testing.T) {
+	reg := NewToolRegistry()
+	for i := range 4 {
+		reg.RegisterHidden(&mockSearchableTool{name: fmt.Sprintf("dead_match_%d", i), desc: "match"})
+	}
+	reg.RegisterHidden(&mockSearchableTool{name: "live_match", desc: "match"})
+	ctx := WithUnavailableTools(context.Background(), func(name string) bool {
+		return strings.HasPrefix(name, "dead_")
+	})
+	searches := map[string]Tool{
+		"regex": NewRegexSearchTool(reg, 5, 2),
+		"bm25":  NewBM25SearchTool(reg, 5, 2),
+	}
+	args := map[string]map[string]any{"regex": {"pattern": "match"}, "bm25": {"query": "match"}}
+	for name, search := range searches {
+		t.Run(name, func(t *testing.T) {
+			got := ParseDiscoveryResult(search.Execute(ctx, args[name]).ContentForLLM())
+			if len(got) != 1 || got[0] != "live_match" {
+				t.Fatalf("the dead tools must not take the slots or be announced: %v", got)
+			}
+		})
+	}
+	if got := ParseDiscoveryResult(
+		searches["regex"].Execute(context.Background(), args["regex"]).ContentForLLM(),
+	); len(
+		got,
+	) != 2 {
+		t.Fatalf("another session's search keeps every tool and the cap: %v", got)
+	}
+}
+
+func TestDiscoveryExactNameOfUnavailableToolFindsNothing(t *testing.T) {
+	reg := NewToolRegistry()
+	reg.RegisterHidden(&mockSearchableTool{name: "mcp_gmail_send", desc: "send mail"})
+	ctx := WithUnavailableTools(context.Background(), func(string) bool { return true })
+	result := NewBM25SearchTool(reg, 5, 2).Execute(ctx, map[string]any{"query": "mcp_gmail_send"})
+	if got := ParseDiscoveryResult(result.ContentForLLM()); len(got) != 0 {
+		t.Fatalf("a promoted exact name must not bring it back: %v", got)
+	}
+}

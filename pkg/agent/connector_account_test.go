@@ -34,6 +34,7 @@ func (c connectorTestTool) Execute(context.Context, map[string]any) *tools.ToolR
 type connectorOfferRecorder struct {
 	stepProvider
 	offered [][]string
+	last    []providers.Message
 }
 
 func (r *connectorOfferRecorder) Chat(
@@ -48,6 +49,7 @@ func (r *connectorOfferRecorder) Chat(
 		names = append(names, def.Function.Name)
 	}
 	r.offered = append(r.offered, names)
+	r.last = messages
 	return r.stepProvider.Chat(ctx, messages, defs, model, options)
 }
 
@@ -90,6 +92,33 @@ func TestMissingAccountTakesTheConnectorOutForTheTurnOnly(t *testing.T) {
 	}
 	if !slices.Contains(recorder.offered[0], "mcp_gmail_send") {
 		t.Fatalf("the next turn must offer it again, a reconnect does not reach the pod: %v", recorder.offered)
+	}
+}
+
+func TestRetiredConnectorStaysOutOfDiscovery(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	recorder := &connectorOfferRecorder{stepProvider: stepProvider{steps: oneCallPerStep(
+		stepCall{tool: "mcp_gmail_send"},
+		stepCall{tool: tools.RegexSearchToolName, args: map[string]any{"pattern": "gmail"}},
+	)}}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), recorder)
+	registry := al.registry.GetDefaultAgent().Tools
+	registry.Register(tools.NewRegexSearchTool(registry, 5, 5))
+	registry.RegisterHidden(connectorTestTool{
+		mcpTestTool: newMCPTestTool("mcp_gmail_send", tools.RepeatReadOnly), signal: tools.MCPAccountMissing,
+	})
+	if _, err := al.ProcessDirect(context.Background(), "go", "connector-session"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	var searched string
+	for _, message := range recorder.last {
+		if message.Role == "tool" {
+			searched = message.Content
+		}
+	}
+	if !strings.Contains(searched, "No tools found") {
+		t.Fatalf("the search must not announce the retired connector: %q", searched)
 	}
 }
 

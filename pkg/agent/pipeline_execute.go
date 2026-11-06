@@ -600,6 +600,9 @@ toolLoop:
 				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
 		}
 		ts.offerTools([]string{toolName})
+		if len(ts.connectors.retired) > 0 {
+			execCtx = tools.WithUnavailableTools(execCtx, ts.isToolRetired)
+		}
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,

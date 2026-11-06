@@ -24,6 +24,10 @@ var leadingCDPattern = regexp.MustCompile(`^\s*cd\s+("[^"]*"|'[^']*'|[^\s;&|<>()
 // including a tool told to run elsewhere (`env -C ..`, `git -C ..`).
 var laterDirChangePattern = regexp.MustCompile(`\b(cd|pushd|popd)\b|\s-C\b|--chdir\b|--directory\b`)
 
+// chainSeparatorPattern finds what ends a command; `&&` comes first so that a
+// lone `&` means the background operator.
+var chainSeparatorPattern = regexp.MustCompile(`&&|\|\||[;&\n]`)
+
 // shellJoinReplacer removes what the shell removes when it joins one word, so a
 // path split across quotes is checked whole: `../'../x'` climbs twice.
 var shellJoinReplacer = strings.NewReplacer(`'`, "", `"`, "", "\\\n", "")
@@ -40,44 +44,70 @@ func (t *ExecTool) escapingDotDotPath(cmd, cwdPath string) string {
 			root = abs
 		}
 	}
-	base, rest := skipLeadingCDs(stripHeredocBodies(cmd), cwdPath, root)
+	starts, rest := skipLeadingCDs(stripHeredocBodies(cmd), cwdPath, root)
 	rest = shellJoinReplacer.Replace(rest)
 	if laterDirChangePattern.MatchString(rest) {
-		base = root
+		starts = []string{root}
 	}
-	for _, token := range strings.FieldsFunc(rest, isPathTokenBoundary) {
+	guaranteed, fallback := splitAfterAndChain(rest)
+	if path := t.firstEscapingPath(guaranteed, starts[len(starts)-1:], root); path != "" {
+		return path
+	}
+	return t.firstEscapingPath(fallback, starts, root)
+}
+
+// splitAfterAndChain separates what only runs if every leading cd worked (the
+// `&&` chain) from what also runs when one failed: `cd a && x || cat ../y` and
+// `cd a && x; cat ../y` read ../y from wherever the shell stayed.
+func splitAfterAndChain(text string) (guaranteed, fallback string) {
+	for _, loc := range chainSeparatorPattern.FindAllStringIndex(text, -1) {
+		if text[loc[0]:loc[1]] != "&&" {
+			return text[:loc[0]], text[loc[0]:]
+		}
+	}
+	return text, ""
+}
+
+// firstEscapingPath returns the first path in text that leaves root from any of
+// the directories text may run in.
+func (t *ExecTool) firstEscapingPath(text string, starts []string, root string) string {
+	for _, token := range strings.FieldsFunc(text, isPathTokenBoundary) {
 		if isWebURL(token) {
 			continue
 		}
 		for _, path := range strings.Split(token, ":") {
-			if t.dotDotPathEscapes(path, base, root) {
-				return path
+			for _, start := range starts {
+				if t.dotDotPathEscapes(path, start, root) {
+					return path
+				}
 			}
 		}
 	}
 	return ""
 }
 
-// skipLeadingCDs returns the directory the rest of text runs in. A cd it cannot
-// resolve, or one that leaves root, stays in the text to be checked as a path.
-func skipLeadingCDs(text, cwdPath, root string) (string, string) {
-	base := cwdPath
+// skipLeadingCDs returns the directories the rest of text may run in, the one
+// where every cd worked last. A cd it cannot resolve, or one that leaves root,
+// stays in the text to be checked as a path.
+func skipLeadingCDs(text, cwdPath, root string) ([]string, string) {
+	starts := []string{cwdPath}
 	for {
+		base := starts[len(starts)-1]
 		match := leadingCDPattern.FindStringSubmatch(text)
 		if match == nil {
-			return base, text
+			return starts, text
 		}
 		target := strings.Trim(match[1], `"'`)
 		// Anything the shell expands lands somewhere this cannot tell.
 		if target == "-" || strings.ContainsAny(target, "$`~*?[\\") {
-			return base, text
+			return starts, text
 		}
 		// The shell's cd is logical: `a/..` is base even when a is a symlink.
 		next := logicalPath(base, target)
 		if !isInsideDir(next, root) || !isInsideDir(realPath(next), root) {
-			return base, text
+			return starts, text
 		}
-		base, text = next, text[len(match[0]):]
+		starts, text = append(starts, next), text[len(match[0]):]
 	}
 }
 
