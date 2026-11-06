@@ -38,10 +38,7 @@ func TestWriteFile_ReplacesScratchAndOwnFilesWithoutFlag(t *testing.T) {
 	write("work/abs.py", "old")
 	assert.False(t, run(filepath.Join(workspace, "work/abs.py")).IsError, "an absolute path counts too")
 
-	for _, rel := range []string{"memory/MEMORY.md", "artifacts/report.md", "todo.md", "work", "working/x.md"} {
-		if rel == "work" {
-			continue
-		}
+	for _, rel := range []string{"memory/MEMORY.md", "artifacts/report.md", "todo.md", "working/x.md"} {
 		write(rel, "old")
 		result := run(rel)
 		assert.True(t, result.IsError, rel)
@@ -49,7 +46,6 @@ func TestWriteFile_ReplacesScratchAndOwnFilesWithoutFlag(t *testing.T) {
 		assert.Equal(t, "old", read(rel), "a refused file stays intact")
 	}
 
-	write("work/x.md", "old")
 	assert.True(t, run("work/../todo.md").IsError, "climbing out of a scratch dir is not scratch")
 
 	assert.False(t, run("artifacts/mine.md").IsError)
