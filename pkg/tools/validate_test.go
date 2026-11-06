@@ -341,13 +341,13 @@ func TestValidateToolArgs_RegistryIntegration(t *testing.T) {
 		t.Errorf("expected 'expected string' in error, got %q", result.ForLLM)
 	}
 
-	// Extra property — dropped, and the model is told
+	// Extra property — should fail with validation error
 	result = r.Execute(context.Background(), "read_file", map[string]any{"path": "/x", "__inject": true})
-	if result.IsError {
-		t.Errorf("expected the extra property to be dropped, got error: %s", result.ForLLM)
+	if !result.IsError {
+		t.Error("expected validation error for extra property")
 	}
-	if !strings.Contains(result.ForLLM, "__inject") {
-		t.Errorf("expected the dropped property to be named, got %q", result.ForLLM)
+	if !strings.Contains(result.ForLLM, "unexpected prop") {
+		t.Errorf("expected 'unexpected prop...' in error, got %q", result.ForLLM)
 	}
 }
 
