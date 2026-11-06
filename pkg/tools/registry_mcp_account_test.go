@@ -20,6 +20,7 @@ func (a *accountTool) Description() string { return "" }
 func (a *accountTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{"known": map[string]any{"type": "string"}}}
 }
+
 func (a *accountTool) Execute(_ context.Context, args map[string]any) *ToolResult {
 	a.received = args
 	return a.result
@@ -84,8 +85,18 @@ func TestRegistry_RejectionTakesTwoInARow(t *testing.T) {
 func TestRegistry_UnknownArgs(t *testing.T) {
 	args := func() map[string]any { return map[string]any{"known": "k", "stray": "s"} }
 
-	reader := &accountTool{name: "mcp_x_read", server: "x", safety: toolshared.RepeatReadOnly, result: NewToolResult("ok")}
-	writer := &accountTool{name: "mcp_x_send", server: "x", safety: toolshared.RepeatUnsafe, result: NewToolResult("ok")}
+	reader := &accountTool{
+		name:   "mcp_x_read",
+		server: "x",
+		safety: toolshared.RepeatReadOnly,
+		result: NewToolResult("ok"),
+	}
+	writer := &accountTool{
+		name:   "mcp_x_send",
+		server: "x",
+		safety: toolshared.RepeatUnsafe,
+		result: NewToolResult("ok"),
+	}
 	reg := NewToolRegistry()
 	reg.Register(reader)
 	reg.Register(writer)

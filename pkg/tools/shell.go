@@ -284,12 +284,18 @@ func (t *ExecTool) Parameters() map[string]any {
 				"description": "Working directory for the command",
 			},
 			"timeout": map[string]any{
-				"type":        "integer",
-				"description": fmt.Sprintf("Seconds a foreground command may run before it is killed, up to %d. Omit it for the default", int(maxExecTimeout/time.Second)),
+				"type": "integer",
+				"description": fmt.Sprintf(
+					"Seconds a foreground command may run before it is killed, up to %d. Omit it for the default",
+					int(maxExecTimeout/time.Second),
+				),
 			},
 			"wait": map[string]any{
-				"type":        "integer",
-				"description": fmt.Sprintf("For poll: seconds to wait for the session to finish before answering, up to %d. Returns as soon as it finishes", int(maxExecTimeout/time.Second)),
+				"type": "integer",
+				"description": fmt.Sprintf(
+					"For poll: seconds to wait for the session to finish before answering, up to %d. Returns as soon as it finishes",
+					int(maxExecTimeout/time.Second),
+				),
 			},
 		},
 		// action is not required: it defaults to "run" when a command is
@@ -1522,7 +1528,10 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 		// doing to get around this. A path passed as a real argument stays
 		// unquoted (`python3 /etc/x.py`) and is still caught. (seucaranguejo fork)
 		if path := t.escapingDotDotPath(cmd, cwdPath); path != "" {
-			return fmt.Sprintf("Command blocked by safety guard (path traversal detected: %s leaves the workspace)", path)
+			return fmt.Sprintf(
+				"Command blocked by safety guard (path traversal detected: %s leaves the workspace)",
+				path,
+			)
 		}
 
 		scanCmd := expandTilde(stripQuotedBodies(stripHeredocBodies(cmd)))

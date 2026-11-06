@@ -85,7 +85,7 @@ func TestExecPollWait(t *testing.T) {
 	begin = time.Now()
 	tool.Execute(ctx, map[string]any{"action": "poll", "sessionId": slowID, "wait": float64(30)})
 	if time.Since(begin) > 5*time.Second {
-		t.Fatal("a cancelled turn must not stay waiting")
+		t.Fatal("a canceled turn must not stay waiting")
 	}
 }
 
@@ -123,12 +123,12 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{"work/a", "work/b", "proposta/assets"} {
-		if err := os.MkdirAll(filepath.Join(workspace, dir), 0o755); err != nil {
+		if err = os.MkdirAll(filepath.Join(workspace, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(workspace, "work", "link")); err != nil {
+	if err = os.Symlink(outside, filepath.Join(workspace, "work", "link")); err != nil {
 		t.Fatal(err)
 	}
 	tool, err := NewExecTool(workspace, true)

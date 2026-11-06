@@ -513,7 +513,10 @@ func (r *ToolRegistry) ExecuteWithContext(
 	r.noteMCPAccount(tool, result)
 	if len(droppedArgs) > 0 {
 		logger.InfoCF("tool", "Tool arguments ignored", map[string]any{"tool": name, "args": droppedArgs})
-		result.ForLLM += fmt.Sprintf("\n\n[Ignored arguments this tool does not have: %s]", strings.Join(droppedArgs, ", "))
+		result.ForLLM += fmt.Sprintf(
+			"\n\n[Ignored arguments this tool does not have: %s]",
+			strings.Join(droppedArgs, ", "),
+		)
 	}
 
 	duration := time.Since(start)

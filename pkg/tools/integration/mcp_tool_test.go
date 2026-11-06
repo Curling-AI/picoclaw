@@ -1007,7 +1007,11 @@ func TestMCPAccountSignal(t *testing.T) {
 		want toolshared.MCPAccountSignal
 	}{
 		{"no account", "No connected account found for user ID abc for toolkit gmail", toolshared.MCPAccountMissing},
-		{"provider 401", `{"successfull":false,"data":{"status_code":401},"mercury_last_http_status_code":401}`, toolshared.MCPAccountRejected},
+		{
+			"provider 401",
+			`{"successful":false,"data":{"status_code":401},"mercury_last_http_status_code":401}`,
+			toolshared.MCPAccountRejected,
+		},
 		{"status only", `{"data":{"status_code": 401}}`, toolshared.MCPAccountRejected},
 		{"quota 403", `{"data":{"status_code":403},"mercury_last_http_status_code":403}`, toolshared.MCPAccountUnknown},
 		{"bad request", `{"data":{"status_code":400}}`, toolshared.MCPAccountUnknown},

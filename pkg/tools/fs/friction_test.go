@@ -53,7 +53,10 @@ func TestWriteFile_ReplacesScratchAndOwnFilesWithoutFlag(t *testing.T) {
 	assert.False(t, result.IsError, "what the agent wrote itself can be rewritten")
 	assert.Contains(t, result.ForLLM, "previous contents are gone")
 
-	flagged := tool.Execute(context.Background(), map[string]any{"path": "todo.md", "content": "flag", "overwrite": true})
+	flagged := tool.Execute(
+		context.Background(),
+		map[string]any{"path": "todo.md", "content": "flag", "overwrite": true},
+	)
 	assert.False(t, flagged.IsError)
 	assert.Equal(t, "flag", read("todo.md"))
 }
