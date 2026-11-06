@@ -605,8 +605,9 @@ func TestShellTool_ExitCodeDetails(t *testing.T) {
 
 	result := tool.Execute(ctx, args)
 
-	if !result.IsError {
-		t.Error("expected error for non-zero exit code")
+	// Nothing on stderr: the exit code is part of the answer, not a failure.
+	if result.IsError {
+		t.Error("non-zero exit without stderr should not be an error")
 	}
 
 	// Should contain the exit code in the message (new format: "exited with code 42")
@@ -619,9 +620,6 @@ func TestShellTool_ExitCodeDetails(t *testing.T) {
 		t.Errorf("expected 'exited with code' in message, got: %s", result.ForLLM)
 	}
 
-	// Err field is set by the exec system (may or may not be set depending on implementation)
-	// The important thing is that IsError=true
-	t.Logf("Exit code result: %s", result.ForLLM)
 }
 
 // TestShellTool_TimeoutWithPartialOutput verifies timeout includes partial output
