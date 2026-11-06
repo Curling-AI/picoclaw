@@ -12,6 +12,18 @@ const (
 	ArtifactPathsLLMNote = "Use `send_file` with one of these paths to send it to the user, or use file/exec tools to save it inside the workspace if requested."
 )
 
+// MCPAccountSignal is what a connector's answer says about its account.
+type MCPAccountSignal int
+
+const (
+	MCPAccountUnknown MCPAccountSignal = iota
+	// MCPAccountMissing: no account is connected, and a retry cannot change that.
+	MCPAccountMissing
+	// MCPAccountRejected: the provider answered 401, which may still be a token
+	// the connector is about to refresh.
+	MCPAccountRejected
+)
+
 // ToolResult represents the structured return value from tool execution.
 // It provides clear semantics for different types of results and supports
 // async operations, user-facing messages, and error handling.
@@ -47,6 +59,9 @@ type ToolResult struct {
 	// reported the call as not done, so it stays false there.
 	// (seucaranguejo fork)
 	OutcomeUnknown bool `json:"-"`
+
+	// MCPAccount says what a connector's answer revealed about its account.
+	MCPAccount MCPAccountSignal `json:"-"`
 
 	// Media contains media store refs produced by this tool.
 	// When non-empty, the agent will publish these as OutboundMediaMessage.

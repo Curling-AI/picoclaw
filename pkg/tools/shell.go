@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,8 +39,9 @@ func getSessionManager() *SessionManager {
 }
 
 type ExecTool struct {
-	workingDir string
-	timeout    time.Duration
+	workingDir       string
+	timeout          time.Duration
+	strictExitStatus bool
 	// denyPatterns are the built-in footgun patterns (fork bomb, mkfs, dd, …).
 	// They are scanned against the heredoc/quote-stripped command so destructive
 	// WORDS inside inline code (python -c, heredocs) don't false-trip them.
@@ -238,9 +240,10 @@ func (t *ExecTool) Description() string {
 		wd = "your workspace"
 	}
 	return fmt.Sprintf(
-		`Execute shell commands. Commands already run in %s by default — do NOT prefix with "cd %s &&"; just use paths relative to it (or absolute). The shell session persists between calls (env vars and any directory change carry over). Use background=true for long-running commands (returns sessionId). Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`,
+		`Execute shell commands. Commands already run in %s by default — do NOT prefix with "cd %s &&"; just use paths relative to it (or absolute). Each call is a new shell that starts there: a cd or an exported variable does not carry over to the next call. A foreground command is killed after a timeout; pass timeout (seconds, up to %d) when it needs longer. To wait for a long job, start it with background=true (returns sessionId) and call poll with wait instead of running sleep. Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`,
 		wd,
 		wd,
+		int(maxExecTimeout/time.Second),
 	)
 }
 
@@ -270,11 +273,11 @@ func (t *ExecTool) Parameters() map[string]any {
 				"description": "Data to write to stdin (required for write)",
 			},
 			"background": map[string]any{
-				"type":        "string",
+				"type":        "boolean",
 				"description": "Run in background immediately",
 			},
 			"pty": map[string]any{
-				"type":        "string",
+				"type":        "boolean",
 				"description": "Run in a pseudo-terminal (PTY) when available",
 			},
 			"cwd": map[string]any{
@@ -282,8 +285,18 @@ func (t *ExecTool) Parameters() map[string]any {
 				"description": "Working directory for the command",
 			},
 			"timeout": map[string]any{
-				"type":        "integer",
-				"description": "Timeout in seconds (0 = no timeout)",
+				"type": "integer",
+				"description": fmt.Sprintf(
+					"Seconds a foreground command may run before it is killed, up to %d. Omit it for the default",
+					int(maxExecTimeout/time.Second),
+				),
+			},
+			"wait": map[string]any{
+				"type": "integer",
+				"description": fmt.Sprintf(
+					"For poll: seconds to wait for the session to finish before answering, up to %d. Returns as soon as it finishes",
+					int(maxExecTimeout/time.Second),
+				),
 			},
 		},
 		// action is not required: it defaults to "run" when a command is
@@ -313,7 +326,7 @@ func (t *ExecTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	case "list":
 		return t.executeList()
 	case "poll":
-		return t.executePoll(args)
+		return t.executePoll(ctx, args)
 	case "read":
 		return t.executeRead(args)
 	case "write":
@@ -415,15 +428,101 @@ func (t *ExecTool) executeRun(ctx context.Context, args map[string]any) *ToolRes
 		return t.runBackground(ctx, command, cwd, isPty)
 	}
 
-	return t.runSync(ctx, command, cwd)
+	return t.runSync(ctx, command, cwd, t.commandTimeout(args))
 }
 
-func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult {
+// commandTimeout is what the model asked for, up to the turn's own limit, or
+// the configured default.
+func (t *ExecTool) commandTimeout(args map[string]any) time.Duration {
+	if seconds := secondsArg(args, "timeout"); seconds > 0 {
+		return seconds
+	}
+	return t.timeout
+}
+
+const (
+	// maxExecTimeout keeps one command from holding a turn for more than 10 minutes.
+	maxExecTimeout   = 600 * time.Second
+	pollWaitInterval = 500 * time.Millisecond
+)
+
+// secondsArg reads a duration in seconds, capped at maxExecTimeout. JSON hands
+// over a float64 and coerceToolArgs an int64.
+func secondsArg(args map[string]any, key string) time.Duration {
+	var seconds int64
+	switch v := args[key].(type) {
+	case float64:
+		seconds = int64(v)
+	case int64:
+		seconds = v
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(min(seconds, int64(maxExecTimeout/time.Second))) * time.Second
+}
+
+// answerExitCommands use exit 1 to say "no": no match, false, the files differ.
+var answerExitCommands = map[string]bool{
+	"grep": true, "egrep": true, "fgrep": true, "rg": true, "pgrep": true,
+	"test": true, "[": true, "[[": true, "diff": true, "cmp": true, "which": true,
+}
+
+// shellCommandSeparator also takes the line break after an operator, which the
+// shell ignores there.
+var shellCommandSeparator = regexp.MustCompile(`(?:\|\||&&|\|)\s*|[;\n]`)
+
+// exitStatusOverridePattern finds what can end the shell, or fail it, before the
+// last command runs.
+var exitStatusOverridePattern = regexp.MustCompile(`\b(exit|set)\b`)
+
+func commandName(segment string) string {
+	fields := strings.Fields(segment)
+	if len(fields) == 0 {
+		return ""
+	}
+	return filepath.Base(strings.TrimLeft(fields[0], "("))
+}
+
+// exitOneIsAnswer says whether the exit 1 came from a command that answers with
+// it: the last one, unless a `&&` before it could have stopped the chain with a
+// silent exit 1 of its own. A cd fails on stderr, so it stays ruled out unless
+// redirected. A separator inside quotes makes it miss and report a failure, as before.
+func exitOneIsAnswer(command string) bool {
+	if exitStatusOverridePattern.MatchString(command) {
+		return false
+	}
+	segments := shellCommandSeparator.Split(command, -1)
+	separators := shellCommandSeparator.FindAllString(command, -1)
+	last := len(segments) - 1
+	for last >= 0 && commandName(segments[last]) == "" {
+		last--
+	}
+	if last < 0 || !answerExitCommands[commandName(segments[last])] {
+		return false
+	}
+	for i := last; i > 0; i-- {
+		switch strings.TrimSpace(separators[i-1]) {
+		case "|": // An earlier member of the pipeline: the shell reports the last one.
+		case "&&":
+			name := commandName(segments[i-1])
+			silentCD := name == "cd" && strings.Contains(segments[i-1], ">")
+			if silentCD || (name != "cd" && !answerExitCommands[name]) {
+				return false
+			}
+		default:
+			return true
+		}
+	}
+	return true
+}
+
+func (t *ExecTool) runSync(ctx context.Context, command, cwd string, timeout time.Duration) *ToolResult {
 	// timeout == 0 means no timeout
 	var cmdCtx context.Context
 	var cancel context.CancelFunc
-	if t.timeout > 0 {
-		cmdCtx, cancel = context.WithTimeout(ctx, t.timeout)
+	if timeout > 0 {
+		cmdCtx, cancel = context.WithTimeout(ctx, timeout)
 	} else {
 		cmdCtx, cancel = context.WithCancel(ctx)
 	}
@@ -487,9 +586,11 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 		output += "\nSTDERR:\n" + stderr.String()
 	}
 
+	failed := err != nil
+	exitNote := ""
 	if err != nil {
 		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
-			msg := fmt.Sprintf("Command timed out after %v", t.timeout)
+			msg := fmt.Sprintf("Command timed out after %v", timeout)
 			if output != "" {
 				msg += "\n\nPartial output before timeout:\n" + output
 			}
@@ -505,18 +606,22 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode := exitErr.ExitCode()
-			output += fmt.Sprintf("\n\n[Command exited with code %d]", exitCode)
+			exitNote = fmt.Sprintf("\n\n[Command exited with code %d]", exitCode)
 
 			// Add signal information if killed by signal (Unix)
 			if exitCode == -1 {
-				output += " (killed by signal)"
+				exitNote += " (killed by signal)"
 			}
+			// Exit 1 from grep and the like is an answer, not a failure. Any other
+			// command can send its errors to stdout (`npm test 2>&1`), so an empty
+			// stderr alone proves nothing.
+			failed = t.strictExitStatus || stderr.Len() > 0 || exitCode != 1 || !exitOneIsAnswer(command)
 		} else {
-			output += fmt.Sprintf("\n\n[Command failed: %v]", err)
+			exitNote = fmt.Sprintf("\n\n[Command failed: %v]", err)
 		}
 	}
 
-	if output == "" {
+	if output == "" && exitNote == "" {
 		output = "(no output)"
 	}
 
@@ -524,8 +629,10 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	if len(output) > maxLen {
 		output = output[:maxLen] + fmt.Sprintf("\n... (truncated, %d more chars)", len(output)-maxLen)
 	}
+	// After the cut, so long output keeps it.
+	output += exitNote
 
-	if err != nil {
+	if failed {
 		return &ToolResult{
 			ForLLM:  output,
 			ForUser: output,
@@ -780,7 +887,24 @@ func (t *ExecTool) executeList() *ToolResult {
 	}
 }
 
-func (t *ExecTool) executePoll(args map[string]any) *ToolResult {
+// waitForSession returns when the session finishes, wait passes or ctx ends.
+func waitForSession(ctx context.Context, session *ProcessSession, wait time.Duration) {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	tick := time.NewTicker(pollWaitInterval)
+	defer tick.Stop()
+	for !session.IsDone() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+func (t *ExecTool) executePoll(ctx context.Context, args map[string]any) *ToolResult {
 	sessionID, ok := args["sessionId"].(string)
 	if !ok {
 		return ErrorResult("sessionId is required")
@@ -792,6 +916,10 @@ func (t *ExecTool) executePoll(args map[string]any) *ToolResult {
 			return ErrorResult(fmt.Sprintf("session not found: %s", sessionID))
 		}
 		return ErrorResult(err.Error())
+	}
+
+	if wait := secondsArg(args, "wait"); wait > 0 {
+		waitForSession(ctx, session, wait)
 	}
 
 	resp := ExecResponse{
@@ -1205,7 +1333,7 @@ func stripHeredocBodies(cmd string) string {
 		bodyStart = m[1] + bodyStart + 1
 		// Find the terminator: a line that is exactly the word (allowing
 		// leading tabs for <<-).
-		end := len(cmd)
+		end := -1
 		for i := bodyStart; i <= len(cmd); {
 			lineEnd := strings.IndexByte(cmd[i:], '\n')
 			var line string
@@ -1298,10 +1426,9 @@ func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
 	return false
 }
 
-// recursiveRmRE casa `rm` recursivo e captura o ALVO. As flags podem vir em
-// qualquer ordem e agrupadas (`-rf`, `-fr`, `-r -f`). (seucaranguejo fork)
-var recursiveRmRE = regexp.MustCompile(
-	`\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(?:-[a-zA-Z]+\s+)*([^\s;|&]+)`)
+// rmCommandRE casa `rm` e captura os arguments; rmOperands separa flags de alvos.
+// (seucaranguejo fork)
+var rmCommandRE = regexp.MustCompile(`(?:^|[\s;&|(])rm\s+([^;|&\n]+)`)
 
 // deletesWorkspaceRoot diz se a linha apaga o workspace INTEIRO.
 //
@@ -1310,31 +1437,62 @@ var recursiveRmRE = regexp.MustCompile(
 // resolvido e comparado com a raiz — que no seucaranguejo é EFS e guarda o
 // histórico e os entregáveis do usuário. (seucaranguejo fork)
 func deletesWorkspaceRoot(cmd, cwdPath string) bool {
-	for _, m := range recursiveRmRE.FindAllStringSubmatch(cmd, -1) {
-		alvo := strings.Trim(m[1], `"'`)
-		if alvo == "*" || alvo == "." || alvo == "./" || alvo == ".." {
-			return true
-		}
-		abs, err := commandPathAbs(alvo, cwdPath)
-		if err != nil {
+	starts, rest := skipLeadingCDs(cmd, cwdPath, cwdPath)
+	guaranteed, fallback := splitAfterAndChain(rest)
+	raiz := realPath(cwdPath)
+	return rmDeletesRoot(guaranteed, starts[len(starts)-1:], raiz) || rmDeletesRoot(fallback, starts, raiz)
+}
+
+// rmDeletesRoot checks each recursive rm in text from every directory it may run in.
+func rmDeletesRoot(text string, starts []string, raiz string) bool {
+	for _, m := range rmCommandRE.FindAllStringSubmatch(text, -1) {
+		operands, recursive := rmOperands(m[1])
+		if !recursive {
 			continue
 		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
-		raiz := cwdPath
-		if r, err := filepath.EvalSymlinks(raiz); err == nil {
-			raiz = r
-		}
-		// O próprio workspace, ou qualquer ancestral dele.
-		if abs == raiz {
-			return true
-		}
-		if rel, err := filepath.Rel(abs, raiz); err == nil && !strings.HasPrefix(rel, "..") {
-			return true
+		for _, alvo := range operands {
+			if alvo == "*" || alvo == "." || alvo == "./" || alvo == ".." {
+				return true
+			}
+			// `<dir>/*` empties <dir>, which for the workspace is the same loss.
+			if strings.HasSuffix(alvo, "/*") {
+				alvo = strings.TrimSuffix(alvo, "*")
+			}
+			if slices.ContainsFunc(
+				starts,
+				func(start string) bool { return rmTargetContains(climbPath(start, alvo), raiz) },
+			) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// rmTargetContains: the workspace itself, or any ancestor of it.
+func rmTargetContains(target, raiz string) bool {
+	if target == raiz {
+		return true
+	}
+	rel, err := filepath.Rel(target, raiz)
+	return err == nil && !strings.HasPrefix(rel, "..")
+}
+
+// rmOperands splits the arguments of rm, with what the shell removes already gone.
+func rmOperands(args string) (operands []string, recursive bool) {
+	optionsDone := false
+	for _, raw := range strings.Fields(shellJoinReplacer.Replace(args)) {
+		token := strings.ReplaceAll(raw, `\`, "")
+		switch {
+		case optionsDone || !strings.HasPrefix(token, "-"):
+			operands = append(operands, token)
+		case token == "--":
+			optionsDone = true
+		case token == "--recursive" || (!strings.HasPrefix(token, "--") && strings.ContainsAny(token, "rR")):
+			recursive = true
+		}
+	}
+	return operands, recursive
 }
 
 // expandTilde troca `~/` pelo HOME antes da varredura de caminho.
@@ -1417,30 +1575,9 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	}
 
 	if t.restrictToWorkspace {
-		if abs, err := filepath.Abs(cwd); err == nil && deletesWorkspaceRoot(cmd, abs) {
-			return "Command blocked by safety guard (this deletes the whole workspace, " +
-				"which persists across restarts and holds the user's history, memory and " +
-				"deliverables. Delete specific files or subdirectories instead.)"
-		}
-
-		// Block path traversal patterns including .../.../ variants
-		if regexp.MustCompile(`\.\.(?:[\\/]\.\.)*[\\/]`).MatchString(cmd) {
-			return "Command blocked by safety guard (path traversal detected)"
-		}
-
 		cwdPath, err := filepath.Abs(cwd)
 		if err != nil {
 			return ""
-		}
-
-		// Web URL schemes whose path components (starting with //) should be exempt
-		// from workspace sandbox checks. file: is intentionally excluded so that
-		// file:// URIs are still validated against the workspace boundary.
-		webSchemes := []string{
-			"http:", "https:", "ftp:", "ftps:", "sftp:", "ssh:", "git:",
-			// Network protocols curl and other tools reach over //host — not
-			// filesystem paths. (seucaranguejo fork)
-			"smtp:", "smtps:", "imap:", "imaps:", "pop3:", "pop3s:", "ws:", "wss:",
 		}
 
 		// On Windows, expand ~ and PowerShell environment variables ($env:VAR) before path checking
@@ -1463,6 +1600,19 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 				cmd = strings.ReplaceAll(cmd, "$HOME", home)
 				cmd = strings.ReplaceAll(cmd, "~/", home+"/")
 			}
+		}
+
+		if deletesWorkspaceRoot(cmd, cwdPath) {
+			return "Command blocked by safety guard (this deletes the whole workspace, " +
+				"which persists across restarts and holds the user's history, memory and " +
+				"deliverables. Delete specific files or subdirectories instead.)"
+		}
+
+		if path := t.escapingDotDotPath(cmd, cwdPath); path != "" {
+			return fmt.Sprintf(
+				"Command blocked by safety guard (path traversal detected: %s leaves the workspace)",
+				path,
+			)
 		}
 
 		// Heredoc bodies and quoted string literals are DATA, not filesystem
@@ -1541,7 +1691,13 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 				}
 			}
 
-			p, err := commandPathAbs(commandPathTextFromMatch(scanCmd, loc[0], loc[1]), cwdPath)
+			pathText := commandPathTextFromMatch(scanCmd, loc[0], loc[1])
+			// A relative path that climbs was resolved above, from where it runs.
+			if !filepath.IsAbs(pathText) && strings.Contains(pathText, "../") {
+				continue
+			}
+
+			p, err := commandPathAbs(pathText, cwdPath)
 			if err != nil {
 				continue
 			}
@@ -1704,6 +1860,12 @@ func commonFileExtension(ext string) bool {
 func localPathExists(cwd, token string) bool {
 	info, err := os.Lstat(filepath.Join(cwd, token))
 	return err == nil && info != nil
+}
+
+// SetStrictExitStatus makes any non-zero exit a failure. For callers with no model
+// to read the code: a cron command's exit status is all that says it failed.
+func (t *ExecTool) SetStrictExitStatus(strict bool) {
+	t.strictExitStatus = strict
 }
 
 func (t *ExecTool) SetTimeout(timeout time.Duration) {

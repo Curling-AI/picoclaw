@@ -578,3 +578,73 @@ func TestCoerceToolArgs_DecodesJSONTextForArraysAndObjects(t *testing.T) {
 		t.Errorf("text that is not JSON of the declared type changed: %#v / %#v", args["broken"], args["wrong"])
 	}
 }
+
+func TestDropUnknownToolArgs(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string"},
+			"body": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"title": map[string]any{"type": "string"}},
+			},
+			"rows": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"id": map[string]any{"type": "string"}},
+				},
+			},
+			"sheets": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "array"}},
+		},
+	}
+	args := map[string]any{
+		"name":      "x",
+		"__channel": "cli",
+		"body":      map[string]any{"title": "t", "stray": 1},
+		"rows":      []any{map[string]any{"id": "1", "extra": true}},
+		"sheets":    map[string]any{"Vendas": []any{}},
+	}
+
+	dropped := dropUnknownToolArgs(schema, args)
+
+	want := []string{"__channel", "body.stray", "rows.extra"}
+	if strings.Join(dropped, ",") != strings.Join(want, ",") {
+		t.Fatalf("dropped = %v, want %v", dropped, want)
+	}
+	if _, kept := args["__channel"]; kept {
+		t.Fatal("an internal argument must not reach the tool")
+	}
+	if err := validateToolArgs(schema, args); err != nil {
+		t.Fatalf("free-form keys declared by additionalProperties must pass: %v", err)
+	}
+	if _, kept := args["sheets"].(map[string]any)["Vendas"]; !kept {
+		t.Fatal("free-form keys must be kept")
+	}
+}
+
+func TestDropUnknownToolArgs_AdditionalTrueKeepsEverything(t *testing.T) {
+	schema := map[string]any{"properties": map[string]any{}, "additionalProperties": true}
+	args := map[string]any{"anything": 1}
+	if dropped := dropUnknownToolArgs(schema, args); dropped != nil || args["anything"] != 1 {
+		t.Fatalf("dropped = %v, args = %v", dropped, args)
+	}
+}
+
+// validateToolArgs accepts extras in a nullable object, so the drop must leave them.
+func TestDropUnknownToolArgs_OnlyInsidePlainObjects(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"nullable": map[string]any{
+				"type":       []any{"object", "null"},
+				"properties": map[string]any{"known": map[string]any{"type": "string"}},
+			},
+		},
+	}
+	args := map[string]any{"nullable": map[string]any{"known": "k", "extra": "e"}}
+
+	if dropped := dropUnknownToolArgs(schema, args); len(dropped) != 0 {
+		t.Fatalf("dropped %v", dropped)
+	}
+}

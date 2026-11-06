@@ -117,7 +117,7 @@ func (t *LoadImageTool) Execute(ctx context.Context, args map[string]any) *ToolR
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		return ErrorResult(fmt.Sprintf("file not found: %v", err))
+		return ErrorResult(fmt.Sprintf("file not found: %v", err) + similarFilesHint(&hostFs{}, resolved, err))
 	}
 	if info.IsDir() {
 		return ErrorResult("path is a directory, expected an image file")
