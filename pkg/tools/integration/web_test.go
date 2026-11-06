@@ -1576,13 +1576,12 @@ func TestWebFetchTool_CloudflareChallenge_NoRetryOnOtherErrors(t *testing.T) {
 	}
 }
 
-// TestWebFetchTool_CloudflareChallenge_RetryFailsToo verifies that if the honest-UA
-// retry also fails (e.g. still blocked), the error from the retry is returned.
+// TestWebFetchTool_CloudflareChallenge_RetryFailsToo verifies that a challenge
+// surviving the honest-UA retry reaches the model as a block, not as page content.
 func TestWebFetchTool_CloudflareChallenge_RetryFailsToo(t *testing.T) {
 	withPrivateWebFetchHostsAllowed(t)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always return CF challenge regardless of UA
 		w.Header().Set("Cf-Mitigated", "challenge")
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusForbidden)
@@ -1597,13 +1596,50 @@ func TestWebFetchTool_CloudflareChallenge_RetryFailsToo(t *testing.T) {
 
 	result := tool.Execute(context.Background(), map[string]any{"url": server.URL})
 
-	// Should not be an error — the retry response is used as-is (403 is a valid HTTP response)
-	if result.IsError {
-		t.Fatalf("expected non-error result even when retry is also blocked, got: %s", result.ForLLM)
+	if !result.IsError {
+		t.Fatalf("expected a block error, got: %s", result.ForLLM)
 	}
-	// Status in the JSON result should reflect the 403
-	if !strings.Contains(result.ForLLM, "403") {
-		t.Errorf("expected status 403 in result, got: %s", result.ForLLM)
+	if !strings.Contains(result.ForLLM, "cloudflare") || !strings.Contains(result.ForLLM, "browser tool") {
+		t.Errorf("expected the vendor and the way out, got: %s", result.ForLLM)
+	}
+	if strings.Contains(result.ForLLM, "still blocked") {
+		t.Errorf("the block page must not reach the model, got: %s", result.ForLLM)
+	}
+}
+
+// A block page without the Cloudflare header is recognized too, and a real page
+// that merely quotes a marker is not.
+func TestWebFetchTool_AntiBotPages(t *testing.T) {
+	withPrivateWebFetchHostsAllowed(t)
+
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		blocked bool
+	}{
+		{"challenge title", http.StatusServiceUnavailable, "<html><title>Just a moment...</title></html>", true},
+		{"datadome on 403", http.StatusForbidden, `<html><script src="https://js.captcha-delivery.com/c.js"></script></html>`, true},
+		{"article quoting a marker", http.StatusOK, "<html><title>About captcha-delivery.com</title><body>captcha-delivery.com</body></html>", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(c.status)
+				w.Write([]byte(c.body))
+			}))
+			defer server.Close()
+
+			tool, err := NewWebFetchTool(50000, format, testFetchLimit)
+			if err != nil {
+				t.Fatalf("NewWebFetchTool() error: %v", err)
+			}
+			result := tool.Execute(context.Background(), map[string]any{"url": server.URL})
+			if result.IsError != c.blocked {
+				t.Fatalf("IsError = %v, want %v: %s", result.IsError, c.blocked, result.ForLLM)
+			}
+		})
 	}
 }
 
