@@ -559,20 +559,12 @@ func (r *ToolRegistry) ExecuteWithContext(
 }
 
 // dropsUnknownArgs says whether a stray argument is dropped rather than refused.
-// Whatever acts on something the call cannot take back keeps refusing, because the
-// stray argument can carry intent: write_file with append=true would replace the
-// log, an e-mail would go without a misnamed attachment.
+// Only a tool that declares itself read-only drops it: anywhere else it can carry
+// intent the call would lose in silence. replace_text with newText would delete the
+// line, exec with working_dir would run in the wrong place.
 func dropsUnknownArgs(tool Tool) bool {
-	if _, isMCP := tool.(mcpServerTool); isMCP {
-		safety, ok := tool.(toolshared.SideEffectHinter)
-		return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
-	}
-	switch tool.Name() {
-	case "write_file", "append_file", "edit_file", "message", "send_file", "send_tts", "reaction",
-		"cron", "spawn", "subagent", "delegate":
-		return false
-	}
-	return true
+	safety, ok := tool.(toolshared.SideEffectHinter)
+	return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
 }
 
 type mcpServerTool interface {

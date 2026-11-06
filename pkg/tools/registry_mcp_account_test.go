@@ -145,16 +145,15 @@ func (n namedNativeTool) Execute(context.Context, map[string]any) *ToolResult {
 	return NewToolResult("ok")
 }
 
-func TestDropsUnknownArgs_NativeToolsThatActKeepRefusing(t *testing.T) {
-	for _, name := range []string{"write_file", "append_file", "edit_file", "message", "send_file", "cron", "spawn"} {
+func TestDropsUnknownArgs_OnlyDeclaredReadOnlyToolsDrop(t *testing.T) {
+	for _, name := range []string{"exec", "memory", "write_file", "edit_file", "message", "cron", "spawn"} {
 		if dropsUnknownArgs(namedNativeTool{name}) {
 			t.Errorf("%s must refuse: the stray argument can carry intent", name)
 		}
 	}
-	for _, name := range []string{"read_file", "list_dir", "exec", "memory"} {
-		if !dropsUnknownArgs(namedNativeTool{name}) {
-			t.Errorf("%s should drop a stray argument", name)
-		}
+	reader := &accountTool{name: "reader", safety: toolshared.RepeatReadOnly}
+	if !dropsUnknownArgs(reader) {
+		t.Error("a tool that declares itself read-only should drop a stray argument")
 	}
 }
 

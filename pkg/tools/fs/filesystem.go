@@ -22,6 +22,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
 
 const MaxReadFileSize = 64 * 1024 // 64KB limit to avoid context overflow
@@ -333,9 +334,13 @@ func NewReadFileLinesTool(
 	}
 }
 
+func (t *ReadFileTool) RepeatSafety() toolshared.RepeatSafety { return toolshared.RepeatReadOnly }
+
 func (t *ReadFileTool) Name() string {
 	return "read_file"
 }
+
+func (t *ReadFileLinesTool) RepeatSafety() toolshared.RepeatSafety { return toolshared.RepeatReadOnly }
 
 func (t *ReadFileLinesTool) Name() string {
 	return "read_file"
@@ -1159,6 +1164,8 @@ func NewListDirTool(workspace string, restrict bool, allowPaths ...[]*regexp.Reg
 	}
 	return &ListDirTool{fs: buildFs(workspace, restrict, patterns)}
 }
+
+func (t *ListDirTool) RepeatSafety() toolshared.RepeatSafety { return toolshared.RepeatReadOnly }
 
 func (t *ListDirTool) Name() string {
 	return "list_dir"
