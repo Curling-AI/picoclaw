@@ -28,15 +28,6 @@ type ToolRegistry struct {
 	version    atomic.Uint64 // incremented on Register/RegisterHidden for cache invalidation
 	mediaStore media.MediaStore
 	allowlist  map[string]struct{}
-	// mcpRejections counts consecutive 401s per connector.
-	mcpRejections map[string]mcpRejection
-	// retiredMCP holds, per connector, the tools taken out until the next turn.
-	retiredMCP map[string]map[string]*ToolEntry
-}
-
-type mcpRejection struct {
-	count          int
-	countedInRound bool
 }
 
 type mediaStoreAware interface {
@@ -172,10 +163,6 @@ func (r *ToolRegistry) TickTTL() {
 			entry.TTL--
 		}
 	}
-	for server, rejection := range r.mcpRejections {
-		rejection.countedInRound = false
-		r.mcpRejections[server] = rejection
-	}
 }
 
 // TouchTools re-arms the TTL of promoted tools that were just used (sliding
@@ -284,11 +271,7 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
 	coerced, _ := cloneJSONValue(args).(map[string]any)
 	if tool, ok := r.GetRegistered(name); ok {
-		schema := tool.Parameters()
-		coerceToolArgs(schema, coerced)
-		if dropsUnknownArgs(tool) {
-			dropUnknownToolArgs(schema, coerced)
-		}
+		normalizeToolArgs(tool, tool.Parameters(), coerced)
 	}
 	return coerced
 }
@@ -451,11 +434,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 	// unambiguous typing slips (numeric strings, stringified booleans) so a
 	// recoverable call doesn't cost the agent a whole iteration.
 	schema := tool.Parameters()
-	coerceToolArgs(schema, args)
-	var droppedArgs []string
-	if dropsUnknownArgs(tool) {
-		droppedArgs = dropUnknownToolArgs(schema, args)
-	}
+	droppedArgs := normalizeToolArgs(tool, schema, args)
 	if err := validateToolArgs(schema, args); err != nil {
 		logger.WarnCF("tool", "Tool argument validation failed",
 			map[string]any{"tool": name, "error": err.Error()})
@@ -521,7 +500,6 @@ func (r *ToolRegistry) ExecuteWithContext(
 
 	result = normalizeToolResult(result, name, r.mediaStore, channel, chatID)
 	toolshared.AfterExecutionTool(ctx, tool, result)
-	r.noteMCPAccount(tool, result)
 	if len(droppedArgs) > 0 {
 		logger.InfoCF("tool", "Tool arguments ignored", map[string]any{"tool": name, "args": droppedArgs})
 		result.ForLLM += fmt.Sprintf(
@@ -558,6 +536,16 @@ func (r *ToolRegistry) ExecuteWithContext(
 	return result
 }
 
+// normalizeToolArgs applies the fixes a call gets before validation and returns
+// the arguments it dropped. The repeat guard compares calls after the same fixes.
+func normalizeToolArgs(tool Tool, schema, args map[string]any) []string {
+	coerceToolArgs(schema, args)
+	if dropsUnknownArgs(tool) {
+		return dropUnknownToolArgs(schema, args)
+	}
+	return nil
+}
+
 // dropsUnknownArgs says whether a stray argument is dropped rather than refused.
 // Only a tool that declares itself read-only drops it: anywhere else it can carry
 // intent the call would lose in silence. replace_text with newText would delete the
@@ -565,101 +553,6 @@ func (r *ToolRegistry) ExecuteWithContext(
 func dropsUnknownArgs(tool Tool) bool {
 	safety, ok := tool.(toolshared.SideEffectHinter)
 	return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
-}
-
-type mcpServerTool interface {
-	MCPServerName() string
-}
-
-// mcpRejectionLimit is how many 401s in a row, in different rounds, take a
-// connector out: one can be a token about to be refreshed, and parallel calls of
-// one round all see the same token.
-const mcpRejectionLimit = 2
-
-// noteMCPAccount takes a connector whose account does not work out of the registry
-// for the rest of the turn, so the model stops spending iterations on its tools.
-// RestoreRetiredMCP brings it back: nothing tells the pod the user reconnected,
-// because that does not change its config.
-//
-// shortcut: every turn that uses a dead connector pays one failed call, and the
-// change in the tool list costs the prompt cache once each way. Reading the account
-// status when the config is built would avoid both, at the cost of more calls on
-// Composio's shared per-minute quota; upgrade if the volume stays high.
-func (r *ToolRegistry) noteMCPAccount(tool Tool, result *ToolResult) {
-	scoped, ok := tool.(mcpServerTool)
-	if !ok {
-		return
-	}
-	server := scoped.MCPServerName()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	switch result.MCPAccount {
-	case toolshared.MCPAccountMissing:
-	case toolshared.MCPAccountRejected:
-		rejection := r.mcpRejections[server]
-		if !rejection.countedInRound {
-			rejection.count++
-			rejection.countedInRound = true
-		}
-		if rejection.count < mcpRejectionLimit {
-			if r.mcpRejections == nil {
-				r.mcpRejections = map[string]mcpRejection{}
-			}
-			r.mcpRejections[server] = rejection
-			return
-		}
-	default:
-		if !result.IsError {
-			delete(r.mcpRejections, server)
-		}
-		return
-	}
-	delete(r.mcpRejections, server)
-	retired := map[string]*ToolEntry{}
-	for name, entry := range r.tools {
-		if owned, ok := entry.Tool.(mcpServerTool); ok && owned.MCPServerName() == server {
-			retired[name] = entry
-			delete(r.tools, name)
-		}
-	}
-	if len(retired) == 0 {
-		return // a parallel call of the same round already took them out
-	}
-	if r.retiredMCP == nil {
-		r.retiredMCP = map[string]map[string]*ToolEntry{}
-	}
-	r.retiredMCP[server] = retired
-	r.version.Add(1)
-	logger.WarnCF("tool", "Connector tools retired for this turn: account not usable", map[string]any{"server": server})
-	result.ForLLM += fmt.Sprintf("\n\n[The account of the %s connector is not usable, so its tools were removed for "+
-		"this turn. Do not look for another of its tools: tell the user it needs to be connected again.]", server)
-}
-
-// RestoreRetiredMCP brings back the connectors retired during the previous turn.
-func (r *ToolRegistry) RestoreRetiredMCP() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.retiredMCP) == 0 {
-		return
-	}
-	for _, retired := range r.retiredMCP {
-		for name, entry := range retired {
-			if _, registeredAgain := r.tools[name]; !registeredAgain {
-				r.tools[name] = entry
-			}
-		}
-	}
-	r.retiredMCP = nil
-	r.version.Add(1)
-}
-
-// IsMCPServerRetired says whether a connector's tools are out for this turn. They
-// are still registered as far as readiness is concerned.
-func (r *ToolRegistry) IsMCPServerRetired(server string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, retired := r.retiredMCP[server]
-	return retired
 }
 
 // sortedToolNames returns tool names in sorted order for deterministic iteration.

@@ -78,6 +78,47 @@ func TestWriteFile_OverwriteFlagDoesNotUnprotectAFile(t *testing.T) {
 	assert.Equal(t, "new", string(got))
 }
 
+func TestWriteFile_FileChangedSinceTheAgentCreatedItKeepsTheRefusal(t *testing.T) {
+	workspace := t.TempDir()
+	tool := NewWriteFileTool(workspace, true)
+	args := map[string]any{"path": "report.md", "content": "agent"}
+	assert.False(t, tool.Execute(context.Background(), args).IsError)
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "report.md"), []byte("the user's edit"), 0o644))
+
+	assert.True(t, tool.Execute(context.Background(), args).IsError)
+
+	got, err := os.ReadFile(filepath.Join(workspace, "report.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "the user's edit", string(got))
+}
+
+func TestWriteFile_RepeatedRewriteKeepsWorking(t *testing.T) {
+	tool := NewWriteFileTool(t.TempDir(), true)
+	for _, content := range []string{"one", "two", "three"} {
+		result := tool.Execute(context.Background(), map[string]any{"path": "report.md", "content": content})
+		assert.False(t, result.IsError, result.ForLLM)
+	}
+}
+
+// Only a file known to be absent counts as free.
+func TestWriteFile_UnreadableFileIsNotTreatedAsNew(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	workspace := t.TempDir()
+	tool := NewWriteFileTool(workspace, true)
+	path := filepath.Join(workspace, "secret.md")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o200))
+
+	result := tool.Execute(context.Background(), map[string]any{"path": "secret.md", "content": "new"})
+
+	assert.True(t, result.IsError, result.ForLLM)
+	require.NoError(t, os.Chmod(path, 0o600))
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "old", string(got))
+}
+
 func TestWriteFile_MemoryKeepsTheRefusalEvenWhenCreatedHere(t *testing.T) {
 	tool := NewWriteFileTool(t.TempDir(), true)
 	args := map[string]any{"path": "memory/MEMORY.md", "content": "first"}

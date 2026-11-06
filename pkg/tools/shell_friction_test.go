@@ -99,7 +99,13 @@ func TestExecExitStatus(t *testing.T) {
 	}{
 		{"grep nothing /dev/null", false},
 		{"test -f /nonexistent", false},
-		{"echo report; exit 3", false},
+		{"cat /dev/null | grep nothing", false},
+		{"(grep nothing /dev/null)", false},
+		{"cd /tmp && diff /dev/null /etc/hosts >/dev/null", false},
+		{"echo report; exit 3", true},
+		{"echo failed 2>&1; exit 1", true},
+		{"sh -c 'echo failed; exit 1' 2>&1", true},
+		{"grep nothing /dev/null; exit 2", true},
 		{"echo oops >&2; exit 1", true},
 		{"ls /nonexistent_directory_12345", true},
 		{"kill -9 $$", true},
@@ -113,6 +119,14 @@ func TestExecExitStatus(t *testing.T) {
 	result := tool.Execute(context.Background(), map[string]any{"command": "exit 3"})
 	if !strings.Contains(result.ForLLM, "exited with code 3") {
 		t.Errorf("the code must stay visible to the model: %s", result.ForLLM)
+	}
+	result = tool.Execute(
+		context.Background(),
+		map[string]any{"command": "head -c 20000 /dev/zero | tr '\\0' x; exit 3"},
+	)
+	if !strings.Contains(result.ForLLM, "truncated") ||
+		!strings.HasSuffix(result.ForLLM, "[Command exited with code 3]") {
+		t.Errorf("long output must keep the exit code: %s", result.ForLLM[max(0, len(result.ForLLM)-120):])
 	}
 }
 
@@ -128,6 +142,9 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 	}
 	outside := t.TempDir()
 	if err = os.Symlink(outside, filepath.Join(workspace, "work", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(filepath.Join("work", "a"), filepath.Join(workspace, "deep")); err != nil {
 		t.Fatal(err)
 	}
 	tool, err := NewExecTool(workspace, true)
@@ -149,13 +166,15 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 		{name: "quoted cd", command: `cd "work/a" && ls ../b`},
 		{name: "quoted path inside", command: `ls "../b"`, cwd: subdir},
 		{name: "import in a heredoc", command: "cat > work/a/x.mjs <<'EOF'\nimport '../../../scripts/cad.mjs'\nEOF"},
-		{name: "variable after the climb", command: "cp ../b/$f .", cwd: subdir},
 		{name: "url with a climb", command: "curl https://example.com/a/../b"},
 		{name: "sed expression", command: "sed 's/../x/' /dev/null"},
 		{name: "git range", command: "echo HEAD..main"},
 		{name: "workspace variable", command: "ls $PWD/work/../proposta"},
 		{name: "empty a subdir", command: "cd work && rm -rf ./*"},
 		{name: "empty a sibling", command: "cd work/a && rm -rf ../b/*"},
+		{name: "rm of named dirs", command: "rm -rf -- work/a work/b"},
+		{name: "rm flag of another tool", command: "docker run --rm -it img ."},
+		{name: "bare climb inside", command: "ls ..", cwd: subdir},
 
 		{name: "from the root", command: "cat ../secret", blocked: true},
 		{name: "deep escape", command: "cat ../../../etc/passwd", cwd: subdir, blocked: true},
@@ -189,6 +208,20 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 		{name: "empty the workspace after cd", command: "cd work && rm -rf ../*", blocked: true},
 		{name: "empty the workspace through a dir", command: "rm -rf work/../*", blocked: true},
 		{name: "empty the workspace from here", command: "rm -rf ./*", blocked: true},
+		{name: "rm after end of options", command: "rm -rf -- *", blocked: true},
+		{name: "rm with another operand first", command: "rm -rf x *", blocked: true},
+		{name: "rm of the expanded workspace", command: "rm -rf $PWD/*", blocked: true},
+		{name: "rm with escaped dots", command: `cd work && rm -rf .\./*`, blocked: true},
+		{name: "rm with flags last", command: "rm * -rf", blocked: true},
+		{name: "variable after the climb", command: "cp ../b/$f .", cwd: subdir, blocked: true},
+		{name: "substitution after the climb", command: "cat ../`echo x`", cwd: subdir, blocked: true},
+		{name: "tilde after the climb", command: "cat ../~x", cwd: subdir, blocked: true},
+		{name: "env runs elsewhere", command: "cd work && env -C .. cat ../secret", blocked: true},
+		{name: "git runs elsewhere", command: "cd work && git -C .. show ../secret", blocked: true},
+		{name: "cd split by quotes", command: "cd work && c''d ..; cat ../secret", blocked: true},
+		{name: "bare climb out", command: "ls ..", blocked: true},
+		{name: "climb ending the path", command: "cp x work/../..", blocked: true},
+		{name: "logical cd through a symlink", command: "cd deep/../.. && rm -rf ws", blocked: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

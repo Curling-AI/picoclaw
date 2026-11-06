@@ -956,10 +956,16 @@ type WriteFileTool struct {
 	workspace string
 
 	writtenMu sync.Mutex
-	// written holds the files this tool wrote since the pod started.
+	// written holds the files this tool created since the pod started, as they were
+	// left: a file someone changed since is no longer the agent's to replace.
 	// shortcut: forgotten on restart, where the refusal comes back once per file;
 	// persist it if that still shows up in the failures.
-	written map[string]struct{}
+	written map[string]fileStamp
+}
+
+type fileStamp struct {
+	size    int64
+	modTime time.Time
 }
 
 // workspaceScratchDirs hold work in progress, which the agent rewrites freely.
@@ -983,7 +989,7 @@ func NewWriteFileTool(
 		fs:        buildFs(workspace, restrict, patterns),
 		altTools:  []string{"append_file", "edit_file"},
 		workspace: workspace,
-		written:   map[string]struct{}{},
+		written:   map[string]fileStamp{},
 	}
 }
 
@@ -1001,16 +1007,32 @@ func (t *WriteFileTool) workspacePath(path string) string {
 			workspace = root
 		}
 	}
-	rel, err := filepath.Rel(workspace, filepath.Clean(abs))
-	if err != nil || !filepath.IsLocal(rel) {
+	if !isWithinWorkspace(abs, workspace) {
+		return ""
+	}
+	rel, err := filepath.Rel(filepath.Clean(workspace), filepath.Clean(abs))
+	if err != nil {
 		return ""
 	}
 	return filepath.ToSlash(rel)
 }
 
+func (t *WriteFileTool) stampOf(path string) (fileStamp, bool) {
+	file, err := t.fs.Open(path)
+	if err != nil {
+		return fileStamp{}, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fileStamp{}, false
+	}
+	return fileStamp{size: info.Size(), modTime: info.ModTime()}, true
+}
+
 // replacesWithoutFlag says whether an existing file may be replaced without
-// overwrite=true: scratch files, and what the agent itself created. Everything
-// else, memory above all, keeps the refusal.
+// overwrite=true: scratch files, and what the agent itself created and nobody
+// changed since. Everything else, memory above all, keeps the refusal.
 func (t *WriteFileTool) replacesWithoutFlag(path string) bool {
 	rel := t.workspacePath(path)
 	if rel == "" {
@@ -1020,10 +1042,14 @@ func (t *WriteFileTool) replacesWithoutFlag(path string) bool {
 	if rel != top && slices.Contains(workspaceScratchDirs, top) {
 		return true
 	}
+	stamp, ok := t.stampOf(path)
+	if !ok {
+		return false
+	}
 	t.writtenMu.Lock()
 	defer t.writtenMu.Unlock()
-	_, wrote := t.written[rel]
-	return wrote
+	written, wrote := t.written[rel]
+	return wrote && written.size == stamp.size && written.modTime.Equal(stamp.modTime)
 }
 
 func (t *WriteFileTool) rememberWritten(path string) {
@@ -1031,10 +1057,14 @@ func (t *WriteFileTool) rememberWritten(path string) {
 	if rel == "" || rel == "memory" || strings.HasPrefix(rel, "memory/") {
 		return
 	}
+	stamp, ok := t.stampOf(path)
+	if !ok {
+		return
+	}
 	t.writtenMu.Lock()
 	defer t.writtenMu.Unlock()
-	if len(t.written) < maxTrackedWrites {
-		t.written[rel] = struct{}{}
+	if _, known := t.written[rel]; known || len(t.written) < maxTrackedWrites {
+		t.written[rel] = stamp
 	}
 }
 
@@ -1120,7 +1150,10 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	replaced, created := false, false
 	err := t.fs.withWriteLock(path, func() error {
 		existing, openErr := t.fs.Open(path)
-		created = openErr != nil
+		created = errors.Is(openErr, os.ErrNotExist)
+		if openErr != nil && !created && !overwrite {
+			return openErr // unreadable or outside the sandbox: not known to be free
+		}
 		if openErr == nil {
 			_ = existing.Close()
 			replaced = !overwrite && t.replacesWithoutFlag(path)
@@ -1144,7 +1177,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 		return ErrorResult(err.Error())
 	}
 
-	if created {
+	if created || replaced {
 		t.rememberWritten(path)
 	}
 	if replaced {

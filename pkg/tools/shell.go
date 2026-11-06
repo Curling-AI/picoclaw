@@ -461,6 +461,26 @@ func secondsArg(args map[string]any, key string) time.Duration {
 	return time.Duration(min(seconds, int64(maxExecTimeout/time.Second))) * time.Second
 }
 
+// answerExitCommands use exit 1 to say "no": no match, false, the files differ.
+var answerExitCommands = map[string]bool{
+	"grep": true, "egrep": true, "fgrep": true, "rg": true, "pgrep": true,
+	"test": true, "[": true, "[[": true, "diff": true, "cmp": true, "which": true,
+}
+
+var shellCommandSeparator = regexp.MustCompile(`\|\||&&|[;|\n]`)
+
+// exitOneIsAnswer looks at the last command, the one whose exit code the shell
+// reports. A separator inside quotes makes it miss and report a failure, as before.
+func exitOneIsAnswer(command string) bool {
+	segments := shellCommandSeparator.Split(command, -1)
+	for i := len(segments) - 1; i >= 0; i-- {
+		if fields := strings.Fields(segments[i]); len(fields) > 0 {
+			return answerExitCommands[filepath.Base(strings.TrimLeft(fields[0], "("))]
+		}
+	}
+	return false
+}
+
 func (t *ExecTool) runSync(ctx context.Context, command, cwd string, timeout time.Duration) *ToolResult {
 	// timeout == 0 means no timeout
 	var cmdCtx context.Context
@@ -531,6 +551,7 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string, timeout tim
 	}
 
 	failed := err != nil
+	exitNote := ""
 	if err != nil {
 		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
 			msg := fmt.Sprintf("Command timed out after %v", timeout)
@@ -549,22 +570,22 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string, timeout tim
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode := exitErr.ExitCode()
-			output += fmt.Sprintf("\n\n[Command exited with code %d]", exitCode)
+			exitNote = fmt.Sprintf("\n\n[Command exited with code %d]", exitCode)
 
 			// Add signal information if killed by signal (Unix)
 			if exitCode == -1 {
-				output += " (killed by signal)"
+				exitNote += " (killed by signal)"
 			}
-			// A non-zero exit with nothing on stderr is an answer, not a failure:
-			// grep without a match, a script ending in a test. The code stays in
-			// the output.
-			failed = t.strictExitStatus || stderr.Len() > 0 || exitCode == -1
+			// Exit 1 from grep and the like is an answer, not a failure. Any other
+			// command can send its errors to stdout (`npm test 2>&1`), so an empty
+			// stderr alone proves nothing.
+			failed = t.strictExitStatus || stderr.Len() > 0 || exitCode != 1 || !exitOneIsAnswer(command)
 		} else {
-			output += fmt.Sprintf("\n\n[Command failed: %v]", err)
+			exitNote = fmt.Sprintf("\n\n[Command failed: %v]", err)
 		}
 	}
 
-	if output == "" {
+	if output == "" && exitNote == "" {
 		output = "(no output)"
 	}
 
@@ -572,6 +593,8 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string, timeout tim
 	if len(output) > maxLen {
 		output = output[:maxLen] + fmt.Sprintf("\n... (truncated, %d more chars)", len(output)-maxLen)
 	}
+	// After the cut, so long output keeps it.
+	output += exitNote
 
 	if failed {
 		return &ToolResult{
@@ -1367,10 +1390,9 @@ func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
 	return false
 }
 
-// recursiveRmRE casa `rm` recursivo e captura o ALVO. As flags podem vir em
-// qualquer ordem e agrupadas (`-rf`, `-fr`, `-r -f`). (seucaranguejo fork)
-var recursiveRmRE = regexp.MustCompile(
-	`\brm\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*[rR][a-zA-Z]*\s+(?:-[a-zA-Z]+\s+)*([^\s;|&]+)`)
+// rmCommandRE casa `rm` e captura os arguments; rmOperands separa flags de alvos.
+// (seucaranguejo fork)
+var rmCommandRE = regexp.MustCompile(`(?:^|[\s;&|(])rm\s+([^;|&\n]+)`)
 
 // deletesWorkspaceRoot diz se a linha apaga o workspace INTEIRO.
 //
@@ -1380,26 +1402,48 @@ var recursiveRmRE = regexp.MustCompile(
 // histórico e os entregáveis do usuário. (seucaranguejo fork)
 func deletesWorkspaceRoot(cmd, cwdPath string) bool {
 	base, _ := skipLeadingCDs(cmd, cwdPath, cwdPath)
-	for _, m := range recursiveRmRE.FindAllStringSubmatch(cmd, -1) {
-		alvo := strings.Trim(m[1], `"'`)
-		if alvo == "*" || alvo == "." || alvo == "./" || alvo == ".." {
-			return true
+	raiz := realPath(cwdPath)
+	for _, m := range rmCommandRE.FindAllStringSubmatch(cmd, -1) {
+		operands, recursive := rmOperands(m[1])
+		if !recursive {
+			continue
 		}
-		// `<dir>/*` empties <dir>, which for the workspace is the same loss.
-		if strings.HasSuffix(alvo, "/*") {
-			alvo = strings.TrimSuffix(alvo, "*")
-		}
-		abs := climbPath(base, alvo)
-		raiz := realPath(cwdPath)
-		// O próprio workspace, ou qualquer ancestral dele.
-		if abs == raiz {
-			return true
-		}
-		if rel, err := filepath.Rel(abs, raiz); err == nil && !strings.HasPrefix(rel, "..") {
-			return true
+		for _, alvo := range operands {
+			if alvo == "*" || alvo == "." || alvo == "./" || alvo == ".." {
+				return true
+			}
+			// `<dir>/*` empties <dir>, which for the workspace is the same loss.
+			if strings.HasSuffix(alvo, "/*") {
+				alvo = strings.TrimSuffix(alvo, "*")
+			}
+			abs := climbPath(base, alvo)
+			// O próprio workspace, ou qualquer ancestral dele.
+			if abs == raiz {
+				return true
+			}
+			if rel, err := filepath.Rel(abs, raiz); err == nil && !strings.HasPrefix(rel, "..") {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// rmOperands splits the arguments of rm, with what the shell removes already gone.
+func rmOperands(args string) (operands []string, recursive bool) {
+	optionsDone := false
+	for _, raw := range strings.Fields(shellJoinReplacer.Replace(args)) {
+		token := strings.ReplaceAll(raw, `\`, "")
+		switch {
+		case optionsDone || !strings.HasPrefix(token, "-"):
+			operands = append(operands, token)
+		case token == "--":
+			optionsDone = true
+		case token == "--recursive" || (!strings.HasPrefix(token, "--") && strings.ContainsAny(token, "rR")):
+			recursive = true
+		}
+	}
+	return operands, recursive
 }
 
 // expandTilde troca `~/` pelo HOME antes da varredura de caminho.
@@ -1482,12 +1526,6 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	}
 
 	if t.restrictToWorkspace {
-		if abs, err := filepath.Abs(cwd); err == nil && deletesWorkspaceRoot(cmd, abs) {
-			return "Command blocked by safety guard (this deletes the whole workspace, " +
-				"which persists across restarts and holds the user's history, memory and " +
-				"deliverables. Delete specific files or subdirectories instead.)"
-		}
-
 		cwdPath, err := filepath.Abs(cwd)
 		if err != nil {
 			return ""
@@ -1513,6 +1551,12 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 				cmd = strings.ReplaceAll(cmd, "$HOME", home)
 				cmd = strings.ReplaceAll(cmd, "~/", home+"/")
 			}
+		}
+
+		if deletesWorkspaceRoot(cmd, cwdPath) {
+			return "Command blocked by safety guard (this deletes the whole workspace, " +
+				"which persists across restarts and holds the user's history, memory and " +
+				"deliverables. Delete specific files or subdirectories instead.)"
 		}
 
 		if path := t.escapingDotDotPath(cmd, cwdPath); path != "" {
