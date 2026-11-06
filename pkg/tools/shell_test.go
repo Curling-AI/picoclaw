@@ -619,7 +619,6 @@ func TestShellTool_ExitCodeDetails(t *testing.T) {
 	if !strings.Contains(result.ForLLM, "exited with code") {
 		t.Errorf("expected 'exited with code' in message, got: %s", result.ForLLM)
 	}
-
 }
 
 // TestShellTool_TimeoutWithPartialOutput verifies timeout includes partial output
