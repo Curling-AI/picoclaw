@@ -2377,6 +2377,26 @@ func (t *WebFetchTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 	}
 
 	bodyStr := string(body)
+	if page, blocked := utils.ClassifyAntiBotResponse(
+		resp.StatusCode,
+		resp.Header,
+		resp.Request.URL.String(),
+		bodyStr,
+	); blocked {
+		logger.WarnCF("tool", "web_fetch got an anti-bot page", map[string]any{
+			"vendor": page.Vendor,
+			"kind":   page.Kind,
+			"host":   hostname,
+			"status": resp.StatusCode,
+		})
+		return ErrorResult(fmt.Sprintf(
+			"blocked: %s answered with a %s page instead of %s (HTTP %d), so this is not the site's content. Open the URL with the browser tool if you have one; retrying web_fetch or curl with another User-Agent will not help.",
+			page.Vendor,
+			page.Kind,
+			hostname,
+			resp.StatusCode,
+		))
+	}
 	contentType := resp.Header.Get("Content-Type")
 
 	mediaType, params, err := mime.ParseMediaType(contentType)
