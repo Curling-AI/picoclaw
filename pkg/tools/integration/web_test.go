@@ -1619,8 +1619,18 @@ func TestWebFetchTool_AntiBotPages(t *testing.T) {
 		blocked bool
 	}{
 		{"challenge title", http.StatusServiceUnavailable, "<html><title>Just a moment...</title></html>", true},
-		{"datadome on 403", http.StatusForbidden, `<html><script src="https://js.captcha-delivery.com/c.js"></script></html>`, true},
-		{"article quoting a marker", http.StatusOK, "<html><title>About captcha-delivery.com</title><body>captcha-delivery.com</body></html>", false},
+		{
+			"datadome on 403",
+			http.StatusForbidden,
+			`<html><script src="https://js.captcha-delivery.com/c.js"></script></html>`,
+			true,
+		},
+		{
+			"article quoting a marker",
+			http.StatusOK,
+			"<html><title>About captcha-delivery.com</title><body>captcha-delivery.com</body></html>",
+			false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

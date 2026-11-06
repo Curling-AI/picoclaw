@@ -4,8 +4,10 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
+
+	nethtml "golang.org/x/net/html"
+	"golang.org/x/net/publicsuffix"
 )
 
 // AntiBotPage says which anti-bot product answered instead of the site.
@@ -54,7 +56,8 @@ var antiBotBodyMarkers = []struct {
 	{"awswaf", AntiBotPage{VendorAWSWAF, AntiBotChallenge}},
 }
 
-var reHTMLTitle = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+// A challenge page declares its title up front, and the rest can be megabytes.
+const antiBotTitleScanBytes = 64 * 1024
 
 // ClassifyAntiBotTitle recognizes an anti-bot page from what a browser reports
 // after a navigation: its URL and title. "Access Denied" stays out: without the
@@ -68,7 +71,9 @@ func ClassifyAntiBotTitle(pageURL, title string) (AntiBotPage, bool) {
 }
 
 // ClassifyAntiBotResponse recognizes an anti-bot page from an HTTP response.
-func ClassifyAntiBotResponse(status int, header http.Header, body string) (AntiBotPage, bool) {
+// pageURL is the URL after redirects. Only HTML bodies count: a JSON or text file
+// quoting a challenge title is that file's content.
+func ClassifyAntiBotResponse(status int, header http.Header, pageURL, body string) (AntiBotPage, bool) {
 	if strings.EqualFold(header.Get("Cf-Mitigated"), "challenge") {
 		return AntiBotPage{VendorCloudflare, AntiBotChallenge}, true
 	}
@@ -76,12 +81,15 @@ func ClassifyAntiBotResponse(status int, header http.Header, body string) (AntiB
 	case "challenge", "captcha":
 		return AntiBotPage{VendorAWSWAF, AntiBotChallenge}, true
 	}
-	if m := reHTMLTitle.FindStringSubmatch(body); m != nil {
-		if page, ok := ClassifyAntiBotTitle("", m[1]); ok {
-			return page, true
-		}
+	isHTML := isHTMLResponse(header, body)
+	title := ""
+	if isHTML {
+		title = htmlTitle(body)
 	}
-	if !isDeniedStatus(status) {
+	if page, ok := ClassifyAntiBotTitle(pageURL, title); ok {
+		return page, true
+	}
+	if !isHTML || !isDeniedStatus(status) {
 		return AntiBotPage{}, false
 	}
 	for _, m := range antiBotBodyMarkers {
@@ -92,8 +100,38 @@ func ClassifyAntiBotResponse(status int, header http.Header, body string) (AntiB
 	return AntiBotPage{}, false
 }
 
+func isHTMLResponse(header http.Header, body string) bool {
+	contentType := header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType([]byte(body))
+	}
+	return strings.Contains(strings.ToLower(contentType), "html")
+}
+
+// htmlTitle uses the tokenizer so a <title> inside a comment or script does not count.
+func htmlTitle(body string) string {
+	tokenizer := nethtml.NewTokenizer(strings.NewReader(body[:min(len(body), antiBotTitleScanBytes)]))
+	for {
+		switch tokenizer.Next() {
+		case nethtml.ErrorToken:
+			return ""
+		case nethtml.StartTagToken:
+			if name, _ := tokenizer.TagName(); string(name) == "title" {
+				if tokenizer.Next() == nethtml.TextToken {
+					return string(tokenizer.Text())
+				}
+				return ""
+			}
+		}
+	}
+}
+
+// isGoogleHost requires an ICANN suffix, so google.attacker.com and a
+// google.<shared hosting suffix> site do not pass as Google.
 func isGoogleHost(host string) bool {
-	return strings.HasPrefix(host, "google.") || strings.Contains(host, ".google.")
+	host = strings.ToLower(host)
+	suffix, icann := publicsuffix.PublicSuffix(host)
+	return icann && (host == "google."+suffix || strings.HasSuffix(host, ".google."+suffix))
 }
 
 func isDeniedStatus(status int) bool {
