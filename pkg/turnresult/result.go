@@ -28,6 +28,10 @@ type Request struct {
 	Channel    string
 	ChatID     string
 	Media      []string
+	// Silent: o turno não publica nada no chat sozinho (sem texto de fallback,
+	// feedback de ferramenta ou stream) e uma resposta vazia é um fim normal,
+	// não uma falha. Só a ferramenta message entrega. (seucaranguejo fork)
+	Silent bool
 }
 
 func Failure(err error) Result {

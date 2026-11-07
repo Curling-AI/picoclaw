@@ -147,7 +147,7 @@ func TestAgentLoop_MessageAndResponseLogsCarrySizeOnly(t *testing.T) {
 		ChatID:   "direct",
 		SenderID: "user-1",
 		Content:  "error: anota minha senha hunter8",
-	}, nil); err != nil {
+	}, nil, false); err != nil {
 		t.Fatalf("processMessageResult failed: %v", err)
 	}
 
