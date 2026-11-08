@@ -98,8 +98,9 @@ func skipLeadingCDs(text, cwdPath, root string) ([]string, string) {
 			return starts, text
 		}
 		target := strings.Trim(match[1], `"'`)
-		// Anything the shell expands lands somewhere this cannot tell.
-		if target == "-" || strings.ContainsAny(target, "$`~*?[\\") {
+		// Anything the shell expands lands somewhere this cannot tell, and an
+		// option (`-`, `--`, `-P`) is not the directory: `cd --` goes to $HOME.
+		if strings.HasPrefix(target, "-") || strings.ContainsAny(target, "$`~*?[\\") {
 			return starts, text
 		}
 		// The shell's cd is logical: `a/..` is base even when a is a symlink.
