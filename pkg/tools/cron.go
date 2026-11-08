@@ -113,6 +113,7 @@ func NewCronTool(
 
 	if execTool != nil {
 		execTool.SetTimeout(execTimeout)
+		execTool.SetStrictExitStatus(true)
 	}
 	return &CronTool{
 		cronService:           cronService,

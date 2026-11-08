@@ -218,6 +218,9 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 					"prompt (AGENTS.md persona, USER.md, SOUL.md) — that pays for it twice in every request.",
 				workspacePath,
 			),
+			"**Scripts** - Before a script uses JSON or an API's answer, look at its real structure "+
+				"(keys, types, a small sample). Keep a script of more than a few lines in a file and fix it "+
+				"with small edits, changing only what failed, instead of writing it again from scratch.",
 		)
 	}
 	for i, rule := range rules {

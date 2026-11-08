@@ -307,6 +307,7 @@ type turnState struct {
 	// session's tool_search nor the agent-wide TTL tick rewrites the tools
 	// array under a running turn (each rewrite costs the whole prompt cache).
 	offeredTools  map[string]struct{}
+	connectors    connectorAccounts
 	offeredSeeded bool
 
 	agent   *AgentInstance

@@ -26,6 +26,7 @@ type (
 	PromptMetadataProvider = toolshared.PromptMetadataProvider
 	RepeatSafety           = toolshared.RepeatSafety
 	SideEffectHinter       = toolshared.SideEffectHinter
+	MCPAccountSignal       = toolshared.MCPAccountSignal
 	ServerNamedTool        = toolshared.ServerNamedTool
 	TurnScopedTool         = toolshared.TurnScopedTool
 	ToolResult             = toolshared.ToolResult
@@ -41,9 +42,11 @@ const (
 	ToolPromptSourceRegistry  = toolshared.ToolPromptSourceRegistry
 	ToolPromptSourceDiscovery = toolshared.ToolPromptSourceDiscovery
 
-	RepeatUnsafe     = toolshared.RepeatUnsafe
-	RepeatIdempotent = toolshared.RepeatIdempotent
-	RepeatReadOnly   = toolshared.RepeatReadOnly
+	RepeatUnsafe       = toolshared.RepeatUnsafe
+	RepeatIdempotent   = toolshared.RepeatIdempotent
+	RepeatReadOnly     = toolshared.RepeatReadOnly
+	MCPAccountMissing  = toolshared.MCPAccountMissing
+	MCPAccountRejected = toolshared.MCPAccountRejected
 )
 
 func WithToolContext(ctx context.Context, channel, chatID string) context.Context {

@@ -3,7 +3,9 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -83,6 +85,56 @@ func coerceToolArgs(schema map[string]any, args map[string]any) {
 	}
 }
 
+// dropUnknownToolArgs removes, in place, the properties the schema does not
+// declare and names what it removed, so a stray argument does not burn an
+// iteration on a validation error. Removing instead of letting them through
+// keeps internal arguments such as __channel out of the model's reach.
+func dropUnknownToolArgs(schema map[string]any, args map[string]any) []string {
+	props, ok := schema["properties"].(map[string]any)
+	if !ok || args == nil {
+		return nil
+	}
+	var dropped []string
+	for key, val := range args {
+		propSchema, known := props[key].(map[string]any)
+		if _, declared := props[key]; !declared && !allowsAdditional(schema) {
+			delete(args, key)
+			dropped = append(dropped, key)
+			continue
+		}
+		if !known {
+			continue
+		}
+		for _, nested := range dropUnknownNestedArgs(propSchema, val) {
+			dropped = append(dropped, key+"."+nested)
+		}
+	}
+	slices.Sort(dropped)
+	return dropped
+}
+
+func dropUnknownNestedArgs(propSchema map[string]any, val any) []string {
+	switch v := val.(type) {
+	case map[string]any:
+		// validateToolArgs only looks inside a plain object schema; match it.
+		if propSchema["type"] != "object" {
+			return nil
+		}
+		return dropUnknownToolArgs(propSchema, v)
+	case []any:
+		itemSchema, ok := propSchema["items"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		var dropped []string
+		for _, item := range v {
+			dropped = append(dropped, dropUnknownNestedArgs(itemSchema, item)...)
+		}
+		return dropped
+	}
+	return nil
+}
+
 // validateToolArgs validates args against a JSON Schema-like map.
 // schema is expected to have optional keys: "properties", "required", "additionalProperties".
 func validateToolArgs(schema map[string]any, args map[string]any) error {
@@ -114,7 +166,8 @@ func validateToolArgs(schema map[string]any, args map[string]any) error {
 		propSchemaRaw, known := props[key]
 		if !known {
 			if !additional {
-				return fmt.Errorf("unexpected property %q", key)
+				accepted := slices.Sorted(maps.Keys(props))
+				return fmt.Errorf("unexpected property %q (accepted: %s)", key, strings.Join(accepted, ", "))
 			}
 			continue
 		}
@@ -162,14 +215,16 @@ func checkRequired(schema map[string]any, args map[string]any) error {
 }
 
 // allowsAdditional returns true when the schema explicitly sets
-// "additionalProperties" to true, or when the key is absent (default: reject extras).
+// "additionalProperties" to true or to a schema (a map with free-form keys, such
+// as a spreadsheet's sheet names). Absent or false rejects extras.
 func allowsAdditional(schema map[string]any) bool {
-	v, ok := schema["additionalProperties"]
-	if !ok {
-		return false
+	switch v := schema["additionalProperties"].(type) {
+	case bool:
+		return v
+	case map[string]any:
+		return true
 	}
-	b, ok := v.(bool)
-	return ok && b
+	return false
 }
 
 // checkType validates that val matches the JSON Schema type declared in propSchema.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -72,11 +73,12 @@ func (t *RegexSearchTool) Execute(ctx context.Context, args map[string]any) *Too
 
 	logger.DebugCF("discovery", "Regex search", map[string]any{"pattern": pattern})
 
-	res, err := t.registry.SearchRegex(pattern, t.maxSearchResults)
+	res, err := t.registry.SearchRegex(pattern, discoveryLimit(ctx, t.maxSearchResults, t.registry.Count()))
 	if err != nil {
 		logger.WarnCF("discovery", "Invalid regex pattern", map[string]any{"pattern": pattern, "error": err.Error()})
 		return ErrorResult(fmt.Sprintf("Invalid regex pattern syntax: %v. Please fix your regex and try again.", err))
 	}
+	res = availableResults(ctx, res, t.maxSearchResults)
 
 	logger.InfoCF("discovery", "Regex search completed", map[string]any{"pattern": pattern, "results": len(res)})
 	return formatDiscoveryResponse(t.registry, res, t.ttl, t.maxSearchResults)
@@ -142,7 +144,8 @@ func (t *BM25SearchTool) Execute(ctx context.Context, args map[string]any) *Tool
 		return SilentResult("No tools found matching the query.")
 	}
 
-	ranked := cached.engine.Search(query, t.maxSearchResults)
+	limit := discoveryLimit(ctx, t.maxSearchResults, len(cached.docs))
+	ranked := cached.engine.Search(query, limit)
 	results := make([]ToolSearchResult, len(ranked))
 	for i, r := range ranked {
 		results[i] = ToolSearchResult{
@@ -150,7 +153,7 @@ func (t *BM25SearchTool) Execute(ctx context.Context, args map[string]any) *Tool
 			Description: r.Document.Description,
 		}
 	}
-	results = promoteExactNameMatch(query, cached.docs, results, t.maxSearchResults)
+	results = availableResults(ctx, promoteExactNameMatch(query, cached.docs, results, limit), t.maxSearchResults)
 	if len(results) == 0 {
 		logger.DebugCF("discovery", "BM25 search: no matches", map[string]any{"query": query})
 		return SilentResult("No tools found matching the query.")
@@ -204,6 +207,32 @@ func (r *ToolRegistry) SearchRegex(pattern string, maxSearchResults int) ([]Tool
 	}
 
 	return results, nil
+}
+
+type unavailableToolsKey struct{}
+
+// WithUnavailableTools keeps the tools a turn cannot call out of its searches: the
+// registry is shared with other sessions, so this cannot live there.
+func WithUnavailableTools(ctx context.Context, unavailable func(toolName string) bool) context.Context {
+	return context.WithValue(ctx, unavailableToolsKey{}, unavailable)
+}
+
+// discoveryLimit is how many results to ask a search for: all of them when some
+// will be dropped, so that those do not take the slots of the ones kept.
+func discoveryLimit(ctx context.Context, maxResults, corpus int) int {
+	if _, filtered := ctx.Value(unavailableToolsKey{}).(func(string) bool); filtered && maxResults > 0 {
+		return corpus
+	}
+	return maxResults
+}
+
+func availableResults(ctx context.Context, results []ToolSearchResult, maxResults int) []ToolSearchResult {
+	unavailable, filtered := ctx.Value(unavailableToolsKey{}).(func(string) bool)
+	if !filtered {
+		return results
+	}
+	kept := slices.DeleteFunc(slices.Clone(results), func(r ToolSearchResult) bool { return unavailable(r.Name) })
+	return kept[:min(len(kept), maxResults)]
 }
 
 func formatDiscoveryResponse(

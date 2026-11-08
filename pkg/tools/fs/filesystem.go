@@ -13,13 +13,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
 
 const MaxReadFileSize = 64 * 1024 // 64KB limit to avoid context overflow
@@ -331,9 +334,13 @@ func NewReadFileLinesTool(
 	}
 }
 
+func (t *ReadFileTool) RepeatSafety() toolshared.RepeatSafety { return toolshared.RepeatReadOnly }
+
 func (t *ReadFileTool) Name() string {
 	return "read_file"
 }
+
+func (t *ReadFileLinesTool) RepeatSafety() toolshared.RepeatSafety { return toolshared.RepeatReadOnly }
 
 func (t *ReadFileLinesTool) Name() string {
 	return "read_file"
@@ -423,7 +430,7 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 
 	file, err := t.fs.Open(path)
 	if err != nil {
-		return ErrorResult(err.Error())
+		return ErrorResult(err.Error() + similarFilesHint(t.fs, path, err))
 	}
 	defer file.Close()
 
@@ -593,7 +600,7 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 
 	file, err := t.fs.Open(path)
 	if err != nil {
-		return ErrorResult(err.Error())
+		return ErrorResult(err.Error() + similarFilesHint(t.fs, path, err))
 	}
 	defer file.Close()
 
@@ -944,9 +951,28 @@ func getInt64Arg(args map[string]any, key string, defaultVal int64) (int64, erro
 }
 
 type WriteFileTool struct {
-	fs       fileSystem
-	altTools []string
+	fs        fileSystem
+	altTools  []string
+	workspace string
+
+	writtenMu sync.Mutex
+	// written holds the files this tool created since the pod started, as they were
+	// left: a file someone changed since is no longer the agent's to replace.
+	// shortcut: forgotten on restart, where the refusal comes back once per file;
+	// persist it if that still shows up in the failures.
+	written map[string]fileStamp
 }
+
+type fileStamp struct {
+	size    int64
+	modTime time.Time
+}
+
+// workspaceScratchDirs hold work in progress, which the agent rewrites freely.
+var workspaceScratchDirs = []string{"work", "tmp", "scripts"}
+
+// maxTrackedWrites bounds written on a pod that stays up for long.
+const maxTrackedWrites = 4096
 
 func NewWriteFileTool(
 	workspace string,
@@ -960,8 +986,85 @@ func NewWriteFileTool(
 	// Default to both alternatives so standalone callers keep the full guidance;
 	// the agent wiring narrows this to the tools actually registered.
 	return &WriteFileTool{
-		fs:       buildFs(workspace, restrict, patterns),
-		altTools: []string{"append_file", "edit_file"},
+		fs:        buildFs(workspace, restrict, patterns),
+		altTools:  []string{"append_file", "edit_file"},
+		workspace: workspace,
+		written:   map[string]fileStamp{},
+	}
+}
+
+// workspacePath is path relative to the workspace, or "" outside of it.
+func (t *WriteFileTool) workspacePath(path string) string {
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(t.workspace, abs)
+	}
+	workspace := t.workspace
+	// A link in a scratch dir can point at a deliverable: judge where it lands.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+		if root, rootErr := filepath.EvalSymlinks(workspace); rootErr == nil {
+			workspace = root
+		}
+	}
+	if !isWithinWorkspace(abs, workspace) {
+		return ""
+	}
+	rel, err := filepath.Rel(filepath.Clean(workspace), filepath.Clean(abs))
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+func (t *WriteFileTool) stampOf(path string) (fileStamp, bool) {
+	file, err := t.fs.Open(path)
+	if err != nil {
+		return fileStamp{}, false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fileStamp{}, false
+	}
+	return fileStamp{size: info.Size(), modTime: info.ModTime()}, true
+}
+
+// replacesWithoutFlag says whether an existing file may be replaced without
+// overwrite=true: scratch files, and what the agent itself created and nobody
+// changed since. Everything else, memory above all, keeps the refusal.
+func (t *WriteFileTool) replacesWithoutFlag(path string) bool {
+	rel := t.workspacePath(path)
+	if rel == "" {
+		return false
+	}
+	top, _, _ := strings.Cut(rel, "/")
+	if rel != top && slices.Contains(workspaceScratchDirs, top) {
+		return true
+	}
+	stamp, ok := t.stampOf(path)
+	if !ok {
+		return false
+	}
+	t.writtenMu.Lock()
+	defer t.writtenMu.Unlock()
+	written, wrote := t.written[rel]
+	return wrote && written.size == stamp.size && written.modTime.Equal(stamp.modTime)
+}
+
+func (t *WriteFileTool) rememberWritten(path string) {
+	rel := t.workspacePath(path)
+	if rel == "" || rel == "memory" || strings.HasPrefix(rel, "memory/") {
+		return
+	}
+	stamp, ok := t.stampOf(path)
+	if !ok {
+		return
+	}
+	t.writtenMu.Lock()
+	defer t.writtenMu.Unlock()
+	if _, known := t.written[rel]; known || len(t.written) < maxTrackedWrites {
+		t.written[rel] = stamp
 	}
 }
 
@@ -990,7 +1093,7 @@ func (t *WriteFileTool) Name() string {
 }
 
 func (t *WriteFileTool) Description() string {
-	desc := "Write content to a file, replacing any existing content. Content is written byte-for-byte after argument decoding. Standard JSON escaping applies: \\n for newline and \\\\n for a literal backslash-n sequence. If the file already exists you must set overwrite=true, which replaces the ENTIRE file."
+	desc := "Write content to a file, replacing any existing content. Content is written byte-for-byte after argument decoding. Standard JSON escaping applies: \\n for newline and \\\\n for a literal backslash-n sequence. If the file already exists you must set overwrite=true, which replaces the ENTIRE file, unless it is under work/, tmp/ or scripts/ or you wrote it yourself, which are replaced without it."
 	if phrase := t.altToolsPhrase(); phrase != "" {
 		desc += fmt.Sprintf(
 			" To add to or change part of an existing file without losing its current contents, use %s instead.",
@@ -1044,10 +1147,17 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 
 	overwrite, _ := args["overwrite"].(bool)
 
+	replaced, created := false, false
 	err := t.fs.withWriteLock(path, func() error {
-		if !overwrite {
-			if existing, err := t.fs.Open(path); err == nil {
-				_ = existing.Close()
+		existing, openErr := t.fs.Open(path)
+		created = errors.Is(openErr, os.ErrNotExist)
+		if openErr != nil && !created && !overwrite {
+			return openErr // unreadable or outside the sandbox: not known to be free
+		}
+		if openErr == nil {
+			_ = existing.Close()
+			replaced = !overwrite && t.replacesWithoutFlag(path)
+			if !overwrite && !replaced {
 				if phrase := t.altToolsPhrase(); phrase != "" {
 					return fmt.Errorf(
 						"file: %s already exists. To add to it or change part of it without losing the current contents, use %s. Only set overwrite=true if you intend to replace the entire file.",
@@ -1067,6 +1177,12 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 		return ErrorResult(err.Error())
 	}
 
+	if created || replaced {
+		t.rememberWritten(path)
+	}
+	if replaced {
+		return SilentResult(fmt.Sprintf("File replaced, its previous contents are gone: %s", path))
+	}
 	return SilentResult(fmt.Sprintf("File written: %s", path))
 }
 
@@ -1081,6 +1197,8 @@ func NewListDirTool(workspace string, restrict bool, allowPaths ...[]*regexp.Reg
 	}
 	return &ListDirTool{fs: buildFs(workspace, restrict, patterns)}
 }
+
+func (t *ListDirTool) RepeatSafety() toolshared.RepeatSafety { return toolshared.RepeatReadOnly }
 
 func (t *ListDirTool) Name() string {
 	return "list_dir"

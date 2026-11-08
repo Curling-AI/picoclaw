@@ -271,7 +271,7 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 func (r *ToolRegistry) CoercedArgs(name string, args map[string]any) map[string]any {
 	coerced, _ := cloneJSONValue(args).(map[string]any)
 	if tool, ok := r.GetRegistered(name); ok {
-		coerceToolArgs(tool.Parameters(), coerced)
+		normalizeToolArgs(tool, tool.Parameters(), coerced)
 	}
 	return coerced
 }
@@ -434,7 +434,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 	// unambiguous typing slips (numeric strings, stringified booleans) so a
 	// recoverable call doesn't cost the agent a whole iteration.
 	schema := tool.Parameters()
-	coerceToolArgs(schema, args)
+	droppedArgs := normalizeToolArgs(tool, schema, args)
 	if err := validateToolArgs(schema, args); err != nil {
 		logger.WarnCF("tool", "Tool argument validation failed",
 			map[string]any{"tool": name, "error": err.Error()})
@@ -500,6 +500,13 @@ func (r *ToolRegistry) ExecuteWithContext(
 
 	result = normalizeToolResult(result, name, r.mediaStore, channel, chatID)
 	toolshared.AfterExecutionTool(ctx, tool, result)
+	if len(droppedArgs) > 0 {
+		logger.InfoCF("tool", "Tool arguments ignored", map[string]any{"tool": name, "args": droppedArgs})
+		result.ForLLM += fmt.Sprintf(
+			"\n\n[Ignored arguments this tool does not have: %s]",
+			strings.Join(droppedArgs, ", "),
+		)
+	}
 
 	duration := time.Since(start)
 
@@ -527,6 +534,25 @@ func (r *ToolRegistry) ExecuteWithContext(
 	}
 
 	return result
+}
+
+// normalizeToolArgs applies the fixes a call gets before validation and returns
+// the arguments it dropped. The repeat guard compares calls after the same fixes.
+func normalizeToolArgs(tool Tool, schema, args map[string]any) []string {
+	coerceToolArgs(schema, args)
+	if dropsUnknownArgs(tool) {
+		return dropUnknownToolArgs(schema, args)
+	}
+	return nil
+}
+
+// dropsUnknownArgs says whether a stray argument is dropped rather than refused.
+// Only a tool that declares itself read-only drops it: anywhere else it can carry
+// intent the call would lose in silence. replace_text with newText would delete the
+// line, exec with working_dir would run in the wrong place.
+func dropsUnknownArgs(tool Tool) bool {
+	safety, ok := tool.(toolshared.SideEffectHinter)
+	return ok && safety.RepeatSafety() == toolshared.RepeatReadOnly
 }
 
 // sortedToolNames returns tool names in sorted order for deterministic iteration.

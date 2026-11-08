@@ -158,6 +158,11 @@ toolLoop:
 			continue
 		}
 
+		if server := connectorServer(ts.agent.Tools, toolName); ts.connectors.isRetired(server) {
+			skipToolCall(connectorRetiredNote(server))
+			continue
+		}
+
 		if reason := brokenArgumentsReason(ts.agent.Tools, toolName, toolArgs, exec.response, ts.agent.MaxTokens); reason != "" {
 			logger.WarnCF("agent", "Tool call arrived with arguments that are not JSON; not running it",
 				map[string]any{
@@ -595,6 +600,9 @@ toolLoop:
 				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
 		}
 		ts.offerTools([]string{toolName})
+		if len(ts.connectors.retired) > 0 {
+			execCtx = tools.WithUnavailableTools(execCtx, ts.isToolRetired)
+		}
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,
@@ -603,6 +611,7 @@ toolLoop:
 			ts.chatID,
 			asyncCallback,
 		)
+		ts.noteConnectorAccount(toolName, toolResult, iteration)
 		if tools.IsToolDiscoveryToolName(toolName) && toolResult != nil {
 			// What the search told the model it unlocked joins the turn's
 			// tools — including a tool another session had already promoted,
