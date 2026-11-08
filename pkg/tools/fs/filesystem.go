@@ -1171,15 +1171,19 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 				)
 			}
 		}
-		return t.fs.WriteFile(path, []byte(content))
+		if err := t.fs.WriteFile(path, []byte(content)); err != nil {
+			return err
+		}
+		// Under the lock, so a concurrent write is never recorded as this one.
+		if created || replaced {
+			t.rememberWritten(path)
+		}
+		return nil
 	})
 	if err != nil {
 		return ErrorResult(err.Error())
 	}
 
-	if created || replaced {
-		t.rememberWritten(path)
-	}
 	if replaced {
 		return SilentResult(fmt.Sprintf("File replaced, its previous contents are gone: %s", path))
 	}

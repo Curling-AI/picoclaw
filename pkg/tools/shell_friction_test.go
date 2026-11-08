@@ -220,6 +220,8 @@ func TestExecGuard_DotDotOnlyBlocksWhatLeavesTheWorkspace(t *testing.T) {
 		{name: "cd home", command: "cd ~ && cat ../secret", blocked: true},
 		{name: "cd other user", command: "cd ~root && cat ../etc/passwd", blocked: true},
 		{name: "cd previous", command: "cd - && cat ../secret", blocked: true},
+		{name: "cd end of options goes home", command: "cd -- && cat ../secret", blocked: true},
+		{name: "cd physical option", command: "cd -P && cat ../secret", blocked: true},
 		{name: "cd glob", command: "cd * && cat ../../secret", blocked: true},
 		{name: "second cd not followed", command: "cd work && cd ..; cat ../secret", blocked: true},
 		{name: "cd in a later subshell", command: "cd work && (cd ..; cat ../secret)", blocked: true},

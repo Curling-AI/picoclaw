@@ -161,3 +161,36 @@ func TestReadFile_MissingNamesSimilarFiles(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.ForLLM, "s-01.png")
 }
+
+// writeRacingFs lets another writer change the file right after the lock is released.
+type writeRacingFs struct {
+	fileSystem
+	afterUnlock func()
+}
+
+func (r writeRacingFs) withWriteLock(path string, write func() error) error {
+	err := r.fileSystem.withWriteLock(path, write)
+	r.afterUnlock()
+	return err
+}
+
+func TestWriteFile_ConcurrentWriteAfterUnlockIsNotRecordedAsOwn(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "artifacts", "report.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	tool := NewWriteFileTool(workspace, true)
+	tool.fs = writeRacingFs{fileSystem: tool.fs, afterUnlock: func() {
+		require.NoError(t, os.WriteFile(path, []byte("another writer's version"), 0o644))
+	}}
+
+	assert.False(
+		t,
+		tool.Execute(context.Background(), map[string]any{"path": "artifacts/report.md", "content": "mine"}).IsError,
+	)
+	result := tool.Execute(context.Background(), map[string]any{"path": "artifacts/report.md", "content": "again"})
+
+	assert.True(t, result.IsError, "the version on disk is not the one this tool wrote")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "another writer's version", string(got))
+}
