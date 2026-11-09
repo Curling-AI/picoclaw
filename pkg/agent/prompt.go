@@ -58,6 +58,7 @@ const (
 	PromptSourceToolDiscovery  PromptSourceID = "tool_registry:discovery"
 	PromptSourceOutputPolicy   PromptSourceID = "runtime.output"
 	PromptSourceSubTurnProfile PromptSourceID = "subturn.profile"
+	PromptSourceVoiceSearch    PromptSourceID = "voice:search"
 	// PromptSourceLoop: instruções e memória do Loop deste turno.
 	// (seucaranguejo fork — ver loop.go)
 	PromptSourceLoop          PromptSourceID = "loop:instructions"
@@ -254,6 +255,12 @@ func builtinPromptSources() []PromptSourceDescriptor {
 			Description:     "Child agent profile instructions",
 			Allowed:         []PromptPlacement{{Layer: PromptLayerInstruction, Slot: PromptSlotWorkspace}},
 			StableByDefault: false,
+		},
+		{
+			ID:          PromptSourceVoiceSearch,
+			Owner:       "turn",
+			Description: "Search policy for voice turns",
+			Allowed:     []PromptPlacement{{Layer: PromptLayerInstruction, Slot: PromptSlotWorkspace}},
 		},
 		{
 			ID:              PromptSourceLoop,

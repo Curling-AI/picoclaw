@@ -134,6 +134,7 @@ type processOptions struct {
 	// isso é o orçamento do ciclo, no control-plane. (seucaranguejo fork)
 	MaxToolIterations       int
 	TurnProfile             config.EffectiveTurnProfile
+	voiceSearch             VoiceSearchPolicy
 	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
 	Media                   []string               // media:// refs from inbound message
 	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
@@ -657,6 +658,7 @@ func (al *AgentLoop) runAgentLoopResult(
 	if err != nil {
 		return turnresult.Failure(err), err
 	}
+	opts = voiceSearchOptions(ctx, opts)
 
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
 	if opts.Dispatch.Channel() != "" &&

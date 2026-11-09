@@ -132,6 +132,10 @@ func promptOverlaysForOptions(opts processOptions) []PromptPart {
 		parts = append(parts, *part)
 	}
 
+	if opts.voiceSearch != 0 {
+		parts = append(parts, voiceSearchPrompt(opts.voiceSearch))
+	}
+
 	if systemPrompt := strings.TrimSpace(opts.SystemPromptOverride); systemPrompt != "" {
 		parts = append(parts, PromptPart{
 			ID:      "instruction.subturn_profile",
