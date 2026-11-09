@@ -34,6 +34,7 @@ type EffectiveTurnProfile struct {
 	ToolsMode        TurnProfileMode
 	AllowedSkills    []string
 	AllowedTools     []string
+	DisallowedTools  []string // Runtime restrictions, independent of the configured profile.
 }
 
 func (m TurnProfileMode) Effective() TurnProfileMode {

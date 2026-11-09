@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -57,6 +58,9 @@ func turnProfileHasCallableTools(
 }
 
 func turnProfileToolAllowed(profile config.EffectiveTurnProfile, name string) bool {
+	if toolDisallowed(profile, name) {
+		return false
+	}
 	if !profile.Enabled {
 		return true
 	}
@@ -73,6 +77,11 @@ func turnProfileToolAllowed(profile config.EffectiveTurnProfile, name string) bo
 	default:
 		return true
 	}
+}
+
+func toolDisallowed(profile config.EffectiveTurnProfile, name string) bool {
+	return len(profile.DisallowedTools) > 0 &&
+		slices.Contains(profile.DisallowedTools, strings.ToLower(strings.TrimSpace(name)))
 }
 
 func toolUseSystemPromptRule() string {
@@ -100,6 +109,15 @@ func filterToolsByTurnProfile(
 	defs []providers.ToolDefinition,
 	profile config.EffectiveTurnProfile,
 ) []providers.ToolDefinition {
+	if len(profile.DisallowedTools) > 0 {
+		filtered := make([]providers.ToolDefinition, 0, len(defs))
+		for _, def := range defs {
+			if !toolDisallowed(profile, def.Function.Name) {
+				filtered = append(filtered, def)
+			}
+		}
+		defs = filtered
+	}
 	if !profile.Enabled {
 		return defs
 	}
