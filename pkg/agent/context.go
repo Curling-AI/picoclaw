@@ -195,7 +195,10 @@ func (cb *ContextBuilder) getIdentity(includeToolUseRule bool) string {
 	}
 	accuracyRule := "**Be helpful and accurate** - Briefly explain what you're doing."
 	if includeToolUseRule {
-		accuracyRule = "**Be helpful and accurate** - When using tools, briefly explain what you're doing."
+		accuracyRule = "**Progress notes** - Open every multi-step task with one short line saying what you'll do, " +
+			"sent with the first tool call. After that, write a line only when you hit a blocker or something that " +
+			"changes the plan or the outcome, acknowledge a mid-task message, are about to send, post, delete or " +
+			"publish, or start a long wait — not when one step ends and the next begins."
 	}
 	rules = append(
 		rules,
