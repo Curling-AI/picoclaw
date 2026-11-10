@@ -92,9 +92,9 @@ func TestPublicHistoryPointReadUsesOneIndexedRowAfterCompaction(t *testing.T) {
 	position := int64(4)
 	request := PublicHistoryPageRequest{Key: key, Position: &position}
 	files := os.DirFS(store.dir)
-	original, err := ReadPublicHistoryPageFS(t.Context(), files, request)
-	if err != nil || len(original.Entries) != 1 || original.Start != position {
-		t.Fatalf("invalid indexed row: %+v %v", original, err)
+	original, originalErr := ReadPublicHistoryPageFS(t.Context(), files, request)
+	if originalErr != nil || len(original.Entries) != 1 || original.Start != position {
+		t.Fatalf("invalid indexed row: %+v %v", original, originalErr)
 	}
 	if err := store.AddMessage(t.Context(), key, "assistant", "another reply"); err != nil {
 		t.Fatal(err)
@@ -107,12 +107,21 @@ func TestPublicHistoryPointReadUsesOneIndexedRowAfterCompaction(t *testing.T) {
 	}
 	traced := &publicPageTraceFS{FS: files}
 	page, err := ReadPublicHistoryPageFS(t.Context(), traced, request)
-	if err != nil || !reflect.DeepEqual(page.Entries, original.Entries) || page.Stats.RowsRead != 1 || traced.sourceBytes != page.Stats.DataBytesRead || traced.sourceBytes == 0 {
+	if err != nil || !reflect.DeepEqual(page.Entries, original.Entries) || page.Stats.RowsRead != 1 ||
+		traced.sourceBytes != page.Stats.DataBytesRead || traced.sourceBytes == 0 {
 		t.Fatalf("point read did not verify one original row: %+v %v", page, err)
 	}
 	invalid := page.Ceiling
-	if _, err := ReadPublicHistoryPageFS(t.Context(), files, PublicHistoryPageRequest{Key: key, Position: &invalid}); !errors.Is(err, ErrHistoryCursor) {
-		t.Fatalf("out-of-range position: %v", err)
+	invalidRequest := PublicHistoryPageRequest{Key: key, Position: &invalid}
+	if _, rangeErr := ReadPublicHistoryPageFS(
+		t.Context(),
+		files,
+		invalidRequest,
+	); !errors.Is(
+		rangeErr,
+		ErrHistoryCursor,
+	) {
+		t.Fatalf("out-of-range position: %v", rangeErr)
 	}
 }
 
