@@ -39,6 +39,9 @@ func ReadPublicHistoryPageFS(
 		return PublicHistoryPage{}, operationErr1
 	}
 	if request.Cursor != "" {
+		if request.Position != nil {
+			return PublicHistoryPage{}, ErrHistoryCursor
+		}
 		if operationErr2 := ValidatePublicHistoryPageCursor(request.Cursor); operationErr2 != nil {
 			return PublicHistoryPage{}, operationErr2
 		}
@@ -84,7 +87,7 @@ func ReadPublicHistoryPageFS(
 	if operationErr3 != nil {
 		return PublicHistoryPage{}, operationErr3
 	}
-	page, operationErr3 := readPublicPage(ctx, request, cursor, source, index)
+	page, operationErr3 := readPublicPositionOrPage(ctx, request, cursor, source, index)
 	if operationErr3 != nil {
 		return PublicHistoryPage{}, operationErr3
 	}
@@ -97,4 +100,28 @@ func ReadPublicHistoryPageFS(
 	}
 	page.Entries = publicHistoryResult(meta, page.Entries).Entries
 	return page, nil
+}
+
+func readPublicPositionOrPage(ctx context.Context, request PublicHistoryPageRequest, cursor publicHistoryCursor, source io.ReaderAt, index *publicIndexReader) (PublicHistoryPage, error) {
+	if request.Position == nil {
+		return readPublicPage(ctx, request, cursor, source, index)
+	}
+	position := *request.Position
+	if position < 0 || position >= cursor.Count {
+		return PublicHistoryPage{}, ErrHistoryCursor
+	}
+	if err := ctx.Err(); err != nil {
+		return PublicHistoryPage{}, err
+	}
+	entry, readBytes, err := readPublicPageEntry(source, index, position, cursor.Bytes)
+	if err != nil {
+		return PublicHistoryPage{}, err
+	}
+	size, err := publicPageMessageBytes(entry, request.MessageBytes)
+	if err != nil || size > PublicHistoryMessageBytes {
+		return PublicHistoryPage{}, errors.Join(ErrHistoryCapacity, err)
+	}
+	return PublicHistoryPage{Version: PublicHistoryVersion, Generation: cursor.Generation, Revision: cursor.Revision,
+		Start: position, End: position + 1, Ceiling: cursor.Count, Entries: []PublicHistoryEntry{entry},
+		Stats: PublicHistoryReadStats{RowsRead: 1, DataBytesRead: readBytes, IndexBytesRead: index.bytes, MessageBytes: int64(size)}}, nil
 }

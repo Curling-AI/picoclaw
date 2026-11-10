@@ -19,8 +19,10 @@ const (
 
 // PublicHistoryPageRequest measures messages separately from private evidence and the bounded envelope.
 type PublicHistoryPageRequest struct {
-	Key          string
-	Cursor       string
+	Key    string
+	Cursor string
+	// Position selects one indexed row. Its identity must be checked by the caller.
+	Position     *int64
 	MessageBytes func(PublicHistoryEntry) (int, error)
 }
 
