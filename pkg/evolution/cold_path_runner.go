@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type coldPathRuntime interface {
@@ -149,7 +151,10 @@ func (r *ColdPathRunner) runWorkspace(workspace string) {
 		r.lastStart[workspace] = r.now()
 		r.mu.Unlock()
 
-		err := r.runtime.RunColdPathOnce(r.ctx, workspace)
+		// A run reads the records of every turn since the last one, so it is a
+		// task of its own rather than part of the turn that triggered it.
+		runCtx := protocoltypes.WithTaskID(r.ctx, protocoltypes.NewTraceID("evolution-"))
+		err := r.runtime.RunColdPathOnce(runCtx, workspace)
 		if err != nil && isNoCreditError(err) && r.noCreditPause > 0 {
 			// Pending work is dropped too: without credit it would fail the same way.
 			until := r.now().Add(r.noCreditPause)
