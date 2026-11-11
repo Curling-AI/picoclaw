@@ -157,7 +157,8 @@ func TestSteering_StartsANewTaskAndKeepsLaunchedWorkInTheOld(t *testing.T) {
 		}
 	}
 
-	if _, err := al.ProcessDirectWithChannel(t.Context(), "run the job", conversationSession, "grpc", "run-1"); err != nil {
+	_, err := al.ProcessDirectWithChannel(t.Context(), "run the job", conversationSession, "grpc", "run-1")
+	if err != nil {
 		t.Fatalf("ProcessDirectWithChannel: %v", err)
 	}
 	ids := provider.taskIDs()
