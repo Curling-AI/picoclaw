@@ -121,3 +121,81 @@ func TestAsyncResult_AnswersInTheTaskThatLaunchedIt(t *testing.T) {
 		t.Fatalf("task ids = %q, want the launching turn's on every call", ids)
 	}
 }
+
+// steeredTaskRecorder launches late_async on its first call, while the person
+// writes again, and answers after; it keeps the task id of every call.
+type steeredTaskRecorder struct {
+	taskIDRecorder
+	steer func()
+}
+
+func (p *steeredTaskRecorder) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	resp, err := p.taskIDRecorder.Chat(ctx, messages, tools, model, opts)
+	if len(p.taskIDs()) == 1 {
+		p.steer()
+	}
+	return resp, err
+}
+
+// A message the person sends mid-turn is a new request: the calls after it
+// read it go out on a new task, while the work launched before it still
+// answers in the task that launched it.
+func TestSteering_StartsANewTaskAndKeepsLaunchedWorkInTheOld(t *testing.T) {
+	provider := &steeredTaskRecorder{taskIDRecorder: taskIDRecorder{tool: "late_async"}}
+	al, msgBus, _ := newSystemMessageTestLoop(t, provider)
+	tool := &lateAsyncTool{}
+	al.RegisterTool(tool)
+	provider.steer = func() {
+		if err := al.Steer(providers.Message{Role: "user", Content: "and also check the docs"}); err != nil {
+			t.Errorf("steer: %v", err)
+		}
+	}
+
+	if _, err := al.ProcessDirectWithChannel(t.Context(), "run the job", conversationSession, "grpc", "run-1"); err != nil {
+		t.Fatalf("ProcessDirectWithChannel: %v", err)
+	}
+	ids := provider.taskIDs()
+	if len(ids) != 2 || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("task ids = %q, want the call after the message on a task of its own", ids)
+	}
+
+	tool.finish("background result")
+	select {
+	case result := <-msgBus.InboundChan():
+		if result.TaskID != ids[0] {
+			t.Fatalf("launched work answers in task %q, want the launching %q", result.TaskID, ids[0])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("async result was not published")
+	}
+}
+
+// A message that moves the parent's task while a sub-turn runs leaves the
+// sub-turn on the task it started on.
+func TestSpawnSubTurn_KeepsItsTaskWhenTheParentMoves(t *testing.T) {
+	ctx := protocoltypes.WithTaskID(context.Background(), "task-parent")
+	provider := &steeredTaskRecorder{
+		taskIDRecorder: taskIDRecorder{tool: "note"},
+		steer:          func() { protocoltypes.MoveTaskID(ctx, "task-moved") },
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+	agent.Tools.Register(noteTool{})
+
+	if _, err := spawnSubTurn(ctx, al, newStopTestParent(agent), SubTurnConfig{
+		Model:        "test-model",
+		SystemPrompt: "write a note",
+	}); err != nil {
+		t.Fatalf("spawnSubTurn: %v", err)
+	}
+
+	if ids := provider.taskIDs(); len(ids) != 2 || ids[0] != "task-parent" || ids[1] != "task-parent" {
+		t.Fatalf("task ids = %q, want the sub-turn to keep the task it started on", ids)
+	}
+}
