@@ -50,7 +50,7 @@ func (p *Pipeline) Finalize(
 		// boilerplate) is shown to the user but kept OUT of session history:
 		// persisted fallbacks read as the model's own prior replies and make
 		// it reproduce the failure on every following turn of the session.
-		if !exec.finalIsFallback {
+		if !exec.finalIsFallback && providerForTurn(turnCtx, ts.turnID) == nil {
 			p.persistAssistantReply(turnCtx, ts, assistantReply(exec, finalContent))
 		}
 		if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {

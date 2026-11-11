@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -238,11 +239,16 @@ func (p *Pipeline) CallLLM(
 	// Verified via A/B replay: with the referenced defs absent, glm-5.2
 	// returned empty 6/6; with them present, it acted 48/48.
 	ts.seedOfferedTools(ts.agent.Tools)
+	selectedTool := selectedToolForTurn(turnCtx, ts.turnID)
+	if selectedTool != "" {
+		ts.offerTools([]string{selectedTool})
+	}
 	if _, restricted := tools.ExecutionPolicySkills(turnCtx); restricted {
 		ts.offerTools(ts.profile.AllowedTools)
 	}
 	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
 		ts.offerTools(referenced)
+		referenced = slices.DeleteFunc(referenced, func(name string) bool { return name == selectedTool })
 		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools referenced by session history",
 				map[string]any{
@@ -318,7 +324,12 @@ func (p *Pipeline) CallLLM(
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}
-	if err := p.routeTurnModel(ctx, ts, exec); err != nil {
+	if provider := providerForTurn(ctx, ts.turnID); provider != nil {
+		exec.activeProvider = provider
+		exec.activeCandidates = nil
+		exec.activeModel = provider.GetDefaultModel()
+		exec.useNativeSearch = false
+	} else if err := p.routeTurnModel(ctx, ts, exec); err != nil {
 		return ControlBreak, err
 	}
 
@@ -1096,6 +1107,12 @@ func (p *Pipeline) CallLLM(
 			})
 		exec.response.Content = ""
 		exec.emptyResponseRetries = maxEmptyResponseRetries
+	}
+
+	// The external caller owns the reply; this turn only records its tool execution.
+	if len(exec.response.ToolCalls) == 0 && providerForTurn(turnCtx, ts.turnID) != nil {
+		cancelConfiguredStreamingLLM(turnCtx, exec)
+		return ControlBreak, nil
 	}
 
 	// No-tool-call path: steering check and direct response

@@ -310,7 +310,7 @@ func (al *AgentLoop) runTurn(
 				return turnResult{}, fmt.Errorf("hook requested turn abort")
 			}
 			// Ensure empty response falls back to DefaultResponse
-			if finalContent == "" {
+			if finalContent == "" && providerForTurn(turnCtx, ts.turnID) == nil {
 				finalContent = ts.opts.DefaultResponse
 				exec.finalIsFallback = true
 			}
@@ -373,9 +373,12 @@ func (al *AgentLoop) runTurn(
 		return al.abortTurn(ts)
 	}
 
-	synthesized := finalContent == ""
-	if synthesized {
+	if finalContent == "" {
 		exec.incomplete = true
+	}
+	// External providers own the reply, including when the runtime hits its tool budget.
+	synthesized := finalContent == "" && providerForTurn(turnCtx, ts.turnID) == nil
+	if synthesized {
 		if ts.atIterationCap(ts.currentIteration()) {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
