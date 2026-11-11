@@ -318,7 +318,12 @@ func (p *Pipeline) CallLLM(
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}
-	if err := p.routeTurnModel(ctx, ts, exec); err != nil {
+	if provider := providerForTurn(ctx, ts.turnID); provider != nil {
+		exec.activeProvider = provider
+		exec.activeCandidates = nil
+		exec.activeModel = provider.GetDefaultModel()
+		exec.useNativeSearch = false
+	} else if err := p.routeTurnModel(ctx, ts, exec); err != nil {
 		return ControlBreak, err
 	}
 
@@ -1091,6 +1096,12 @@ func (p *Pipeline) CallLLM(
 			})
 		exec.response.Content = ""
 		exec.emptyResponseRetries = maxEmptyResponseRetries
+	}
+
+	// The external caller owns the reply; this turn only records its tool execution.
+	if len(exec.response.ToolCalls) == 0 && providerForTurn(turnCtx, ts.turnID) != nil {
+		cancelConfiguredStreamingLLM(turnCtx, exec)
+		return ControlBreak, nil
 	}
 
 	// No-tool-call path: steering check and direct response

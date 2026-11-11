@@ -302,7 +302,7 @@ func (al *AgentLoop) runTurn(
 				return turnResult{}, fmt.Errorf("hook requested turn abort")
 			}
 			// Ensure empty response falls back to DefaultResponse
-			if finalContent == "" {
+			if finalContent == "" && providerForTurn(turnCtx, ts.turnID) == nil {
 				finalContent = ts.opts.DefaultResponse
 				exec.finalIsFallback = true
 			}
