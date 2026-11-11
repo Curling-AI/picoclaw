@@ -4,10 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -65,7 +68,9 @@ func TestTranscribeJoinedAudio_MarkedAudio(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: tc.transcriber}
 			audio := writeJoinedAudio(t)
-			sent := []providers.Message{{Role: "user", Content: "[voice]", Media: []string{audio}, TranscribeAudio: true}}
+			sent := []providers.Message{
+				{Role: "user", Content: "[voice]", Media: []string{audio}, TranscribeAudio: true},
+			}
 
 			got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
 
@@ -85,6 +90,28 @@ func TestTranscribeJoinedAudio_MarkedAudio(t *testing.T) {
 	}
 }
 
+// Each transcription lands on its own message: the marked one sits between
+// two that are not.
+func TestTranscribeJoinedAudio_KeepsEachMessageInItsPlace(t *testing.T) {
+	al := &AgentLoop{
+		cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: &fixedTranscriber{text: "oi"},
+	}
+	sent := []providers.Message{
+		{Role: "user", Content: "first"},
+		{Role: "user", Content: "[voice]", Media: []string{writeJoinedAudio(t)}, TranscribeAudio: true},
+		{Role: "user", Content: "third"},
+	}
+
+	got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
+
+	want := []string{"first", "[voice: oi]", "third"}
+	for i, w := range want {
+		if got[i].Content != w {
+			t.Errorf("message %d = %q, want %q", i, got[i].Content, w)
+		}
+	}
+}
+
 // A channel message was transcribed before it was queued (agent.go:252). One
 // whose audio failed keeps the file next to the note: read again, it would get
 // a second note and a second charge.
@@ -92,7 +119,9 @@ func TestTranscribeJoinedAudio_LeavesUnmarkedMessagesAlone(t *testing.T) {
 	tr := &countingTranscriber{text: "não devia rodar"}
 	al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: tr}
 	audio := writeJoinedAudio(t)
-	sent := []providers.Message{{Role: "user", Content: "fala\n" + failedTranscriptionAudioNote, Media: []string{audio}}}
+	sent := []providers.Message{
+		{Role: "user", Content: "fala\n" + failedTranscriptionAudioNote, Media: []string{audio}},
+	}
 
 	got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
 
@@ -142,6 +171,182 @@ func TestSteerSession_MarksMessagesWithFiles(t *testing.T) {
 		t.Fatalf("queued %d messages, want 2", len(queued))
 	}
 	if queued[0].TranscribeAudio || !queued[1].TranscribeAudio {
-		t.Fatalf("marks = %v, want text unmarked and file marked", []bool{queued[0].TranscribeAudio, queued[1].TranscribeAudio})
+		t.Fatalf(
+			"marks = %v, want text unmarked and file marked",
+			[]bool{queued[0].TranscribeAudio, queued[1].TranscribeAudio},
+		)
+	}
+}
+
+// newAudioSteeringLoop is newSessionSteeringLoop that also hands back the bus:
+// al.bus is an interface without OutboundChan.
+func newAudioSteeringLoop(t *testing.T, provider providers.LLMProvider) (*AgentLoop, *bus.MessageBus) {
+	t.Helper()
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace: t.TempDir(), ModelName: "test-model", MaxTokens: 4096, MaxToolIterations: 10,
+	}}}
+	msgBus := bus.NewMessageBus()
+	return NewAgentLoop(cfg, msgBus, provider), msgBus
+}
+
+func runDirectOn(ctx context.Context, al *AgentLoop, content, sessionKey, channel, chatID string) <-chan directResult {
+	done := make(chan directResult, 1)
+	go func() {
+		resp, err := al.ProcessDirectWithChannel(ctx, content, sessionKey, channel, chatID)
+		done <- directResult{resp: resp, err: err}
+	}()
+	return done
+}
+
+// collectSteeringReads keeps the content of each steering_read the loop
+// publishes; read stops the collector and returns them.
+func collectSteeringReads(t *testing.T, msgBus *bus.MessageBus) (read func() []string) {
+	t.Helper()
+	var reads []string
+	take := func(out bus.OutboundMessage) {
+		if out.Context.Raw[metadataKeyMessageKind] == messageKindSteeringRead {
+			reads = append(reads, out.Content)
+		}
+	}
+	ctx, stop := context.WithCancel(t.Context())
+	collected := make(chan struct{})
+	go func() {
+		defer close(collected)
+		for {
+			select {
+			case out := <-msgBus.OutboundChan():
+				take(out)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return func() []string {
+		stop()
+		<-collected
+		for {
+			select {
+			case out := <-msgBus.OutboundChan():
+				take(out)
+			default:
+				return reads
+			}
+		}
+	}
+}
+
+// An audio sent while the conversation answers reaches the model and the
+// history transcribed; the screen is told the message as it was sent, which is
+// what ethos matches the send by (rpcchannel.go, joined.take).
+func TestSteerSession_AudioReachesTheTurnTranscribed(t *testing.T) {
+	provider := newSessionRecordingProvider("stale answer", "answer that heard the audio")
+	al, msgBus := newAudioSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
+	al.SetMediaStore(media.NewFileMediaStore())
+	al.SetTranscriber(&fixedTranscriber{text: "manda o resumo por e-mail"})
+	reads := collectSteeringReads(t, msgBus)
+
+	done := runDirectOn(t.Context(), al, "build the deck", conversationA, "grpc", "run-a")
+	waitStarted(t, provider.started, done)
+	if err := al.SteerSession(conversationA, "[voice]", []string{writeJoinedAudio(t)}); err != nil {
+		t.Fatalf("SteerSession: %v", err)
+	}
+	provider.unblock()
+	waitDirect(t, done)
+
+	calls := provider.calls()
+	if len(calls) != 2 || !sentContains(calls[1], "[voice: manda o resumo por e-mail]") {
+		t.Fatalf("got %d calls; the second must carry the transcription", len(calls))
+	}
+	history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(conversationA)
+	if n := occurrences(history, "[voice: manda o resumo por e-mail]"); n != 1 {
+		t.Errorf("the history holds the transcription %d times, want once", n)
+	}
+	if got := reads(); !slices.Equal(got, []string{"[voice]"}) {
+		t.Errorf("steering_read = %q, want the message as sent", got)
+	}
+}
+
+// A message no turn read before its turn ended runs in the continuation that
+// ethos starts for it (drainJoined): it is transcribed there too.
+func TestContinueDirect_TranscribesAudioQueuedBySteerSession(t *testing.T) {
+	provider := newSessionRecordingProvider("answer that heard the audio", "")
+	provider.unblock()
+	al := newSessionSteeringLoop(t, provider)
+	al.SetMediaStore(media.NewFileMediaStore())
+	al.SetTranscriber(&fixedTranscriber{text: "manda o resumo"})
+	if err := al.SteerSession(conversationA, "[voice]", []string{writeJoinedAudio(t)}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, ran, err := al.ContinueDirect(
+		t.Context(),
+		DirectContinuation{SessionKey: conversationA, Channel: "test", ChatID: "run-a"},
+	)
+
+	if err != nil || !ran {
+		t.Fatalf("ContinueDirect = ran %v, err %v", ran, err)
+	}
+	if result.Content != "answer that heard the audio" {
+		t.Errorf("answered %q", result.Content)
+	}
+	if calls := provider.calls(); len(calls) != 1 || !sentContains(calls[0], "[voice: manda o resumo]") {
+		t.Fatalf("got %d calls; the continuation must carry the transcription", len(calls))
+	}
+}
+
+// blockingTranscriber holds the transcription until its context ends, as a
+// slow speech-to-text call does.
+type blockingTranscriber struct {
+	started chan struct{}
+	err     chan error
+}
+
+func (b *blockingTranscriber) Name() string { return "blocking" }
+
+func (b *blockingTranscriber) Transcribe(ctx context.Context, _ string) (*asr.TranscriptionResponse, error) {
+	close(b.started)
+	<-ctx.Done()
+	b.err <- ctx.Err()
+	return nil, ctx.Err()
+}
+
+// A stop during the transcription cuts it with the turn: it runs on the
+// turn's context, not on one of its own.
+func TestSteerSession_StopCutsTheTranscription(t *testing.T) {
+	provider := newSessionRecordingProvider("stale answer", "later")
+	al := newSessionSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
+	al.SetMediaStore(media.NewFileMediaStore())
+	tr := &blockingTranscriber{started: make(chan struct{}), err: make(chan error, 1)}
+	al.SetTranscriber(tr)
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+
+	done := runDirectOn(ctx, al, "build the deck", conversationA, "test", "run-a")
+	waitStarted(t, provider.started, done)
+	if err := al.SteerSession(conversationA, "[voice]", []string{writeJoinedAudio(t)}); err != nil {
+		t.Fatal(err)
+	}
+	provider.unblock()
+	select {
+	case <-tr.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn never transcribed the audio")
+	}
+	stop()
+
+	select {
+	case err := <-tr.err:
+		if err == nil {
+			t.Error("the transcription ended without its context ending")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop did not reach the transcription")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the turn did not end after the stop")
 	}
 }

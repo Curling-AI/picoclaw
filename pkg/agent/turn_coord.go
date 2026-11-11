@@ -226,6 +226,10 @@ func (al *AgentLoop) runTurn(
 
 		// Inject pending steering messages
 		if len(pendingMessages) > 0 {
+			// The screen places each message as the person sent it; the model
+			// and the history get its audio transcribed. (seucaranguejo fork, MST-553)
+			sent := pendingMessages
+			pendingMessages = al.transcribeJoinedAudio(turnCtx, ts, pendingMessages)
 			resolvedPending := resolveMediaRefs(pendingMessages, al.mediaStore, maxMediaSize, 0)
 			totalContentLen := 0
 			for i, pm := range pendingMessages {
@@ -238,7 +242,7 @@ func (al *AgentLoop) runTurn(
 				}
 				if pm.PromptSource == string(PromptSourceSteering) {
 					paceNudged = false
-					al.joinPersonMessage(turnCtx, ts, exec, pm, iteration)
+					al.joinPersonMessage(turnCtx, ts, exec, sent[i], iteration)
 					protocoltypes.MoveTaskID(turnCtx, newTaskID())
 				}
 				if !ts.opts.NoHistory {

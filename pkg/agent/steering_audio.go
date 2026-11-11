@@ -22,7 +22,11 @@ const SteerSessionTranscribesAudio = true
 // lock, which the stop button and ChatActive also take, and a speech-to-text
 // call there would hold them. msgs is left as it was: the screen places each
 // message as the person sent it. (seucaranguejo fork, MST-553)
-func (al *AgentLoop) transcribeJoinedAudio(ctx context.Context, ts *turnState, msgs []providers.Message) []providers.Message {
+func (al *AgentLoop) transcribeJoinedAudio(
+	ctx context.Context,
+	ts *turnState,
+	msgs []providers.Message,
+) []providers.Message {
 	var out []providers.Message
 	for i, m := range msgs {
 		if !m.TranscribeAudio {
