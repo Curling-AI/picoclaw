@@ -217,6 +217,12 @@ type Message struct {
 	// to the agent runtime. (seucaranguejo fork — see agent/self_delivery.go)
 	JoinedSends string `json:"-"`
 
+	// TranscribeAudio marks a message SteerSession queued: the turn that reads
+	// it transcribes its audio before the model sees it, as a message that
+	// opens a turn gets (prepareInboundMessageForAgent). Internal to the agent
+	// runtime. (seucaranguejo fork — see agent/steering_audio.go, MST-553)
+	TranscribeAudio bool `json:"-"`
+
 	// Ordering evidence is private storage provenance, never provider JSON.
 	HistoryOrderVersion uint8  `json:"-"`
 	HistoryStreamID     string `json:"-"`
