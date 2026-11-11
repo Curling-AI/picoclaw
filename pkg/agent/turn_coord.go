@@ -365,9 +365,12 @@ func (al *AgentLoop) runTurn(
 		return al.abortTurn(ts)
 	}
 
-	synthesized := finalContent == ""
-	if synthesized {
+	if finalContent == "" {
 		exec.incomplete = true
+	}
+	// External providers own the reply, including when the runtime hits its tool budget.
+	synthesized := finalContent == "" && providerForTurn(turnCtx, ts.turnID) == nil
+	if synthesized {
 		if ts.atIterationCap(ts.currentIteration()) {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.

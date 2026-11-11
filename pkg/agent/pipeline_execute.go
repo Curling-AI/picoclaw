@@ -465,9 +465,13 @@ toolLoop:
 					})
 				messages = append(messages, al.skipToolCalls(
 					ts, normalizedToolCalls[i+1:], "repeated refused call", repeatStopSkipContent)...)
+				exec.messages = messages
+				if providerForTurn(turnCtx, ts.turnID) != nil {
+					exec.incomplete = true
+					return ToolControlBreak
+				}
 				// The coordinator finalizes with this text like any reply, so the
 				// user gets it on every channel and the next turn sees it.
-				exec.messages = messages
 				exec.finalContent = repeatStopSummary(displayToolName(ts.agent.Tools, toolName))
 				p.beginSynthesizedFinalStream(turnCtx, ts, exec)
 				return ToolControlBreak
