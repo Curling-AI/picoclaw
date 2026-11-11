@@ -72,11 +72,20 @@ func WithTaskRole(ctx context.Context, role string) context.Context {
 
 // TaskCallLabels are the labels one call carries: its task's, plus its role.
 func TaskCallLabels(ctx context.Context) []string {
-	labels := TaskLabelsFromContext(ctx)
+	_, labels := TaskCallFromContext(ctx)
+	return labels
+}
+
+// TaskCallFromContext reads ctx's task once, for a call: its id and the labels
+// the call carries. Two reads could straddle a MoveTaskID and pair one task's
+// id with another's labels.
+func TaskCallFromContext(ctx context.Context) (string, []string) {
+	t := taskFromContext(ctx)
+	labels := slices.Clone(t.labels)
 	if role, _ := ctx.Value(taskRoleContextKey{}).(string); role != "" {
 		labels = append(labels, role)
 	}
-	return labels
+	return t.id, labels
 }
 
 // NewTraceID mints a 96-bit id with prefix for the gateway to trace by; "" when

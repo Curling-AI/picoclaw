@@ -66,12 +66,12 @@ const (
 )
 
 func (p *Provider) applyTaskIDHeader(req *http.Request) {
-	taskID := protocoltypes.TaskIDFromContext(req.Context())
+	taskID, labels := protocoltypes.TaskCallFromContext(req.Context())
 	if taskID == "" || !p.goesToHulk() {
 		return
 	}
 	req.Header.Set(taskIDHeader, taskID)
-	if labels := protocoltypes.TaskCallLabels(req.Context()); len(labels) > 0 {
+	if len(labels) > 0 {
 		encoded, _ := json.Marshal(labels)
 		req.Header.Set(taskLabelsHeader, string(encoded))
 	}

@@ -46,6 +46,9 @@ func TestTaskLabelsTravelWithTheTask(t *testing.T) {
 	if got := TaskCallLabels(t.Context()); len(got) != 0 {
 		t.Fatalf("a context without a task got labels %q", got)
 	}
+	if id, labels := TaskCallFromContext(WithTaskRole(turn, RoleAgent)); id != "task-b" || !slices.Equal(labels, want) {
+		t.Fatalf("one read of the moved turn = %q %q, want task-b %q", id, labels, want)
+	}
 }
 
 // Only the vocabulary counts as a label, and a channel outside it goes unlabeled.
