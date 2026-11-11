@@ -40,8 +40,8 @@ func TestTaskLabelsTravelWithTheTask(t *testing.T) {
 	if got := TaskCallLabels(WithTaskRole(turn, RoleAgent)); !slices.Equal(got, want) {
 		t.Fatalf("moved turn labels = %q, want %q", got, want)
 	}
-	if got, want := TaskCallLabels(subTurn), []string{TaskAutomation, RoleSubagent}; !slices.Equal(got, want) {
-		t.Fatalf("sub-turn labels = %q, want %q", got, want)
+	if got, wantSub := TaskCallLabels(subTurn), []string{TaskAutomation, RoleSubagent}; !slices.Equal(got, wantSub) {
+		t.Fatalf("sub-turn labels = %q, want %q", got, wantSub)
 	}
 	if got := TaskCallLabels(t.Context()); len(got) != 0 {
 		t.Fatalf("a context without a task got labels %q", got)
