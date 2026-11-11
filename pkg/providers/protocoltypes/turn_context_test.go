@@ -2,6 +2,7 @@ package protocoltypes
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -24,5 +25,42 @@ func TestMoveTaskIDStaysInItsHolder(t *testing.T) {
 	MoveTaskID(t.Context(), "task-c")
 	if got := TaskIDFromContext(t.Context()); got != "" {
 		t.Fatalf("a context without a task got %q", got)
+	}
+}
+
+// A task's labels go where its id goes, a move replaces both, and each call
+// adds its own role.
+func TestTaskLabelsTravelWithTheTask(t *testing.T) {
+	turn := WithTaskID(t.Context(), "task-a", TaskAutomation)
+	subTurn := WithTaskRole(WithTaskID(turn, TaskIDFromContext(turn), TaskLabelsFromContext(turn)...), RoleSubagent)
+
+	MoveTaskID(turn, "task-b", MessageTaskLabels("grpc")...)
+
+	want := []string{TaskMessage, "channel:web", RoleAgent}
+	if got := TaskCallLabels(WithTaskRole(turn, RoleAgent)); !slices.Equal(got, want) {
+		t.Fatalf("moved turn labels = %q, want %q", got, want)
+	}
+	if got, want := TaskCallLabels(subTurn), []string{TaskAutomation, RoleSubagent}; !slices.Equal(got, want) {
+		t.Fatalf("sub-turn labels = %q, want %q", got, want)
+	}
+	if got := TaskCallLabels(t.Context()); len(got) != 0 {
+		t.Fatalf("a context without a task got labels %q", got)
+	}
+}
+
+// Only the vocabulary counts as a label, and a channel outside it goes unlabeled.
+func TestTaskLabelVocabulary(t *testing.T) {
+	if got := MessageTaskLabels("feishu"); !slices.Equal(got, []string{TaskMessage}) {
+		t.Fatalf("labels for an unknown channel = %q, want only the message", got)
+	}
+	for _, label := range append(MessageTaskLabels("whatsapp"), TaskReaction, RoleImage) {
+		if !IsTaskLabel(label) {
+			t.Fatalf("%q left out of the vocabulary", label)
+		}
+	}
+	for _, label := range []string{"task:other", "channel:feishu", "channel:grpc", "role:agent "} {
+		if IsTaskLabel(label) {
+			t.Fatalf("%q taken as a label", label)
+		}
 	}
 }

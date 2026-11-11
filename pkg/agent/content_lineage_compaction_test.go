@@ -132,7 +132,7 @@ func TestContentLineageSummaryRejectsConcurrentAppendWithoutPartialSummary(t *te
 	events, closeEvents := subscribeRuntimeEventsForTest(t, al, 8, runtimeevents.KindAgentSessionSummarize)
 	defer closeEvents()
 	manager := al.contextManager.(*legacyContextManager)
-	manager.summarizeSession(agent, key)
+	manager.summarizeSession(context.Background(), agent, key)
 	after, err := store.ReadHistoryContentFrame(t.Context(), key)
 	if err != nil || len(after.Entries) != len(before.Entries)+1 || after.Summary != before.Summary ||
 		after.Entries[len(after.Entries)-1].Message.Content != "entrega durante o resumo" {

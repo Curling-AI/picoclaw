@@ -2,6 +2,7 @@ package openai_compat
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"net/http"
 	"strings"
@@ -57,11 +58,21 @@ func (p *Provider) goesToHulk() bool {
 }
 
 // taskIDHeader groups every call of one task in hulk (X-Hulk-Task-ID in its
-// docs; header names are case-insensitive).
-const taskIDHeader = "X-Hulk-Task-Id"
+// docs; header names are case-insensitive). taskLabelsHeader classifies the
+// call, and hulk takes it only next to a task id.
+const (
+	taskIDHeader     = "X-Hulk-Task-Id"
+	taskLabelsHeader = "X-Hulk-Task-Labels"
+)
 
 func (p *Provider) applyTaskIDHeader(req *http.Request) {
-	if taskID := protocoltypes.TaskIDFromContext(req.Context()); taskID != "" && p.goesToHulk() {
-		req.Header.Set(taskIDHeader, taskID)
+	taskID := protocoltypes.TaskIDFromContext(req.Context())
+	if taskID == "" || !p.goesToHulk() {
+		return
+	}
+	req.Header.Set(taskIDHeader, taskID)
+	if labels := protocoltypes.TaskCallLabels(req.Context()); len(labels) > 0 {
+		encoded, _ := json.Marshal(labels)
+		req.Header.Set(taskLabelsHeader, string(encoded))
 	}
 }

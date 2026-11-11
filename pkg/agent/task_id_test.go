@@ -14,11 +14,12 @@ import (
 )
 
 // taskIDRecorder answers each turn with one call to tool, then text, and keeps
-// the task id every model call carried.
+// the task id and labels every model call carried.
 type taskIDRecorder struct {
-	tool string
-	mu   sync.Mutex
-	ids  []string
+	tool   string
+	mu     sync.Mutex
+	ids    []string
+	labels [][]string
 }
 
 func (p *taskIDRecorder) Chat(
@@ -27,6 +28,7 @@ func (p *taskIDRecorder) Chat(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ids = append(p.ids, protocoltypes.TaskIDFromContext(ctx))
+	p.labels = append(p.labels, protocoltypes.TaskCallLabels(ctx))
 	if len(p.ids)%2 == 1 {
 		return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
 			ID:        fmt.Sprintf("call-%d", len(p.ids)),
@@ -44,6 +46,12 @@ func (p *taskIDRecorder) taskIDs() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.ids...)
+}
+
+func (p *taskIDRecorder) taskLabels() [][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([][]string(nil), p.labels...)
 }
 
 // Every model call between a message and its answer carries the same task id,
