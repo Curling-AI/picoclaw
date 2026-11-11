@@ -16,6 +16,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type stubJobExecutor struct {
@@ -30,12 +31,16 @@ type stubJobExecutor struct {
 	publishedChan   string
 	publishedChatID string
 	publishedKey    string
+	lastTaskID      string
+	lastTaskLabels  []string
 }
 
 func (s *stubJobExecutor) ProcessDirectWithChannel(
-	_ context.Context,
+	ctx context.Context,
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
+	s.lastTaskID = protocoltypes.TaskIDFromContext(ctx)
+	s.lastTaskLabels = protocoltypes.TaskLabelsFromContext(ctx)
 	s.lastPrompt = content
 	s.lastKey = sessionKey
 	s.lastChan = channel
@@ -1602,5 +1607,37 @@ func TestCronTool_GetReturnsConnectors(t *testing.T) {
 	)
 	if got := parseCronJobResult(t, result); !slices.Equal(got.Payload.Connectors, []string{"gmail"}) {
 		t.Fatalf("get lost the connectors: %s", result.ForLLM)
+	}
+}
+
+// A scheduled run is a task of its own, labeled automation, or memory-refresh
+// for the job the gateway seeds; a run a turn asked for stays in that turn's task.
+func TestCronTool_ExecuteJobRunsAsATaskOfItsOwn(t *testing.T) {
+	inTurn := protocoltypes.WithTaskID(context.Background(), "task-turn", protocoltypes.TaskMessage)
+	for _, tc := range []struct {
+		name, job string
+		ctx       context.Context
+		wantID    string
+		want      []string
+	}{
+		{"scheduled", "daily digest", context.Background(), "", []string{protocoltypes.TaskAutomation}},
+		{"memory refresh", cron.MemoryRefreshJobName, context.Background(), "", []string{protocoltypes.TaskMemoryRefresh}},
+		{"asked by a turn", "daily digest", inTurn, "task-turn", []string{protocoltypes.TaskMessage}},
+	} {
+		executor := &stubJobExecutor{response: "done"}
+		tool := newTestCronToolWithExecutorAndConfig(t, executor, config.DefaultConfig())
+		job := &cron.CronJob{ID: "job-1", Name: tc.job}
+		job.Payload.Channel = "telegram"
+		job.Payload.To = "chat-1"
+		job.Payload.Message = "summarize the day"
+
+		tool.ExecuteJob(tc.ctx, job)
+
+		if !strings.HasPrefix(executor.lastTaskID, "task-") || (tc.wantID != "" && executor.lastTaskID != tc.wantID) {
+			t.Fatalf("%s: task = %q, want a task- id (%q if set)", tc.name, executor.lastTaskID, tc.wantID)
+		}
+		if !slices.Equal(executor.lastTaskLabels, tc.want) {
+			t.Fatalf("%s: task labels = %q, want %q", tc.name, executor.lastTaskLabels, tc.want)
+		}
 	}
 }

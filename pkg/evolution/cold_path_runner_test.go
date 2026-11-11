@@ -345,11 +345,11 @@ func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {
 	}
 }
 
-// taskRecordingRuntime keeps the task id each run was given.
+// taskRecordingRuntime keeps the task id and labels each run was given.
 type taskRecordingRuntime struct{ tasks chan string }
 
 func (r *taskRecordingRuntime) RunColdPathOnce(ctx context.Context, _ string) error {
-	r.tasks <- protocoltypes.TaskIDFromContext(ctx)
+	r.tasks <- protocoltypes.TaskIDFromContext(ctx) + " " + strings.Join(protocoltypes.TaskLabelsFromContext(ctx), ",")
 	return nil
 }
 
@@ -372,8 +372,8 @@ func TestColdPathRunner_EachRunIsATaskOfItsOwn(t *testing.T) {
 	}
 
 	for _, task := range tasks {
-		if !strings.HasPrefix(task, "evolution-") {
-			t.Fatalf("run task = %q, want an evolution- task", task)
+		if !strings.HasPrefix(task, "evolution-") || !strings.HasSuffix(task, " "+protocoltypes.TaskEvolution) {
+			t.Fatalf("run task = %q, want an evolution- task labeled %s", task, protocoltypes.TaskEvolution)
 		}
 	}
 	if tasks[0] == tasks[1] {

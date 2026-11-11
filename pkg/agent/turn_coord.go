@@ -36,11 +36,17 @@ func (al *AgentLoop) runTurn(
 	turnCtx = protocoltypes.WithTurnID(turnCtx, ts.turnID)
 	// A sub-turn starts on the task of the turn that spawned it, in a holder of
 	// its own: a message that later moves the parent's task does not move it.
-	taskID := protocoltypes.TaskIDFromContext(turnCtx)
+	// A turn that finds no task was started by a message.
+	taskID, taskLabels := protocoltypes.TaskIDFromContext(turnCtx), protocoltypes.TaskLabelsFromContext(turnCtx)
 	if taskID == "" {
-		taskID = newTaskID()
+		taskID, taskLabels = newTaskID(), protocoltypes.MessageTaskLabels(ts.channel)
 	}
-	turnCtx = protocoltypes.WithTaskID(turnCtx, taskID)
+	turnCtx = protocoltypes.WithTaskID(turnCtx, taskID, taskLabels...)
+	role := protocoltypes.RoleAgent
+	if ts.depth > 0 {
+		role = protocoltypes.RoleSubagent
+	}
+	turnCtx = protocoltypes.WithTaskRole(turnCtx, role)
 	turnCtx = WithAgentLoop(turnCtx, al)
 	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
@@ -239,7 +245,7 @@ func (al *AgentLoop) runTurn(
 				if pm.PromptSource == string(PromptSourceSteering) {
 					paceNudged = false
 					al.joinPersonMessage(turnCtx, ts, exec, pm, iteration)
-					protocoltypes.MoveTaskID(turnCtx, newTaskID())
+					protocoltypes.MoveTaskID(turnCtx, newTaskID(), protocoltypes.MessageTaskLabels(ts.channel)...)
 				}
 				if !ts.opts.NoHistory {
 					ts.appendHistoryMessage(pm)

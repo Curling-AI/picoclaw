@@ -394,7 +394,7 @@ func (al *AgentLoop) processSystemMessage(
 		opts.BackgroundResult = &msg
 	}
 	if msg.TaskID != "" {
-		ctx = protocoltypes.WithTaskID(ctx, msg.TaskID)
+		ctx = protocoltypes.WithTaskID(ctx, msg.TaskID, msg.TaskLabels...)
 	}
 	return al.runAgentLoop(ctx, agent, opts)
 }

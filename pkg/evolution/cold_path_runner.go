@@ -153,7 +153,7 @@ func (r *ColdPathRunner) runWorkspace(workspace string) {
 
 		// A run reads the records of every turn since the last one, so it is a
 		// task of its own rather than part of the turn that triggered it.
-		runCtx := protocoltypes.WithTaskID(r.ctx, protocoltypes.NewTraceID("evolution-"))
+		runCtx := protocoltypes.WithTaskID(r.ctx, protocoltypes.NewTraceID("evolution-"), protocoltypes.TaskEvolution)
 		err := r.runtime.RunColdPathOnce(runCtx, workspace)
 		if err != nil && isNoCreditError(err) && r.noCreditPause > 0 {
 			// Pending work is dropped too: without credit it would fail the same way.

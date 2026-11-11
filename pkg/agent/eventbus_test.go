@@ -553,7 +553,7 @@ func TestAgentLoop_EmitsSessionSummarizeEvent(t *testing.T) {
 	defer closeRuntimeEvents()
 
 	lcm := &legacyContextManager{al: al}
-	lcm.summarizeSession(defaultAgent, "session-1")
+	lcm.summarizeSession(context.Background(), defaultAgent, "session-1")
 
 	events := collectRuntimeEventStream(runtimeCh)
 	summaryEvt, ok := findRuntimeEvent(events, runtimeevents.KindAgentSessionSummarize)

@@ -109,7 +109,7 @@ func TestContentLineagePendingStopsSummaryWorkBeforeProvider(t *testing.T) {
 				agent.Provider, agent.KeepLastMessages = provider, 2
 				manager := al.contextManager.(*legacyContextManager)
 				if mode == "summarize" {
-					manager.summarizeSession(agent, key)
+					manager.summarizeSession(context.Background(), agent, key)
 				} else {
 					_, changed, compactErr := manager.forceCompressionContext(t.Context(), key, 0)
 					if changed || (!errors.Is(compactErr, memory.ErrContentLineagePending) &&
@@ -155,7 +155,7 @@ func TestContentLineageSummaryResumesAfterQualifiedArchive(t *testing.T) {
 	agent := al.registry.GetDefaultAgent()
 	provider := &contentSummaryCountingProvider{}
 	agent.Provider, agent.KeepLastMessages = provider, 2
-	al.contextManager.(*legacyContextManager).summarizeSession(agent, key)
+	al.contextManager.(*legacyContextManager).summarizeSession(context.Background(), agent, key)
 	if provider.calls == 0 {
 		t.Fatal("qualified archive left future summarization permanently disabled")
 	}
