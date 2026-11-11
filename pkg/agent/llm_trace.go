@@ -1,12 +1,11 @@
 package agent
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"maps"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // llmRequestIDOption is read by the provider and sent as X-Request-Id.
@@ -26,11 +25,7 @@ func newTaskID() string {
 }
 
 func newTraceID(prefix string) string {
-	var buf [12]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return ""
-	}
-	return prefix + hex.EncodeToString(buf[:])
+	return protocoltypes.NewTraceID(prefix)
 }
 
 func optsWithFreshRequestID(opts map[string]any) (map[string]any, string) {

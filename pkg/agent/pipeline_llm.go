@@ -587,7 +587,12 @@ func (p *Pipeline) CallLLM(
 	// contextRefusals counts this call's context-window refusals; retry also
 	// counts the transient ones (429, 5xx) before them.
 	contextRefusals := 0
-	for retry := 0; retry <= maxRetries; retry++ {
+	for retry, attempt := 0, 0; retry <= maxRetries; retry, attempt = retry+1, attempt+1 {
+		// The gateway keys idempotency on the request id: an attempt that reuses
+		// it is read as the call before it, and refused once the body changed.
+		if attempt > 0 {
+			exec.llmOpts, exec.llmRequestID = optsWithFreshRequestID(exec.llmOpts)
+		}
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
 			break

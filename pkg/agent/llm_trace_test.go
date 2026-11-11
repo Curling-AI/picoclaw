@@ -1,8 +1,13 @@
 package agent
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -48,5 +53,64 @@ func TestResponseCompletionTokens_UnknownIsNegative(t *testing.T) {
 	resp := &providers.LLMResponse{Usage: &providers.UsageInfo{CompletionTokens: 14}}
 	if got := responseCompletionTokens(resp); got != 14 {
 		t.Fatalf("completion tokens = %d, want 14", got)
+	}
+}
+
+// requestIDRecorder fails its first call with a server error and keeps the
+// request id every call carried.
+type requestIDRecorder struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (p *requestIDRecorder) Chat(
+	_ context.Context, _ []providers.Message, _ []providers.ToolDefinition, _ string, opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ids = append(p.ids, requestIDFromOptions(opts))
+	if len(p.ids) == 1 {
+		return nil, errors.New("API request failed:\n  Status: 500\n  Body:   internal server error")
+	}
+	return &providers.LLMResponse{Content: "recovered", FinishReason: "stop"}, nil
+}
+
+func (p *requestIDRecorder) GetDefaultModel() string { return "test-model" }
+
+// A retry is a new upstream call: the gateway reads a repeated request id as
+// the call before it.
+func TestPipeline_CallLLM_RetryGetsAFreshRequestID(t *testing.T) {
+	provider := &requestIDRecorder{}
+	cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+		Workspace:           t.TempDir(),
+		ModelName:           "test-model",
+		MaxTokens:           4096,
+		MaxToolIterations:   10,
+		MaxLLMRetries:       1,
+		LLMRetryBackoffSecs: 1,
+	}}}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn: %v", err)
+	}
+
+	if _, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1); err != nil {
+		t.Fatalf("CallLLM: %v", err)
+	}
+
+	ids := provider.ids
+	if len(ids) != 2 || ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("request ids = %q, want a fresh one for the retry", ids)
+	}
+	if exec.llmRequestID != ids[1] {
+		t.Fatalf("recorded request id = %q, want the one the answering call carried (%q)", exec.llmRequestID, ids[1])
 	}
 }
