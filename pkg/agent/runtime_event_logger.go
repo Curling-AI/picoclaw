@@ -285,6 +285,7 @@ func appendRuntimeEventPayloadSummary(fields map[string]any, payload any) {
 		fields["reason"] = payload.Reason
 		fields["error"] = payload.Error
 		fields["backoff_ms"] = payload.Backoff.Milliseconds()
+		fields["request_id"] = payload.RequestID
 	case ContextCompressPayload:
 		fields["reason"] = payload.Reason
 		fields["dropped_messages"] = payload.DroppedMessages

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // Auto-delegation for image turns (seucaranguejo fork).
@@ -307,7 +308,7 @@ func (p *Pipeline) callVisionDelegate(
 		"temperature":      0.2,
 		"prompt_cache_key": promptCacheKeyForSession(ts.promptCacheScope(), "vision"),
 	}
-	resp, err := provider.Chat(ctx, msgs, nil, model, opts)
+	resp, err := provider.Chat(protocoltypes.WithTaskRole(ctx, protocoltypes.RoleVision), msgs, nil, model, opts)
 	if err != nil {
 		return "", err
 	}

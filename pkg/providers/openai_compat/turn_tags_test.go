@@ -1,6 +1,7 @@
 package openai_compat
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -203,6 +204,57 @@ func TestTaskIDHeaderReachesHulkOnly(t *testing.T) {
 			}
 			if got := <-seen; got != tc.want {
 				t.Fatalf("%s stream=%v: task header = %q, want %q", tc.path, stream, got, tc.want)
+			}
+		}
+	}
+}
+
+// The labels ride next to the task id on hulk's route only: hulk refuses
+// labels on a call without a task.
+func TestTaskLabelsReachHulkOnlyNextToATask(t *testing.T) {
+	labeled := protocoltypes.WithTaskRole(
+		protocoltypes.WithTaskID(t.Context(), "task-1", protocoltypes.MessageTaskLabels("grpc")...),
+		protocoltypes.RoleAgent,
+	)
+	for _, tc := range []struct {
+		name string
+		path string
+		ctx  context.Context
+		want string
+	}{
+		{"hulk", "/llm-proxy/a/hulk", labeled, `["task:message","channel:web","role:agent"]`},
+		{"no task", "/llm-proxy/a/hulk", protocoltypes.WithTaskRole(t.Context(), protocoltypes.RoleAgent), ""},
+		{"gateway", "/llm-proxy/a/gateway", labeled, ""},
+	} {
+		for _, stream := range []bool{false, true} {
+			seen := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.Header.Get(taskLabelsHeader)
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(
+						w,
+						"data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+					)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`)
+			}))
+			provider := NewProvider("key", server.URL+tc.path, "")
+			messages := []Message{{Role: "user", Content: "hello"}}
+			var err error
+			if stream {
+				_, err = provider.ChatStreamEvents(tc.ctx, messages, nil, "model", nil, nil)
+			} else {
+				_, err = provider.Chat(tc.ctx, messages, nil, "model", nil)
+			}
+			server.Close()
+			if err != nil {
+				t.Fatalf("%s stream=%v: model call: %v", tc.name, stream, err)
+			}
+			if got := <-seen; got != tc.want {
+				t.Fatalf("%s stream=%v: labels header = %q, want %q", tc.name, stream, got, tc.want)
 			}
 		}
 	}
