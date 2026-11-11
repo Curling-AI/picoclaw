@@ -120,6 +120,7 @@ func (p *Pipeline) ExecuteTools(
 	al := p.al
 	turnCtx = withToolTurnOrigin(turnCtx, ts)
 	normalizedToolCalls := exec.normalizedToolCalls
+	selectedTool := selectedToolForTurn(turnCtx, ts.turnID)
 
 	ts.setPhase(TurnPhaseTools)
 	messages := exec.messages
@@ -147,7 +148,11 @@ toolLoop:
 			skipped := providers.ToolCall{ID: tc.ID, Name: toolName}
 			messages = append(messages, al.skipToolCalls(ts, []providers.ToolCall{skipped}, content, content)...)
 		}
-		denyByTurnProfile := func() bool {
+		denyTool := func() bool {
+			if selectedTool != "" && toolName != selectedTool {
+				skipToolCall(fmt.Sprintf("Tool %q was not selected for this turn.", toolName))
+				return true
+			}
 			if turnProfileToolAllowed(ts.profile, toolName) {
 				return false
 			}
@@ -155,7 +160,7 @@ toolLoop:
 			return true
 		}
 
-		if denyByTurnProfile() {
+		if denyTool() {
 			continue
 		}
 
@@ -492,7 +497,7 @@ toolLoop:
 			}
 		}
 
-		if denyByTurnProfile() {
+		if denyTool() {
 			continue
 		}
 
@@ -602,17 +607,21 @@ toolLoop:
 		execCtx = tools.WithExecOrigin(execCtx, root.sessionKey, root.turnID)
 		// A subagent's task is found by this id. (seucaranguejo fork)
 		execCtx = tools.WithToolCallID(execCtx, tc.ID)
-		// The model can still name a deferred tool whose promotion expired;
-		// honor the call instead of answering "tool not found".
-		if revived := ts.agent.Tools.EnsureVisible([]string{toolName}, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
-			logger.InfoCF("agent", "Revived expired deferred tool called by the model",
-				map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
+		executeTool := ts.agent.Tools.ExecuteWithContext
+		if selectedTool != "" {
+			executeTool = ts.agent.Tools.ExecuteSelectedWithContext
+		} else {
+			// The model can still name a deferred tool whose promotion expired.
+			if revived := ts.agent.Tools.EnsureVisible([]string{toolName}, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
+				logger.InfoCF("agent", "Revived expired deferred tool called by the model",
+					map[string]any{"agent_id": ts.agent.ID, "iteration": iteration, "tool": toolName})
+			}
 		}
 		ts.offerTools([]string{toolName})
 		if len(ts.connectors.retired) > 0 {
 			execCtx = tools.WithUnavailableTools(execCtx, ts.isToolRetired)
 		}
-		toolResult := ts.agent.Tools.ExecuteWithContext(
+		toolResult := executeTool(
 			execCtx,
 			toolName,
 			toolArgs,
@@ -964,9 +973,11 @@ toolLoop:
 	// long task outlives its own tools mid-flight (TTL is a global counter
 	// across all of the agent's sessions) and the turn dies the way
 	// EnsureVisible describes.
-	roundCalls := []providers.Message{{Role: "assistant", ToolCalls: exec.normalizedToolCalls}}
-	if used := toolCallNamesFromMessages(roundCalls); len(used) > 0 {
-		ts.agent.Tools.TouchTools(used, discoveryPromoteTTL(p.Cfg))
+	if selectedTool == "" {
+		roundCalls := []providers.Message{{Role: "assistant", ToolCalls: exec.normalizedToolCalls}}
+		if used := toolCallNamesFromMessages(roundCalls); len(used) > 0 {
+			ts.agent.Tools.TouchTools(used, discoveryPromoteTTL(p.Cfg))
+		}
 	}
 	ts.agent.Tools.TickTTL()
 	logger.DebugCF("agent", "TTL tick after tool execution", map[string]any{

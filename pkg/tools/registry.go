@@ -407,6 +407,29 @@ func (r *ToolRegistry) ExecuteWithContext(
 	channel, chatID string,
 	asyncCallback AsyncCallback,
 ) *ToolResult {
+	return r.executeWithContext(ctx, name, args, channel, chatID, asyncCallback, false)
+}
+
+// ExecuteSelectedWithContext executes the registered tool selected by the
+// caller for this turn, independently of its shared discovery TTL.
+func (r *ToolRegistry) ExecuteSelectedWithContext(
+	ctx context.Context,
+	name string,
+	args map[string]any,
+	channel, chatID string,
+	asyncCallback AsyncCallback,
+) *ToolResult {
+	return r.executeWithContext(ctx, name, args, channel, chatID, asyncCallback, true)
+}
+
+func (r *ToolRegistry) executeWithContext(
+	ctx context.Context,
+	name string,
+	args map[string]any,
+	channel, chatID string,
+	asyncCallback AsyncCallback,
+	selected bool,
+) *ToolResult {
 	logger.InfoCF("tool", "Tool execution started",
 		map[string]any{
 			"tool": name,
@@ -414,7 +437,7 @@ func (r *ToolRegistry) ExecuteWithContext(
 		})
 
 	tool, ok := r.Get(name)
-	if _, restricted := toolshared.ExecutionPolicySkills(ctx); restricted {
+	if _, restricted := toolshared.ExecutionPolicySkills(ctx); restricted || selected {
 		tool, ok = r.GetRegistered(name)
 	}
 	if !ok {
@@ -425,6 +448,9 @@ func (r *ToolRegistry) ExecuteWithContext(
 		return ErrorResult(
 			fmt.Sprintf("tool %q not found", name),
 		).WithError(fmt.Errorf("tool not found"))
+	}
+	if scoped, isScoped := tool.(TurnScopedTool); selected && isScoped && !scoped.OfferedIn(ctx) {
+		return ErrorResult(fmt.Sprintf("Tool %q is not available for this turn.", name))
 	}
 	if !toolshared.ExecutionPolicyAllowsTool(ctx, tool) {
 		return ErrorResult(fmt.Sprintf("Tool %q is not allowed for this execution.", name))

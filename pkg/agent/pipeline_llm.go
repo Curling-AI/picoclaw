@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -238,11 +239,16 @@ func (p *Pipeline) CallLLM(
 	// Verified via A/B replay: with the referenced defs absent, glm-5.2
 	// returned empty 6/6; with them present, it acted 48/48.
 	ts.seedOfferedTools(ts.agent.Tools)
+	selectedTool := selectedToolForTurn(turnCtx, ts.turnID)
+	if selectedTool != "" {
+		ts.offerTools([]string{selectedTool})
+	}
 	if _, restricted := tools.ExecutionPolicySkills(turnCtx); restricted {
 		ts.offerTools(ts.profile.AllowedTools)
 	}
 	if referenced := toolCallNamesFromMessages(exec.messages); len(referenced) > 0 {
 		ts.offerTools(referenced)
+		referenced = slices.DeleteFunc(referenced, func(name string) bool { return name == selectedTool })
 		if revived := ts.agent.Tools.EnsureVisible(referenced, discoveryPromoteTTL(p.Cfg)); len(revived) > 0 {
 			logger.InfoCF("agent", "Re-promoted deferred tools referenced by session history",
 				map[string]any{
