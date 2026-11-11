@@ -106,6 +106,9 @@ type LLMRetryPayload struct {
 	Reason     string
 	Error      string
 	Backoff    time.Duration
+	// RequestID is the one the next attempt goes out with: like the request
+	// event's, the only record of a call whose response never arrives.
+	RequestID string
 }
 
 // ContextCompressReason identifies why emergency compression ran.
