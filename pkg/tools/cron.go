@@ -875,7 +875,7 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 	//     silently", models narrated the silence ("Sem novidades.", "(No new
 	//     listings — no message sent.)"), and that went out on every tick, to
 	//     WhatsApp at a template's price. A run with nothing to deliver answers
-	//     NO_REPLY, which automationDelivery takes out. The note keeps its first
+	//     NO_REPLY, which AutomationDelivery takes out. The note keeps its first
 	//     and last words: ethos's privacy export finds it by them.
 	//     (seucaranguejo fork — MST-795)
 	message := fmt.Sprintf("[Scheduled run of cron job %q]\n%s\n\n"+
@@ -914,7 +914,7 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 	// The answer is the delivery: NO_REPLY is not delivered, the text around
 	// it is. The status stays the turn's. (seucaranguejo fork — MST-795; the
 	// gate is adapted from picoclaw#128)
-	delivery, mixed := automationDelivery(result.Content)
+	delivery, mixed := AutomationDelivery(result.Content)
 	switch {
 	case delivery == "" && result.Content != "":
 		logger.InfoCF("cron", "Automation run had nothing to deliver",

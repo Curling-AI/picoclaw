@@ -9,7 +9,7 @@ import (
 
 // noReplyToken is the final answer of an automation run that has nothing to
 // deliver. The run's note asks for it (ExecuteJobWithResult), and
-// automationDelivery takes it out before anything is published.
+// AutomationDelivery takes it out before anything is published.
 // (seucaranguejo fork — MST-795)
 const noReplyToken = "NO_REPLY"
 
@@ -22,7 +22,7 @@ var noReplyPattern = regexp.MustCompile(`(?i)NO\\?_REPLY`)
 // "?from=no_reply&x=1", "no_reply_bot".
 const wordJoiners = "@/.-_=&?#:+%~"
 
-// automationDelivery is what an automation run's final answer delivers. Every
+// AutomationDelivery is what an automation run's final answer delivers. Every
 // NO_REPLY standing as a word of its own is taken out: the rune right before
 // or after it does not glue it to a word (glues), so "_NO_REPLY_" counts and
 // "NO_REPLYING", "no_reply@email.apple.com" and "x.com/no_reply" do not.
@@ -30,7 +30,7 @@ const wordJoiners = "@/.-_=&?#:+%~"
 // quotes, code or bold is still the token. When text is left, it is
 // delivered, so the token never drops news the run found; mixed reports that
 // case. An answer without the token is delivered as it is.
-func automationDelivery(answer string) (deliver string, mixed bool) {
+func AutomationDelivery(answer string) (deliver string, mixed bool) {
 	rest, found := withoutNoReply(answer)
 	if !found {
 		return answer, false

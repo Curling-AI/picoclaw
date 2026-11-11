@@ -2,7 +2,7 @@ package tools
 
 import "testing"
 
-// One case per rule of automationDelivery: taking any single rule out changes
+// One case per rule of AutomationDelivery: taking any single rule out changes
 // the outcome of at least one case. (seucaranguejo fork — MST-795)
 func TestAutomationDelivery(t *testing.T) {
 	for _, tc := range []struct {
@@ -39,9 +39,9 @@ func TestAutomationDelivery(t *testing.T) {
 		{"empty", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			deliver, mixed := automationDelivery(tc.answer)
+			deliver, mixed := AutomationDelivery(tc.answer)
 			if deliver != tc.deliver || mixed != tc.mixed {
-				t.Fatalf("automationDelivery(%q) = (%q, %v), want (%q, %v)",
+				t.Fatalf("AutomationDelivery(%q) = (%q, %v), want (%q, %v)",
 					tc.answer, deliver, mixed, tc.deliver, tc.mixed)
 			}
 		})

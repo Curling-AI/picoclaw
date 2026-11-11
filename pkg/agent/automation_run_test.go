@@ -2,9 +2,13 @@ package agent
 
 import (
 	"context"
+	"slices"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
 )
 
@@ -112,5 +116,105 @@ func TestReasoningIsNotTheAnswerOfAnAutomationRun(t *testing.T) {
 				t.Fatalf("result = %+v, want %s with %q", result, tc.status, tc.answer)
 			}
 		})
+	}
+}
+
+// newEndedRunLoop is an agent whose automation run, delivered to Telegram chat
+// 123 (conversation mirrorChatSession), has ended: the run's session holds its
+// note and its answer.
+func newEndedRunLoop(
+	t *testing.T,
+	script ...providers.LLMResponse,
+) (*AgentLoop, *bus.MessageBus, session.SessionStore) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	msgBus := bus.NewMessageBus()
+	al := NewAgentLoop(cfg, msgBus, &scriptedProvider{script: script})
+	t.Cleanup(al.Close)
+	al.SetDeliverySessionResolver(func(channel, chatID string) string {
+		if channel == "telegram" && chatID == "123" {
+			return mirrorChatSession
+		}
+		return ""
+	})
+	sessions := al.registry.GetDefaultAgent().Sessions
+	sessions.AddMessage(mirrorChatSession, "user", "oi")
+	sessions.AddMessage(mirrorChatSession, "assistant", "Oi! Em que posso ajudar?")
+	sessions.AddMessage(automationRunKey, "user", automationRequest(automationRunKey).Content)
+	sessions.AddMessage(automationRunKey, "assistant", "NO_REPLY")
+	return al, msgBus, sessions
+}
+
+// A spawn an automation run launched can finish after the run ended. Its
+// result opens a turn in the run's session, whose history holds the note that
+// asks for NO_REPLY, and that turn's answer goes to the chat: it delivers what
+// the run's own answer would. (seucaranguejo fork — MST-795)
+func TestLateResultOfAnAutomationRunDeliversByItsAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		answer    string
+		published string
+	}{
+		{"nothing to deliver", "NO_REPLY", ""},
+		{"news", "Nova vaga: casa em Lisboa", "Nova vaga: casa em Lisboa"},
+		{"token mixed with news", "NO_REPLY\nNova vaga: casa em Lisboa", "Nova vaga: casa em Lisboa"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			al, msgBus, sessions := newEndedRunLoop(t, providers.LLMResponse{Content: tc.answer})
+			before := len(sessions.GetHistory(mirrorChatSession))
+
+			if _, err := al.processSystemMessage(context.Background(), bus.NormalizeInboundMessage(bus.InboundMessage{
+				Context:    bus.InboundContext{Channel: "system", ChatID: "telegram:123", SenderID: "async:spawn"},
+				Content:    "Task 'vagas' completed.\n\nResult:\nlistagem conferida",
+				SessionKey: automationRunKey,
+			})); err != nil {
+				t.Fatalf("processSystemMessage: %v", err)
+			}
+
+			var published []string
+			for drained := false; !drained; {
+				select {
+				case out := <-msgBus.OutboundChan():
+					published = append(published, out.Content)
+				default:
+					drained = true
+				}
+			}
+			var mirrored []string
+			for _, m := range sessions.GetHistory(mirrorChatSession)[before:] {
+				mirrored = append(mirrored, m.Content)
+			}
+			var want []string
+			if tc.published != "" {
+				want = []string{tc.published}
+			}
+			if !slices.Equal(published, want) || !slices.Equal(mirrored, want) {
+				t.Fatalf("published %q and mirrored %q, want %q in both", published, mirrored, want)
+			}
+		})
+	}
+}
+
+// The gate is the automation run's: a late result in a chat conversation
+// delivers its answer as it is. (seucaranguejo fork — MST-795)
+func TestLateResultOutsideAnAutomationRunIsDeliveredAsItIs(t *testing.T) {
+	al, msgBus, _ := newEndedRunLoop(t, providers.LLMResponse{Content: "NO_REPLY"})
+
+	if _, err := al.processSystemMessage(context.Background(), bus.NormalizeInboundMessage(bus.InboundMessage{
+		Context:    bus.InboundContext{Channel: "system", ChatID: "telegram:123", SenderID: "async:spawn"},
+		Content:    "Task 'vagas' completed.\n\nResult:\nlistagem conferida",
+		SessionKey: mirrorChatSession,
+	})); err != nil {
+		t.Fatalf("processSystemMessage: %v", err)
+	}
+
+	select {
+	case out := <-msgBus.OutboundChan():
+		if out.Content != "NO_REPLY" {
+			t.Fatalf("published %q, want the answer as it is", out.Content)
+		}
+	default:
+		t.Fatal("the chat conversation's answer was not published")
 	}
 }
