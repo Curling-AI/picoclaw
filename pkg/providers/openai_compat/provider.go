@@ -510,6 +510,7 @@ func (p *Provider) Chat(
 	}
 	p.applyCustomHeaders(req)
 	applyRequestIDHeader(req, options)
+	p.applyTaskIDHeader(req)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -659,6 +660,7 @@ func (p *Provider) ChatStreamEvents(
 	}
 	p.applyCustomHeaders(req)
 	applyRequestIDHeader(req, options)
+	p.applyTaskIDHeader(req)
 
 	// Use a client without Timeout for streaming — the http.Client.Timeout covers
 	// the entire request lifecycle including body reads, which would kill long streams.

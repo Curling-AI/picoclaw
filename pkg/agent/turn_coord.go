@@ -34,6 +34,10 @@ func (al *AgentLoop) runTurn(
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = protocoltypes.WithTurnID(turnCtx, ts.turnID)
+	// A sub-turn keeps the task of the turn that spawned it.
+	if protocoltypes.TaskIDFromContext(turnCtx) == "" {
+		turnCtx = protocoltypes.WithTaskID(turnCtx, newTaskID())
+	}
 	turnCtx = WithAgentLoop(turnCtx, al)
 	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 

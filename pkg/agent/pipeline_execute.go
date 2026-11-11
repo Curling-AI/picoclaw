@@ -16,6 +16,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/redact"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -571,6 +572,7 @@ toolLoop:
 				Content:    content,
 				SessionKey: ts.originSessionKey(),
 				LaunchedAt: launchedAt,
+				TaskID:     protocoltypes.TaskIDFromContext(turnCtx),
 			}, result.Err)
 		}
 
