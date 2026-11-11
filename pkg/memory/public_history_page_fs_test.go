@@ -111,17 +111,33 @@ func TestPublicHistoryPointReadUsesOneIndexedRowAfterCompaction(t *testing.T) {
 		traced.sourceBytes != page.Stats.DataBytesRead || traced.sourceBytes == 0 {
 		t.Fatalf("point read did not verify one original row: %+v %v", page, err)
 	}
-	invalid := page.Ceiling
-	invalidRequest := PublicHistoryPageRequest{Key: key, Position: &invalid}
-	if _, rangeErr := ReadPublicHistoryPageFS(
-		t.Context(),
-		files,
-		invalidRequest,
-	); !errors.Is(
-		rangeErr,
-		ErrHistoryCursor,
-	) {
-		t.Fatalf("out-of-range position: %v", rangeErr)
+	recent, recentErr := ReadPublicHistoryPageFS(t.Context(), files, PublicHistoryPageRequest{Key: key})
+	if recentErr != nil || recent.OlderCursor == "" {
+		t.Fatalf("fixture must provide a valid cursor: %+v %v", recent, recentErr)
+	}
+	before := publicPageFiles(t, store.dir)
+	for _, scenario := range []struct {
+		name     string
+		position int64
+		cursor   string
+	}{
+		{name: "at ceiling", position: page.Ceiling},
+		{name: "negative", position: -1},
+		{name: "position with cursor", position: position, cursor: recent.OlderCursor},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			invalidRequest := PublicHistoryPageRequest{
+				Key: key, Position: &scenario.position, Cursor: scenario.cursor,
+			}
+			if _, rangeErr := ReadPublicHistoryPageFS(
+				t.Context(), files, invalidRequest,
+			); !errors.Is(rangeErr, ErrHistoryCursor) {
+				t.Fatalf("invalid point request: %v", rangeErr)
+			}
+			if !reflect.DeepEqual(before, publicPageFiles(t, store.dir)) {
+				t.Fatal("invalid point request changed producer files")
+			}
+		})
 	}
 }
 
