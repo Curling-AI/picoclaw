@@ -206,7 +206,10 @@ type turnExecution struct {
 	// replies, so a saved "the model returned an empty response" message makes
 	// the next empty completion MORE likely and the session degrades
 	// permanently (observed in prod: poisoned sessions alternating ~50%
-	// empty while fresh sessions never glitched).
+	// empty while fresh sessions never glitched). In the main turn of an
+	// automation run it marks the empty end the coordinator closed without
+	// any text: nothing to persist, nothing to deliver. (seucaranguejo fork —
+	// MST-795)
 	finalIsFallback bool
 
 	// Iteration tracking
