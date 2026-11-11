@@ -89,3 +89,28 @@ func TestAutomationRunAtTheIterationCapKeepsTheToolLimitReply(t *testing.T) {
 		t.Fatalf("result = %+v, want the tool-limit reply", result)
 	}
 }
+
+func TestReasoningIsNotTheAnswerOfAnAutomationRun(t *testing.T) {
+	const thought = "没有新内容，不需要通知用户。"
+	reply := providers.LLMResponse{Content: "", ReasoningContent: thought}
+	for _, tc := range []struct {
+		name   string
+		key    string
+		status turnresult.Status
+		answer string
+	}{
+		{"automation run", automationRunKey, turnresult.Failed, ""},
+		{"other turn", "chat-session", turnresult.Completed, thought},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			al, _ := newScriptedLoop(t, reply, reply)
+			result, err := al.ProcessDirectWithResult(context.Background(), automationRequest(tc.key))
+			if err != nil {
+				t.Fatalf("ProcessDirectWithResult: %v", err)
+			}
+			if result.Status != tc.status || result.Content != tc.answer {
+				t.Fatalf("result = %+v, want %s with %q", result, tc.status, tc.answer)
+			}
+		})
+	}
+}

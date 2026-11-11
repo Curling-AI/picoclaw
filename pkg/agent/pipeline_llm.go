@@ -1233,6 +1233,17 @@ func (p *Pipeline) CallLLM(
 						"resolved_provider": exec.response.ResolvedProvider,
 					},
 				)
+			// Nor in the main turn of an automation run: its answer is delivered
+			// to the owner, and thinking is no answer to deliver. (seucaranguejo
+			// fork — MST-795, adapted from picoclaw#128)
+			case ts.isCronRunMainTurn() && responseReasoningContent(exec.response) != "":
+				logger.WarnCF("agent", "Automation run answered only in reasoning; not using it as the reply",
+					map[string]any{
+						"agent_id":        ts.agent.ID,
+						"iteration":       iteration,
+						"reasoning_chars": len(responseReasoningContent(exec.response)),
+						"request_id":      exec.response.ProviderRequestID,
+					})
 			case exec.response.ReasoningContent != "":
 				responseContent = exec.response.ReasoningContent
 			case exec.response.Reasoning != "":
