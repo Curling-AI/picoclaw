@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // observedProvider wraps an LLMProvider so background call paths that bypass
@@ -41,6 +42,9 @@ func (o *observedProvider) Chat(
 	model string,
 	options map[string]any,
 ) (*providers.LLMResponse, error) {
+	if o.source == "summarize" {
+		ctx = protocoltypes.WithTaskRole(ctx, protocoltypes.RoleCompaction)
+	}
 	resp, err := o.LLMProvider.Chat(ctx, messages, tools, model, options)
 	if err == nil {
 		o.mu.RLock()

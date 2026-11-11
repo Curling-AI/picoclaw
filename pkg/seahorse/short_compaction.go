@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/tokenizer"
 )
 
@@ -82,9 +83,13 @@ func (e *CompactionEngine) Compact(
 	if input.Force || (tokensBefore > budget && budget > 0) {
 		// Launch async condensed compaction with dedup
 		if _, loaded := e.condensing.LoadOrStore(convID, struct{}{}); !loaded {
+			// The condensed pass is the turn's work done after it: it keeps the
+			// turn's task, and stops with the engine rather than with the turn.
+			condenseCtx := protocoltypes.WithTaskID(e.shutdownCtx,
+				protocoltypes.TaskIDFromContext(ctx), protocoltypes.TaskLabelsFromContext(ctx)...)
 			go func() {
 				defer e.condensing.Delete(convID)
-				e.runCondensedLoop(e.shutdownCtx, convID, sessionKey)
+				e.runCondensedLoop(condenseCtx, convID, sessionKey)
 			}()
 		}
 	}

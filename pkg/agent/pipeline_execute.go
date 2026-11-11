@@ -545,6 +545,7 @@ toolLoop:
 		// The result answers the request that launched the work, even if the
 		// person wrote again before it finished.
 		launchTaskID := protocoltypes.TaskIDFromContext(turnCtx)
+		launchTaskLabels := protocoltypes.TaskLabelsFromContext(turnCtx)
 		asyncCallback := func(_ context.Context, result *tools.ToolResult) {
 			if !result.Silent && result.ForUser != "" {
 				outCtx, outCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -585,6 +586,7 @@ toolLoop:
 				SessionKey: ts.originSessionKey(),
 				LaunchedAt: launchedAt,
 				TaskID:     launchTaskID,
+				TaskLabels: launchTaskLabels,
 			}, result.Err)
 		}
 

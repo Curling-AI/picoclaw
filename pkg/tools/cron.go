@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -881,6 +882,15 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		"new. Only write a note when the run produced a genuinely new fact the user would care about; "+
 		"never use the daily notes as a state store.)",
 		job.Name, job.Payload.Message, job.ID, job.ID)
+
+	// A scheduled run is a task of its own; one a turn asked for stays in that turn's.
+	if protocoltypes.TaskIDFromContext(ctx) == "" {
+		kind := protocoltypes.TaskAutomation
+		if job.Name == cron.MemoryRefreshJobName {
+			kind = protocoltypes.TaskMemoryRefresh
+		}
+		ctx = protocoltypes.WithTaskID(ctx, protocoltypes.NewTraceID("task-"), kind)
+	}
 
 	// Call agent with the job message
 	result, err := t.executePrompt(

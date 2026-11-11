@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -105,7 +106,7 @@ func TestContentMutationPendingStopsSummaryBeforeProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := al.contextManager.(*legacyContextManager)
-	manager.summarizeSession(agent, key)
+	manager.summarizeSession(context.Background(), agent, key)
 	_, changed, compactErr := manager.forceCompressionContext(t.Context(), key, 0)
 	if provider.calls != 0 || changed || !errors.Is(compactErr, memory.ErrContentMutationPendingKind) {
 		t.Fatal("typed Pending allowed uncommittable summary provider work", provider.calls, changed, compactErr)

@@ -879,7 +879,7 @@ func setupCronTool(
 }
 
 // memoryRefreshJobName is the stable name used to keep the seed idempotent.
-const memoryRefreshJobName = "memory-refresh"
+const memoryRefreshJobName = cron.MemoryRefreshJobName
 
 // seedMemoryRefreshJob adds a self-managed daily job (once, by name) that has
 // the agent review recent conversations and refresh durable memory in

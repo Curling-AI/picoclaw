@@ -55,8 +55,9 @@ type InboundMessage struct {
 	// conversation cleared after that is not the one the work belongs to.
 	LaunchedAt time.Time `json:"launched_at,omitzero"`
 	// TaskID is the task of the turn that launched that work: the turn its
-	// result opens answers the same request.
-	TaskID string `json:"task_id,omitempty"`
+	// result opens answers the same request. TaskLabels are that task's.
+	TaskID     string   `json:"task_id,omitempty"`
+	TaskLabels []string `json:"task_labels,omitempty"`
 }
 
 // OutboundScope captures the structured session scope associated with an

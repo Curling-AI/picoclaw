@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // --- Test Helpers ---
@@ -1034,5 +1036,58 @@ func TestCompactLeafAccumulatesUpToLeafChunkTokens(t *testing.T) {
 	if summary.SourceMessageTokenCount > LeafChunkTokens {
 		t.Errorf("source tokens = %d, should be <= LeafChunkTokens (%d)",
 			summary.SourceMessageTokenCount, LeafChunkTokens)
+	}
+}
+
+// The condensed pass runs after the turn that asked for it, still in that
+// turn's task.
+func TestCompactCondensedKeepsTheTurnsTask(t *testing.T) {
+	ce, s, convID := newTestCompactionEngine(t)
+	var mu sync.Mutex
+	var tasks []string
+	ce.complete = func(ctx context.Context, _ string, _ CompleteOptions) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		tasks = append(tasks, protocoltypes.TaskIDFromContext(ctx)+" "+
+			strings.Join(protocoltypes.TaskLabelsFromContext(ctx), ","))
+		return "Mock summary of the conversation segment.", nil
+	}
+	ctx := context.Background()
+	for i := 0; i < CondensedMinFanout; i++ {
+		now := time.Now().UTC()
+		summary, err := s.CreateSummary(ctx, CreateSummaryInput{
+			ConversationID: convID, Kind: SummaryKindLeaf, Content: fmt.Sprintf("leaf %d", i),
+			TokenCount: 500, EarliestAt: &now, LatestAt: &now,
+		})
+		if err != nil {
+			t.Fatalf("CreateSummary %d: %v", i, err)
+		}
+		s.AppendContextSummary(ctx, convID, summary.SummaryID)
+	}
+	for i := 0; i < FreshTailCount; i++ {
+		m, _ := s.AddMessage(ctx, convID, "user", "fresh message", 10)
+		s.AppendContextMessage(ctx, convID, m.ID)
+	}
+
+	turnCtx, endTurn := context.WithCancel(
+		protocoltypes.WithTaskID(ctx, "task-turn", protocoltypes.TaskMessage, "channel:web"))
+	if _, err := ce.Compact(turnCtx, convID, "sk_v1_teste", CompactInput{Force: true}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	endTurn()
+	if !waitForCondensed(ce, convID, 2*time.Second) {
+		t.Fatal("timeout waiting for condensed compaction")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := "task-turn " + protocoltypes.TaskMessage + ",channel:web"
+	if len(tasks) == 0 {
+		t.Fatal("the condensed pass never called the model")
+	}
+	for _, got := range tasks {
+		if got != want {
+			t.Fatalf("condensed calls = %q, want each in the turn's task %q", tasks, want)
+		}
 	}
 }

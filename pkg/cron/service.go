@@ -55,6 +55,9 @@ type CronJobState struct {
 	LastError   string `json:"lastError,omitempty"`
 }
 
+// MemoryRefreshJobName names the job the gateway seeds to curate memory.
+const MemoryRefreshJobName = "memory-refresh"
+
 type CronJob struct {
 	ID             string       `json:"id"`
 	Name           string       `json:"name"`

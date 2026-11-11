@@ -596,7 +596,7 @@ func TestSummarizeSession_KeepsWhatWasWrittenDuringTheSummary(t *testing.T) {
 		msg("user", "Q3"), msg("assistant", "A3"),
 	})
 
-	(&legacyContextManager{al: al}).summarizeSession(agent, mirrorChatSession)
+	(&legacyContextManager{al: al}).summarizeSession(context.Background(), agent, mirrorChatSession)
 
 	history := sessions.GetHistory(mirrorChatSession)
 	if len(history) != 5 || history[0].Content != "Q2" || history[4].Content != "entrega durante o resumo" {

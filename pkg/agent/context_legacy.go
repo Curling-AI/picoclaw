@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // legacyContextManager wraps the existing summarization/compression logic
@@ -95,7 +96,7 @@ func (m *legacyContextManager) Compact(ctx context.Context, req *CompactRequest)
 			)
 		}
 	case ContextCompressReasonSummarize:
-		m.maybeSummarize(req.SessionKey)
+		m.maybeSummarize(ctx, req.SessionKey)
 	}
 	return nil
 }
@@ -127,7 +128,7 @@ func (m *legacyContextManager) Clear(ctx context.Context, sessionKey string) err
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
 // It runs asynchronously in a goroutine.
-func (m *legacyContextManager) maybeSummarize(sessionKey string) {
+func (m *legacyContextManager) maybeSummarize(ctx context.Context, sessionKey string) {
 	agent := m.al.registry.GetDefaultAgent()
 	if agent == nil {
 		return
@@ -144,6 +145,11 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 		summarizeKey := agent.ID + ":" + sessionKey
 		entry := &compactionEntry{startedAt: time.Now(), messages: len(newHistory)}
 		if _, loading := m.summarizing.LoadOrStore(summarizeKey, entry); !loading {
+			// The summary is the turn's work done after it: it stays in the
+			// turn's task, in a holder of its own, and outlives the turn.
+			taskCtx := protocoltypes.WithTaskRole(protocoltypes.WithTaskID(context.Background(),
+				protocoltypes.TaskIDFromContext(ctx), protocoltypes.TaskLabelsFromContext(ctx)...),
+				protocoltypes.RoleCompaction)
 			go func() {
 				defer m.summarizing.Delete(summarizeKey)
 				defer func() {
@@ -155,7 +161,7 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 					}
 				}()
 				logger.Debug("Memory threshold reached. Optimizing conversation history...")
-				m.summarizeSession(agent, sessionKey)
+				m.summarizeSession(taskCtx, agent, sessionKey)
 			}()
 		}
 	}
@@ -259,8 +265,8 @@ func (m *legacyContextManager) forceCompressionContext(
 	}, true, nil
 }
 
-func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+func (m *legacyContextManager) summarizeSession(ctx context.Context, agent *AgentInstance, sessionKey string) {
+	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
 	view, err := readContentCompactionView(ctx, agent, sessionKey)
