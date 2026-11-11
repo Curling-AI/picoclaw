@@ -598,16 +598,19 @@ func (p *Pipeline) CallLLM(
 	// contextRefusals counts this call's context-window refusals; retry also
 	// counts the transient ones (429, 5xx) before them.
 	contextRefusals := 0
-	for retry, attempt := 0, 0; retry <= maxRetries; retry, attempt = retry+1, attempt+1 {
-		// The gateway keys idempotency on the request id: an attempt that reuses
-		// it is read as the call before it, and refused once the body changed.
-		if attempt > 0 {
-			exec.llmOpts, exec.llmRequestID = optsWithFreshRequestID(exec.llmOpts)
+	// The gateway keys idempotency on the request id: an attempt that reuses it
+	// is read as the call before it, and refused once the body changed. Each
+	// failure picks the id of the attempt after it, which the retry event names.
+	nextRequestID := ""
+	for retry := 0; retry <= maxRetries; retry++ {
+		if nextRequestID != "" {
+			exec.llmOpts, exec.llmRequestID = optsWithRequestID(exec.llmOpts, nextRequestID), nextRequestID
 		}
 		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
 			break
 		}
+		nextRequestID = newLLMRequestID()
 		if ts.hardAbortRequested() && errors.Is(err, context.Canceled) {
 			// The gateway bills the tokens generated before the steer/cancel, but
 			// this call returns context.Canceled and never reaches the AfterLLM
@@ -642,6 +645,7 @@ func (p *Pipeline) CallLLM(
 						MaxRetries: maxRetries,
 						Reason:     "vision_unsupported",
 						Error:      err.Error(),
+						RequestID:  nextRequestID,
 					},
 				)
 				logger.WarnCF("agent", "Model cannot read images; retrying the call without them", map[string]any{
@@ -690,6 +694,7 @@ func (p *Pipeline) CallLLM(
 					Reason:     retryReason,
 					Error:      err.Error(),
 					Backoff:    backoff,
+					RequestID:  nextRequestID,
 				},
 			)
 			logger.WarnCF("agent", "Transient LLM error, retrying after backoff", map[string]any{
@@ -718,6 +723,7 @@ func (p *Pipeline) CallLLM(
 					MaxRetries: maxRetries,
 					Reason:     "context_limit",
 					Error:      err.Error(),
+					RequestID:  nextRequestID,
 				},
 			)
 			logger.WarnCF(

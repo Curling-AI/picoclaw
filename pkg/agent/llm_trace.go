@@ -30,12 +30,16 @@ func newTraceID(prefix string) string {
 
 func optsWithFreshRequestID(opts map[string]any) (map[string]any, string) {
 	id := newLLMRequestID()
+	return optsWithRequestID(opts, id), id
+}
+
+func optsWithRequestID(opts map[string]any, id string) map[string]any {
 	next := maps.Clone(opts)
 	if next == nil {
 		next = map[string]any{}
 	}
 	next[llmRequestIDOption] = id
-	return next, id
+	return next
 }
 
 func requestIDFromOptions(opts map[string]any) string {

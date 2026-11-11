@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -102,6 +103,8 @@ func TestPipeline_CallLLM_RetryGetsAFreshRequestID(t *testing.T) {
 		t.Fatalf("SetupTurn: %v", err)
 	}
 
+	retries, stop := subscribeRuntimeEventsForTest(t, al, 4, runtimeevents.KindAgentLLMRetry)
+	defer stop()
 	if _, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1); err != nil {
 		t.Fatalf("CallLLM: %v", err)
 	}
@@ -112,5 +115,10 @@ func TestPipeline_CallLLM_RetryGetsAFreshRequestID(t *testing.T) {
 	}
 	if exec.llmRequestID != ids[1] {
 		t.Fatalf("recorded request id = %q, want the one the answering call carried (%q)", exec.llmRequestID, ids[1])
+	}
+	// The retry event is the only record of an attempt that never answers.
+	retry, ok := findRuntimeEvent(collectRuntimeEventStream(retries), runtimeevents.KindAgentLLMRetry)
+	if payload, _ := retry.Payload.(LLMRetryPayload); !ok || payload.RequestID != ids[1] {
+		t.Fatalf("retry event = %+v, want it to name the retry's request id %q", retry.Payload, ids[1])
 	}
 }
