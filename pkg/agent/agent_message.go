@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
@@ -391,6 +392,9 @@ func (al *AgentLoop) processSystemMessage(
 	}
 	if namesSession {
 		opts.BackgroundResult = &msg
+	}
+	if msg.TaskID != "" {
+		ctx = protocoltypes.WithTaskID(ctx, msg.TaskID)
 	}
 	return al.runAgentLoop(ctx, agent, opts)
 }

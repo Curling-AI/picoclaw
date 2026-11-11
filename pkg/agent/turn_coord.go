@@ -34,6 +34,13 @@ func (al *AgentLoop) runTurn(
 	// Inject turnState and AgentLoop into context so tools (e.g. spawn) can retrieve them.
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = protocoltypes.WithTurnID(turnCtx, ts.turnID)
+	// A sub-turn starts on the task of the turn that spawned it, in a holder of
+	// its own: a message that later moves the parent's task does not move it.
+	taskID := protocoltypes.TaskIDFromContext(turnCtx)
+	if taskID == "" {
+		taskID = newTaskID()
+	}
+	turnCtx = protocoltypes.WithTaskID(turnCtx, taskID)
 	turnCtx = WithAgentLoop(turnCtx, al)
 	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
@@ -232,6 +239,7 @@ func (al *AgentLoop) runTurn(
 				if pm.PromptSource == string(PromptSourceSteering) {
 					paceNudged = false
 					al.joinPersonMessage(turnCtx, ts, exec, pm, iteration)
+					protocoltypes.MoveTaskID(turnCtx, newTaskID())
 				}
 				if !ts.opts.NoHistory {
 					ts.appendHistoryMessage(pm)

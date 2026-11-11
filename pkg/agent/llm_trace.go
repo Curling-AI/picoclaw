@@ -16,11 +16,21 @@ const llmRequestIDOption = "request_id"
 // gateway's idempotency key, so every attempt — including a retry of the same
 // prompt — must get a fresh one.
 func newLLMRequestID() string {
+	return newTraceID("pc-")
+}
+
+// newTaskID names one task for the gateway. Turn ids restart at 1 with the
+// process, and the gateway groups tasks by user, so they cannot serve.
+func newTaskID() string {
+	return newTraceID("task-")
+}
+
+func newTraceID(prefix string) string {
 	var buf [12]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return ""
 	}
-	return "pc-" + hex.EncodeToString(buf[:])
+	return prefix + hex.EncodeToString(buf[:])
 }
 
 func optsWithFreshRequestID(opts map[string]any) (map[string]any, string) {

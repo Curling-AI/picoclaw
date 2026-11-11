@@ -16,6 +16,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/redact"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -536,6 +537,9 @@ toolLoop:
 		toolCallID := tc.ID
 		asyncToolName := toolName
 		launchedAt := time.Now()
+		// The result answers the request that launched the work, even if the
+		// person wrote again before it finished.
+		launchTaskID := protocoltypes.TaskIDFromContext(turnCtx)
 		asyncCallback := func(_ context.Context, result *tools.ToolResult) {
 			if !result.Silent && result.ForUser != "" {
 				outCtx, outCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -575,6 +579,7 @@ toolLoop:
 				Content:    content,
 				SessionKey: ts.originSessionKey(),
 				LaunchedAt: launchedAt,
+				TaskID:     launchTaskID,
 			}, result.Err)
 		}
 

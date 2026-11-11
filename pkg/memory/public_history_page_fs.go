@@ -102,7 +102,13 @@ func ReadPublicHistoryPageFS(
 	return page, nil
 }
 
-func readPublicPositionOrPage(ctx context.Context, request PublicHistoryPageRequest, cursor publicHistoryCursor, source io.ReaderAt, index *publicIndexReader) (PublicHistoryPage, error) {
+func readPublicPositionOrPage(
+	ctx context.Context,
+	request PublicHistoryPageRequest,
+	cursor publicHistoryCursor,
+	source io.ReaderAt,
+	index *publicIndexReader,
+) (PublicHistoryPage, error) {
 	if request.Position == nil {
 		return readPublicPage(ctx, request, cursor, source, index)
 	}
@@ -121,7 +127,19 @@ func readPublicPositionOrPage(ctx context.Context, request PublicHistoryPageRequ
 	if err != nil || size > PublicHistoryMessageBytes {
 		return PublicHistoryPage{}, errors.Join(ErrHistoryCapacity, err)
 	}
-	return PublicHistoryPage{Version: PublicHistoryVersion, Generation: cursor.Generation, Revision: cursor.Revision,
-		Start: position, End: position + 1, Ceiling: cursor.Count, Entries: []PublicHistoryEntry{entry},
-		Stats: PublicHistoryReadStats{RowsRead: 1, DataBytesRead: readBytes, IndexBytesRead: index.bytes, MessageBytes: int64(size)}}, nil
+	return PublicHistoryPage{
+		Version:    PublicHistoryVersion,
+		Generation: cursor.Generation,
+		Revision:   cursor.Revision,
+		Start:      position,
+		End:        position + 1,
+		Ceiling:    cursor.Count,
+		Entries:    []PublicHistoryEntry{entry},
+		Stats: PublicHistoryReadStats{
+			RowsRead:       1,
+			DataBytesRead:  readBytes,
+			IndexBytesRead: index.bytes,
+			MessageBytes:   int64(size),
+		},
+	}, nil
 }

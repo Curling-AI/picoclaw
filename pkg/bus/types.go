@@ -54,6 +54,9 @@ type InboundMessage struct {
 	// LaunchedAt is when the async work behind a system message started. A
 	// conversation cleared after that is not the one the work belongs to.
 	LaunchedAt time.Time `json:"launched_at,omitzero"`
+	// TaskID is the task of the turn that launched that work: the turn its
+	// result opens answers the same request.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // OutboundScope captures the structured session scope associated with an

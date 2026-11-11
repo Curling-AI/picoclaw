@@ -163,3 +163,47 @@ func TestTurnTagsAcceptA64CharacterTagAsTheTenthTag(t *testing.T) {
 		t.Fatalf("gateway tags at contract limits = %s, want %s", gotJSON, wantJSON)
 	}
 }
+
+func TestTaskIDHeaderReachesHulkOnly(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/llm-proxy/a/hulk", "task-1"},
+		{"/llm-proxy/a/gateway", ""},
+		{"/v1", ""},
+	} {
+		for _, stream := range []bool{false, true} {
+			seen := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen <- r.Header.Get(taskIDHeader)
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(
+						w,
+						"data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+					)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"done"},"finish_reason":"stop"}]}`)
+			}))
+			provider := NewProvider("key", server.URL+tc.path, "")
+			ctx := protocoltypes.WithTaskID(t.Context(), "task-1")
+			messages := []Message{{Role: "user", Content: "hello"}}
+			var err error
+			if stream {
+				_, err = provider.ChatStreamEvents(ctx, messages, nil, "model", nil, nil)
+			} else {
+				_, err = provider.Chat(ctx, messages, nil, "model", nil)
+			}
+			server.Close()
+			if err != nil {
+				t.Fatalf("%s stream=%v: model call: %v", tc.path, stream, err)
+			}
+			if got := <-seen; got != tc.want {
+				t.Fatalf("%s stream=%v: task header = %q, want %q", tc.path, stream, got, tc.want)
+			}
+		}
+	}
+}
