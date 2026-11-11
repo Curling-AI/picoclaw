@@ -2,6 +2,8 @@ package protocoltypes
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"sync/atomic"
 )
 
@@ -42,4 +44,14 @@ func TaskIDFromContext(ctx context.Context) string {
 		return ""
 	}
 	return *holder.Load()
+}
+
+// NewTraceID mints a 96-bit id with prefix for the gateway to trace by; "" when
+// the system has no randomness to give.
+func NewTraceID(prefix string) string {
+	var buf [12]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return ""
+	}
+	return prefix + hex.EncodeToString(buf[:])
 }

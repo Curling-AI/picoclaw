@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type blockingColdPathRuntime struct {
@@ -340,5 +342,41 @@ func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {
 	}
 	if got := runtime.cancelCount.Load(); got != 1 {
 		t.Fatalf("cancelCount = %d, want 1", got)
+	}
+}
+
+// taskRecordingRuntime keeps the task id each run was given.
+type taskRecordingRuntime struct{ tasks chan string }
+
+func (r *taskRecordingRuntime) RunColdPathOnce(ctx context.Context, _ string) error {
+	r.tasks <- protocoltypes.TaskIDFromContext(ctx)
+	return nil
+}
+
+// A run reads the records of every turn since the last one, so each run is a
+// task of its own, named so the gateway's panel tells it from a person's task.
+func TestColdPathRunner_EachRunIsATaskOfItsOwn(t *testing.T) {
+	runtime := &taskRecordingRuntime{tasks: make(chan string, 2)}
+	runner := NewColdPathRunner(runtime)
+	defer runner.Close()
+
+	var tasks []string
+	for range 2 {
+		runner.Trigger("ws")
+		select {
+		case task := <-runtime.tasks:
+			tasks = append(tasks, task)
+		case <-time.After(2 * time.Second):
+			t.Fatal("cold path did not run")
+		}
+	}
+
+	for _, task := range tasks {
+		if !strings.HasPrefix(task, "evolution-") {
+			t.Fatalf("run task = %q, want an evolution- task", task)
+		}
+	}
+	if tasks[0] == tasks[1] {
+		t.Fatalf("runs shared task %q", tasks[0])
 	}
 }
