@@ -2,13 +2,20 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
 )
 
@@ -119,6 +126,135 @@ func TestReasoningIsNotTheAnswerOfAnAutomationRun(t *testing.T) {
 	}
 }
 
+// A streamed answer reaches the chat before the run's gate sees it, so an
+// automation run's turn does not stream: with streaming on for the model and
+// the channel, its NO_REPLY stays off the channel, while the same turn in a
+// chat session still streams. (seucaranguejo fork — MST-795)
+func TestAutomationRunDoesNotStreamItsAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		key       string
+		streams   bool
+		finalized []string
+	}{
+		{"automation run", automationRunKey, false, nil},
+		{"other turn", "chat-session", true, []string{"NO_REPLY"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+			streamer := &recordingStreamer{}
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+			provider := &configuredStreamingProvider{
+				streamPlan: []configuredStreamingCall{{
+					chunks:   []string{"NO_REPLY"},
+					response: &providers.LLMResponse{Content: "NO_REPLY"},
+				}},
+				chatResponse: &providers.LLMResponse{Content: "NO_REPLY"},
+			}
+			al := NewAgentLoop(cfg, msgBus, provider)
+			t.Cleanup(al.Close)
+			request := automationRequest(tc.key)
+			request.Channel, request.ChatID = "pico", "session-1"
+
+			result, err := al.ProcessDirectWithResult(context.Background(), request)
+			if err != nil {
+				t.Fatalf("ProcessDirectWithResult: %v", err)
+			}
+			if result.Content != "NO_REPLY" {
+				t.Fatalf("result = %+v, want the answer NO_REPLY", result)
+			}
+
+			if streams := provider.streamCalls > 0; streams != tc.streams {
+				t.Fatalf("stream calls = %d, want streaming = %v", provider.streamCalls, tc.streams)
+			}
+			if !slices.Equal(streamer.finalized, tc.finalized) {
+				t.Fatalf("finalized stream %q, want %q", streamer.finalized, tc.finalized)
+			}
+			var published []string
+			for drained := false; !drained; {
+				select {
+				case out := <-msgBus.OutboundChan():
+					published = append(published, out.Content)
+				default:
+					drained = true
+				}
+			}
+			if !tc.streams && (len(streamer.updates) > 0 || len(published) > 0) {
+				t.Fatalf("stream chunks %q and bus messages %q, want none", streamer.updates, published)
+			}
+		})
+	}
+}
+
+// With tool feedback on, a run that used a tool shows the chat a feedback
+// message, which the final outbound closes. A run that delivers nothing has no
+// final outbound: CronTool asks its executor, the AgentLoop, to take the
+// message out. (seucaranguejo fork — MST-795)
+func TestAutomationRunThatDeliversNothingDismissesToolFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		answer    string
+		dismissed []string
+	}{
+		{"nothing to deliver", "NO_REPLY", []string{"telegram:chat-1"}},
+		{"news", "Nova vaga: casa em Lisboa", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Agents.Defaults.Workspace = t.TempDir()
+			cfg.Agents.Defaults.ToolFeedback.Enabled = true
+			readme := filepath.Join(cfg.Agents.Defaults.Workspace, "README.md")
+			if err := os.WriteFile(readme, []byte("vagas"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			msgBus := bus.NewMessageBus()
+			al := NewAgentLoop(cfg, msgBus, &scriptedProvider{script: []providers.LLMResponse{
+				readFileCall("call-1"),
+				{Content: tc.answer},
+			}})
+			t.Cleanup(al.Close)
+			channels := &recordingChannelManager{}
+			al.channelManager = channels
+			cronTool, err := tools.NewCronTool(
+				cron.NewCronService(filepath.Join(t.TempDir(), "cron.json"), nil),
+				al, msgBus, cfg.Agents.Defaults.Workspace, true, 0, cfg,
+			)
+			if err != nil {
+				t.Fatalf("NewCronTool: %v", err)
+			}
+			var job cron.CronJob
+			job.ID = "job-1"
+			job.Name = "Novas vagas"
+			job.Payload.Channel = "telegram"
+			job.Payload.To = "chat-1"
+			job.Payload.Message = "me avise só quando houver vaga nova"
+
+			if _, err := cronTool.ExecuteJobWithResult(context.Background(), cron.Execution{
+				Progress: nil, RunID: uuid.NewString(), Trigger: cron.Scheduled, Job: &job,
+			}); err != nil {
+				t.Fatalf("ExecuteJobWithResult: %v", err)
+			}
+
+			feedback := false
+			for drained := false; !drained; {
+				select {
+				case out := <-msgBus.OutboundChan():
+					feedback = feedback || strings.Contains(out.Content, "`read_file`")
+				default:
+					drained = true
+				}
+			}
+			if !feedback {
+				t.Fatal("the run published no tool feedback")
+			}
+			if !slices.Equal(channels.dismissed, tc.dismissed) {
+				t.Fatalf("dismissed %q, want %q", channels.dismissed, tc.dismissed)
+			}
+		})
+	}
+}
+
 // newEndedRunLoop is an agent whose automation run, delivered to Telegram chat
 // 123 (conversation mirrorChatSession), has ended: the run's session holds its
 // note and its answer.
@@ -191,6 +327,38 @@ func TestLateResultOfAnAutomationRunDeliversByItsAnswer(t *testing.T) {
 			}
 			if !slices.Equal(published, want) || !slices.Equal(mirrored, want) {
 				t.Fatalf("published %q and mirrored %q, want %q in both", published, mirrored, want)
+			}
+		})
+	}
+}
+
+// A late result's turn that delivers nothing has no final outbound to close
+// the chat's tool-feedback message either: it takes the message out.
+// (seucaranguejo fork — MST-795)
+func TestLateResultOfAnAutomationRunThatDeliversNothingDismissesToolFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		answer    string
+		dismissed []string
+	}{
+		{"nothing to deliver", "NO_REPLY", []string{"telegram:123"}},
+		{"news", "Nova vaga: casa em Lisboa", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			al, _, _ := newEndedRunLoop(t, providers.LLMResponse{Content: tc.answer})
+			channels := &recordingChannelManager{}
+			al.channelManager = channels
+
+			if _, err := al.processSystemMessage(context.Background(), bus.NormalizeInboundMessage(bus.InboundMessage{
+				Context:    bus.InboundContext{Channel: "system", ChatID: "telegram:123", SenderID: "async:spawn"},
+				Content:    "Task 'vagas' completed.\n\nResult:\nlistagem conferida",
+				SessionKey: automationRunKey,
+			})); err != nil {
+				t.Fatalf("processSystemMessage: %v", err)
+			}
+
+			if !slices.Equal(channels.dismissed, tc.dismissed) {
+				t.Fatalf("dismissed %q, want %q", channels.dismissed, tc.dismissed)
 			}
 		})
 	}

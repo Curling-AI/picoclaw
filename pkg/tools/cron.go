@@ -52,6 +52,13 @@ type deliveryMirrorer interface {
 	MirrorDelivery(delivery ExternalDelivery)
 }
 
+// toolFeedbackDismisser takes a chat's tool-feedback message out
+// (agent.AgentLoop). The run's final outbound is what closes that message; a
+// run that delivers nothing has none. (seucaranguejo fork — MST-795)
+type toolFeedbackDismisser interface {
+	DismissToolFeedback(ctx context.Context, channel, chatID string)
+}
+
 // maxMirroredCommandOutput bounds what a command job's run adds to the chat's
 // conversation: a job every few minutes with a long stdout would otherwise grow
 // the history by that much on every run. It is one Telegram message.
@@ -940,6 +947,11 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 	result.Content = delivery
 	if result.Content != "" {
 		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, result.Content)
+	} else if dismisser, ok := t.executor.(toolFeedbackDismisser); ok {
+		// No final outbound closes the chat's tool-feedback message, whose
+		// animation would keep running and which the next reply would edit.
+		// (seucaranguejo fork — MST-795)
+		dismisser.DismissToolFeedback(ctx, channel, chatID)
 	}
 	return result, nil
 }

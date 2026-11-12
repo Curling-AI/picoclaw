@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"time"
+
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -52,4 +55,18 @@ func deliveredAnswer(sessionKey, channel, answer string) string {
 		})
 	}
 	return delivery
+}
+
+// DismissToolFeedback takes the channel's tool-feedback message out of chatID,
+// as publishResponse does when the message tool already answered. An
+// automation run that delivers nothing has no final outbound to close that
+// message: it would stay in the chat, its animation running, and the next
+// reply would edit it. (seucaranguejo fork — MST-795)
+func (al *AgentLoop) DismissToolFeedback(ctx context.Context, channel, chatID string) {
+	if al.channelManager == nil || channel == "" || chatID == "" {
+		return
+	}
+	dismissCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	al.channelManager.DismissToolFeedback(dismissCtx, channel, chatID, nil)
 }
