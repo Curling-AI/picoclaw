@@ -762,6 +762,10 @@ func (al *AgentLoop) runAgentLoopResult(
 				delivery,
 			)
 		}
+	} else if opts.SendResponse && ts.isCronRunMainTurn() {
+		// Nothing goes out, so no final outbound closes the chat's
+		// tool-feedback message. (seucaranguejo fork — MST-795)
+		al.DismissToolFeedback(ctx, opts.Dispatch.Channel(), opts.Dispatch.ChatID())
 	}
 
 	if result.finalContent != "" {

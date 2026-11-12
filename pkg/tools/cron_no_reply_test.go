@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,13 @@ func runAutomation(t *testing.T, status turnresult.Status, answer string) (turnr
 	var executor typedJobExecutor
 	executor.status = status
 	executor.response = answer
-	tool := newTestCronToolWithExecutorAndConfig(t, &executor, config.DefaultConfig())
+	return runAutomationOn(t, &executor), &executor
+}
+
+// runAutomationOn runs that automation on executor.
+func runAutomationOn(t *testing.T, executor JobExecutor) turnresult.Result {
+	t.Helper()
+	tool := newTestCronToolWithExecutorAndConfig(t, executor, config.DefaultConfig())
 	var job cron.CronJob
 	job.ID = "job-no-reply"
 	job.Name = "Novas vagas"
@@ -36,7 +43,7 @@ func runAutomation(t *testing.T, status turnresult.Status, answer string) (turnr
 	if err != nil {
 		t.Fatalf("ExecuteJobWithResult: %v", err)
 	}
-	return result, &executor
+	return result
 }
 
 func TestAutomationRunDeliversByItsAnswer(t *testing.T) {
@@ -61,6 +68,44 @@ func TestAutomationRunDeliversByItsAnswer(t *testing.T) {
 			}
 			if result.Status != tc.status || result.Content != tc.published {
 				t.Fatalf("result = %+v, want %s with %q", result, tc.status, tc.published)
+			}
+		})
+	}
+}
+
+// dismissingJobExecutor takes a chat's tool-feedback message out when asked,
+// as agent.AgentLoop does.
+type dismissingJobExecutor struct {
+	typedJobExecutor
+	dismissed []string
+}
+
+func (e *dismissingJobExecutor) DismissToolFeedback(_ context.Context, channel, chatID string) {
+	e.dismissed = append(e.dismissed, channel+":"+chatID)
+}
+
+// The final outbound is what closes the chat's tool-feedback message: a run
+// that delivers nothing takes it out instead, and one that delivers leaves it
+// to that outbound. (seucaranguejo fork — MST-795)
+func TestAutomationRunThatDeliversNothingDismissesToolFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    turnresult.Status
+		answer    string
+		dismissed []string
+	}{
+		{"nothing to deliver", turnresult.Completed, "NO_REPLY", []string{"whatsapp_central:owner"}},
+		{"empty failed run", turnresult.Failed, "", []string{"whatsapp_central:owner"}},
+		{"news", turnresult.Completed, "Nova vaga: casa em Lisboa", nil},
+		{"token mixed with news", turnresult.Completed, "NO_REPLY\nNova vaga: casa em Lisboa", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var executor dismissingJobExecutor
+			executor.status = tc.status
+			executor.response = tc.answer
+			runAutomationOn(t, &executor)
+			if !slices.Equal(executor.dismissed, tc.dismissed) {
+				t.Fatalf("dismissed %q, want %q", executor.dismissed, tc.dismissed)
 			}
 		})
 	}
