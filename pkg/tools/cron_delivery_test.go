@@ -29,13 +29,27 @@ func TestAutomationDelivery(t *testing.T) {
 			"e-mail address", "Novo e-mail de no_reply@email.apple.com: seu recibo",
 			"Novo e-mail de no_reply@email.apple.com: seu recibo", false,
 		},
+		{
+			"upper-case e-mail address", "Novo e-mail de NO_REPLY@email.apple.com: seu recibo",
+			"Novo e-mail de NO_REPLY@email.apple.com: seu recibo", false,
+		},
 		{"URL path", "https://x.com/no_reply/123", "https://x.com/no_reply/123", false},
 		{"URL ending in it", "Responda em https://x.com/no_reply", "Responda em https://x.com/no_reply", false},
 		{"query string", "?from=no_reply&x=1", "?from=no_reply&x=1", false},
 		{"identifier", "no_reply_bot avisou", "no_reply_bot avisou", false},
 		{"markdown-escaped underscore", "NO\\_REPLY", "", false},
+		{"mixed case alone", "No_Reply", "", false},
+		{
+			"lower case as a sender", "Novo e-mail de no_reply: seu recibo",
+			"Novo e-mail de no_reply: seu recibo", false,
+		},
+		{"lower case before parentheses", "Remetente: no_reply (Apple)", "Remetente: no_reply (Apple)", false},
+		{"lower case next to news", "no_reply\n\nNova vaga", "no_reply\n\nNova vaga", false},
+		{"upper case cut, lower case kept", "NO_REPLY\nRemetente: no_reply", "Remetente: no_reply", true},
+		{"escaped token after text", "Nada novo. NO\\_REPLY", "Nada novo.", true},
 		{"italic then period", "_NO_REPLY_.", "", false},
 		{"no token", "Sem novidades.", "Sem novidades.", false},
+		{"no token and no letter", "✅", "✅", false},
 		{"empty", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
