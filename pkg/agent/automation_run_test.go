@@ -119,6 +119,67 @@ func TestReasoningIsNotTheAnswerOfAnAutomationRun(t *testing.T) {
 	}
 }
 
+// A streamed answer reaches the chat before the run's gate sees it, so an
+// automation run's turn does not stream: with streaming on for the model and
+// the channel, its NO_REPLY stays off the channel, while the same turn in a
+// chat session still streams. (seucaranguejo fork — MST-795)
+func TestAutomationRunDoesNotStreamItsAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		key       string
+		streams   bool
+		finalized []string
+	}{
+		{"automation run", automationRunKey, false, nil},
+		{"other turn", "chat-session", true, []string{"NO_REPLY"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+			streamer := &recordingStreamer{}
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+			provider := &configuredStreamingProvider{
+				streamPlan: []configuredStreamingCall{{
+					chunks:   []string{"NO_REPLY"},
+					response: &providers.LLMResponse{Content: "NO_REPLY"},
+				}},
+				chatResponse: &providers.LLMResponse{Content: "NO_REPLY"},
+			}
+			al := NewAgentLoop(cfg, msgBus, provider)
+			t.Cleanup(al.Close)
+			request := automationRequest(tc.key)
+			request.Channel, request.ChatID = "pico", "session-1"
+
+			result, err := al.ProcessDirectWithResult(context.Background(), request)
+			if err != nil {
+				t.Fatalf("ProcessDirectWithResult: %v", err)
+			}
+			if result.Content != "NO_REPLY" {
+				t.Fatalf("result = %+v, want the answer NO_REPLY", result)
+			}
+
+			if streams := provider.streamCalls > 0; streams != tc.streams {
+				t.Fatalf("stream calls = %d, want streaming = %v", provider.streamCalls, tc.streams)
+			}
+			if !slices.Equal(streamer.finalized, tc.finalized) {
+				t.Fatalf("finalized stream %q, want %q", streamer.finalized, tc.finalized)
+			}
+			var published []string
+			for drained := false; !drained; {
+				select {
+				case out := <-msgBus.OutboundChan():
+					published = append(published, out.Content)
+				default:
+					drained = true
+				}
+			}
+			if !tc.streams && (len(streamer.updates) > 0 || len(published) > 0) {
+				t.Fatalf("stream chunks %q and bus messages %q, want none", streamer.updates, published)
+			}
+		})
+	}
+}
+
 // newEndedRunLoop is an agent whose automation run, delivered to Telegram chat
 // 123 (conversation mirrorChatSession), has ended: the run's session holds its
 // note and its answer.
