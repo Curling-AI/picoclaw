@@ -712,7 +712,13 @@ func (al *AgentLoop) runAgentLoopResult(
 		}
 	}
 
-	if opts.SendResponse && result.finalContent != "" {
+	// A late result's turn in an automation run's session delivers what the
+	// run would: NO_REPLY is not delivered. (seucaranguejo fork — MST-795)
+	delivery := ""
+	if opts.SendResponse {
+		delivery = deliveredAnswer(opts.Dispatch.SessionKey, opts.Dispatch.Channel(), result.finalContent)
+	}
+	if delivery != "" {
 		agentID, sessionKey, scope := outboundTurnMetadata(
 			agent.ID,
 			opts.Dispatch.SessionKey,
@@ -728,7 +734,7 @@ func (al *AgentLoop) runAgentLoopResult(
 			AgentID:      agentID,
 			SessionKey:   sessionKey,
 			Scope:        scope,
-			Content:      result.finalContent,
+			Content:      delivery,
 			ContextUsage: computeContextUsage(agent, opts.Dispatch.SessionKey),
 		}
 		if modelName := strings.TrimSpace(result.modelName); modelName != "" {
@@ -748,14 +754,18 @@ func (al *AgentLoop) runAgentLoopResult(
 				"chat_id": opts.Dispatch.ChatID(),
 				"error":   err.Error(),
 			})
-		} else if result.finalContent != opts.DefaultResponse {
+		} else if delivery != opts.DefaultResponse {
 			al.mirrorDelivery(
 				opts.Dispatch.SessionKey,
 				opts.Dispatch.Channel(),
 				opts.Dispatch.ChatID(),
-				result.finalContent,
+				delivery,
 			)
 		}
+	} else if opts.SendResponse && ts.isCronRunMainTurn() {
+		// Nothing goes out, so no final outbound closes the chat's
+		// tool-feedback message. (seucaranguejo fork — MST-795)
+		al.DismissToolFeedback(ctx, opts.Dispatch.Channel(), opts.Dispatch.ChatID())
 	}
 
 	if result.finalContent != "" {

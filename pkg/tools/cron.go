@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/cron"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/turnresult"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -49,6 +50,13 @@ type ExternalDelivery struct {
 // output a command job publishes without going through a turn.
 type deliveryMirrorer interface {
 	MirrorDelivery(delivery ExternalDelivery)
+}
+
+// toolFeedbackDismisser takes a chat's tool-feedback message out
+// (agent.AgentLoop). The run's final outbound is what closes that message; a
+// run that delivers nothing has none. (seucaranguejo fork — MST-795)
+type toolFeedbackDismisser interface {
+	DismissToolFeedback(ctx context.Context, channel, chatID string)
 }
 
 // maxMirroredCommandOutput bounds what a command job's run adds to the chat's
@@ -850,7 +858,7 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		return turnresult.Result{Status: turnresult.Completed, Content: ""}, nil
 	}
 
-	// System note prepended to EVERY scheduled run. Two purposes:
+	// System note prepended to EVERY scheduled run. Three purposes:
 	//
 	//  1. Anti-pollution: without it, agents dutifully log "nothing happened" to
 	//     the daily notes on each tick — a 5-minute job wrote ~300 notes/day in
@@ -870,6 +878,14 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 	// where 1-2 suffice, every 5 minutes, forever (observed in prod). The
 	// instruction now IS the check: run it directly; only a failure reveals
 	// the setup run.
+	//
+	//  3. Delivery: the final answer is the run's delivery. Told to "run
+	//     silently", models narrated the silence ("Sem novidades.", "(No new
+	//     listings — no message sent.)"), and that went out on every tick, to
+	//     WhatsApp at a template's price. A run with nothing to deliver answers
+	//     NO_REPLY, which AutomationDelivery takes out. The note keeps its first
+	//     and last words: ethos's privacy export finds it by them.
+	//     (seucaranguejo fork — MST-795)
 	message := fmt.Sprintf("[Scheduled run of cron job %q]\n%s\n\n"+
 		"(System note: this is a routine scheduled run.\n"+
 		"• Reproducibility: in your FIRST tool call, execute `bash scripts/%s/run.sh` directly — do "+
@@ -878,9 +894,13 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		"reproducible script there that captures this task end-to-end (except sending chat "+
 		"messages: the script prints them and you send them with the message tool), then run it. Keep "+
 		"state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
-		"• Notes: do NOT record routine runs in the daily notes — run silently when there is nothing "+
-		"new. Only write a note when the run produced a genuinely new fact the user would care about; "+
-		"never use the daily notes as a state store.)",
+		"• Delivery: your final answer is delivered to the user as this run's result. If this run has "+
+		"nothing the user should receive (nothing new, nothing changed, nothing to report), your final "+
+		"answer must be exactly "+noReplyToken+" and nothing else; do not write that there is nothing "+
+		"new. Otherwise answer with the result itself and never mention "+noReplyToken+".\n"+
+		"• Notes: do NOT record routine runs in the daily notes. Only write a note when the run "+
+		"produced a genuinely new fact the user would care about; never use the daily notes as a "+
+		"state store.)",
 		job.Name, job.Payload.Message, job.ID, job.ID)
 
 	// A scheduled run is a task of its own; one a turn asked for stays in that turn's.
@@ -908,8 +928,30 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 		return result, err
 	}
 
+	// The answer is the delivery: NO_REPLY is not delivered, the text around
+	// it is. The status stays the turn's. (seucaranguejo fork — MST-795; the
+	// gate is adapted from picoclaw#128)
+	delivery, mixed := AutomationDelivery(result.Content)
+	switch {
+	case delivery == "" && result.Content != "":
+		logger.InfoCF("cron", "Automation run had nothing to deliver",
+			map[string]any{"job_id": job.ID, "session_key": sessionKey, "channel": channel})
+	case mixed:
+		logger.WarnCF("cron", "Automation answer mixed NO_REPLY with text; delivering the text", map[string]any{
+			"job_id":          job.ID,
+			"channel":         channel,
+			"answer_chars":    len(result.Content),
+			"delivered_chars": len(delivery),
+		})
+	}
+	result.Content = delivery
 	if result.Content != "" {
 		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, result.Content)
+	} else if dismisser, ok := t.executor.(toolFeedbackDismisser); ok {
+		// No final outbound closes the chat's tool-feedback message, whose
+		// animation would keep running and which the next reply would edit.
+		// (seucaranguejo fork — MST-795)
+		dismisser.DismissToolFeedback(ctx, channel, chatID)
 	}
 	return result, nil
 }
