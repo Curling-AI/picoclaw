@@ -25,10 +25,11 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	// in this log line.
 	started := time.Now()
 	phases := map[string]any{"session_key": ts.sessionKey}
-	mark := func(name string, since time.Time) time.Time {
+	phaseStart := started
+	mark := func(name string) {
 		now := time.Now()
-		phases[name+"_ms"] = now.Sub(since).Milliseconds()
-		return now
+		phases[name+"_ms"] = now.Sub(phaseStart).Milliseconds()
+		phaseStart = now
 	}
 	defer func() {
 		if total := time.Since(started); total > slowTurnSetup {
@@ -49,9 +50,9 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 			summary = resp.Summary
 		}
 	}
-	phaseStart := mark("assemble", started)
+	mark("assemble")
 	ts.refreshRestorePointFromSession(ts.agent)
-	phaseStart = mark("restore_point", phaseStart)
+	mark("restore_point")
 
 	contextualSkills := ts.activeSkills
 	if ts.agent.ContextBuilder != nil {
@@ -61,7 +62,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)
 	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
-	phaseStart = mark("build_messages", phaseStart)
+	mark("build_messages")
 	currentTurnStart := len(messages)
 	if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
 		currentTurnStart = len(messages) - 1
@@ -161,14 +162,14 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		}
 	}
 
-	phaseStart = mark("context_budget", phaseStart)
+	mark("context_budget")
 	if !ts.opts.NoHistory && (strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0) {
 		rootMsg := userPromptMessage(ts.userMessage, ts.media)
 		rootMsg = ts.appendUserPrompt(p.al, rootMsg)
 		ts.recordPersistedMessage(rootMsg)
 		ts.ingestMessage(ctx, p.al, rootMsg)
 	}
-	mark("append_prompt", phaseStart)
+	mark("append_prompt")
 
 	activeCandidates, activeModel, usedLight := p.al.selectCandidates(ts.agent, ts.userMessage, messages)
 	activeProvider := ts.agent.Provider
