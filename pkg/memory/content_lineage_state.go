@@ -166,10 +166,7 @@ func (s *JSONLStore) checkContentJournalSettled(key string) error {
 	return nil
 }
 
-// contentOwnership reads one session's identity for the alias scan below. The
-// scan runs under a session lock for every key with ':' (cron runs), and on EFS
-// each uncached meta read is a round trip: with the 14-day cron backlog it held
-// turns for minutes before the first LLM call.
+// contentOwnership prefers the cache: the alias scan runs under the session lock and each uncached meta read is an EFS round trip.
 func (s *JSONLStore) contentOwnership(physical string) (historyOwnership, error) {
 	if owner, cached, _ := s.cachedHistoryOwnership(physical); cached {
 		return owner, nil
