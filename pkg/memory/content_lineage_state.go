@@ -166,6 +166,23 @@ func (s *JSONLStore) checkContentJournalSettled(key string) error {
 	return nil
 }
 
+// contentOwnership reads one session's identity for the alias scan below. The
+// scan runs under a session lock for every key with ':' (cron runs), and on EFS
+// each uncached meta read is a round trip: with the 14-day cron backlog it held
+// turns for minutes before the first LLM call.
+func (s *JSONLStore) contentOwnership(physical string) (historyOwnership, error) {
+	if owner, cached, _ := s.cachedHistoryOwnership(physical); cached {
+		return owner, nil
+	}
+	var owner historyOwnership
+	data, err := os.ReadFile(s.metaPath(physical))
+	if err != nil {
+		return owner, err
+	}
+	err = json.Unmarshal(data, &owner)
+	return owner, err
+}
+
 func (s *JSONLStore) canonicalContentKey(ctx context.Context, key string) error {
 	if strings.TrimSpace(key) == "" || strings.TrimSpace(key) != key {
 		return ErrHistoryOwnershipUnavailable
@@ -195,12 +212,8 @@ func (s *JSONLStore) canonicalContentKey(ctx context.Context, key string) error 
 			continue
 		}
 		physical := strings.TrimSuffix(entry.Name(), ".meta.json")
-		data, readErr := os.ReadFile(s.metaPath(physical))
+		owner, readErr := s.contentOwnership(physical)
 		if readErr != nil {
-			return fmt.Errorf("%w: %w", ErrHistoryOwnershipUnavailable, readErr)
-		}
-		var owner historyOwnership
-		if readErr = json.Unmarshal(data, &owner); readErr != nil {
 			return fmt.Errorf("%w: %w", ErrHistoryOwnershipUnavailable, readErr)
 		}
 		if physical == sanitizeKey(key) && owner.Key != "" && owner.Key != key {

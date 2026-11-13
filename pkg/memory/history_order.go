@@ -330,20 +330,27 @@ type historyOwnership struct {
 	pending bool
 }
 
+// cachedHistoryOwnership answers an identity from the write-through cache, or
+// reports a miss; a pending journal is a miss because recovery can change it.
+func (s *JSONLStore) cachedHistoryOwnership(sanitized string) (owner historyOwnership, cached, pending bool) {
+	s.metaMu.RLock()
+	defer s.metaMu.RUnlock()
+	pending = s.historyPending[sanitized]
+	meta, cached := s.metaCache[sanitized]
+	if !cached || pending {
+		return historyOwnership{}, false, pending
+	}
+	return historyOwnership{Key: meta.Key, Aliases: append([]string(nil), meta.Aliases...)}, true, false
+}
+
 // The caller holds the physical-session lock. Pending recovery can change
 // identity, so a non-owner with an unsettled journal cannot exclude ownership.
 func (s *JSONLStore) readHistoryOwnership(key string) (historyOwnership, error) {
-	sanitized := sanitizeKey(key)
-	s.metaMu.RLock()
-	pending := s.historyPending[sanitized]
-	meta, cached := s.metaCache[sanitized]
-	if cached && !pending {
-		owner := historyOwnership{Key: meta.Key, Aliases: append([]string(nil), meta.Aliases...)}
-		s.metaMu.RUnlock()
+	owner, cached, pending := s.cachedHistoryOwnership(sanitizeKey(key))
+	if cached {
 		return owner, nil
 	}
-	s.metaMu.RUnlock()
-	owner := historyOwnership{Key: key, pending: pending}
+	owner = historyOwnership{Key: key, pending: pending}
 	data, err := os.ReadFile(s.metaPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return owner, nil
