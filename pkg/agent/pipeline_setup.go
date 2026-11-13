@@ -5,10 +5,14 @@ package agent
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+// slowTurnSetup is how long setup may take before its phases are logged.
+const slowTurnSetup = 5 * time.Second
 
 // SetupTurn extracts the one-time initialization phase, returning a
 // turnExecution populated with history, messages, and candidate selection.
@@ -16,6 +20,22 @@ import (
 func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution, error) {
 	cfg := p.Cfg
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+
+	// The turn is silent until its first LLM call, so a stall here only shows
+	// in this log line.
+	started := time.Now()
+	phases := map[string]any{"session_key": ts.sessionKey}
+	mark := func(name string, since time.Time) time.Time {
+		now := time.Now()
+		phases[name+"_ms"] = now.Sub(since).Milliseconds()
+		return now
+	}
+	defer func() {
+		if total := time.Since(started); total > slowTurnSetup {
+			phases["total_ms"] = total.Milliseconds()
+			logger.WarnCF("agent", "Slow turn setup", phases)
+		}
+	}()
 
 	var history []providers.Message
 	var summary string
@@ -29,7 +49,9 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 			summary = resp.Summary
 		}
 	}
+	phaseStart := mark("assemble", started)
 	ts.refreshRestorePointFromSession(ts.agent)
+	phaseStart = mark("restore_point", phaseStart)
 
 	contextualSkills := ts.activeSkills
 	if ts.agent.ContextBuilder != nil {
@@ -39,6 +61,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)
 	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
+	phaseStart = mark("build_messages", phaseStart)
 	currentTurnStart := len(messages)
 	if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
 		currentTurnStart = len(messages) - 1
@@ -138,12 +161,14 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		}
 	}
 
+	phaseStart = mark("context_budget", phaseStart)
 	if !ts.opts.NoHistory && (strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0) {
 		rootMsg := userPromptMessage(ts.userMessage, ts.media)
 		rootMsg = ts.appendUserPrompt(p.al, rootMsg)
 		ts.recordPersistedMessage(rootMsg)
 		ts.ingestMessage(ctx, p.al, rootMsg)
 	}
+	mark("append_prompt", phaseStart)
 
 	activeCandidates, activeModel, usedLight := p.al.selectCandidates(ts.agent, ts.userMessage, messages)
 	activeProvider := ts.agent.Provider
