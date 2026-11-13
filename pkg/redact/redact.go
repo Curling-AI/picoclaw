@@ -21,7 +21,7 @@ var keyNameReplacer = strings.NewReplacer("_", "", "-", "", ".", "")
 
 var sensitiveKeyWords = []string{
 	"password", "passwd", "senha", "secret", "token", "apikey", "accesskey",
-	"privatekey", "authorization", "cookie", "credential",
+	"privatekey", "appkey", "applicationkey", "authorization", "cookie", "credential",
 }
 
 // Plural "tokens" usually counts a model's text, except in these names.
