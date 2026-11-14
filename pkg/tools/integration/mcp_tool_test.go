@@ -990,6 +990,29 @@ func TestMCPTool_RepeatSafety(t *testing.T) {
 	}
 }
 
+func TestMCPTool_DeclaredDestructive(t *testing.T) {
+	yes, no := true, false
+	tests := []struct {
+		name        string
+		annotations *mcp.ToolAnnotations
+		want        bool
+	}{
+		{name: "no annotations", annotations: nil, want: false},
+		{name: "destructiveHint absent", annotations: &mcp.ToolAnnotations{Title: "Delete"}, want: false},
+		{name: "declared additive", annotations: &mcp.ToolAnnotations{DestructiveHint: &no}, want: false},
+		{name: "declared destructive", annotations: &mcp.ToolAnnotations{DestructiveHint: &yes}, want: true},
+		{name: "read-only ignores destructiveHint", annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &yes}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool := NewMCPTool(&MockMCPManager{}, "skip", &mcp.Tool{Name: "skip_project_delete", Annotations: tt.annotations})
+			if got := tool.DeclaredDestructive(); got != tt.want {
+				t.Errorf("DeclaredDestructive() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMCPTool_ServerToolName(t *testing.T) {
 	tool := NewMCPTool(&MockMCPManager{}, "skip", &mcp.Tool{Name: "skip_project_status"})
 	if got := tool.ServerToolName(); got != "skip_project_status" {
