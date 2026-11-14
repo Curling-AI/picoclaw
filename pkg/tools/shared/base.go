@@ -53,6 +53,13 @@ type SideEffectHinter interface {
 	RepeatSafety() RepeatSafety
 }
 
+// DestructiveHinter is implemented by tools whose server can declare that a
+// call may delete or overwrite data (MCP destructiveHint).
+type DestructiveHinter interface {
+	// DeclaredDestructive is true only when the server explicitly says so.
+	DeclaredDestructive() bool
+}
+
 // ServerNamedTool is implemented by tools registered under a wrapped name
 // (mcp_<server>_<tool>) that the model also refers to by the server's own name.
 type ServerNamedTool interface {
