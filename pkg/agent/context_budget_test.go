@@ -906,6 +906,188 @@ func TestTrimHistoryToFitContextWindow_ClearsSingleOversizedTurn(t *testing.T) {
 	}
 }
 
+// dropTurnByTurn is the cut the trim always made: the oldest turn goes, the
+// prompt is rebuilt, and so on until it fits. It is the reference for where
+// the trim cuts, whatever way it gets there.
+func dropTurnByTurn(
+	history []providers.Message,
+	build func([]providers.Message) []providers.Message,
+	window int,
+) ([]providers.Message, bool) {
+	if !isOverContextBudget(window, build(history), nil, 0) {
+		return history, true
+	}
+	for len(history) > 0 {
+		turns := parseTurnBoundaries(history)
+		switch {
+		case len(turns) >= 2:
+			history = history[turns[1]:]
+		case len(turns) == 1 && turns[0] > 0:
+			history = history[turns[0]:]
+		default:
+			history = nil
+		}
+		if !isOverContextBudget(window, build(history), nil, 0) {
+			return history, true
+		}
+	}
+	return nil, false
+}
+
+// turnsOf returns n turns of two messages each, every turn the same size.
+func turnsOf(n int) []providers.Message {
+	history := make([]providers.Message, 0, 2*n)
+	for i := range n {
+		history = append(history,
+			msgUser(fmt.Sprintf("question %04d %s", i, strings.Repeat("u ", 40))),
+			msgAssistant(fmt.Sprintf("answer %04d %s", i, strings.Repeat("a ", 40))),
+		)
+	}
+	return history
+}
+
+func historyTokens(history []providers.Message) int {
+	total := 0
+	for _, m := range history {
+		total += EstimateMessageTokens(m)
+	}
+	return total
+}
+
+func TestTrimHistoryToFitContextWindow_CutsWhereTurnByTurnDropDid(t *testing.T) {
+	system := providers.Message{Role: "system", Content: strings.Repeat("s", 400)}
+	build := func(history []providers.Message) []providers.Message {
+		return append([]providers.Message{system}, history...)
+	}
+	stray := []providers.Message{msgAssistant(strings.Repeat("stray ", 30)), msgAssistant(strings.Repeat("stray ", 30))}
+	shapes := map[string][]providers.Message{
+		"empty":                    nil,
+		"regular turns":            turnsOf(9),
+		"stray messages, turns":    append(append([]providers.Message(nil), stray...), turnsOf(5)...),
+		"one turn":                 turnsOf(1),
+		"stray messages, one turn": append(append([]providers.Message(nil), stray...), turnsOf(1)...),
+		"no user message":          stray,
+		"turns of uneven size": append(turnsOf(3),
+			msgUser(strings.Repeat("big ", 300)), msgAssistant("ok"), msgUser("small"), msgAssistant("ok")),
+	}
+	for name, history := range shapes {
+		// Every window from "nothing fits" to "all of it fits".
+		whole := estimateCallTokens(build(history), nil, 0)
+		for window := 1; window <= whole+1; window += 7 {
+			want, wantFit := dropTurnByTurn(history, build, window)
+			got, messages, fit := trimHistoryToFitContextWindow(history, build, window, nil, 0)
+			if fit != wantFit || len(got) != len(want) {
+				t.Fatalf("%s, window %d: kept %d messages (fit %v), want %d (fit %v)",
+					name, window, len(got), fit, len(want), wantFit)
+			}
+			if len(got) > 0 && got[0].Content != want[0].Content {
+				t.Fatalf("%s, window %d: kept history starts at %q, want %q",
+					name, window, got[0].Content, want[0].Content)
+			}
+			if len(messages) != 1+len(got) {
+				t.Fatalf("%s, window %d: returned call has %d messages, want the one built from the kept history (%d)",
+					name, window, len(messages), 1+len(got))
+			}
+		}
+	}
+}
+
+func TestTrimHistoryToFitContextWindow_RebuildsThePromptAFewTimes(t *testing.T) {
+	history := turnsOf(2000)
+	builds := 0
+	build := func(history []providers.Message) []providers.Message {
+		builds++
+		return history
+	}
+	// Half of the history has to go.
+	window := historyTokens(history) / 2
+
+	kept, _, fit := trimHistoryToFitContextWindow(history, build, window, nil, 0)
+
+	want, _ := dropTurnByTurn(history, func(h []providers.Message) []providers.Message { return h }, window)
+	if !fit || len(kept) != len(want) {
+		t.Fatalf("kept %d messages (fit %v), want %d", len(kept), fit, len(want))
+	}
+	if builds > 30 {
+		t.Fatalf("prompt rebuilt %d times to drop %d turns, want a few dozen at most",
+			builds, (len(history)-len(kept))/2)
+	}
+}
+
+func TestTrimHistory_NeededCutLeavesHistoryUnderTheLimit(t *testing.T) {
+	history := turnsOf(100)
+	perTurn := historyTokens(history) / 100
+	builds := 0
+	build := func(history []providers.Message) []providers.Message {
+		builds++
+		return history
+	}
+	// One turn too many for the window; compaction would have kept 40 turns.
+	budget := callBudget{window: 99 * perTurn}
+
+	kept, messages, fit := trimHistory(history, build, budget, 40*perTurn)
+
+	if !fit || len(kept) != 80 {
+		t.Fatalf("kept %d messages (fit %v), want the newest 40 turns", len(kept), fit)
+	}
+	if kept[0].Content != history[120].Content {
+		t.Fatalf("kept history starts at %q, want turn 60", kept[0].Content)
+	}
+	if len(messages) != len(kept) {
+		t.Fatalf("returned call has %d messages, want the one built from the kept history", len(messages))
+	}
+	if builds != 2 {
+		t.Fatalf("prompt rebuilt %d times, want 2: the whole history, then the cut", builds)
+	}
+}
+
+func TestTrimHistory_LimitDoesNotCutAHistoryThatFits(t *testing.T) {
+	history := turnsOf(100)
+	perTurn := historyTokens(history) / 100
+	identity := func(history []providers.Message) []providers.Message { return history }
+
+	kept, _, fit := trimHistory(history, identity, callBudget{window: 100 * perTurn}, 40*perTurn)
+
+	if !fit || len(kept) != len(history) {
+		t.Fatalf("kept %d of %d messages (fit %v), want all: the call fits the window", len(kept), len(history), fit)
+	}
+}
+
+func TestTrimHistory_LimitGivesWayWhenItWouldKeepNoHistory(t *testing.T) {
+	// The newest turn alone is past the limit and still fits the window.
+	history := append(turnsOf(3), msgUser(strings.Repeat("big ", 400)), msgAssistant("ok"))
+	newest := historyTokens(history[6:])
+	identity := func(history []providers.Message) []providers.Message { return history }
+	window := historyTokens(history) - 1
+
+	kept, _, fit := trimHistory(history, identity, callBudget{window: window}, newest-1)
+
+	want, _ := dropTurnByTurn(history, identity, window)
+	if !fit || len(kept) == 0 || len(kept) != len(want) {
+		t.Fatalf("kept %d messages (fit %v), want %d: the cut that fits the window", len(kept), fit, len(want))
+	}
+}
+
+func TestTrimHistory_CutsPastTheLimitUntilTheCallFits(t *testing.T) {
+	history := turnsOf(100)
+	perTurn := historyTokens(history) / 100
+	// What the call carries besides history takes most of the window.
+	system := providers.Message{Role: "system", Content: strings.Repeat("s", 2000)}
+	build := func(history []providers.Message) []providers.Message {
+		return append([]providers.Message{system}, history...)
+	}
+	budget := callBudget{window: EstimateMessageTokens(system) + 10*perTurn}
+
+	kept, messages, fit := trimHistory(history, build, budget, 40*perTurn)
+
+	if !fit || len(kept) != 20 {
+		t.Fatalf("kept %d messages (fit %v), want the 10 turns the window has room for", len(kept), fit)
+	}
+	if budget.overflow(messages) > 0 {
+		t.Fatal("returned call is past the window")
+	}
+}
+
 // --- compactionCanHelp ---------------------------------------------------
 
 func TestCompactionCanHelp(t *testing.T) {

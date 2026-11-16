@@ -6,6 +6,8 @@
 package agent
 
 import (
+	"sort"
+
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tokenizer"
 )
@@ -176,9 +178,9 @@ func (g compactionGuard) skipReason() string {
 	return ""
 }
 
-// trimHistoryToFitContextWindow rebuilds the prompt from progressively newer
-// history slices until it fits within the context window. Oldest complete turns
-// are dropped first so tool-call sequences remain intact.
+// trimHistoryToFitContextWindow drops the oldest complete turns of history
+// until the prompt rebuilt from the rest fits within the context window.
+// Cutting at turn boundaries keeps tool-call sequences intact.
 func trimHistoryToFitContextWindow(
 	history []providers.Message,
 	build func([]providers.Message) []providers.Message,
@@ -186,44 +188,73 @@ func trimHistoryToFitContextWindow(
 	toolDefs []providers.ToolDefinition,
 	maxTokens int,
 ) ([]providers.Message, []providers.Message, bool) {
-	messages := build(history)
-	if !isOverContextBudget(contextWindow, messages, toolDefs, maxTokens) {
-		return history, messages, true
-	}
-
-	trimmedHistory := append([]providers.Message(nil), history...)
-	for len(trimmedHistory) > 0 {
-		dropUntil := nextHistoryTrimStart(trimmedHistory)
-		if dropUntil <= 0 || dropUntil >= len(trimmedHistory) {
-			trimmedHistory = nil
-		} else {
-			trimmedHistory = append([]providers.Message(nil), trimmedHistory[dropUntil:]...)
-		}
-
-		messages = build(trimmedHistory)
-		if !isOverContextBudget(contextWindow, messages, toolDefs, maxTokens) {
-			return trimmedHistory, messages, true
-		}
-	}
-
-	return nil, messages, false
+	return trimHistory(history, build, callBudget{window: contextWindow, toolDefs: toolDefs, maxTokens: maxTokens}, 0)
 }
 
-func nextHistoryTrimStart(history []providers.Message) int {
+// trimHistory is trimHistoryToFitContextWindow with a ceiling on what a
+// needed cut keeps. When the call does not fit and historyLimit is positive,
+// the cut leaves at most that many estimated tokens of history: a session
+// that could not compact then runs where compaction would have kept it, not
+// at the window's edge on every call. The limit gives way when only an empty
+// history would satisfy it.
+func trimHistory(
+	history []providers.Message,
+	build func([]providers.Message) []providers.Message,
+	budget callBudget,
+	historyLimit int,
+) ([]providers.Message, []providers.Message, bool) {
+	messages := build(history)
+	if budget.overflow(messages) <= 0 {
+		return history, messages, true
+	}
 	if len(history) == 0 {
-		return 0
+		return nil, messages, false
 	}
 
+	// starts are the cuts to try, oldest first: every turn after the first,
+	// then no history at all. A lone turn behind stray messages is a cut too.
 	turns := parseTurnBoundaries(history)
-	if len(turns) >= 2 {
-		return turns[1]
+	starts := turns
+	if len(turns) >= 2 || (len(turns) == 1 && turns[0] == 0) {
+		starts = turns[1:]
 	}
-	if len(turns) == 1 {
-		if turns[0] > 0 {
-			return turns[0]
+	starts = append(starts, len(history))
+
+	first := 0
+	if historyLimit > 0 {
+		kept := make([]int, len(history)+1) // kept[i]: estimated tokens of history[i:]
+		for i := len(history) - 1; i >= 0; i-- {
+			kept[i] = kept[i+1] + EstimateMessageTokens(history[i])
 		}
-		return len(history)
+		first = sort.Search(len(starts)-1, func(i int) bool { return kept[starts[i]] <= historyLimit })
+		if first == len(starts)-1 {
+			first = 0
+		}
 	}
 
-	return len(history)
+	// A copy, nil when nothing is left: build may keep what it is given.
+	suffix := func(start int) []providers.Message {
+		return append([]providers.Message(nil), history[start:]...)
+	}
+	var call []providers.Message // the call built at the earliest cut known to fit
+	fits := func(i int) bool {
+		messages = build(suffix(starts[i]))
+		if budget.overflow(messages) > 0 {
+			return false
+		}
+		call = messages
+		return true
+	}
+	// Each probe rebuilds the prompt, and the cut is usually the first one
+	// tried or close to it: gallop from there, then bisect the last gap.
+	lo, hi := first, first
+	for step := 1; hi < len(starts) && !fits(hi); step *= 2 {
+		lo, hi = hi+1, hi+step
+	}
+	hi = min(hi, len(starts))
+	cut := lo + sort.Search(hi-lo, func(i int) bool { return fits(lo + i) })
+	if cut == len(starts) {
+		return nil, messages, false
+	}
+	return suffix(starts[cut]), call, true
 }

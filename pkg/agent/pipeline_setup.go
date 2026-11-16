@@ -70,7 +70,9 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 
 	messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize, currentTurnStart)
 
-	if !ts.opts.NoHistory {
+	// A turn stopped during setup makes no call: fitting one would only hold
+	// the session through more prompt builds.
+	if !ts.opts.NoHistory && ctx.Err() == nil {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
 			rebuild := func(trimmedHistory []providers.Message) []providers.Message {
@@ -133,12 +135,13 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				}
 				originalHistoryCount := len(history)
 				var fit bool
-				history, messages, fit = trimHistoryToFitContextWindow(
+				// A call still past the window means compaction did not run or was
+				// not enough: cut to the threshold it works to (see maybeSummarize).
+				history, messages, fit = trimHistory(
 					history,
 					rebuild,
-					ts.agent.ContextWindow,
-					toolDefs,
-					ts.agent.MaxTokens,
+					callBudget{window: ts.agent.ContextWindow, toolDefs: toolDefs, maxTokens: ts.agent.MaxTokens},
+					ts.agent.ContextWindow*ts.agent.SummarizeTokenPercent/100,
 				)
 				if dropped := originalHistoryCount - len(history); dropped > 0 {
 					logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
