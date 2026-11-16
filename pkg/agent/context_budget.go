@@ -6,6 +6,8 @@
 package agent
 
 import (
+	"sort"
+
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tokenizer"
 )
@@ -176,54 +178,75 @@ func (g compactionGuard) skipReason() string {
 	return ""
 }
 
-// trimHistoryToFitContextWindow rebuilds the prompt from progressively newer
-// history slices until it fits within the context window. Oldest complete turns
-// are dropped first so tool-call sequences remain intact.
-func trimHistoryToFitContextWindow(
+// trimHistory drops the oldest complete turns of history until the prompt
+// rebuilt from the rest fits the budget. Cutting at turn boundaries keeps
+// tool-call sequences intact. It returns the history kept, the call built
+// from it and whether that call fits.
+//
+// A positive historyLimit is a ceiling on what a needed cut keeps: at most
+// that many estimated tokens of history, so a session that could not compact
+// runs where compaction would have kept it, not at the window's edge on every
+// call. When even the newest turn is past the limit, the cut keeps that turn
+// alone.
+func trimHistory(
 	history []providers.Message,
 	build func([]providers.Message) []providers.Message,
-	contextWindow int,
-	toolDefs []providers.ToolDefinition,
-	maxTokens int,
+	budget callBudget,
+	historyLimit int,
 ) ([]providers.Message, []providers.Message, bool) {
 	messages := build(history)
-	if !isOverContextBudget(contextWindow, messages, toolDefs, maxTokens) {
+	if budget.overflow(messages) <= 0 {
 		return history, messages, true
 	}
-
-	trimmedHistory := append([]providers.Message(nil), history...)
-	for len(trimmedHistory) > 0 {
-		dropUntil := nextHistoryTrimStart(trimmedHistory)
-		if dropUntil <= 0 || dropUntil >= len(trimmedHistory) {
-			trimmedHistory = nil
-		} else {
-			trimmedHistory = append([]providers.Message(nil), trimmedHistory[dropUntil:]...)
-		}
-
-		messages = build(trimmedHistory)
-		if !isOverContextBudget(contextWindow, messages, toolDefs, maxTokens) {
-			return trimmedHistory, messages, true
-		}
-	}
-
-	return nil, messages, false
-}
-
-func nextHistoryTrimStart(history []providers.Message) int {
 	if len(history) == 0 {
-		return 0
+		return nil, messages, false
 	}
 
+	// starts are the cuts to try, oldest first: every turn after the first,
+	// then no history at all. A lone turn behind stray messages is a cut too.
 	turns := parseTurnBoundaries(history)
-	if len(turns) >= 2 {
-		return turns[1]
+	starts := turns
+	if len(turns) >= 2 || (len(turns) == 1 && turns[0] == 0) {
+		starts = turns[1:]
 	}
-	if len(turns) == 1 {
-		if turns[0] > 0 {
-			return turns[0]
+	starts = append(starts, len(history))
+
+	first := 0
+	if historyLimit > 0 {
+		kept := make([]int, len(history)+1) // kept[i]: estimated tokens of history[i:]
+		for i := len(history) - 1; i >= 0; i-- {
+			kept[i] = kept[i+1] + EstimateMessageTokens(history[i])
 		}
-		return len(history)
+		first = sort.Search(len(starts)-1, func(i int) bool { return kept[starts[i]] <= historyLimit })
+		if first == len(starts)-1 {
+			first = max(len(starts)-2, 0)
+		}
 	}
 
-	return len(history)
+	// A copy, nil when nothing is left: build may keep what it is given.
+	suffix := func(start int) []providers.Message {
+		return append([]providers.Message(nil), history[start:]...)
+	}
+	var call []providers.Message // the call built at the earliest cut known to fit
+	fits := func(i int) bool {
+		messages = build(suffix(starts[i]))
+		if budget.overflow(messages) > 0 {
+			return false
+		}
+		call = messages
+		return true
+	}
+	// A shorter history never builds a larger call, so the first cut that fits
+	// can be searched for. Each probe rebuilds the prompt, and that cut is
+	// usually the first one tried or close to it: gallop, then bisect the gap.
+	lo, hi := first, first
+	for step := 1; hi < len(starts) && !fits(hi); step *= 2 {
+		lo, hi = hi+1, hi+step
+	}
+	hi = min(hi, len(starts))
+	cut := lo + sort.Search(hi-lo, func(i int) bool { return fits(lo + i) })
+	if cut == len(starts) {
+		return nil, messages, false
+	}
+	return suffix(starts[cut]), call, true
 }

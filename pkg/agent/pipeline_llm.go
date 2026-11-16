@@ -871,14 +871,13 @@ func (p *Pipeline) CallLLM(
 			}
 			var fit bool
 			var trimmedStableHistory []providers.Message
-			trimmedStableHistory, exec.callMessages, fit = trimHistoryToFitContextWindow(
+			trimmedStableHistory, exec.callMessages, fit = trimHistory(
 				stableHistory,
 				func(trimmedHistory []providers.Message) []providers.Message {
 					return buildCall(trimmedHistory, exec.elidedToolResults)
 				},
-				effectiveCW,
-				exec.providerToolDefs,
-				ts.agent.MaxTokens,
+				budget,
+				0,
 			)
 			if !fit {
 				// Even the active turn alone is past the window: notes stand in
