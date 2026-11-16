@@ -80,9 +80,16 @@ func TestErrorCodeReadsFullBodyNotPreview(t *testing.T) {
 }
 
 func TestModelFallbackCodeSurvivesALongMessage(t *testing.T) {
-	response := &http.Response{StatusCode: 404, Header: http.Header{"X-Maestro-Fallback-Tier": {"flash"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"` + strings.Repeat("a", 300) + `","code":"model_not_found"}}`))}
+	response := &http.Response{
+		StatusCode: 404,
+		Header:     http.Header{"X-Maestro-Fallback-Tier": {"flash"}},
+		Body: io.NopCloser(
+			strings.NewReader(`{"error":{"message":"` + strings.Repeat("a", 300) + `","code":"model_not_found"}}`),
+		),
+	}
 	var refusal *HTTPError
-	if !errors.As(HandleErrorResponse(response, "proxy"), &refusal) || refusal.ErrorCode != "model_not_found" || refusal.FallbackTier != "flash" {
+	if !errors.As(HandleErrorResponse(response, "proxy"), &refusal) || refusal.ErrorCode != "model_not_found" ||
+		refusal.FallbackTier != "flash" {
 		t.Fatalf("refusal=%+v", refusal)
 	}
 }

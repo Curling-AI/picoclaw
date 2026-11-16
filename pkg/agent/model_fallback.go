@@ -22,6 +22,11 @@ func (p *Pipeline) fallbackToSmart(ctx context.Context, ts *turnState, exec *tur
 		return false, nil
 	}
 	from := exec.llmModelName
+	fromTier := ts.modelTier
+	if fromTier == "" {
+		// Bot defaults have no selected tier; clients still need the removed alias.
+		fromTier = from
+	}
 	changed, err := p.activateModel(ts, exec, candidates, candidates[0].Model)
 	if err != nil || !changed {
 		return false, err
@@ -33,15 +38,24 @@ func (p *Pipeline) fallbackToSmart(ctx context.Context, ts *turnState, exec *tur
 	delete(exec.llmOpts, "native_search")
 	exec.useNativeSearch = false
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
-	logger.WarnCF("agent", "Removed model replaced with ONE Smart", map[string]any{"session_key": ts.sessionKey, "from_model": from, "model": exec.llmModelName})
+	logger.WarnCF(
+		"agent",
+		"Removed model replaced with ONE Smart",
+		map[string]any{"session_key": ts.sessionKey, "from_model": from, "model": exec.llmModelName},
+	)
 	if ts.channel == "grpc" && ts.opts.AllowInterimPicoPublish && p.al != nil && p.al.bus != nil {
-		payload, err := json.Marshal(map[string]string{"fromTier": from, "toTier": "flash", "reason": "model_not_found"})
+		payload, err := json.Marshal(
+			map[string]string{"fromTier": fromTier, "toTier": "flash", "reason": "model_not_found"},
+		)
 		if err != nil {
 			return false, err
 		}
 		notifyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if err := p.al.bus.PublishOutbound(notifyCtx, outboundMessageForTurnWithOptions(ts, string(payload), outboundTurnMessageOptions{kind: "model_fallback"})); err != nil {
+		if err := p.al.bus.PublishOutbound(
+			notifyCtx,
+			outboundMessageForTurnWithOptions(ts, string(payload), outboundTurnMessageOptions{kind: "model_fallback"}),
+		); err != nil {
 			logger.WarnCF("agent", "Model fallback notification failed", map[string]any{"error": err.Error()})
 		}
 	}
