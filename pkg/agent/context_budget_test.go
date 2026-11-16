@@ -845,7 +845,7 @@ func TestIsOverContextBudget_RealisticSession(t *testing.T) {
 	}
 }
 
-func TestTrimHistoryToFitContextWindow_DropsOldestTurns(t *testing.T) {
+func TestTrimHistory_DropsOldestTurns(t *testing.T) {
 	history := []providers.Message{
 		msgUser(strings.Repeat("u1 ", 120)),
 		msgAssistant(strings.Repeat("a1 ", 120)),
@@ -859,13 +859,7 @@ func TestTrimHistoryToFitContextWindow_DropsOldestTurns(t *testing.T) {
 		return append([]providers.Message(nil), history...)
 	}
 
-	trimmedHistory, messages, fit := trimHistoryToFitContextWindow(
-		history,
-		build,
-		700,
-		nil,
-		0,
-	)
+	trimmedHistory, messages, fit := trimHistory(history, build, callBudget{window: 700}, 0)
 	if !fit {
 		t.Fatal("expected trimmed history to fit context window")
 	}
@@ -880,19 +874,18 @@ func TestTrimHistoryToFitContextWindow_DropsOldestTurns(t *testing.T) {
 	}
 }
 
-func TestTrimHistoryToFitContextWindow_ClearsSingleOversizedTurn(t *testing.T) {
+func TestTrimHistory_ClearsSingleOversizedTurn(t *testing.T) {
 	history := []providers.Message{
 		msgUser(strings.Repeat("oversized ", 200)),
 		msgAssistant(strings.Repeat("oversized ", 200)),
 	}
 
-	trimmedHistory, messages, fit := trimHistoryToFitContextWindow(
+	trimmedHistory, messages, fit := trimHistory(
 		history,
 		func(history []providers.Message) []providers.Message {
 			return append([]providers.Message(nil), history...)
 		},
-		200,
-		nil,
+		callBudget{window: 200},
 		0,
 	)
 	if !fit {
@@ -954,7 +947,7 @@ func historyTokens(history []providers.Message) int {
 	return total
 }
 
-func TestTrimHistoryToFitContextWindow_CutsWhereTurnByTurnDropDid(t *testing.T) {
+func TestTrimHistory_CutsWhereTurnByTurnDropDid(t *testing.T) {
 	system := providers.Message{Role: "system", Content: strings.Repeat("s", 400)}
 	build := func(history []providers.Message) []providers.Message {
 		return append([]providers.Message{system}, history...)
@@ -975,7 +968,7 @@ func TestTrimHistoryToFitContextWindow_CutsWhereTurnByTurnDropDid(t *testing.T) 
 		whole := estimateCallTokens(build(history), nil, 0)
 		for window := 1; window <= whole+1; window += 7 {
 			want, wantFit := dropTurnByTurn(history, build, window)
-			got, messages, fit := trimHistoryToFitContextWindow(history, build, window, nil, 0)
+			got, messages, fit := trimHistory(history, build, callBudget{window: window}, 0)
 			if fit != wantFit || len(got) != len(want) {
 				t.Fatalf("%s, window %d: kept %d messages (fit %v), want %d (fit %v)",
 					name, window, len(got), fit, len(want), wantFit)
@@ -992,7 +985,7 @@ func TestTrimHistoryToFitContextWindow_CutsWhereTurnByTurnDropDid(t *testing.T) 
 	}
 }
 
-func TestTrimHistoryToFitContextWindow_RebuildsThePromptAFewTimes(t *testing.T) {
+func TestTrimHistory_RebuildsThePromptAFewTimes(t *testing.T) {
 	history := turnsOf(2000)
 	builds := 0
 	build := func(history []providers.Message) []providers.Message {
@@ -1002,7 +995,7 @@ func TestTrimHistoryToFitContextWindow_RebuildsThePromptAFewTimes(t *testing.T) 
 	// Half of the history has to go.
 	window := historyTokens(history) / 2
 
-	kept, _, fit := trimHistoryToFitContextWindow(history, build, window, nil, 0)
+	kept, _, fit := trimHistory(history, build, callBudget{window: window}, 0)
 
 	want, _ := dropTurnByTurn(history, func(h []providers.Message) []providers.Message { return h }, window)
 	if !fit || len(kept) != len(want) {

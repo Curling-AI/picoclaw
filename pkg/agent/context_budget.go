@@ -178,25 +178,16 @@ func (g compactionGuard) skipReason() string {
 	return ""
 }
 
-// trimHistoryToFitContextWindow drops the oldest complete turns of history
-// until the prompt rebuilt from the rest fits within the context window.
-// Cutting at turn boundaries keeps tool-call sequences intact.
-func trimHistoryToFitContextWindow(
-	history []providers.Message,
-	build func([]providers.Message) []providers.Message,
-	contextWindow int,
-	toolDefs []providers.ToolDefinition,
-	maxTokens int,
-) ([]providers.Message, []providers.Message, bool) {
-	return trimHistory(history, build, callBudget{window: contextWindow, toolDefs: toolDefs, maxTokens: maxTokens}, 0)
-}
-
-// trimHistory is trimHistoryToFitContextWindow with a ceiling on what a
-// needed cut keeps. When the call does not fit and historyLimit is positive,
-// the cut leaves at most that many estimated tokens of history: a session
-// that could not compact then runs where compaction would have kept it, not
-// at the window's edge on every call. When even the newest turn is past the
-// limit, the cut keeps that turn alone.
+// trimHistory drops the oldest complete turns of history until the prompt
+// rebuilt from the rest fits the budget. Cutting at turn boundaries keeps
+// tool-call sequences intact. It returns the history kept, the call built
+// from it and whether that call fits.
+//
+// A positive historyLimit is a ceiling on what a needed cut keeps: at most
+// that many estimated tokens of history, so a session that could not compact
+// runs where compaction would have kept it, not at the window's edge on every
+// call. When even the newest turn is past the limit, the cut keeps that turn
+// alone.
 func trimHistory(
 	history []providers.Message,
 	build func([]providers.Message) []providers.Message,
