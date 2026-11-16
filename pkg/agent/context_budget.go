@@ -195,8 +195,8 @@ func trimHistoryToFitContextWindow(
 // needed cut keeps. When the call does not fit and historyLimit is positive,
 // the cut leaves at most that many estimated tokens of history: a session
 // that could not compact then runs where compaction would have kept it, not
-// at the window's edge on every call. The limit gives way when only an empty
-// history would satisfy it.
+// at the window's edge on every call. When even the newest turn is past the
+// limit, the cut keeps that turn alone.
 func trimHistory(
 	history []providers.Message,
 	build func([]providers.Message) []providers.Message,
@@ -228,7 +228,7 @@ func trimHistory(
 		}
 		first = sort.Search(len(starts)-1, func(i int) bool { return kept[starts[i]] <= historyLimit })
 		if first == len(starts)-1 {
-			first = 0
+			first = max(len(starts)-2, 0)
 		}
 	}
 
@@ -245,8 +245,9 @@ func trimHistory(
 		call = messages
 		return true
 	}
-	// Each probe rebuilds the prompt, and the cut is usually the first one
-	// tried or close to it: gallop from there, then bisect the last gap.
+	// A shorter history never builds a larger call, so the first cut that fits
+	// can be searched for. Each probe rebuilds the prompt, and that cut is
+	// usually the first one tried or close to it: gallop, then bisect the gap.
 	lo, hi := first, first
 	for step := 1; hi < len(starts) && !fits(hi); step *= 2 {
 		lo, hi = hi+1, hi+step

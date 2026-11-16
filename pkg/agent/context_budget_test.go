@@ -1039,6 +1039,9 @@ func TestTrimHistory_NeededCutLeavesHistoryUnderTheLimit(t *testing.T) {
 	if builds != 2 {
 		t.Fatalf("prompt rebuilt %d times, want 2: the whole history, then the cut", builds)
 	}
+	if kept[0].Content = "changed by the caller"; history[120].Content == kept[0].Content {
+		t.Fatal("kept history shares its messages with the history it was cut from")
+	}
 }
 
 func TestTrimHistory_LimitDoesNotCutAHistoryThatFits(t *testing.T) {
@@ -1053,18 +1056,15 @@ func TestTrimHistory_LimitDoesNotCutAHistoryThatFits(t *testing.T) {
 	}
 }
 
-func TestTrimHistory_LimitGivesWayWhenItWouldKeepNoHistory(t *testing.T) {
-	// The newest turn alone is past the limit and still fits the window.
+func TestTrimHistory_KeepsTheNewestTurnWhenItAloneIsPastTheLimit(t *testing.T) {
 	history := append(turnsOf(3), msgUser(strings.Repeat("big ", 400)), msgAssistant("ok"))
 	newest := historyTokens(history[6:])
 	identity := func(history []providers.Message) []providers.Message { return history }
-	window := historyTokens(history) - 1
 
-	kept, _, fit := trimHistory(history, identity, callBudget{window: window}, newest-1)
+	kept, _, fit := trimHistory(history, identity, callBudget{window: historyTokens(history) - 1}, newest-1)
 
-	want, _ := dropTurnByTurn(history, identity, window)
-	if !fit || len(kept) == 0 || len(kept) != len(want) {
-		t.Fatalf("kept %d messages (fit %v), want %d: the cut that fits the window", len(kept), fit, len(want))
+	if !fit || len(kept) != 2 || kept[0].Content != history[6].Content {
+		t.Fatalf("kept %d messages (fit %v), want the newest turn alone", len(kept), fit)
 	}
 }
 
