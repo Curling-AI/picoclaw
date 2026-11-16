@@ -63,10 +63,14 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
 	mark("build_messages")
-	currentTurnStart := len(messages)
-	if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
-		currentTurnStart = len(messages) - 1
+	// turnStart is where the turn's own message sits in a prompt built for it.
+	turnStart := func(built []providers.Message) int {
+		if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
+			return len(built) - 1
+		}
+		return len(built)
 	}
+	currentTurnStart := turnStart(messages)
 
 	messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize, currentTurnStart)
 
@@ -86,13 +90,12 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				)
 				rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
-				rebuiltCurrentTurnStart := len(rebuilt)
-				if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
-					rebuiltCurrentTurnStart = len(rebuilt) - 1
-				}
-				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, rebuiltCurrentTurnStart)
+				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, turnStart(rebuilt))
 			}
-			if !compactionCanHelp(rebuild, ts.agent.ContextWindow, toolDefs, ts.agent.MaxTokens) {
+			// What the call takes with no history at all: the system prompt, the
+			// turn's message, the tool definitions and the output reserve.
+			fixed := estimateCallTokens(rebuild(nil), toolDefs, ts.agent.MaxTokens)
+			if fixed > ts.agent.ContextWindow {
 				// Even an empty-history prompt exceeds the budget: the overflow
 				// is structural (context_window/max_tokens misconfigured, or an
 				// oversized tool set / system prompt), not conversational.
@@ -136,13 +139,16 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				originalHistoryCount := len(history)
 				var fit bool
 				// A call still past the window means compaction did not run or was
-				// not enough: cut to the threshold it works to (see maybeSummarize).
+				// not enough: cut to the summarization percent of the room the
+				// window leaves for history, so the cut binds on any window.
 				history, messages, fit = trimHistory(
 					history,
 					rebuild,
 					callBudget{window: ts.agent.ContextWindow, toolDefs: toolDefs, maxTokens: ts.agent.MaxTokens},
-					ts.agent.ContextWindow*ts.agent.SummarizeTokenPercent/100,
+					(ts.agent.ContextWindow-fixed)*ts.agent.SummarizeTokenPercent/100,
 				)
+				// The rebuilt call is shorter: the turn's message moved with it.
+				currentTurnStart = turnStart(messages)
 				if dropped := originalHistoryCount - len(history); dropped > 0 {
 					logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
 						"session_key":     ts.sessionKey,
