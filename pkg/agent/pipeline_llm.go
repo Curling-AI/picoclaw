@@ -602,6 +602,7 @@ func (p *Pipeline) CallLLM(
 	// is read as the call before it, and refused once the body changed. Each
 	// failure picks the id of the attempt after it, which the retry event names.
 	nextRequestID := ""
+	modelReplaced := false
 	for retry := 0; retry <= maxRetries; retry++ {
 		if nextRequestID != "" {
 			exec.llmOpts, exec.llmRequestID = optsWithRequestID(exec.llmOpts, nextRequestID), nextRequestID
@@ -623,6 +624,19 @@ func (p *Pipeline) CallLLM(
 		}
 		if isConfiguredStreamingVisibleError(err) {
 			break
+		}
+
+		if !modelReplaced && turnCtx.Err() == nil && hasSmartFallback(err) {
+			changed, switchErr := p.fallbackToSmart(turnCtx, ts, exec)
+			if switchErr != nil {
+				err = switchErr
+				break
+			}
+			if changed {
+				modelReplaced = true
+				retry--
+				continue
+			}
 		}
 
 		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {

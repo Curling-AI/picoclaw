@@ -469,7 +469,8 @@ type HTTPError struct {
 	// the message before it happens to be. A gateway adding one field to the
 	// envelope would silently break the classification, with no test failing.
 	// (seucaranguejo fork)
-	ErrorCode string
+	ErrorCode    string
+	FallbackTier string
 }
 
 func (e *HTTPError) Error() string {
@@ -492,10 +493,12 @@ func (e *HTTPError) Error() string {
 	)
 }
 
+const maxErrorResponseBytes = 4 << 10
+
 // HandleErrorResponse reads a non-200 response body and returns an appropriate error.
 func HandleErrorResponse(resp *http.Response, apiBase string) error {
 	contentType := resp.Header.Get("Content-Type")
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBytes))
 	if readErr != nil {
 		return fmt.Errorf("failed to read response: %w", readErr)
 	}
@@ -503,11 +506,12 @@ func HandleErrorResponse(resp *http.Response, apiBase string) error {
 		return WrapHTMLResponseError(resp.StatusCode, body, contentType, apiBase)
 	}
 	return &HTTPError{
-		StatusCode:  resp.StatusCode,
-		BodyPreview: ResponsePreview(body, 128),
-		ContentType: contentType,
-		APIBase:     apiBase,
-		ErrorCode:   extractErrorCode(body),
+		StatusCode:   resp.StatusCode,
+		BodyPreview:  ResponsePreview(body, 128),
+		ContentType:  contentType,
+		APIBase:      apiBase,
+		ErrorCode:    extractErrorCode(body),
+		FallbackTier: resp.Header.Get("X-Maestro-Fallback-Tier"),
 	}
 }
 

@@ -195,6 +195,10 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		}
 	}
 	if streamErr != nil {
+		if !publisher.Published() && hasSmartFallback(streamErr) {
+			publisher.Cancel(ctx)
+			return nil, true, streamErr
+		}
 		if !publisher.Published() {
 			fallbackOpts, fallbackID := optsWithFreshRequestID(exec.llmOpts)
 			exec.llmRequestID = fallbackID
