@@ -52,12 +52,8 @@ func (al *AgentLoop) runTurn(
 
 	if ts.agent != nil && ts.agent.ContextBuilder != nil {
 		// Off the turn's path: the next turn finds the prompt rebuilt with what
-		// this one wrote to memory or skills. The catalog is saved here, after
-		// the reply, so no write to the workspace outlives the turn. (seucaranguejo fork)
-		defer func() {
-			ts.agent.ContextBuilder.saveUnsavedCatalog()
-			go ts.agent.ContextBuilder.RefreshSystemPromptCache()
-		}()
+		// this one wrote to memory or skills. (seucaranguejo fork)
+		defer func() { go ts.agent.ContextBuilder.RefreshSystemPromptCache() }()
 	}
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)

@@ -74,7 +74,7 @@ type ContextBuilder struct {
 
 	// savedCatalogTried lets only the first build of a process use the skill
 	// catalog an earlier process saved. unsavedCatalog is the catalog of the
-	// last full build, saved when the next turn ends.
+	// last full build, saved when the agent loop stops.
 	savedCatalogTried bool
 	unsavedCatalog    *skillCatalog
 }

@@ -388,6 +388,14 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 
 func (al *AgentLoop) Stop() {
 	al.running.Store(false)
+	// The next process builds its first prompt from the skill catalog this one
+	// read. Saved here, off every turn. (seucaranguejo fork)
+	registry := al.GetRegistry()
+	for _, id := range registry.ListAgentIDs() {
+		if agent, ok := registry.GetAgent(id); ok && agent.ContextBuilder != nil {
+			agent.ContextBuilder.saveUnsavedCatalog()
+		}
+	}
 }
 
 // Close releases resources held by agent session stores. Call after Stop.
