@@ -175,6 +175,9 @@ const (
 	messageKindToolFeedback    = "tool_feedback"
 	messageKindToolCalls       = "tool_calls"
 	messageKindToolResult      = "tool_result"
+	// messageKindContextCompress tells a web chat the turn is compacting its
+	// history after the model refused the call as too long.
+	messageKindContextCompress = "context_compress"
 	outboundKindFinal          = "final"
 	metadataKeyAccountID       = "account_id"
 	metadataKeyGuildID         = "guild_id"

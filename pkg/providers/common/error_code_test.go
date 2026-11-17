@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,9 +73,23 @@ func TestErrorCodeReadsFullBodyNotPreview(t *testing.T) {
 	if strings.Contains(err.BodyPreview, "insufficient_balance") {
 		t.Fatal("preview unexpectedly kept the code; test no longer proves anything")
 	}
-	// HandleErrorResponse only reads the first 256 bytes, so a code beyond that
-	// is genuinely unrecoverable — that is the documented limit, not a bug.
+	// The log preview stays short while classification reads the bounded body.
 	if err.ErrorCode != "" && err.ErrorCode != "insufficient_balance" {
 		t.Errorf("unexpected ErrorCode %q", err.ErrorCode)
+	}
+}
+
+func TestModelFallbackCodeSurvivesALongMessage(t *testing.T) {
+	response := &http.Response{
+		StatusCode: 404,
+		Header:     http.Header{"X-Maestro-Fallback-Tier": {"flash"}},
+		Body: io.NopCloser(
+			strings.NewReader(`{"error":{"message":"` + strings.Repeat("a", 300) + `","code":"model_not_found"}}`),
+		),
+	}
+	var refusal *HTTPError
+	if !errors.As(HandleErrorResponse(response, "proxy"), &refusal) || refusal.ErrorCode != "model_not_found" ||
+		refusal.FallbackTier != "flash" {
+		t.Fatalf("refusal=%+v", refusal)
 	}
 }

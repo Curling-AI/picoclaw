@@ -507,6 +507,69 @@ func TestAgentLoop_EmitsContextCompressEventOnRetry(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_ContextRetryNoticeReachesOnlyTheWebAsTurnState(t *testing.T) {
+	for _, tc := range []struct {
+		channel   string
+		wantKinds []string
+	}{
+		{channel: "grpc", wantKinds: []string{messageKindContextCompress}},
+		{channel: "telegram", wantKinds: nil},
+		{channel: "whatsapp", wantKinds: nil},
+	} {
+		t.Run(tc.channel, func(t *testing.T) {
+			cfg := &config.Config{Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			}}}
+			provider := &failFirstMockProvider{
+				failures:    1,
+				failError:   stringError("InvalidParameter: Total tokens of image and text exceed max message tokens"),
+				successResp: "Recovered from context error",
+			}
+			msgBus := bus.NewMessageBus()
+			al := NewAgentLoop(cfg, msgBus, provider)
+			defaultAgent := al.registry.GetDefaultAgent()
+			defaultAgent.Sessions.SetHistory("session-1", []providers.Message{
+				{Role: "user", Content: "Old message 1"},
+				{Role: "assistant", Content: "Old response 1"},
+				{Role: "user", Content: "Old message 2"},
+				{Role: "assistant", Content: "Old response 2"},
+				{Role: "user", Content: "Trigger message"},
+			})
+
+			resp, err := al.runAgentLoop(context.Background(), defaultAgent, processOptions{
+				SessionKey:              "session-1",
+				Channel:                 tc.channel,
+				ChatID:                  "run-1",
+				UserMessage:             "Trigger message",
+				DefaultResponse:         defaultResponse,
+				AllowInterimPicoPublish: true,
+			})
+			if err != nil || resp != "Recovered from context error" {
+				t.Fatalf("the turn should complete after compacting, got %q, %v", resp, err)
+			}
+
+			var kinds []string
+			for drained := false; !drained; {
+				select {
+				case out := <-msgBus.OutboundChan():
+					if out.Content != "" {
+						t.Fatalf("no text should reach the person, got %q", out.Content)
+					}
+					kinds = append(kinds, out.Context.Raw[metadataKeyMessageKind])
+				default:
+					drained = true
+				}
+			}
+			if !slices.Equal(kinds, tc.wantKinds) {
+				t.Fatalf("outbound kinds = %v, want %v", kinds, tc.wantKinds)
+			}
+		})
+	}
+}
+
 func TestAgentLoop_EmitsSessionSummarizeEvent(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-eventbus-summary-*")
 	if err != nil {

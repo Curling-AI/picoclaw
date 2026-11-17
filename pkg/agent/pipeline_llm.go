@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -604,6 +603,7 @@ func (p *Pipeline) CallLLM(
 	// is read as the call before it, and refused once the body changed. Each
 	// failure picks the id of the attempt after it, which the retry event names.
 	nextRequestID := ""
+	modelReplaced := false
 	for retry := 0; retry <= maxRetries; retry++ {
 		if nextRequestID != "" {
 			exec.llmOpts, exec.llmRequestID = optsWithRequestID(exec.llmOpts, nextRequestID), nextRequestID
@@ -625,6 +625,19 @@ func (p *Pipeline) CallLLM(
 		}
 		if isConfiguredStreamingVisibleError(err) {
 			break
+		}
+
+		if !modelReplaced && turnCtx.Err() == nil && hasSmartFallback(err) {
+			changed, switchErr := p.fallbackToSmart(turnCtx, ts, exec)
+			if switchErr != nil {
+				err = switchErr
+				break
+			}
+			if changed {
+				modelReplaced = true
+				retry--
+				continue
+			}
 		}
 
 		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {
@@ -809,10 +822,12 @@ func (p *Pipeline) CallLLM(
 						"tool_defs":      len(exec.providerToolDefs),
 					})
 			} else {
-				if retry == 0 && !constants.IsInternalChannel(ts.channel) {
-					al.bus.PublishOutbound(ctx, outboundMessageForTurn(
-						ts,
-						"Context window exceeded. Compressing history and retrying...",
+				// A text here read as an error from the bot: only the web gets a
+				// signal, shown as the turn's state; other channels get nothing.
+				// (seucaranguejo fork)
+				if retry == 0 && ts.channel == "grpc" && ts.opts.AllowInterimPicoPublish {
+					al.bus.PublishOutbound(ctx, outboundMessageForTurnWithOptions(
+						ts, "", outboundTurnMessageOptions{kind: messageKindContextCompress},
 					))
 				}
 
