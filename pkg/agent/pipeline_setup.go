@@ -5,10 +5,14 @@ package agent
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+// slowTurnSetup is how long setup may take before its phases are logged.
+const slowTurnSetup = 5 * time.Second
 
 // SetupTurn extracts the one-time initialization phase, returning a
 // turnExecution populated with history, messages, and candidate selection.
@@ -16,6 +20,23 @@ import (
 func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution, error) {
 	cfg := p.Cfg
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+
+	// The turn is silent until its first LLM call, so a stall here only shows
+	// in this log line.
+	started := time.Now()
+	phases := map[string]any{"session_key": ts.sessionKey}
+	phaseStart := started
+	mark := func(name string) {
+		now := time.Now()
+		phases[name+"_ms"] = now.Sub(phaseStart).Milliseconds()
+		phaseStart = now
+	}
+	defer func() {
+		if total := time.Since(started); total > slowTurnSetup {
+			phases["total_ms"] = total.Milliseconds()
+			logger.WarnCF("agent", "Slow turn setup", phases)
+		}
+	}()
 
 	var history []providers.Message
 	var summary string
@@ -29,7 +50,9 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 			summary = resp.Summary
 		}
 	}
+	mark("assemble")
 	ts.refreshRestorePointFromSession(ts.agent)
+	mark("restore_point")
 
 	contextualSkills := ts.activeSkills
 	if ts.agent.ContextBuilder != nil {
@@ -39,14 +62,21 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)
 	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
-	currentTurnStart := len(messages)
-	if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
-		currentTurnStart = len(messages) - 1
+	mark("build_messages")
+	// turnStart is where the turn's own message sits in a prompt built for it.
+	turnStart := func(built []providers.Message) int {
+		if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
+			return len(built) - 1
+		}
+		return len(built)
 	}
+	currentTurnStart := turnStart(messages)
 
 	messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize, currentTurnStart)
 
-	if !ts.opts.NoHistory {
+	// A turn stopped during setup makes no call: fitting one would only hold
+	// the session through more prompt builds.
+	if !ts.opts.NoHistory && ctx.Err() == nil {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
 			rebuild := func(trimmedHistory []providers.Message) []providers.Message {
@@ -60,13 +90,12 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				)
 				rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
 				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
-				rebuiltCurrentTurnStart := len(rebuilt)
-				if strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0 {
-					rebuiltCurrentTurnStart = len(rebuilt) - 1
-				}
-				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, rebuiltCurrentTurnStart)
+				return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize, turnStart(rebuilt))
 			}
-			if !compactionCanHelp(rebuild, ts.agent.ContextWindow, toolDefs, ts.agent.MaxTokens) {
+			// What the call takes with no history at all: the system prompt, the
+			// turn's message, the tool definitions and the output reserve.
+			fixed := estimateCallTokens(rebuild(nil), toolDefs, ts.agent.MaxTokens)
+			if fixed > ts.agent.ContextWindow {
 				// Even an empty-history prompt exceeds the budget: the overflow
 				// is structural (context_window/max_tokens misconfigured, or an
 				// oversized tool set / system prompt), not conversational.
@@ -109,13 +138,17 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				}
 				originalHistoryCount := len(history)
 				var fit bool
-				history, messages, fit = trimHistoryToFitContextWindow(
+				// A call still past the window means compaction did not run or was
+				// not enough: cut to the summarization percent of the room the
+				// window leaves for history, so the cut binds on any window.
+				history, messages, fit = trimHistory(
 					history,
 					rebuild,
-					ts.agent.ContextWindow,
-					toolDefs,
-					ts.agent.MaxTokens,
+					callBudget{window: ts.agent.ContextWindow, toolDefs: toolDefs, maxTokens: ts.agent.MaxTokens},
+					(ts.agent.ContextWindow-fixed)*ts.agent.SummarizeTokenPercent/100,
 				)
+				// The rebuilt call is shorter: the turn's message moved with it.
+				currentTurnStart = turnStart(messages)
 				if dropped := originalHistoryCount - len(history); dropped > 0 {
 					logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
 						"session_key":     ts.sessionKey,
@@ -138,12 +171,14 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		}
 	}
 
+	mark("context_budget")
 	if !ts.opts.NoHistory && (strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0) {
 		rootMsg := userPromptMessage(ts.userMessage, ts.media)
 		rootMsg = ts.appendUserPrompt(p.al, rootMsg)
 		ts.recordPersistedMessage(rootMsg)
 		ts.ingestMessage(ctx, p.al, rootMsg)
 	}
+	mark("append_prompt")
 
 	activeCandidates, activeModel, usedLight := p.al.selectCandidates(ts.agent, ts.userMessage, messages)
 	activeProvider := ts.agent.Provider

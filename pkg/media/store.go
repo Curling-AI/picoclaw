@@ -133,8 +133,8 @@ func (s *FileMediaStore) indexPath() string {
 
 // WithDurableDir gives the store a durable home: store-managed files are
 // ingested into dir at Store() time, the ref index is snapshotted there on
-// every mutation, and any previous snapshot is loaded now (entries whose
-// file no longer exists are dropped). Session history stores media:// refs;
+// every mutation, and any previous snapshot is loaded now (an entry whose
+// file no longer exists is dropped when it is resolved). Session history stores media:// refs;
 // without a durable home every restart turns them into "unknown ref"
 // dangling pointers.
 func (s *FileMediaStore) WithDurableDir(dir string) *FileMediaStore {
@@ -169,12 +169,8 @@ func (s *FileMediaStore) WithDurableDir(dir string) *FileMediaStore {
 		return s
 	}
 
-	loaded, dropped := 0, 0
+	loaded := 0
 	for _, e := range entries {
-		if _, err := os.Stat(e.Path); err != nil {
-			dropped++
-			continue
-		}
 		meta := MediaMeta{
 			Filename:      e.Filename,
 			ContentType:   e.ContentType,
@@ -199,11 +195,10 @@ func (s *FileMediaStore) WithDurableDir(dir string) *FileMediaStore {
 		s.pathStates[e.Path] = pathState
 		loaded++
 	}
-	if loaded > 0 || dropped > 0 {
+	if loaded > 0 {
 		logger.InfoCF("media", "persist: ref index restored", map[string]any{
-			"path":    s.indexPath(),
-			"loaded":  loaded,
-			"dropped": dropped,
+			"path":   s.indexPath(),
+			"loaded": loaded,
 		})
 	}
 	return s
@@ -360,26 +355,47 @@ func (s *FileMediaStore) Store(localPath string, meta MediaMeta, scope string) (
 
 // Resolve returns the local path for the given ref.
 func (s *FileMediaStore) Resolve(ref string) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	entry, ok := s.refs[ref]
-	if !ok {
-		return "", fmt.Errorf("media store: unknown ref: %s", ref)
-	}
-	return entry.path, nil
+	entry, err := s.resolveEntry(ref)
+	return entry.path, err
 }
 
 // ResolveWithMeta returns the local path and metadata for the given ref.
 func (s *FileMediaStore) ResolveWithMeta(ref string) (string, MediaMeta, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	entry, err := s.resolveEntry(ref)
+	return entry.path, entry.meta, err
+}
 
+// resolveEntry checks that the ref's file still exists here, on use, and not
+// when the index loads: a stat per ref at load is one network round trip per
+// ref on the boot path. A ref whose file is gone is forgotten and reported
+// unknown, as the load used to do; any other stat error keeps the ref and
+// leaves it to the caller's open to report.
+func (s *FileMediaStore) resolveEntry(ref string) (mediaEntry, error) {
+	s.mu.RLock()
 	entry, ok := s.refs[ref]
+	s.mu.RUnlock()
 	if !ok {
-		return "", MediaMeta{}, fmt.Errorf("media store: unknown ref: %s", ref)
+		return mediaEntry{}, fmt.Errorf("media store: unknown ref: %s", ref)
 	}
-	return entry.path, entry.meta, nil
+	if _, err := os.Stat(entry.path); !os.IsNotExist(err) {
+		return entry, nil
+	}
+
+	s.mu.Lock()
+	if current, ok := s.refs[ref]; ok && current.path == entry.path {
+		if scope, ok := s.refToScope[ref]; ok {
+			if scopeRefs, ok := s.scopeToRefs[scope]; ok {
+				delete(scopeRefs, ref)
+				if len(scopeRefs) == 0 {
+					delete(s.scopeToRefs, scope)
+				}
+			}
+		}
+		s.releaseRefLocked(ref, entry.path)
+		s.persistLocked()
+	}
+	s.mu.Unlock()
+	return mediaEntry{}, fmt.Errorf("media store: unknown ref: %s", ref)
 }
 
 // ReleaseAll removes all files under the given scope and cleans up mappings.

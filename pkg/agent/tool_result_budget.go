@@ -414,12 +414,11 @@ func fitTurnByElision(
 	if !ok {
 		return nil, call, turn.elided, false
 	}
-	kept, keptCall, fits := trimHistoryToFitContextWindow(
+	kept, keptCall, fits := trimHistory(
 		turn.stable,
 		func(h []providers.Message) []providers.Message { return build(h, next) },
-		budget.window-headroom,
-		budget.toolDefs,
-		budget.maxTokens,
+		callBudget{window: budget.window - headroom, toolDefs: budget.toolDefs, maxTokens: budget.maxTokens},
+		0,
 	)
 	if fits && len(kept) > 0 {
 		return kept, keptCall, next, true

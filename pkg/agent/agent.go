@@ -175,6 +175,9 @@ const (
 	messageKindToolFeedback    = "tool_feedback"
 	messageKindToolCalls       = "tool_calls"
 	messageKindToolResult      = "tool_result"
+	// messageKindContextCompress tells a web chat the turn is compacting its
+	// history after the model refused the call as too long.
+	messageKindContextCompress = "context_compress"
 	outboundKindFinal          = "final"
 	metadataKeyAccountID       = "account_id"
 	metadataKeyGuildID         = "guild_id"
@@ -385,6 +388,14 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 
 func (al *AgentLoop) Stop() {
 	al.running.Store(false)
+	// The next process builds its first prompt from the skill catalog this one
+	// read. Saved here, off every turn. (seucaranguejo fork)
+	registry := al.GetRegistry()
+	for _, id := range registry.ListAgentIDs() {
+		if agent, ok := registry.GetAgent(id); ok && agent.ContextBuilder != nil {
+			agent.ContextBuilder.saveUnsavedCatalog()
+		}
+	}
 }
 
 // Close releases resources held by agent session stores. Call after Stop.
@@ -712,7 +723,13 @@ func (al *AgentLoop) runAgentLoopResult(
 		}
 	}
 
-	if opts.SendResponse && result.finalContent != "" {
+	// A late result's turn in an automation run's session delivers what the
+	// run would: NO_REPLY is not delivered. (seucaranguejo fork — MST-795)
+	delivery := ""
+	if opts.SendResponse {
+		delivery = deliveredAnswer(opts.Dispatch.SessionKey, opts.Dispatch.Channel(), result.finalContent)
+	}
+	if delivery != "" {
 		agentID, sessionKey, scope := outboundTurnMetadata(
 			agent.ID,
 			opts.Dispatch.SessionKey,
@@ -728,7 +745,7 @@ func (al *AgentLoop) runAgentLoopResult(
 			AgentID:      agentID,
 			SessionKey:   sessionKey,
 			Scope:        scope,
-			Content:      result.finalContent,
+			Content:      delivery,
 			ContextUsage: computeContextUsage(agent, opts.Dispatch.SessionKey),
 		}
 		if modelName := strings.TrimSpace(result.modelName); modelName != "" {
@@ -748,14 +765,18 @@ func (al *AgentLoop) runAgentLoopResult(
 				"chat_id": opts.Dispatch.ChatID(),
 				"error":   err.Error(),
 			})
-		} else if result.finalContent != opts.DefaultResponse {
+		} else if delivery != opts.DefaultResponse {
 			al.mirrorDelivery(
 				opts.Dispatch.SessionKey,
 				opts.Dispatch.Channel(),
 				opts.Dispatch.ChatID(),
-				result.finalContent,
+				delivery,
 			)
 		}
+	} else if opts.SendResponse && ts.isCronRunMainTurn() {
+		// Nothing goes out, so no final outbound closes the chat's
+		// tool-feedback message. (seucaranguejo fork — MST-795)
+		al.DismissToolFeedback(ctx, opts.Dispatch.Channel(), opts.Dispatch.ChatID())
 	}
 
 	if result.finalContent != "" {

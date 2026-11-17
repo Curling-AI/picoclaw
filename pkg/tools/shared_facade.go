@@ -26,6 +26,7 @@ type (
 	PromptMetadataProvider = toolshared.PromptMetadataProvider
 	RepeatSafety           = toolshared.RepeatSafety
 	SideEffectHinter       = toolshared.SideEffectHinter
+	DestructiveHinter      = toolshared.DestructiveHinter
 	MCPAccountSignal       = toolshared.MCPAccountSignal
 	ServerNamedTool        = toolshared.ServerNamedTool
 	TurnScopedTool         = toolshared.TurnScopedTool

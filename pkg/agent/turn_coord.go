@@ -50,6 +50,11 @@ func (al *AgentLoop) runTurn(
 	turnCtx = WithAgentLoop(turnCtx, al)
 	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
+	if ts.agent != nil && ts.agent.ContextBuilder != nil {
+		// Off the turn's path: the next turn finds the prompt rebuilt with what
+		// this one wrote to memory or skills. (seucaranguejo fork)
+		defer func() { go ts.agent.ContextBuilder.RefreshSystemPromptCache() }()
+	}
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
 	defer func() {
@@ -319,10 +324,18 @@ func (al *AgentLoop) runTurn(
 				turnStatus = TurnEndStatusError
 				return turnResult{}, fmt.Errorf("hook requested turn abort")
 			}
-			// Ensure empty response falls back to DefaultResponse
+			// Ensure empty response falls back to DefaultResponse. Not in the main
+			// turn of an automation run: its answer is delivered, and the fallback
+			// would reach the owner as the run's result. The empty end still stays
+			// out of history and fails the run. (seucaranguejo fork — MST-795,
+			// adapted from picoclaw#128)
 			if finalContent == "" && providerForTurn(turnCtx, ts.turnID) == nil {
-				finalContent = ts.opts.DefaultResponse
 				exec.finalIsFallback = true
+				if ts.isCronRunMainTurn() {
+					logEmptyAutomationAnswer(ts)
+				} else {
+					finalContent = ts.opts.DefaultResponse
+				}
 			}
 			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
 			result.incomplete = exec.incomplete || exec.finalIsFallback

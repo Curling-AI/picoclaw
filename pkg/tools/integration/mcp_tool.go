@@ -209,6 +209,13 @@ func (t *MCPTool) RepeatSafety() toolshared.RepeatSafety {
 	}
 }
 
+// DeclaredDestructive ignores the MCP default (destructive unless stated
+// otherwise): only an explicit destructiveHint on a writing tool counts.
+func (t *MCPTool) DeclaredDestructive() bool {
+	hints := t.tool.Annotations
+	return hints != nil && !hints.ReadOnlyHint && hints.DestructiveHint != nil && *hints.DestructiveHint
+}
+
 // Description returns the tool description
 func (t *MCPTool) Description() string {
 	desc := t.tool.Description

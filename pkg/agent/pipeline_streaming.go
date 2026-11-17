@@ -195,6 +195,10 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		}
 	}
 	if streamErr != nil {
+		if !publisher.Published() && hasSmartFallback(streamErr) {
+			publisher.Cancel(ctx)
+			return nil, true, streamErr
+		}
 		if !publisher.Published() {
 			fallbackOpts, fallbackID := optsWithFreshRequestID(exec.llmOpts)
 			exec.llmRequestID = fallbackID
@@ -396,6 +400,20 @@ func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecutio
 			"chat_id":  ts.chatID,
 			"model":    exec.activeModel,
 			"reason":   "turn_output_disabled",
+		})
+		return false
+	}
+	// An automation run's answer is delivered only after its gate takes
+	// NO_REPLY out (CronTool.ExecuteJobWithResult; deliveredAnswer for a late
+	// result's turn); a stream would put it in the chat first. (seucaranguejo
+	// fork — MST-795)
+	if ts.isCronRunMainTurn() {
+		logger.DebugCF("agent", "configured streaming not used", map[string]any{
+			"agent_id":    ts.agent.ID,
+			"channel":     ts.channel,
+			"session_key": ts.sessionKey,
+			"model":       exec.activeModel,
+			"reason":      "automation_run",
 		})
 		return false
 	}

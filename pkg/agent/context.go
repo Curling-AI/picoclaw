@@ -2,19 +2,23 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
@@ -53,6 +57,40 @@ type ContextBuilder struct {
 	// build time. This catches nested file creations/deletions/mtime changes
 	// that may not update the top-level skill root directory mtime.
 	skillFilesAtCache map[string]time.Time
+
+	// skillRootsAtCache holds each existing skill root's own mtime: adding or
+	// removing a skill changes it, whatever the newest file elsewhere says.
+	skillRootsAtCache map[string]time.Time
+
+	// cacheGeneration counts InvalidateCache calls, so a refresh built outside
+	// the lock never stores a prompt from before an explicit invalidation.
+	cacheGeneration uint64
+
+	// refreshing keeps a single RefreshSystemPromptCache walk per builder;
+	// refreshPending makes it walk again for a request that came mid-walk.
+	refreshing     atomic.Bool
+	refreshPending atomic.Bool
+	afterSkillScan func() // test seam: runs after each refresh walk
+
+	// savedCatalogTried lets only the first build of a process use the skill
+	// catalog an earlier process saved. unsavedCatalog is the catalog of the
+	// last full build, saved when the agent loop stops.
+	savedCatalogTried bool
+	unsavedCatalog    *skillCatalog
+}
+
+// skillCatalogVersion changes when skillCatalog changes shape; a saved catalog
+// of another version is ignored.
+const skillCatalogVersion = 1
+
+// skillCatalog is what reading the skill trees produced: the skill list and the
+// walk it was read after. Saved in the workspace, it spares a restarted process
+// that read on its first turn. (seucaranguejo fork)
+type skillCatalog struct {
+	Version    int                  `json:"version"`
+	Skills     []skills.SkillInfo   `json:"skills"`
+	SkillFiles map[string]time.Time `json:"skill_files"`
+	SkillRoots map[string]time.Time `json:"skill_roots"`
 }
 
 func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuilder {
@@ -300,9 +338,14 @@ type systemPromptBuildOptions struct {
 	IncludeToolUseRule  bool
 	AllowedSkills       []string
 	AllowedTools        []string
+	Skills              []skills.SkillInfo // nil reads the skill roots
 }
 
 func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) []PromptPart {
+	skillList := opts.Skills
+	if skillList == nil && opts.IncludeSkillCatalog {
+		skillList = cb.listSkills()
+	}
 	stack := NewPromptStack(cb.promptRegistryOrDefault())
 	add := func(part PromptPart) {
 		if err := stack.Add(part); err != nil {
@@ -349,7 +392,7 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	// and the agent pulls relevant skills via find_installed_skills, keeping the
 	// prompt lean regardless of skill count.
 	if opts.IncludeSkillCatalog && cb.skillDiscovery {
-		if hint := cb.skillDiscoveryHint(opts.AllowedSkills); hint != "" {
+		if hint := skillDiscoveryHint(skillList, opts.AllowedSkills); hint != "" {
 			add(PromptPart{
 				ID:      "capability.skill_catalog",
 				Layer:   PromptLayerCapability,
@@ -364,7 +407,7 @@ func (cb *ContextBuilder) buildSystemPromptParts(opts systemPromptBuildOptions) 
 	} else {
 		skillsSummary := ""
 		if opts.IncludeSkillCatalog {
-			skillsSummary = cb.buildSkillsSummary(opts.AllowedSkills)
+			skillsSummary = buildSkillsSummary(skillList, opts.AllowedSkills)
 		}
 		if skillsSummary != "" {
 			skillIntro := "The following skills extend your capabilities."
@@ -443,7 +486,8 @@ Each part separated by the marker will be sent as an independent message.`,
 
 // BuildSystemPromptWithCache returns the cached system prompt if available
 // and source files haven't changed, otherwise builds and caches it.
-// Source file changes are detected via mtime checks (cheap stat calls).
+// Source file changes are detected via mtime checks (cheap stat calls); edits
+// inside a skill are caught by RefreshSystemPromptCache.
 func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
 	// Try read lock first — fast path when cache is valid
 	cb.systemPromptMutex.RLock()
@@ -469,19 +513,174 @@ func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
 	// so the next sourceFilesChangedLocked check will correctly trigger a
 	// rebuild. The alternative (baseline after build) risks caching stale
 	// content with a too-new baseline, making the staleness invisible.
-	baseline := cb.buildCacheBaseline()
-	prompt := cb.BuildSystemPrompt()
+	baseline, skillList, saved := cb.savedCatalogBaselineLocked()
+	if !saved {
+		baseline = cb.buildCacheBaseline()
+		skillList = cb.listSkills()
+	}
+	prompt := cb.buildDefaultPrompt(skillList)
+	cb.storeCacheLocked(baseline, prompt)
+	if !saved {
+		cb.unsavedCatalog = newSkillCatalog(baseline, skillList)
+	}
+	return prompt
+}
+
+// buildDefaultPrompt is BuildSystemPrompt with the skill list already read.
+func (cb *ContextBuilder) buildDefaultPrompt(skillList []skills.SkillInfo) string {
+	return renderPromptPartsLegacy(cb.buildSystemPromptParts(systemPromptBuildOptions{
+		IncludeSkillCatalog: true,
+		IncludeToolUseRule:  true,
+		Skills:              skillList,
+	}))
+}
+
+func (cb *ContextBuilder) listSkills() []skills.SkillInfo {
+	if cb.skillsLoader == nil {
+		return nil
+	}
+	return cb.skillsLoader.ListSkills()
+}
+
+func newSkillCatalog(baseline cacheBaseline, skillList []skills.SkillInfo) *skillCatalog {
+	return &skillCatalog{
+		Version:    skillCatalogVersion,
+		Skills:     skillList,
+		SkillFiles: baseline.skillFiles,
+		SkillRoots: baseline.skillRoots,
+	}
+}
+
+func (cb *ContextBuilder) skillCatalogPath() string {
+	return filepath.Join(cb.workspace, "state", "skill_catalog.json")
+}
+
+// savedCatalogBaselineLocked offers the first build of a process the catalog an
+// earlier process saved, if no skill root changed since: the build then reads
+// no skill tree, seconds on a network volume. Bootstrap and memory are still
+// read, so their edits show in this turn; an edit inside a skill shows after
+// the next refresh, as it does within a process. The caller holds the write lock.
+func (cb *ContextBuilder) savedCatalogBaselineLocked() (cacheBaseline, []skills.SkillInfo, bool) {
+	// Without a workspace (some tests) there is nowhere to keep the catalog.
+	if cb.savedCatalogTried || cb.workspace == "" {
+		return cacheBaseline{}, nil, false
+	}
+	cb.savedCatalogTried = true
+	catalog, ok := cb.loadSkillCatalog()
+	if !ok {
+		return cacheBaseline{}, nil, false
+	}
+	baseline := cb.statBaseline(cb.skillRoots())
+	if !maps.EqualFunc(baseline.skillRoots, catalog.SkillRoots, time.Time.Equal) {
+		return cacheBaseline{}, nil, false
+	}
+	baseline.skillFiles = catalog.SkillFiles
+	return baseline, catalog.Skills, true
+}
+
+// loadSkillCatalog reads the saved catalog. A missing, unreadable or
+// other-version file is ignored: the build then reads the skill trees.
+func (cb *ContextBuilder) loadSkillCatalog() (skillCatalog, bool) {
+	data, err := os.ReadFile(cb.skillCatalogPath())
+	if err != nil {
+		return skillCatalog{}, false
+	}
+	var catalog skillCatalog
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		logger.InfoCF("agent", "Ignoring unreadable skill catalog", map[string]any{"error": err.Error()})
+		return skillCatalog{}, false
+	}
+	complete := catalog.Skills != nil && catalog.SkillFiles != nil && catalog.SkillRoots != nil
+	return catalog, catalog.Version == skillCatalogVersion && complete
+}
+
+// saveUnsavedCatalog writes the catalog of the last full build, if not yet saved.
+func (cb *ContextBuilder) saveUnsavedCatalog() {
+	cb.systemPromptMutex.Lock()
+	catalog := cb.unsavedCatalog
+	cb.unsavedCatalog = nil
+	cb.systemPromptMutex.Unlock()
+	if catalog == nil || cb.workspace == "" {
+		return
+	}
+	data, err := json.Marshal(catalog)
+	if err == nil {
+		err = fileutil.WriteFileAtomic(cb.skillCatalogPath(), data, 0o600)
+	}
+	if err != nil {
+		logger.WarnCF("agent", "Failed to save the skill catalog", map[string]any{"error": err.Error()})
+	}
+}
+
+// storeCacheLocked installs a built prompt and its baseline. The caller holds
+// the write lock.
+func (cb *ContextBuilder) storeCacheLocked(baseline cacheBaseline, prompt string) {
 	cb.cachedSystemPrompt = prompt
 	cb.cachedAt = baseline.maxMtime
 	cb.existedAtCache = baseline.existed
 	cb.skillFilesAtCache = baseline.skillFiles
+	cb.skillRootsAtCache = baseline.skillRoots
 
 	logger.DebugCF("agent", "System prompt cached",
 		map[string]any{
 			"length": len(prompt),
 		})
+}
 
-	return prompt
+// RefreshSystemPromptCache finds changes inside the skill trees, which
+// BuildSystemPromptWithCache does not look for: the walk costs one stat per
+// skill file, seconds on a network volume for a large workspace. It runs after
+// a turn and leaves the cache rebuilt for the next one. A call that arrives
+// while a walk runs makes that walk run once more, since the walk may have
+// passed the file the caller changed. (seucaranguejo fork)
+func (cb *ContextBuilder) RefreshSystemPromptCache() {
+	cb.refreshPending.Store(true)
+	for cb.refreshing.CompareAndSwap(false, true) {
+		for cb.refreshPending.Swap(false) {
+			cb.refreshOnce()
+		}
+		cb.refreshing.Store(false)
+		// A call between the last Swap and the Store saw refreshing set and
+		// left its request pending: take it over.
+		if !cb.refreshPending.Load() {
+			return
+		}
+	}
+}
+
+// refreshOnce walks and, when anything changed, rebuilds outside the lock so
+// turns keep reading the previous prompt meanwhile.
+func (cb *ContextBuilder) refreshOnce() {
+	started := time.Now()
+	// A rebuild replaces the snapshot map instead of mutating it, so it can be
+	// read without the lock while the walk runs.
+	cb.systemPromptMutex.RLock()
+	filesAtCache, generation := cb.skillFilesAtCache, cb.cacheGeneration
+	stale := cb.cachedSystemPrompt == "" || cb.sourceFilesChangedLocked()
+	cb.systemPromptMutex.RUnlock()
+	changed := filesAtCache != nil && skillFilesChangedSince(cb.skillRoots(), filesAtCache)
+	if cb.afterSkillScan != nil {
+		cb.afterSkillScan()
+	}
+	if stale || changed {
+		// Baseline before the build, as in BuildSystemPromptWithCache.
+		baseline := cb.buildCacheBaseline()
+		skillList := cb.listSkills()
+		prompt := cb.buildDefaultPrompt(skillList)
+		cb.systemPromptMutex.Lock()
+		if cb.cacheGeneration == generation {
+			cb.storeCacheLocked(baseline, prompt)
+			cb.unsavedCatalog = newSkillCatalog(baseline, skillList)
+		}
+		cb.systemPromptMutex.Unlock()
+	}
+	if took := time.Since(started); took > slowTurnSetup {
+		logger.InfoCF("agent", "Slow system prompt refresh", map[string]any{
+			"duration_ms": took.Milliseconds(),
+			"skill_files": len(filesAtCache),
+			"changed":     changed,
+		})
+	}
 }
 
 func (cb *ContextBuilder) buildSystemPromptForRequest(
@@ -528,13 +727,10 @@ func (cb *ContextBuilder) buildSystemPromptForRequest(
 // skillDiscoveryHint replaces the full skill catalog with a one-line pointer to
 // the find_installed_skills tool when discovery is on. Returns "" when there are no
 // enabled skills (nothing to advertise).
-func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
-	if cb.skillsLoader == nil {
-		return ""
-	}
+func skillDiscoveryHint(skillList []skills.SkillInfo, allowed []string) string {
 	allowedSet := cleanAllowedSet(allowed)
 	var names []string
-	for _, s := range cb.skillsLoader.ListSkills() {
+	for _, s := range skillList {
 		if s.Disabled {
 			continue
 		}
@@ -572,12 +768,9 @@ func (cb *ContextBuilder) skillDiscoveryHint(allowed []string) string {
 	)
 }
 
-func (cb *ContextBuilder) buildSkillsSummary(allowed []string) string {
-	if cb.skillsLoader == nil {
-		return ""
-	}
+func buildSkillsSummary(skillList []skills.SkillInfo, allowed []string) string {
 	if len(allowed) == 0 {
-		return cb.skillsLoader.BuildSkillsSummary()
+		return skills.SummarizeSkills(skillList)
 	}
 	allowedSet := cleanAllowedSet(allowed)
 	if len(allowedSet) == 0 {
@@ -586,7 +779,7 @@ func (cb *ContextBuilder) buildSkillsSummary(allowed []string) string {
 
 	var lines []string
 	lines = append(lines, "<skills>")
-	for _, s := range cb.skillsLoader.ListSkills() {
+	for _, s := range skillList {
 		if s.Disabled {
 			continue
 		}
@@ -678,6 +871,8 @@ func (cb *ContextBuilder) InvalidateCache() {
 	cb.cachedAt = time.Time{}
 	cb.existedAtCache = nil
 	cb.skillFilesAtCache = nil
+	cb.skillRootsAtCache = nil
+	cb.cacheGeneration++
 
 	logger.DebugCF("agent", "System prompt cache invalidated", nil)
 }
@@ -737,20 +932,43 @@ func (cb *ContextBuilder) loaderForLoop(scope LoopScope) *skills.SkillsLoader {
 type cacheBaseline struct {
 	existed    map[string]bool
 	skillFiles map[string]time.Time
+	skillRoots map[string]time.Time
 	maxMtime   time.Time
 }
 
 // buildCacheBaseline records which tracked paths currently exist and computes
 // the latest mtime across all tracked files + skills directory contents.
-// Called under write lock when the cache is built.
+// Called when the cache is built, under the write lock or, from a refresh, without it.
 func (cb *ContextBuilder) buildCacheBaseline() cacheBaseline {
 	skillRoots := cb.skillRoots()
+	baseline := cb.statBaseline(skillRoots)
+	baseline.skillFiles = make(map[string]time.Time)
 
+	// Walk all skill roots recursively to snapshot skill files and mtimes.
+	// Use os.Stat (not d.Info) for consistency with sourceFilesChanged checks.
+	for _, root := range skillRoots {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr == nil && !d.IsDir() {
+				if info, err := os.Stat(path); err == nil {
+					baseline.skillFiles[path] = info.ModTime()
+					if info.ModTime().After(baseline.maxMtime) {
+						baseline.maxMtime = info.ModTime()
+					}
+				}
+			}
+			return nil
+		})
+	}
+	return baseline
+}
+
+// statBaseline is the baseline without the skill files: one stat per tracked
+// file and per skill root.
+func (cb *ContextBuilder) statBaseline(skillRoots []string) cacheBaseline {
 	// All paths whose existence we track: source files + all skill roots.
 	allPaths := append(cb.sourcePaths(), skillRoots...)
 
 	existed := make(map[string]bool, len(allPaths))
-	skillFiles := make(map[string]time.Time)
 	var maxMtime time.Time
 
 	for _, p := range allPaths {
@@ -760,21 +978,11 @@ func (cb *ContextBuilder) buildCacheBaseline() cacheBaseline {
 			maxMtime = info.ModTime()
 		}
 	}
-
-	// Walk all skill roots recursively to snapshot skill files and mtimes.
-	// Use os.Stat (not d.Info) for consistency with sourceFilesChanged checks.
+	rootMtimes := make(map[string]time.Time, len(skillRoots))
 	for _, root := range skillRoots {
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr == nil && !d.IsDir() {
-				if info, err := os.Stat(path); err == nil {
-					skillFiles[path] = info.ModTime()
-					if info.ModTime().After(maxMtime) {
-						maxMtime = info.ModTime()
-					}
-				}
-			}
-			return nil
-		})
+		if info, err := os.Stat(root); err == nil {
+			rootMtimes[root] = info.ModTime()
+		}
 	}
 
 	// If no tracked files exist yet (empty workspace), maxMtime is zero.
@@ -787,7 +995,7 @@ func (cb *ContextBuilder) buildCacheBaseline() cacheBaseline {
 		maxMtime = time.Unix(1, 0)
 	}
 
-	return cacheBaseline{existed: existed, skillFiles: skillFiles, maxMtime: maxMtime}
+	return cacheBaseline{existed: existed, skillRoots: rootMtimes, maxMtime: maxMtime}
 }
 
 // sourceFilesChangedLocked checks whether any workspace source file has been
@@ -807,20 +1015,25 @@ func (cb *ContextBuilder) sourceFilesChangedLocked() bool {
 		return true
 	}
 
-	// --- Skill roots (workspace/global/builtin) ---
-	//
-	// For each root:
-	// 1. Creation/deletion and root directory mtime changes are tracked by fileChangedSince.
-	// 2. Nested file create/delete/mtime changes are tracked by the skill file snapshot.
-	for _, root := range cb.skillRoots() {
-		if cb.fileChangedSince(root) {
+	// Skill roots (workspace/global/builtin): a skill added or removed changes
+	// the root's mtime. Edits inside a skill are left to RefreshSystemPromptCache,
+	// which walks the trees after the turn.
+	return skillRootsChangedSince(cb.skillRoots(), cb.skillRootsAtCache)
+}
+
+// skillRootsChangedSince compares each root with its own mtime at cache time;
+// a root that appeared or disappeared also counts.
+func skillRootsChangedSince(roots []string, rootsAtCache map[string]time.Time) bool {
+	if rootsAtCache == nil {
+		return true
+	}
+	for _, root := range roots {
+		cached, existed := rootsAtCache[root]
+		info, err := os.Stat(root)
+		if (err == nil) != existed || (err == nil && !info.ModTime().Equal(cached)) {
 			return true
 		}
 	}
-	if skillFilesChangedSince(cb.skillRoots(), cb.skillFilesAtCache) {
-		return true
-	}
-
 	return false
 }
 

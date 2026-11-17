@@ -120,7 +120,7 @@ func TestSplitHistoryForActiveTurn_ProtectsPersistedTail(t *testing.T) {
 	}
 }
 
-func TestTrimHistoryToFitContextWindow_WithProtectedTurnTailKeepsActiveTurn(t *testing.T) {
+func TestTrimHistory_WithProtectedTurnTailKeepsActiveTurn(t *testing.T) {
 	current := strings.Repeat("current turn ", 80)
 	history := []providers.Message{
 		{Role: "user", Content: strings.Repeat("old turn ", 60)},
@@ -131,13 +131,12 @@ func TestTrimHistoryToFitContextWindow_WithProtectedTurnTailKeepsActiveTurn(t *t
 	stable, protected := splitHistoryForActiveTurn(history, []providers.Message{
 		userPromptMessage(current, nil),
 	})
-	trimmedStable, messages, fit := trimHistoryToFitContextWindow(
+	trimmedStable, messages, fit := trimHistory(
 		stable,
 		func(trimmedHistory []providers.Message) []providers.Message {
 			return append(append([]providers.Message(nil), trimmedHistory...), protected...)
 		},
-		120,
-		nil,
+		callBudget{window: 120},
 		0,
 	)
 

@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
 // setupWorkspace creates a temporary workspace with standard directories and optional files.
@@ -430,13 +433,10 @@ Updated content.`
 	future := time.Now().Add(2 * time.Second)
 	os.Chtimes(skillPath, future, future)
 
-	// Verify that sourceFilesChangedLocked detects the content change
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Error("sourceFilesChangedLocked() should detect skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	// Verify cache is actually rebuilt with new content
 	sp2 := cb.BuildSystemPromptWithCache()
@@ -488,12 +488,10 @@ description: global-v2
 		t.Fatalf("failed to update mtime for %s: %v", globalSkillPath, err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect global skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if !strings.Contains(sp2, "global-v2") {
@@ -548,12 +546,10 @@ description: builtin-v2
 		t.Fatalf("failed to update mtime for %s: %v", builtinSkillPath, err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect builtin skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if !strings.Contains(sp2, "builtin-v2") {
@@ -587,12 +583,10 @@ description: delete-me-v1
 		t.Fatal(err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect deleted skill file")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if strings.Contains(sp2, "delete-me-v1") {
@@ -653,6 +647,9 @@ func TestConcurrentBuildSystemPromptWithCache(t *testing.T) {
 				// Occasionally invalidate to exercise the write path
 				if i%10 == 0 {
 					cb.InvalidateCache()
+				}
+				if i%10 == 5 {
+					cb.RefreshSystemPromptCache()
 				}
 			}
 		}(g)
@@ -761,5 +758,221 @@ func BenchmarkBuildMessagesWithCache(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cb.BuildMessages(history, "summary", "new message", nil, "cli", "test", "", "")
+	}
+}
+
+// A refresh requested while a walk runs must not be dropped: the walk may have
+// already passed the file the requester changed.
+func TestRefreshRequestedDuringWalkRunsAgain(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/late/SKILL.md": "---\nname: late\ndescription: late-v1\n---\n# Late",
+	})
+	defer os.RemoveAll(tmpDir)
+
+	cb := NewContextBuilder(tmpDir)
+	sp1 := cb.BuildSystemPromptWithCache()
+	if !strings.Contains(sp1, "late-v1") {
+		t.Fatal("expected initial prompt to contain the skill description")
+	}
+
+	skillPath := filepath.Join(tmpDir, "skills", "late", "SKILL.md")
+	cb.afterSkillScan = func() {
+		cb.afterSkillScan = nil
+		// Another turn edits the skill after this walk checked it, then asks
+		// for its own refresh while the walk still runs.
+		v2 := "---\nname: late\ndescription: late-v2\n---\n# Late"
+		if err := os.WriteFile(skillPath, []byte(v2), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(2 * time.Second)
+		if err := os.Chtimes(skillPath, future, future); err != nil {
+			t.Fatal(err)
+		}
+		cb.RefreshSystemPromptCache()
+		// The walk holds no lock: a turn reads the previous prompt meanwhile.
+		if cb.BuildSystemPromptWithCache() != sp1 {
+			t.Error("a turn during the walk should read the previous prompt")
+		}
+	}
+	cb.RefreshSystemPromptCache()
+
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "late-v2") {
+		t.Error("the edit made during the walk should be in the prompt once the refresh returns")
+	}
+}
+
+// A skill added next to a future-dated file must still be seen on the turn's
+// path: each root is compared with its own mtime, not the newest file's.
+func TestSkillAddedNextToFutureDatedFile(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/old/SKILL.md": "---\nname: old\ndescription: old-skill\n---\n# Old",
+	})
+	defer os.RemoveAll(tmpDir)
+
+	oldPath := filepath.Join(tmpDir, "skills", "old", "SKILL.md")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(oldPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := NewContextBuilder(tmpDir)
+	if sp := cb.BuildSystemPromptWithCache(); !strings.Contains(sp, "old-skill") {
+		t.Fatal("expected initial prompt to contain the old skill")
+	}
+
+	newPath := filepath.Join(tmpDir, "skills", "new", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("---\nname: new\ndescription: new-skill\n---\n# New"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
+		t.Error("a skill added to the root should be in the next turn's prompt")
+	}
+}
+
+// savedCatalogWorkspace builds the prompt and saves the catalog, as a process
+// does when it stops, so the next process finds the skill catalog saved.
+func savedCatalogWorkspace(t *testing.T) (string, string) {
+	t.Helper()
+	t.Setenv("PICOCLAW_HOME", t.TempDir())
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/kept/SKILL.md": "---\nname: kept\ndescription: kept-v1\n---\n# Kept",
+		"memory/MEMORY.md":     "memory-v1",
+	})
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	// Written well before: a skill added later moves the root's mtime even on a
+	// coarse filesystem clock.
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(tmpDir, "skills"), past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := NewContextBuilder(tmpDir)
+	prompt := cb.BuildSystemPromptWithCache()
+	cb.saveUnsavedCatalog()
+	entries, err := os.ReadDir(filepath.Join(tmpDir, "state"))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "skill_catalog.json" {
+		t.Fatalf("saving should leave only the skill catalog in state/: %v %v", entries, err)
+	}
+	return tmpDir, prompt
+}
+
+func TestRestartBuildsFromSavedSkillCatalog(t *testing.T) {
+	tmpDir, before := savedCatalogWorkspace(t)
+	if NewContextBuilder(tmpDir).BuildSystemPromptWithCache() != before {
+		t.Fatal("a restart with nothing changed should build the same prompt")
+	}
+
+	// An edit inside a skill moves no root: the restart's first turn keeps the
+	// saved catalog, and the refresh after that turn reads the edit.
+	skillPath := filepath.Join(tmpDir, "skills", "kept", "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte("---\nname: kept\ndescription: kept-v2\n---\n# Kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(skillPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+	cb := NewContextBuilder(tmpDir)
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "kept-v1") {
+		t.Fatal("the first turn after a restart should not read the skill trees")
+	}
+	cb.RefreshSystemPromptCache()
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "kept-v2") {
+		t.Error("the refresh after the first turn should read the edit inside the skill")
+	}
+	cb.saveUnsavedCatalog()
+	if !strings.Contains(NewContextBuilder(tmpDir).BuildSystemPromptWithCache(), "kept-v2") {
+		t.Error("stopping should save the refreshed catalog for the next restart")
+	}
+}
+
+func TestRestartSeesEditsMadeWhileStopped(t *testing.T) {
+	cases := map[string]struct {
+		path, content, want string
+	}{
+		"memory":    {"memory/MEMORY.md", "memory-v2", "memory-v2"},
+		"bootstrap": {"AGENTS.md", "# Agent\nbootstrap-v2", "bootstrap-v2"},
+		"new skill": {
+			"skills/added/SKILL.md",
+			"---\nname: added\ndescription: added-skill\n---\n# Added",
+			"added-skill",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpDir, _ := savedCatalogWorkspace(t)
+			path := filepath.Join(tmpDir, tc.path)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(NewContextBuilder(tmpDir).BuildSystemPromptWithCache(), tc.want) {
+				t.Errorf("the first turn after a restart should see the %s edit", name)
+			}
+		})
+	}
+}
+
+func TestRestartIgnoresBadSavedCatalog(t *testing.T) {
+	cases := map[string]func(data []byte, catalog skillCatalog) []byte{
+		"truncated": func(data []byte, _ skillCatalog) []byte { return data[:len(data)/2] },
+		"older version": func(_ []byte, catalog skillCatalog) []byte {
+			catalog.Version--
+			data, _ := json.Marshal(catalog)
+			return data
+		},
+		"incomplete": func(_ []byte, catalog skillCatalog) []byte {
+			catalog.SkillFiles = nil
+			data, _ := json.Marshal(catalog)
+			return data
+		},
+	}
+	for name, corrupt := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpDir, _ := savedCatalogWorkspace(t)
+			catalogPath := filepath.Join(tmpDir, "state", "skill_catalog.json")
+			data, err := os.ReadFile(catalogPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var catalog skillCatalog
+			if err := json.Unmarshal(data, &catalog); err != nil {
+				t.Fatal(err)
+			}
+			// A catalog used despite being bad would show this skill.
+			catalog.Skills = []skills.SkillInfo{{Name: "ghost", Description: "ghost-skill", Source: "workspace"}}
+			data, _ = json.Marshal(catalog)
+			if err := os.WriteFile(catalogPath, corrupt(data, catalog), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			sp := NewContextBuilder(tmpDir).BuildSystemPromptWithCache()
+			if strings.Contains(sp, "ghost-skill") || !strings.Contains(sp, "kept-v1") {
+				t.Error("a bad saved catalog should be ignored and the skills read")
+			}
+		})
+	}
+}
+
+// The catalog is saved when the loop stops, not during a turn: no turn waits
+// on the write, and a stopped pod leaves it to the next one.
+func TestStopSavesSkillCatalog(t *testing.T) {
+	al, _ := newScriptedLoop(t, providers.LLMResponse{Content: "done"})
+	if _, err := al.ProcessDirect(context.Background(), "hello", "skill-catalog-session"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	catalogPath := filepath.Join(al.GetConfig().WorkspacePath(), "state", "skill_catalog.json")
+	if _, err := os.Stat(catalogPath); !os.IsNotExist(err) {
+		t.Fatalf("a turn should not write the skill catalog: %v", err)
+	}
+	al.Stop()
+	if _, err := os.Stat(catalogPath); err != nil {
+		t.Errorf("stopping the loop should save the skill catalog: %v", err)
 	}
 }
