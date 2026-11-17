@@ -167,3 +167,62 @@ func TestSpawnSubTurnPreservesRequestMetadataWithoutParentCancellation(t *testin
 		t.Fatal("independent child did not finish after its provider was released")
 	}
 }
+
+// subTurnOfferProbe records IsSubTurn(ctx) as each OfferedIn call saw it.
+type subTurnOfferProbe struct {
+	countingTool
+	mu   sync.Mutex
+	seen []bool
+}
+
+func (p *subTurnOfferProbe) OfferedIn(ctx context.Context) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, IsSubTurn(ctx))
+	return true
+}
+
+func TestTurnScopedOfferSeesSubTurn(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	probe := &subTurnOfferProbe{countingTool: countingTool{name: "turn_scoped_probe"}}
+	al.RegisterTool(probe)
+	check := func(turn string, want bool) {
+		t.Helper()
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		if len(probe.seen) == 0 {
+			t.Fatalf("%s never asked OfferedIn", turn)
+		}
+		for _, got := range probe.seen {
+			if got != want {
+				t.Fatalf("%s: OfferedIn saw IsSubTurn=%v, want %v", turn, probe.seen, want)
+			}
+		}
+		probe.seen = nil
+	}
+
+	if _, err := al.ProcessDirect(context.Background(), "hi", "root"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	check("root turn", false)
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	parent := &turnState{
+		ctx:            parentCtx,
+		turnID:         "parent",
+		agent:          al.registry.GetDefaultAgent(),
+		session:        newEphemeralSession(nil),
+		pendingResults: make(chan *tools.ToolResult, 4),
+		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+	}
+	if _, err := spawnSubTurn(parentCtx, al, parent, SubTurnConfig{
+		Model:   "mock-model",
+		Timeout: time.Minute,
+	}); err != nil {
+		t.Fatalf("spawnSubTurn: %v", err)
+	}
+	check("subturn", true)
+}
