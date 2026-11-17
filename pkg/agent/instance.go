@@ -924,18 +924,6 @@ func initSessionStore(dir string) session.SessionStore {
 		return session.NewSessionManager(dir)
 	}
 
-	if n, merr := memory.MigrateFromJSON(context.Background(), dir, store); merr != nil {
-		// Migration failure means the store could not write data.
-		// Fall back to SessionManager to avoid a split state where
-		// some sessions are in JSONL and others remain in JSON.
-		logger.WarnCF("agent", "Memory migration failed; falling back to json sessions",
-			map[string]any{"error": merr.Error()})
-		store.Close()
-		return session.NewSessionManager(dir)
-	} else if n > 0 {
-		logger.InfoCF("agent", "Memory migrated to JSONL", map[string]any{"sessions_migrated": n})
-	}
-
 	// Cron runs each leave a session behind; without this the directory grows
 	// forever and listing sessions (which reads every meta off EFS) eventually
 	// outruns the gateway timeout, emptying the web sidebar.
