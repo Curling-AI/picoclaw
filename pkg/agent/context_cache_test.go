@@ -777,7 +777,8 @@ func TestRefreshRequestedDuringWalkRunsAgain(t *testing.T) {
 		cb.afterSkillScan = nil
 		// Another turn edits the skill after this walk checked it, then asks
 		// for its own refresh while the walk still runs.
-		if err := os.WriteFile(skillPath, []byte("---\nname: late\ndescription: late-v2\n---\n# Late"), 0o644); err != nil {
+		v2 := "---\nname: late\ndescription: late-v2\n---\n# Late"
+		if err := os.WriteFile(skillPath, []byte(v2), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		future := time.Now().Add(2 * time.Second)
