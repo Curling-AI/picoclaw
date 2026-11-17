@@ -261,7 +261,11 @@ func (sl *SkillsLoader) LoadSkillsForContext(skillNames []string) string {
 }
 
 func (sl *SkillsLoader) BuildSkillsSummary() string {
-	allSkills := sl.ListSkills()
+	return SummarizeSkills(sl.ListSkills())
+}
+
+// SummarizeSkills renders a skill list as the prompt's <skills> catalog.
+func SummarizeSkills(allSkills []SkillInfo) string {
 	if len(allSkills) == 0 {
 		return ""
 	}
