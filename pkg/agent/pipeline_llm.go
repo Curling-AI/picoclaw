@@ -13,7 +13,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -821,10 +820,12 @@ func (p *Pipeline) CallLLM(
 						"tool_defs":      len(exec.providerToolDefs),
 					})
 			} else {
-				if retry == 0 && !constants.IsInternalChannel(ts.channel) {
-					al.bus.PublishOutbound(ctx, outboundMessageForTurn(
-						ts,
-						"Context window exceeded. Compressing history and retrying...",
+				// A text here read as an error from the bot: only the web gets a
+				// signal, shown as the turn's state; other channels get nothing.
+				// (seucaranguejo fork)
+				if retry == 0 && ts.channel == "grpc" && ts.opts.AllowInterimPicoPublish {
+					al.bus.PublishOutbound(ctx, outboundMessageForTurnWithOptions(
+						ts, "", outboundTurnMessageOptions{kind: messageKindContextCompress},
 					))
 				}
 
