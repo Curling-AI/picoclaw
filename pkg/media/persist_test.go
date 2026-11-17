@@ -140,30 +140,38 @@ func TestDurableDir_ReleaseAllPersisted(t *testing.T) {
 func TestDurableDir_MissingFilesPrunedOnResolve(t *testing.T) {
 	scratch := t.TempDir()
 	durable := t.TempDir()
-	file := writeScratchMedia(t, scratch, "gone.png")
 
+	// One vanished file per resolver, so each one is checked on a ref it has
+	// to prune itself.
 	s1 := NewFileMediaStore().WithDurableDir(durable)
-	ref, err := s1.Store(file, MediaMeta{}, "scope-1")
-	if err != nil {
-		t.Fatalf("Store: %v", err)
-	}
-	ingested, _ := s1.Resolve(ref)
-	if err := os.Remove(ingested); err != nil {
-		t.Fatalf("remove ingested file: %v", err)
+	refs := map[string]string{}
+	for _, name := range []string{"plain.png", "meta.png"} {
+		ref, err := s1.Store(writeScratchMedia(t, scratch, name), MediaMeta{}, "scope-1")
+		if err != nil {
+			t.Fatalf("Store: %v", err)
+		}
+		ingested, _ := s1.Resolve(ref)
+		if err := os.Remove(ingested); err != nil {
+			t.Fatalf("remove ingested file: %v", err)
+		}
+		refs[name] = ref
 	}
 
 	s2 := NewFileMediaStore().WithDurableDir(durable)
-	if n := len(s2.refs); n != 1 {
-		t.Fatalf("load kept %d refs, want 1: the file check belongs to Resolve", n)
+	if n := len(s2.refs); n != 2 {
+		t.Fatalf("load kept %d refs, want 2: the file check belongs to Resolve", n)
 	}
-	if _, _, err := s2.ResolveWithMeta(ref); err == nil || !strings.Contains(err.Error(), "unknown ref") {
+	if _, err := s2.Resolve(refs["plain.png"]); err == nil || !strings.Contains(err.Error(), "unknown ref") {
+		t.Errorf("Resolve of a vanished file = %v, want unknown ref", err)
+	}
+	if _, _, err := s2.ResolveWithMeta(refs["meta.png"]); err == nil || !strings.Contains(err.Error(), "unknown ref") {
 		t.Errorf("ResolveWithMeta of a vanished file = %v, want unknown ref", err)
 	}
-	if _, err := s2.Resolve(ref); err == nil {
-		t.Error("expected unknown ref after file vanished")
+	if n := len(s2.refs); n != 0 {
+		t.Errorf("%d vanished refs still indexed", n)
 	}
 	if len(s2.scopeToRefs) != 0 {
-		t.Errorf("vanished ref still listed under its scope: %v", s2.scopeToRefs)
+		t.Errorf("vanished refs still listed under their scope: %v", s2.scopeToRefs)
 	}
 
 	s3 := NewFileMediaStore().WithDurableDir(durable)
