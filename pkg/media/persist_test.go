@@ -134,9 +134,10 @@ func TestDurableDir_ReleaseAllPersisted(t *testing.T) {
 	}
 }
 
-// Entries whose file vanished are pruned at load instead of resurrecting
-// dangling refs.
-func TestDurableDir_MissingFilesPrunedOnLoad(t *testing.T) {
+// An entry whose file vanished is kept at load (no stat per ref on the boot
+// path) and pruned when resolved, so it never resolves to a dangling path and a
+// later restart does not bring it back.
+func TestDurableDir_MissingFilesPrunedOnResolve(t *testing.T) {
 	scratch := t.TempDir()
 	durable := t.TempDir()
 	file := writeScratchMedia(t, scratch, "gone.png")
@@ -152,8 +153,22 @@ func TestDurableDir_MissingFilesPrunedOnLoad(t *testing.T) {
 	}
 
 	s2 := NewFileMediaStore().WithDurableDir(durable)
+	if n := len(s2.refs); n != 1 {
+		t.Fatalf("load kept %d refs, want 1: the file check belongs to Resolve", n)
+	}
+	if _, _, err := s2.ResolveWithMeta(ref); err == nil || !strings.Contains(err.Error(), "unknown ref") {
+		t.Errorf("ResolveWithMeta of a vanished file = %v, want unknown ref", err)
+	}
 	if _, err := s2.Resolve(ref); err == nil {
 		t.Error("expected unknown ref after file vanished")
+	}
+	if len(s2.scopeToRefs) != 0 {
+		t.Errorf("vanished ref still listed under its scope: %v", s2.scopeToRefs)
+	}
+
+	s3 := NewFileMediaStore().WithDurableDir(durable)
+	if n := len(s3.refs); n != 0 {
+		t.Errorf("a restart brought back %d pruned refs", n)
 	}
 }
 
