@@ -430,13 +430,10 @@ Updated content.`
 	future := time.Now().Add(2 * time.Second)
 	os.Chtimes(skillPath, future, future)
 
-	// Verify that sourceFilesChangedLocked detects the content change
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Error("sourceFilesChangedLocked() should detect skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	// Verify cache is actually rebuilt with new content
 	sp2 := cb.BuildSystemPromptWithCache()
@@ -488,12 +485,10 @@ description: global-v2
 		t.Fatalf("failed to update mtime for %s: %v", globalSkillPath, err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect global skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if !strings.Contains(sp2, "global-v2") {
@@ -548,12 +543,10 @@ description: builtin-v2
 		t.Fatalf("failed to update mtime for %s: %v", builtinSkillPath, err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect builtin skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if !strings.Contains(sp2, "builtin-v2") {
@@ -587,12 +580,10 @@ description: delete-me-v1
 		t.Fatal(err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect deleted skill file")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if strings.Contains(sp2, "delete-me-v1") {
@@ -653,6 +644,9 @@ func TestConcurrentBuildSystemPromptWithCache(t *testing.T) {
 				// Occasionally invalidate to exercise the write path
 				if i%10 == 0 {
 					cb.InvalidateCache()
+				}
+				if i%10 == 5 {
+					cb.RefreshSystemPromptCache()
 				}
 			}
 		}(g)

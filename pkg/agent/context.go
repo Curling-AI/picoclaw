@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -53,6 +54,9 @@ type ContextBuilder struct {
 	// build time. This catches nested file creations/deletions/mtime changes
 	// that may not update the top-level skill root directory mtime.
 	skillFilesAtCache map[string]time.Time
+
+	// refreshing keeps a single RefreshSystemPromptCache walk per builder.
+	refreshing atomic.Bool
 }
 
 func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuilder {
@@ -443,7 +447,8 @@ Each part separated by the marker will be sent as an independent message.`,
 
 // BuildSystemPromptWithCache returns the cached system prompt if available
 // and source files haven't changed, otherwise builds and caches it.
-// Source file changes are detected via mtime checks (cheap stat calls).
+// Source file changes are detected via mtime checks (cheap stat calls); edits
+// inside a skill are caught by RefreshSystemPromptCache.
 func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
 	// Try read lock first — fast path when cache is valid
 	cb.systemPromptMutex.RLock()
@@ -482,6 +487,36 @@ func (cb *ContextBuilder) BuildSystemPromptWithCache() string {
 		})
 
 	return prompt
+}
+
+// RefreshSystemPromptCache finds changes inside the skill trees, which
+// BuildSystemPromptWithCache does not look for: the walk costs one stat per
+// skill file, seconds on a network volume for a large workspace. It runs after
+// a turn and leaves the cache rebuilt for the next one. (seucaranguejo fork)
+func (cb *ContextBuilder) RefreshSystemPromptCache() {
+	if !cb.refreshing.CompareAndSwap(false, true) {
+		return
+	}
+	defer cb.refreshing.Store(false)
+
+	started := time.Now()
+	// A rebuild replaces the snapshot map instead of mutating it, so it can be
+	// read without the lock while the walk runs.
+	cb.systemPromptMutex.RLock()
+	filesAtCache := cb.skillFilesAtCache
+	cb.systemPromptMutex.RUnlock()
+	changed := filesAtCache != nil && skillFilesChangedSince(cb.skillRoots(), filesAtCache)
+	if changed {
+		cb.InvalidateCache()
+	}
+	cb.BuildSystemPromptWithCache()
+	if took := time.Since(started); took > slowTurnSetup {
+		logger.InfoCF("agent", "Slow system prompt refresh", map[string]any{
+			"duration_ms": took.Milliseconds(),
+			"skill_files": len(filesAtCache),
+			"changed":     changed,
+		})
+	}
 }
 
 func (cb *ContextBuilder) buildSystemPromptForRequest(
@@ -807,21 +842,10 @@ func (cb *ContextBuilder) sourceFilesChangedLocked() bool {
 		return true
 	}
 
-	// --- Skill roots (workspace/global/builtin) ---
-	//
-	// For each root:
-	// 1. Creation/deletion and root directory mtime changes are tracked by fileChangedSince.
-	// 2. Nested file create/delete/mtime changes are tracked by the skill file snapshot.
-	for _, root := range cb.skillRoots() {
-		if cb.fileChangedSince(root) {
-			return true
-		}
-	}
-	if skillFilesChangedSince(cb.skillRoots(), cb.skillFilesAtCache) {
-		return true
-	}
-
-	return false
+	// Skill roots (workspace/global/builtin): a skill added or removed changes
+	// the root's mtime. Edits inside a skill are left to RefreshSystemPromptCache,
+	// which walks the trees after the turn.
+	return slices.ContainsFunc(cb.skillRoots(), cb.fileChangedSince)
 }
 
 // fileChangedSince returns true if a tracked source file has been modified,
