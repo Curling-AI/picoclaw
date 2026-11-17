@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -832,8 +833,8 @@ func TestSkillAddedNextToFutureDatedFile(t *testing.T) {
 	}
 }
 
-// savedCatalogWorkspace builds the prompt and ends the turn, as a process does
-// before it stops, so the next process finds the skill catalog saved.
+// savedCatalogWorkspace builds the prompt and saves the catalog, as a process
+// does when it stops, so the next process finds the skill catalog saved.
 func savedCatalogWorkspace(t *testing.T) (string, string) {
 	t.Helper()
 	t.Setenv("PICOCLAW_HOME", t.TempDir())
@@ -854,7 +855,7 @@ func savedCatalogWorkspace(t *testing.T) (string, string) {
 	cb.saveUnsavedCatalog()
 	entries, err := os.ReadDir(filepath.Join(tmpDir, "state"))
 	if err != nil || len(entries) != 1 || entries[0].Name() != "skill_catalog.json" {
-		t.Fatalf("the turn's end should leave only the saved skill catalog in state/: %v %v", entries, err)
+		t.Fatalf("saving should leave only the skill catalog in state/: %v %v", entries, err)
 	}
 	return tmpDir, prompt
 }
@@ -885,7 +886,7 @@ func TestRestartBuildsFromSavedSkillCatalog(t *testing.T) {
 	}
 	cb.saveUnsavedCatalog()
 	if !strings.Contains(NewContextBuilder(tmpDir).BuildSystemPromptWithCache(), "kept-v2") {
-		t.Error("the next turn's end should save the refreshed catalog for the next restart")
+		t.Error("stopping should save the refreshed catalog for the next restart")
 	}
 }
 
@@ -956,5 +957,22 @@ func TestRestartIgnoresBadSavedCatalog(t *testing.T) {
 				t.Error("a bad saved catalog should be ignored and the skills read")
 			}
 		})
+	}
+}
+
+// The catalog is saved when the loop stops, not during a turn: no turn waits
+// on the write, and a stopped pod leaves it to the next one.
+func TestStopSavesSkillCatalog(t *testing.T) {
+	al, _ := newScriptedLoop(t, providers.LLMResponse{Content: "done"})
+	if _, err := al.ProcessDirect(context.Background(), "hello", "skill-catalog-session"); err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	catalogPath := filepath.Join(al.GetConfig().WorkspacePath(), "state", "skill_catalog.json")
+	if _, err := os.Stat(catalogPath); !os.IsNotExist(err) {
+		t.Fatalf("a turn should not write the skill catalog: %v", err)
+	}
+	al.Stop()
+	if _, err := os.Stat(catalogPath); err != nil {
+		t.Errorf("stopping the loop should save the skill catalog: %v", err)
 	}
 }
