@@ -430,13 +430,10 @@ Updated content.`
 	future := time.Now().Add(2 * time.Second)
 	os.Chtimes(skillPath, future, future)
 
-	// Verify that sourceFilesChangedLocked detects the content change
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Error("sourceFilesChangedLocked() should detect skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	// Verify cache is actually rebuilt with new content
 	sp2 := cb.BuildSystemPromptWithCache()
@@ -488,12 +485,10 @@ description: global-v2
 		t.Fatalf("failed to update mtime for %s: %v", globalSkillPath, err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect global skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if !strings.Contains(sp2, "global-v2") {
@@ -548,12 +543,10 @@ description: builtin-v2
 		t.Fatalf("failed to update mtime for %s: %v", builtinSkillPath, err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect builtin skill file content change")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if !strings.Contains(sp2, "builtin-v2") {
@@ -587,12 +580,10 @@ description: delete-me-v1
 		t.Fatal(err)
 	}
 
-	cb.systemPromptMutex.RLock()
-	changed := cb.sourceFilesChangedLocked()
-	cb.systemPromptMutex.RUnlock()
-	if !changed {
-		t.Fatal("sourceFilesChangedLocked() should detect deleted skill file")
+	if cb.BuildSystemPromptWithCache() != sp1 {
+		t.Fatal("building the turn's prompt must not walk the skill tree")
 	}
+	cb.RefreshSystemPromptCache()
 
 	sp2 := cb.BuildSystemPromptWithCache()
 	if strings.Contains(sp2, "delete-me-v1") {
@@ -653,6 +644,9 @@ func TestConcurrentBuildSystemPromptWithCache(t *testing.T) {
 				// Occasionally invalidate to exercise the write path
 				if i%10 == 0 {
 					cb.InvalidateCache()
+				}
+				if i%10 == 5 {
+					cb.RefreshSystemPromptCache()
 				}
 			}
 		}(g)
@@ -761,5 +755,77 @@ func BenchmarkBuildMessagesWithCache(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cb.BuildMessages(history, "summary", "new message", nil, "cli", "test", "", "")
+	}
+}
+
+// A refresh requested while a walk runs must not be dropped: the walk may have
+// already passed the file the requester changed.
+func TestRefreshRequestedDuringWalkRunsAgain(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/late/SKILL.md": "---\nname: late\ndescription: late-v1\n---\n# Late",
+	})
+	defer os.RemoveAll(tmpDir)
+
+	cb := NewContextBuilder(tmpDir)
+	sp1 := cb.BuildSystemPromptWithCache()
+	if !strings.Contains(sp1, "late-v1") {
+		t.Fatal("expected initial prompt to contain the skill description")
+	}
+
+	skillPath := filepath.Join(tmpDir, "skills", "late", "SKILL.md")
+	cb.afterSkillScan = func() {
+		cb.afterSkillScan = nil
+		// Another turn edits the skill after this walk checked it, then asks
+		// for its own refresh while the walk still runs.
+		v2 := "---\nname: late\ndescription: late-v2\n---\n# Late"
+		if err := os.WriteFile(skillPath, []byte(v2), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		future := time.Now().Add(2 * time.Second)
+		if err := os.Chtimes(skillPath, future, future); err != nil {
+			t.Fatal(err)
+		}
+		cb.RefreshSystemPromptCache()
+		// The walk holds no lock: a turn reads the previous prompt meanwhile.
+		if cb.BuildSystemPromptWithCache() != sp1 {
+			t.Error("a turn during the walk should read the previous prompt")
+		}
+	}
+	cb.RefreshSystemPromptCache()
+
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "late-v2") {
+		t.Error("the edit made during the walk should be in the prompt once the refresh returns")
+	}
+}
+
+// A skill added next to a future-dated file must still be seen on the turn's
+// path: each root is compared with its own mtime, not the newest file's.
+func TestSkillAddedNextToFutureDatedFile(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/old/SKILL.md": "---\nname: old\ndescription: old-skill\n---\n# Old",
+	})
+	defer os.RemoveAll(tmpDir)
+
+	oldPath := filepath.Join(tmpDir, "skills", "old", "SKILL.md")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(oldPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	cb := NewContextBuilder(tmpDir)
+	if sp := cb.BuildSystemPromptWithCache(); !strings.Contains(sp, "old-skill") {
+		t.Fatal("expected initial prompt to contain the old skill")
+	}
+
+	newPath := filepath.Join(tmpDir, "skills", "new", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("---\nname: new\ndescription: new-skill\n---\n# New"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
+		t.Error("a skill added to the root should be in the next turn's prompt")
 	}
 }

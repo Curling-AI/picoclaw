@@ -50,6 +50,11 @@ func (al *AgentLoop) runTurn(
 	turnCtx = WithAgentLoop(turnCtx, al)
 	turnCtx = tools.WithBackgroundProcessOwner(turnCtx, ts.backgroundProcessOwner())
 
+	if ts.agent != nil && ts.agent.ContextBuilder != nil {
+		// Off the turn's path: the next turn finds the prompt rebuilt with what
+		// this one wrote to memory or skills. (seucaranguejo fork)
+		defer func() { go ts.agent.ContextBuilder.RefreshSystemPromptCache() }()
+	}
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
 	defer func() {
