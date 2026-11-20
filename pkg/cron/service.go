@@ -132,6 +132,7 @@ type CronService struct {
 	stopChan             chan struct{}
 	wakeChan             chan struct{}
 	gronx                *gronx.Gronx
+	jitterSeed           string
 	execSlots            chan struct{}
 	idleProbe            IdleProbe
 }
@@ -572,7 +573,7 @@ func (cs *CronService) executeJobWithAdmission(
 		job.State.NextRunAtMS = nil
 		nextRunStr = "(paused)"
 	} else {
-		nextRun := cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
+		nextRun := cs.computeNextRun(job.ID, &job.Schedule, time.Now().UnixMilli())
 		job.State.NextRunAtMS = nextRun
 		if nextRun != nil {
 			nextRunStr = time.UnixMilli(*nextRun).Format("2006-01-02 15:04:05")
@@ -617,7 +618,7 @@ func (cs *CronService) restoreCompletedJob(admission executionAdmission) error {
 		// Recover only the recurring schedule if that write never landed.
 		if job.Enabled && job.Schedule.Kind != "at" && job.State.NextRunAtMS == nil &&
 			(job.State.LastRunAtMS == nil || *job.State.LastRunAtMS < admission.StartedAt.UnixMilli()) {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
+			job.State.NextRunAtMS = cs.computeNextRun(job.ID, &job.Schedule, time.Now().UnixMilli())
 			if job.State.NextRunAtMS != nil {
 				if err := writeCronStore(cs.storePath, stored); err != nil {
 					return err
@@ -651,7 +652,7 @@ func (cs *CronService) rescheduleWithoutExecution(jobID string, onlyMissing bool
 		}
 		if (job.Enabled || !cs.durableAdmission && !onlyMissing) && (!onlyMissing || job.State.NextRunAtMS == nil) {
 			now := time.Now().UnixMilli()
-			if next := cs.computeNextRun(&job.Schedule, now); !onlyMissing || next != nil {
+			if next := cs.computeNextRun(job.ID, &job.Schedule, now); !onlyMissing || next != nil {
 				job.State.NextRunAtMS = next
 				if !onlyMissing {
 					job.UpdatedAtMS = now
@@ -673,7 +674,7 @@ func (cs *CronService) rescheduleWithoutExecution(jobID string, onlyMissing bool
 	}
 }
 
-func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int64 {
+func (cs *CronService) computeNextRun(jobID string, schedule *CronSchedule, nowMS int64) *int64 {
 	switch schedule.Kind {
 	case "at":
 		if schedule.AtMS != nil && *schedule.AtMS > nowMS {
@@ -691,9 +692,9 @@ func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int6
 			return nil
 		}
 
-		// Use gronx to calculate next run time
+		// Delayed by this job's jitter, the same one the host computes to wake us.
 		now := time.UnixMilli(nowMS)
-		nextTime, err := gronx.NextTickAfter(schedule.Expr, now, false)
+		nextTime, err := NextCronTick(schedule.Expr, Jitter(cs.jitterSeed, jobID, schedule.Expr), now)
 		if err != nil {
 			log.Printf("[cron] failed to compute next run for expr '%s': %v", schedule.Expr, err)
 			return nil
@@ -738,7 +739,7 @@ func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
 			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
 				job.Name, late.Round(time.Second), grace)
 		}
-		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		job.State.NextRunAtMS = cs.computeNextRun(job.ID, &job.Schedule, now)
 	}
 	return missed
 }
@@ -783,6 +784,14 @@ func (cs *CronService) Load() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	return cs.loadStore()
+}
+
+// SetJitterSeed turns on the delay of cron runs pinned to a round minute
+// (see Jitter). Call it before Start, which recomputes every next run.
+func (cs *CronService) SetJitterSeed(seed string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.jitterSeed = seed
 }
 
 func (cs *CronService) SetOnJob(handler JobHandler) {
@@ -900,14 +909,15 @@ func (cs *CronService) AddPausedJobWithPayload(
 
 func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPayload) CronJob {
 	now := time.Now().UnixMilli()
+	id := generateID()
 	return CronJob{
-		ID:       generateID(),
+		ID:       id,
 		Name:     utils.AutomationName(name, payload.Message),
 		Enabled:  true,
 		Schedule: schedule,
 		Payload:  payload,
 		State: CronJobState{
-			NextRunAtMS: cs.computeNextRun(&schedule, now),
+			NextRunAtMS: cs.computeNextRun(id, &schedule, now),
 		},
 		CreatedAtMS: now,
 		UpdatedAtMS: now,
@@ -957,7 +967,7 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 			updated.UpdatedAtMS = now
 			if updated.Enabled {
 				if previous.Enabled != updated.Enabled || !sameSchedule(previous.Schedule, updated.Schedule) {
-					updated.State.NextRunAtMS = cs.computeNextRun(&updated.Schedule, now)
+					updated.State.NextRunAtMS = cs.computeNextRun(updated.ID, &updated.Schedule, now)
 				}
 			} else {
 				updated.State.NextRunAtMS = nil
@@ -1069,7 +1079,7 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 			job.UpdatedAtMS = time.Now().UnixMilli()
 
 			if enabled {
-				job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
+				job.State.NextRunAtMS = cs.computeNextRun(job.ID, &job.Schedule, time.Now().UnixMilli())
 			} else {
 				job.State.NextRunAtMS = nil
 			}

@@ -371,7 +371,7 @@ func TestCronService_ComputeNextRun(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := cs.computeNextRun(&tt.schedule, now)
+			got := cs.computeNextRun("job", &tt.schedule, now)
 			if (got == nil) != tt.wantNil {
 				t.Errorf("%s: got %v, wantNil %v", tt.name, got, tt.wantNil)
 			}
