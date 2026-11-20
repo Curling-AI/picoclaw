@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // writeJoinedAudio is a web upload: an absolute workspace path, not a
@@ -51,8 +52,8 @@ func (c *countingTranscriber) calls() int {
 func joinedTurn() *turnState { return &turnState{channel: "grpc", chatID: "run-a"} }
 
 // A message SteerSession queued gets what one that opens a turn gets: its
-// audio transcribed, or the note that replaces it. The slice the caller holds
-// keeps the message as sent, which is what the screen places.
+// audio transcribed, or the note that replaces it. The message the caller holds
+// stays as sent, which is what the screen places.
 func TestTranscribeJoinedAudio_MarkedAudio(t *testing.T) {
 	cases := map[string]struct {
 		transcriber asr.Transcriber
@@ -68,47 +69,23 @@ func TestTranscribeJoinedAudio_MarkedAudio(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: tc.transcriber}
 			audio := writeJoinedAudio(t)
-			sent := []providers.Message{
-				{Role: "user", Content: "[voice]", Media: []string{audio}, TranscribeAudio: true},
-			}
+			sent := providers.Message{Role: "user", Content: "[voice]", Media: []string{audio}, TranscribeAudio: true}
 
 			got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
 
-			if got[0].Content != tc.content {
-				t.Errorf("content = %q, want %q", got[0].Content, tc.content)
+			if got.Content != tc.content {
+				t.Errorf("content = %q, want %q", got.Content, tc.content)
 			}
-			if kept := len(got[0].Media) == 1; kept != tc.keepsAudio {
-				t.Errorf("media = %v, keeps audio = %v, want %v", got[0].Media, kept, tc.keepsAudio)
+			if kept := len(got.Media) == 1; kept != tc.keepsAudio {
+				t.Errorf("media = %v, keeps audio = %v, want %v", got.Media, kept, tc.keepsAudio)
 			}
-			if got[0].TranscribeAudio {
+			if got.TranscribeAudio {
 				t.Error("the mark stayed on: a later read would transcribe it again")
 			}
-			if sent[0].Content != "[voice]" || len(sent[0].Media) != 1 || !sent[0].TranscribeAudio {
-				t.Errorf("the message as sent changed: %+v", sent[0])
+			if sent.Content != "[voice]" || len(sent.Media) != 1 || sent.Media[0] != audio || !sent.TranscribeAudio {
+				t.Errorf("the message as sent changed: %+v", sent)
 			}
 		})
-	}
-}
-
-// Each transcription lands on its own message: the marked one sits between
-// two that are not.
-func TestTranscribeJoinedAudio_KeepsEachMessageInItsPlace(t *testing.T) {
-	al := &AgentLoop{
-		cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: &fixedTranscriber{text: "oi"},
-	}
-	sent := []providers.Message{
-		{Role: "user", Content: "first"},
-		{Role: "user", Content: "[voice]", Media: []string{writeJoinedAudio(t)}, TranscribeAudio: true},
-		{Role: "user", Content: "third"},
-	}
-
-	got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
-
-	want := []string{"first", "[voice: oi]", "third"}
-	for i, w := range want {
-		if got[i].Content != w {
-			t.Errorf("message %d = %q, want %q", i, got[i].Content, w)
-		}
 	}
 }
 
@@ -119,17 +96,15 @@ func TestTranscribeJoinedAudio_LeavesUnmarkedMessagesAlone(t *testing.T) {
 	tr := &countingTranscriber{text: "não devia rodar"}
 	al := &AgentLoop{cfg: &config.Config{}, mediaStore: media.NewFileMediaStore(), transcriber: tr}
 	audio := writeJoinedAudio(t)
-	sent := []providers.Message{
-		{Role: "user", Content: "fala\n" + failedTranscriptionAudioNote, Media: []string{audio}},
-	}
+	sent := providers.Message{Role: "user", Content: "fala\n" + failedTranscriptionAudioNote, Media: []string{audio}}
 
 	got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
 
 	if tr.calls() != 0 {
 		t.Errorf("transcribed %d times an unmarked message", tr.calls())
 	}
-	if got[0].Content != sent[0].Content || len(got[0].Media) != 1 {
-		t.Errorf("message changed: %+v", got[0])
+	if got.Content != sent.Content || len(got.Media) != 1 {
+		t.Errorf("message changed: %+v", got)
 	}
 }
 
@@ -141,12 +116,12 @@ func TestTranscribeJoinedAudio_MarkedWithoutAudio(t *testing.T) {
 	if err := os.WriteFile(photo, []byte("\x89PNG\r\n\x1a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sent := []providers.Message{{Role: "user", Content: "olha isso", Media: []string{photo}, TranscribeAudio: true}}
+	sent := providers.Message{Role: "user", Content: "olha isso", Media: []string{photo}, TranscribeAudio: true}
 
 	got := al.transcribeJoinedAudio(t.Context(), joinedTurn(), sent)
 
-	if tr.calls() != 0 || got[0].Content != "olha isso" || len(got[0].Media) != 1 || got[0].Media[0] != photo {
-		t.Errorf("an image changed or was transcribed: %+v (%d calls)", got[0], tr.calls())
+	if tr.calls() != 0 || got.Content != "olha isso" || len(got.Media) != 1 || got.Media[0] != photo {
+		t.Errorf("an image changed or was transcribed: %+v (%d calls)", got, tr.calls())
 	}
 }
 
@@ -348,5 +323,136 @@ func TestSteerSession_StopCutsTheTranscription(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the turn did not end after the stop")
+	}
+}
+
+// taskTranscriber answers each call with the next of texts and keeps the task
+// each call went out on: the gateway groups a transcription with the calls of
+// that task.
+type taskTranscriber struct {
+	mu    sync.Mutex
+	texts []string
+	tasks []string
+}
+
+func (tr *taskTranscriber) Name() string { return "task" }
+
+func (tr *taskTranscriber) Transcribe(ctx context.Context, _ string) (*asr.TranscriptionResponse, error) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.tasks = append(tr.tasks, protocoltypes.TaskIDFromContext(ctx))
+	return &asr.TranscriptionResponse{Text: tr.texts[(len(tr.tasks)-1)%len(tr.texts)]}, nil
+}
+
+func (tr *taskTranscriber) taskIDs() []string {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return slices.Clone(tr.tasks)
+}
+
+// taskSessionProvider is sessionRecordingProvider that also keeps the task
+// each call went out on.
+type taskSessionProvider struct {
+	*sessionRecordingProvider
+	mu    sync.Mutex
+	tasks []string
+}
+
+func (p *taskSessionProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.tasks = append(p.tasks, protocoltypes.TaskIDFromContext(ctx))
+	p.mu.Unlock()
+	return p.sessionRecordingProvider.Chat(ctx, messages, tools, model, opts)
+}
+
+func (p *taskSessionProvider) taskIDs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.tasks)
+}
+
+// joinAudiosMidTurn runs a turn on the web channel and, while its first call
+// works, sends one audio per transcription in tr. It returns the task of each
+// model call and the steering_read of each message.
+func joinAudiosMidTurn(t *testing.T, mode SteeringMode, tr *taskTranscriber, audios int) (
+	provider *taskSessionProvider, reads []string,
+) {
+	t.Helper()
+	provider = &taskSessionProvider{
+		sessionRecordingProvider: newSessionRecordingProvider("stale answer", "answer that heard the audio"),
+	}
+	al, msgBus := newAudioSteeringLoop(t, provider)
+	t.Cleanup(provider.unblock)
+	al.SetSteeringMode(mode)
+	al.SetMediaStore(media.NewFileMediaStore())
+	al.SetTranscriber(tr)
+	read := collectSteeringReads(t, msgBus)
+
+	done := runDirectOn(t.Context(), al, "build the deck", conversationA, "grpc", "run-a")
+	waitStarted(t, provider.started, done)
+	for range audios {
+		if err := al.SteerSession(conversationA, "[voice]", []string{writeJoinedAudio(t)}); err != nil {
+			t.Fatalf("SteerSession: %v", err)
+		}
+	}
+	provider.unblock()
+	waitDirect(t, done)
+	return provider, read()
+}
+
+// A joined audio is a new request: its transcription goes out on the task of
+// the call that answers it, not on the task of the request it joined.
+func TestSteerSession_AudioIsTranscribedInTheTaskThatAnswersIt(t *testing.T) {
+	tr := &taskTranscriber{texts: []string{"manda o resumo"}}
+
+	provider, _ := joinAudiosMidTurn(t, SteeringOneAtATime, tr, 1)
+
+	calls, heard := provider.taskIDs(), tr.taskIDs()
+	if len(calls) != 2 || len(heard) != 1 {
+		t.Fatalf("got %d model calls and %d transcriptions, want 2 and 1", len(calls), len(heard))
+	}
+	if calls[0] == "" || calls[1] == calls[0] {
+		t.Fatalf("model call tasks = %q, want the answer on a task of its own", calls)
+	}
+	if heard[0] != calls[1] {
+		t.Errorf("transcription task = %q, want the answer's %q (the request it joined is %q)",
+			heard[0], calls[1], calls[0])
+	}
+}
+
+// Audios read together are each a request of their own: each transcription
+// goes out on its own task, none on the task of the request they joined, and
+// the last is the task of the call that answers. The screen still places each
+// message as it was sent.
+func TestSteerSession_EachQueuedAudioIsTranscribedInItsOwnTask(t *testing.T) {
+	tr := &taskTranscriber{texts: []string{"primeiro", "segundo"}}
+
+	provider, reads := joinAudiosMidTurn(t, SteeringAll, tr, 2)
+
+	calls, heard := provider.taskIDs(), tr.taskIDs()
+	if len(calls) != 2 || len(heard) != 2 {
+		t.Fatalf("got %d model calls and %d transcriptions, want 2 and 2", len(calls), len(heard))
+	}
+	if heard[0] == "" || heard[0] == heard[1] || slices.Contains(heard, calls[0]) {
+		t.Errorf("transcription tasks = %q, want one each, none the earlier request's %q", heard, calls[0])
+	}
+	if heard[1] != calls[1] {
+		t.Errorf("last transcription task = %q, want the answer's %q", heard[1], calls[1])
+	}
+	answer := provider.calls()[1]
+	first := slices.IndexFunc(answer, func(m providers.Message) bool { return m.Content == "[voice: primeiro]" })
+	second := slices.IndexFunc(answer, func(m providers.Message) bool { return m.Content == "[voice: segundo]" })
+	if first < 0 || second < first {
+		t.Errorf("transcriptions at %d and %d of the answer's messages, want each in its message, in order",
+			first, second)
+	}
+	if !slices.Equal(reads, []string{"[voice]", "[voice]"}) {
+		t.Errorf("steering_read = %q, want each message as sent", reads)
 	}
 }

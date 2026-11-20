@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"slices"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -15,37 +14,27 @@ import (
 // (seucaranguejo fork, MST-553)
 const SteerSessionTranscribesAudio = true
 
-// transcribeJoinedAudio gives the messages SteerSession marked what a message
+// transcribeJoinedAudio gives a message SteerSession marked what a message
 // that opens a turn gets in prepareInboundMessageForAgent: each audio
 // transcribed, or the note that replaces it. It runs where the turn reads the
 // message, not where SteerSession queues it: ethos queues under the pod's chat
 // lock, which the stop button and ChatActive also take, and a speech-to-text
-// call there would hold them. msgs is left as it was: the screen places each
-// message as the person sent it. (seucaranguejo fork, MST-553)
+// call there would hold them. The caller keeps msg as it was: the screen places
+// the message as the person sent it. (seucaranguejo fork, MST-553)
 func (al *AgentLoop) transcribeJoinedAudio(
 	ctx context.Context,
 	ts *turnState,
-	msgs []providers.Message,
-) []providers.Message {
-	var out []providers.Message
-	for i, m := range msgs {
-		if !m.TranscribeAudio {
-			continue
-		}
-		if out == nil {
-			out = slices.Clone(msgs)
-		}
-		heard := al.transcribeAudioInMessage(ctx, bus.InboundMessage{
-			Channel: ts.channel,
-			ChatID:  ts.chatID,
-			Content: m.Content,
-			Media:   m.Media,
-		})
-		m.Content, m.Media, m.TranscribeAudio = heard.Content, heard.Media, false
-		out[i] = m
+	msg providers.Message,
+) providers.Message {
+	if !msg.TranscribeAudio {
+		return msg
 	}
-	if out == nil {
-		return msgs
-	}
-	return out
+	heard := al.transcribeAudioInMessage(ctx, bus.InboundMessage{
+		Channel: ts.channel,
+		ChatID:  ts.chatID,
+		Content: msg.Content,
+		Media:   msg.Media,
+	})
+	msg.Content, msg.Media, msg.TranscribeAudio = heard.Content, heard.Media, false
+	return msg
 }

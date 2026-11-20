@@ -237,24 +237,29 @@ func (al *AgentLoop) runTurn(
 
 		// Inject pending steering messages
 		if len(pendingMessages) > 0 {
-			// The screen places each message as the person sent it; the model
-			// and the history get its audio transcribed. (seucaranguejo fork, MST-553)
-			sent := pendingMessages
-			pendingMessages = al.transcribeJoinedAudio(turnCtx, ts, pendingMessages)
-			resolvedPending := resolveMediaRefs(pendingMessages, al.mediaStore, maxMediaSize, 0)
 			totalContentLen := 0
-			for i, pm := range pendingMessages {
-				messages = append(messages, resolvedPending[i])
+			for _, sent := range pendingMessages {
+				steering := sent.PromptSource == string(PromptSourceSteering)
+				// A message the person sends mid-turn is a new request. Its task
+				// starts before its audio is transcribed, so the transcription
+				// goes out with the calls that answer it. (seucaranguejo fork, MST-553)
+				if steering {
+					protocoltypes.MoveTaskID(turnCtx, newTaskID(), protocoltypes.MessageTaskLabels(ts.channel)...)
+				}
+				// The screen places the message as the person sent it; the model
+				// and the history get its audio transcribed.
+				pm := al.transcribeJoinedAudio(turnCtx, ts, sent)
+				resolved := resolveMediaRefs([]providers.Message{pm}, al.mediaStore, maxMediaSize, 0)
+				messages = append(messages, resolved...)
 				totalContentLen += len(pm.Content)
 				// The user steered the turn: a repeat they ask for is theirs
 				// to make (repeat guard, seucaranguejo fork).
 				if pm.PromptSource != string(PromptSourceSubTurnResult) {
 					ts.repeats.reset()
 				}
-				if pm.PromptSource == string(PromptSourceSteering) {
+				if steering {
 					paceNudged = false
-					al.joinPersonMessage(turnCtx, ts, exec, sent[i], iteration)
-					protocoltypes.MoveTaskID(turnCtx, newTaskID(), protocoltypes.MessageTaskLabels(ts.channel)...)
+					al.joinPersonMessage(turnCtx, ts, exec, sent, iteration)
 				}
 				if !ts.opts.NoHistory {
 					ts.appendHistoryMessage(pm)
