@@ -272,3 +272,36 @@ func TestRegisterChannelWhileTheWorkerSends(t *testing.T) {
 		t.Fatal("the channel the worker started with got the message sent after the swaps")
 	}
 }
+
+// SendMessage (the message tool's path) splits by the length of the channel
+// that took over, and sends to it.
+func TestRegisterChannelThatTakesOverSendMessageSplitsByItsLength(t *testing.T) {
+	m := newTestManager()
+	started := &mockChannel{}
+	startedWorker(t, m, "slack", started)
+	var received []string
+	m.RegisterChannel("slack", &takeoverChannelWithLength{mockChannelWithLength{
+		mockChannel: mockChannel{sendFn: func(_ context.Context, msg bus.OutboundMessage) error {
+			received = append(received, msg.Content)
+			return nil
+		}},
+		maxLen: 5,
+	}})
+
+	err := m.SendMessage(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: "slack", ChatID: "C1", Content: "hello world",
+	}))
+	if err != nil {
+		t.Fatalf("SendMessage() error = %v", err)
+	}
+
+	if len(received) < 2 || len(started.sentMessages) != 0 {
+		t.Fatalf("registered got %v and started %d, want chunks of 5 only on the registered one",
+			received, len(started.sentMessages))
+	}
+	for _, chunk := range received {
+		if len([]rune(chunk)) > 5 {
+			t.Fatalf("chunk %q is longer than the registered channel's 5", chunk)
+		}
+	}
+}
