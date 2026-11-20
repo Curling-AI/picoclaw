@@ -126,14 +126,19 @@ func dailyCronRuns(expr string, loc *time.Location, limit int) int {
 	if err != nil {
 		return 0 // never runs: computeNextRun logs it
 	}
-	start := time.Date(gapReference.Year(), gapReference.Month(), gapReference.Day(), 0, 0, 0, 0, loc)
+	reference := time.Date(gapReference.Year(), gapReference.Month(), gapReference.Day(), 0, 0, 0, 0, loc)
+	tick, err := gronx.NextTickAfter(expr, reference, true)
+	if err != nil {
+		return 0 // no run from the reference on: its last year is over
+	}
+	// From the day of the first run, as gapBelow: a later first year still counts.
+	start := time.Date(tick.Year(), tick.Month(), tick.Day(), 0, 0, 0, 0, loc)
 	end := start.Add(repeatHorizon(segments))
 	// Each day of the horizon (one more for a daylight-saving shift) counts at
 	// most limit + 1 runs before the loop returns.
 	bound := (int(end.Sub(start)/(24*time.Hour)) + 1) * (limit + 1)
 	most, count, day := 0, 0, 0
 	prev := start.Add(-time.Second)
-	tick, err := gronx.NextTickAfter(expr, start, true)
 	for range bound {
 		// Past an expression's last run (its year is over), gronx fails or hands it back.
 		if err != nil || !tick.After(prev) || !tick.Before(end) {

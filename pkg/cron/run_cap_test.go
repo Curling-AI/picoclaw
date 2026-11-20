@@ -27,6 +27,8 @@ func TestDailyRuns(t *testing.T) {
 		{CronSchedule{Kind: "cron", Expr: "0 8,20 1,2 * *"}, 2},
 		{CronSchedule{Kind: "cron", Expr: "* * * * * *"}, 101}, // counting stops past the limit
 		{CronSchedule{Kind: "cron", Expr: "not a cron"}, 0},
+		{CronSchedule{Kind: "cron", Expr: "0 */30 * * * * 2027"}, 48}, // first run a year after the reference
+		{CronSchedule{Kind: "cron", Expr: "0 */30 * * * * 2025"}, 0},  // its year is over
 		{everySchedule(30 * time.Minute), 48},
 		{everySchedule(7 * time.Hour), 4},
 		{CronSchedule{Kind: "at", AtMS: &at}, 0},
@@ -192,5 +194,18 @@ func TestCountingManyDenseJobsAtBootIsQuick(t *testing.T) {
 	}
 	if paused := len(jobs) - len(cs.ListJobs(false)); paused != 0 {
 		t.Errorf("%d jobs paused although 960 runs a day fit a cap of 1000", paused)
+	}
+}
+
+func TestRunCapCountsAScheduleWhoseFirstYearIsLater(t *testing.T) {
+	cs := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
+	cs.SetMaxRunsPerDay(1)
+	later := CronSchedule{Kind: "cron", Expr: "0 */30 * * * * 2027"}
+	if _, err := cs.AddJob("later", later, "hello", "cli", "direct"); !errors.Is(err, ErrTooManyRuns) {
+		t.Errorf("48 runs a day from 2027 under a cap of 1: got %v, want ErrTooManyRuns", err)
+	}
+	over := CronSchedule{Kind: "cron", Expr: "0 */30 * * * * 2025"}
+	if _, err := cs.AddJob("over", over, "hello", "cli", "direct"); err != nil {
+		t.Errorf("a schedule whose year is over never runs: %v", err)
 	}
 }
