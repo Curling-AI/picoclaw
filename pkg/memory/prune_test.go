@@ -101,7 +101,7 @@ func TestPruneCronRunsCapsRunsPerJob(t *testing.T) {
 			prefix = "agent_cronmodel"
 		}
 		busy = append(busy, run(prefix, "busy-job", i))
-		writeSession(t, dir, busy[i], time.Duration(i)*time.Minute)
+		writeSession(t, dir, busy[i], cronRunSettleAge+time.Duration(i)*time.Minute)
 	}
 	small := []string{run("agent_cron", "small", 0), run("agent_cron", "small", 1), run("agent_cron", "small", 2)}
 	for i, name := range small {
@@ -125,6 +125,36 @@ func TestPruneCronRunsCapsRunsPerJob(t *testing.T) {
 		if exists(t, filepath.Join(dir, name+".meta.json")) || exists(t, filepath.Join(dir, name+".jsonl")) {
 			t.Errorf("%s survived the prune", name)
 		}
+	}
+}
+
+// A run past the newest maxCronRunsPerJob may still be executing (a manual run
+// overlaps scheduled ones), so the cap removes it only once it has settled.
+func TestPruneCronRunsCapSparesUnsettledRuns(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := func(n int) string {
+		return fmt.Sprintf("agent_cron-job-%08x-0000-4000-8000-000000000000", n)
+	}
+	for i := range maxCronRunsPerJob {
+		writeSession(t, dir, name(i), time.Duration(i)*time.Minute)
+	}
+	executing, settled := name(maxCronRunsPerJob), name(maxCronRunsPerJob+1)
+	writeSession(t, dir, executing, cronRunSettleAge-time.Hour)
+	writeSession(t, dir, settled, cronRunSettleAge+time.Hour)
+
+	removed, err := store.PruneCronRuns(14*24*time.Hour, time.Now())
+	if err != nil || removed != 1 {
+		t.Fatalf("PruneCronRuns = %d, %v; want only the settled run removed", removed, err)
+	}
+	if !exists(t, filepath.Join(dir, executing+".meta.json")) {
+		t.Error("the cap removed a run written within the settle age")
+	}
+	if exists(t, filepath.Join(dir, settled+".meta.json")) {
+		t.Error("the cap kept a settled run past the newest runs")
 	}
 }
 

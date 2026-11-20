@@ -21,8 +21,8 @@ const (
 
 	// cronSweepInterval is how often the sweeper runs after the boot pass.
 	// Sweeping is O(cron files) and entirely off any request path; hourly keeps
-	// a job that fires every few minutes near its per-automation cap
-	// (memory.PruneCronRuns) for the cost of one directory scan an hour.
+	// each automation close to its run cap (memory.PruneCronRuns) for the cost
+	// of one directory scan an hour.
 	cronSweepInterval = time.Hour
 )
 

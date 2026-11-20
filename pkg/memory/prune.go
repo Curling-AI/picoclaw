@@ -23,6 +23,10 @@ var cronRunKeyPrefixes = []string{"agent:cron-", "agent:cronmodel-"}
 // window, and every run's files sit in the one directory each listing reads.
 const maxCronRunsPerJob = 50
 
+// cronRunSettleAge is how long a run's meta must go unwritten before the cap may
+// remove it: manual runs overlap scheduled ones, and a run untouched for a day has ended.
+const cronRunSettleAge = 24 * time.Hour
+
 type cronRun struct {
 	sanitized string
 	modified  time.Time
@@ -70,8 +74,8 @@ func isCronRunFile(name string) bool {
 // Recovery guards can retain a candidate whose history cannot safely be removed.
 // An in-flight run is never at risk: its files were just written, so they fall
 // far inside the retention window. Within the window, each automation keeps
-// only its newest maxCronRunsPerJob runs (capCronRuns). A retention of zero or
-// less disables pruning.
+// only its newest maxCronRunsPerJob runs plus any not yet settled (capCronRuns).
+// A retention of zero or less disables pruning.
 func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int, error) {
 	if retention <= 0 {
 		return 0, nil
@@ -123,15 +127,16 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 			removed++
 		}
 	}
-	return removed + s.capCronRuns(recent), nil
+	return removed + s.capCronRuns(recent, now), nil
 }
 
 // capCronRuns removes each automation's runs past its newest maxCronRunsPerJob,
-// newest by .meta.json mtime like the age rule. A job never overlaps itself
-// (cron.CronService.dispatch), so those runs have finished and need no age
-// check; the removal still takes the session lock and resumes a pending
-// deletion, and recovery guards can still retain a run.
-func (s *JSONLStore) capCronRuns(recent map[string][]cronRun) int {
+// newest by .meta.json mtime like the age rule. Between writes an executing run
+// holds no lock or journal, and a manual run can outlast 50 scheduled ones, so
+// only runs settled for cronRunSettleAge go. The removal takes the session lock
+// and resumes a pending deletion, and recovery guards can still retain a run.
+func (s *JSONLStore) capCronRuns(recent map[string][]cronRun, now time.Time) int {
+	settled := now.Add(-cronRunSettleAge)
 	removed := 0
 	for _, runs := range recent {
 		if len(runs) <= maxCronRunsPerJob {
@@ -141,7 +146,7 @@ func (s *JSONLStore) capCronRuns(recent map[string][]cronRun) int {
 			return b.modified.Compare(a.modified)
 		})
 		for _, run := range newestFirst[maxCronRunsPerJob:] {
-			if s.removeSessionFiles(run.sanitized) == nil {
+			if run.modified.Before(settled) && s.removeSessionFiles(run.sanitized) == nil {
 				removed++
 			}
 		}
