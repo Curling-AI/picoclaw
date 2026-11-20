@@ -212,13 +212,17 @@ func TestTakeProgressTitlesCopiesWhatTheResponseShares(t *testing.T) {
 			Function: &providers.FunctionCall{Name: "record_args", Arguments: `{"value": "y"}`},
 		},
 		{ID: "call_4", Name: "record_args", Arguments: map[string]any{tools.ProgressTitleParam: " "}},
-		{ID: "call_5", Name: "record_args", Arguments: map[string]any{tools.ProgressTitleParam: "Second"}},
+		{
+			ID: "call_5", Name: "record_args", Arguments: map[string]any{tools.ProgressTitleParam: "Second"},
+			Function: &providers.FunctionCall{Name: "record_args", Arguments: `{"progress_title":"Second"}`},
+		},
 	}
 	calls := make([]providers.ToolCall, 0, len(response))
 	for _, tc := range response {
 		calls = append(calls, providers.NormalizeToolCall(tc))
 	}
-	firstFunction := calls[0].Function.Arguments
+	firstFn := calls[0].Function
+	fifthFn := calls[4].Function
 
 	calls, titles := takeProgressTitles(registry, calls)
 
@@ -230,8 +234,16 @@ func TestTakeProgressTitlesCopiesWhatTheResponseShares(t *testing.T) {
 		t.Fatalf("call_1 = %v / %s, want only value", calls[0].Arguments, calls[0].Function.Arguments)
 	}
 	if response[0].Arguments[tools.ProgressTitleParam] != "First" || response[0].Function != nil ||
-		!strings.Contains(firstFunction, tools.ProgressTitleParam) {
+		!strings.Contains(firstFn.Arguments, tools.ProgressTitleParam) {
 		t.Fatal("the response's call changed")
+	}
+	if fifthFn.Arguments != `{"progress_title":"Second"}` ||
+		response[4].Function.Arguments != `{"progress_title":"Second"}` ||
+		response[4].Arguments[tools.ProgressTitleParam] != "Second" {
+		t.Fatalf("call_5 response changed: %+v / %v", response[4].Function, response[4].Arguments)
+	}
+	if calls[4].Function == fifthFn || calls[4].Function.Arguments != "{}" {
+		t.Fatalf("call_5 = %+v, want a copied FunctionCall without arguments", calls[4].Function)
 	}
 	if calls[1].Arguments[tools.ProgressTitleParam] != "own" {
 		t.Fatalf("call_2 = %v, want the tool's own argument", calls[1].Arguments)
