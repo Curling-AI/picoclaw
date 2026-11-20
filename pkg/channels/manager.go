@@ -621,6 +621,38 @@ func (m *Manager) ClearFinalizedStream(channelName, chatID, sessionKey string) {
 	m.streamActive.Delete(streamSuppressionKey(channelName, chatID, sessionKey))
 }
 
+// ToolEventsFor reports whether the named channel wants the structured tool
+// events and the tool call title for the chat (ToolEventsCapable), for the
+// agent loop through bus.ToolEventsDelegate. (seucaranguejo fork)
+func (m *Manager) ToolEventsFor(channelName, chatID string) bool {
+	m.mu.RLock()
+	ch, exists := m.channels[channelName]
+	m.mu.RUnlock()
+	if !exists {
+		return false
+	}
+	capable, ok := ch.(ToolEventsCapable)
+	return ok && capable.ToolEventsFor(chatID)
+}
+
+// StreamingFor reports whether the named channel streams to the chat, when the
+// channel decides it (StreamingDecider). decided is false otherwise, and the
+// agent loop falls back to the channel's Streaming config
+// (bus.StreamingDecisionDelegate). (seucaranguejo fork)
+func (m *Manager) StreamingFor(channelName, chatID string) (enabled, decided bool) {
+	m.mu.RLock()
+	ch, exists := m.channels[channelName]
+	m.mu.RUnlock()
+	if !exists {
+		return false, false
+	}
+	decider, ok := ch.(StreamingDecider)
+	if !ok {
+		return false, false
+	}
+	return decider.StreamingFor(chatID), true
+}
+
 // GetStreamer implements bus.StreamDelegate.
 // It checks if the named channel supports streaming and returns a Streamer.
 func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionKey string) (bus.Streamer, bool) {
