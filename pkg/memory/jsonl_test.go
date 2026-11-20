@@ -1334,6 +1334,47 @@ func TestJSONLStore_CachedMetaIsIsolatedFromCallerMutation(t *testing.T) {
 	}
 }
 
+// Run keys take the canonical-key shortcut instead of the alias scan. No
+// writer ever names a run key as an alias, so the meta below is forged: if a
+// path still scanned, it would hand the run's reads and writes to "canonical"
+// or refuse them as owned by another session.
+func TestRunSessionKeysSkipAliasScan(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	runKeys := []string{
+		"agent:cron-job-1-0b89ab77-2375-42d6-ac89-83d2ebc233b6",
+		"agent:cronmodel-job-1-1c89ab77-2375-42d6-ac89-83d2ebc233b6",
+		"agent:task-2d89ab77-2375-42d6-ac89-83d2ebc233b6",
+	}
+	for _, key := range runKeys {
+		if err := store.AddMessage(ctx, key, "user", "run"); err != nil {
+			t.Fatalf("AddMessage(%s): %v", key, err)
+		}
+	}
+	aliases := append([]string{"agent:main:direct:u1"}, runKeys...)
+	if err := store.UpsertSessionMeta(ctx, "canonical", nil, aliases); err != nil {
+		t.Fatalf("UpsertSessionMeta: %v", err)
+	}
+
+	done := providers.Message{Role: "assistant", Content: "done"}
+	for _, key := range runKeys {
+		if resolved, found, err := store.ResolveSessionKey(ctx, key); err != nil || !found || resolved != key {
+			t.Fatalf("ResolveSessionKey(%s) = (%q, %v, %v), want itself", key, resolved, found, err)
+		}
+		if _, err := store.AppendHistoryReceipt(ctx, key, done); err != nil {
+			t.Fatalf("AppendHistoryReceipt(%s): %v", key, err)
+		}
+		history, err := store.ReadHistoryContent(ctx, key)
+		if err != nil || len(history) != 2 || history[1].Content != "done" {
+			t.Fatalf("ReadHistoryContent(%s) = %+v, %v; want the run's two messages", key, history, err)
+		}
+	}
+	if resolved, found, err := store.ResolveSessionKey(ctx, "agent:main:direct:u1"); err != nil || !found ||
+		resolved != "canonical" {
+		t.Fatalf("legacy alias resolved to (%q, %v, %v), want canonical", resolved, found, err)
+	}
+}
+
 // ResolveSessionKey must scan metas via the cache, not the filesystem:
 // session listings resolve every listed key, so a raw directory scan here
 // meant O(n²) EFS reads per listing (~9k reads / 5.5s with 96 sessions).

@@ -564,12 +564,23 @@ func (s *JSONLStore) ResolveSessionKey(_ context.Context, sessionKey string) (st
 	return "", false, nil
 }
 
+// runSessionKeyPrefixes are the keys of single runs: cron runs and the tasks
+// one assistant asks of another (agent:task-<uuid>).
+var runSessionKeyPrefixes = append([]string{"agent:task-"}, cronRunKeyPrefixes...)
+
 func shouldShortCircuitSessionResolve(sessionKey string) bool {
 	sessionKey = strings.TrimSpace(strings.ToLower(sessionKey))
 	if sessionKey == "" {
 		return false
 	}
-	return !strings.ContainsAny(sessionKey, ":/\\")
+	// Aliases are legacy keys with 2+ ':' (pkg/session key.go, allocator.go); a run key, with one, is never an alias.
+	for _, prefix := range runSessionKeyPrefixes {
+		if rest, isRun := strings.CutPrefix(sessionKey, prefix); isRun {
+			sessionKey = rest
+			break
+		}
+	}
+	return sessionKey != "" && !strings.ContainsAny(sessionKey, ":/\\")
 }
 
 // lockSessionPair trava as faixas das duas chaves sempre na ordem do índice da
