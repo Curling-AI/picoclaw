@@ -175,3 +175,13 @@ func TestTakeProgressTitleDropsTheSpaceWhereItIsCut(t *testing.T) {
 		t.Fatalf("title = %q, want %d runes without the trailing space", title, ProgressTitleMaxRunes-1)
 	}
 }
+
+func TestTakeProgressTitleLeadingSpaceDoesNotCostRunes(t *testing.T) {
+	text := "   " + strings.Repeat("a", ProgressTitleMaxRunes)
+
+	title, _, _ := TakeProgressTitle(map[string]any{ProgressTitleParam: text})
+
+	if title != strings.Repeat("a", ProgressTitleMaxRunes) {
+		t.Fatalf("title = %q (%d runes), want %d runes", title, len([]rune(title)), ProgressTitleMaxRunes)
+	}
+}
