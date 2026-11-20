@@ -353,23 +353,9 @@ toolLoop:
 						ts.ingestMessage(turnCtx, al, toolResultMsg)
 					}
 
-					// Surface the tool result to structured-interim web channels
-					// (pico/grpc) so the UI can show each result as it lands, not
-					// only after the whole turn. Truncated to keep the live frame
-					// small; the full result is in history. (seucaranguejo fork)
-					if (ts.channel == "pico" || ts.channel == "grpc") && ts.opts.AllowInterimPicoPublish && al != nil && al.bus != nil {
-						if rc := strings.TrimSpace(contentForLLM); rc != "" {
-							if len(rc) > 2000 {
-								rc = rc[:2000] + "…"
-							}
-							resCtx, resCancel := context.WithTimeout(turnCtx, 3*time.Second)
-							_ = al.bus.PublishOutbound(resCtx, outboundMessageForTurnWithOptions(ts, rc, outboundTurnMessageOptions{
-								kind: messageKindToolResult,
-								raw:  map[string]string{metadataKeyToolCallID: tc.ID},
-							}))
-							resCancel()
-						}
-					}
+					// Surface the tool result as it lands (publishToolResultEvent).
+					// (seucaranguejo fork)
+					al.publishToolResultEvent(turnCtx, ts, tc.ID, contentForLLM, hookResult.IsError)
 
 					if hookResult.EndTurn && hookResult.IsError {
 						return finishFailedToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:], hookResult.ForUser)
@@ -796,24 +782,10 @@ toolLoop:
 			ts.ingestMessage(turnCtx, al, toolResultMsg)
 		}
 
-		// Surface the tool result to structured-interim web channels (pico/grpc)
-		// so the UI can show each result as it lands, not only after the whole
-		// turn. This is the main (no post-tool-hook) execution path; the hooked
-		// path above publishes the same way. Truncated to keep the live frame
-		// small; the full result is in history. (seucaranguejo fork)
-		if (ts.channel == "pico" || ts.channel == "grpc") && ts.opts.AllowInterimPicoPublish && al != nil && al.bus != nil {
-			if rc := strings.TrimSpace(contentForLLM); rc != "" {
-				if len(rc) > 2000 {
-					rc = rc[:2000] + "…"
-				}
-				resCtx, resCancel := context.WithTimeout(turnCtx, 3*time.Second)
-				_ = al.bus.PublishOutbound(resCtx, outboundMessageForTurnWithOptions(ts, rc, outboundTurnMessageOptions{
-					kind: messageKindToolResult,
-					raw:  map[string]string{metadataKeyToolCallID: toolCallID},
-				}))
-				resCancel()
-			}
-		}
+		// Surface the tool result as it lands (publishToolResultEvent). This is
+		// the main (no post-tool-hook) execution path; the hooked path above
+		// publishes the same way. (seucaranguejo fork)
+		al.publishToolResultEvent(turnCtx, ts, toolCallID, contentForLLM, toolResult.IsError)
 
 		if toolResult.EndTurn && toolResult.IsError {
 			return finishFailedToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:], toolResult.ForUser)

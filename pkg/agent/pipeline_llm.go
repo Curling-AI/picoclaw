@@ -1022,6 +1022,10 @@ func (p *Pipeline) CallLLM(
 	// tool calls live (seucaranguejo fork).
 	structuredInterimChannel := ts.channel == "pico" || ts.channel == "grpc"
 	shouldPublishPicoToolCallInterim := structuredInterimChannel && len(exec.response.ToolCalls) > 0
+	// A channel that renders tool cards for this chat gets the tool_calls
+	// message only: its reasoning and narration keep the path below.
+	// (seucaranguejo fork — MST-957)
+	shouldPublishToolCallsEvent := !structuredInterimChannel && ts.toolEvents && len(exec.response.ToolCalls) > 0
 	if shouldPublishPicoToolCallInterim {
 		// Pico tool-call turns publish their reasoning/content/tool summary as a
 		// structured sequence after the tool-call payload is normalized below.
@@ -1536,6 +1540,8 @@ func (p *Pipeline) CallLLM(
 			assistantMsg.ToolCalls,
 			contentStreamed,
 		)
+	} else if shouldPublishToolCallsEvent {
+		al.publishToolCallsEvent(turnCtx, ts, exec.llmModelName, assistantMsg.ToolCalls)
 	}
 
 	return ControlToolLoop, nil
