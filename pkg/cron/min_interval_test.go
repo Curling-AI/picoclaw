@@ -8,32 +8,38 @@ import (
 	"time"
 )
 
-func TestShortestGap(t *testing.T) {
+func TestGapBelow(t *testing.T) {
+	const hour = time.Hour
 	for _, tc := range []struct {
-		expr string
-		want time.Duration
+		expr    string
+		minimum time.Duration
+		want    time.Duration // 0: no two runs closer than minimum
 	}{
-		{"*/5 * * * *", 5 * time.Minute},
-		{"*/30 * * * *", 30 * time.Minute},
-		{"*/45 * * * *", 15 * time.Minute}, // runs at :00 and :45
-		{"0,10 8 * * *", 10 * time.Minute},
-		{"0 8 * * *", 24 * time.Hour},
-		{"0 9-17 * * 1-5", time.Hour},
-		{"0 4 * * 1,4", 72 * time.Hour},
-		{"@hourly", time.Hour},
-		{"@daily", 24 * time.Hour},
-		{"@30minutes", 30 * time.Minute},
-		{"0,10 8 1 * *", 10 * time.Minute}, // first run weeks after the reference
-		{"*/10 * * * * *", 10 * time.Second},
-		{"0,10 8 31 12 * 2026", 10 * time.Minute}, // gronx hands the last run back
-		{"* * * * *", time.Minute},                // stops at maxGapTicks
+		{"*/5 * * * *", 30 * time.Minute, 5 * time.Minute},
+		{"*/30 * * * *", 30 * time.Minute, 0},
+		{"*/45 * * * *", 30 * time.Minute, 15 * time.Minute}, // runs at :00 and :45
+		{"0,10 8 * * *", 30 * time.Minute, 10 * time.Minute},
+		{"0 8 * * *", hour, 0},
+		{"0 9-17 * * 1-5", hour, 0},
+		{"0 9-17 * * 1-5", hour + time.Minute, hour},
+		{"0 4 * * 1,4", hour, 0},
+		{"@hourly", hour + time.Minute, hour},
+		{"@daily", hour, 0},
+		{"@30minutes", 31 * time.Minute, 30 * time.Minute},
+		{"0,10 8 1 * *", 30 * time.Minute, 10 * time.Minute},          // first run weeks after the reference
+		{"0,50 0,23 1,15,16 * *", 30 * time.Minute, 10 * time.Minute}, // 15th 23:50 to 16th 00:00
+		{"0,50 0,23 1,31 1,12 *", 30 * time.Minute, 10 * time.Minute}, // 31 December to 1 January
+		{"*/10 * * * * *", 30 * time.Minute, 10 * time.Second},
+		{"0,10 8 31 12 * 2026", 30 * time.Minute, 10 * time.Minute},
+		{"0 8 31 12 * 2026", 30 * time.Minute, 0}, // gronx hands the last run back
+		{"* * * * *", 30 * time.Minute, time.Minute},
 	} {
-		got, err := shortestGap(tc.expr)
+		got, err := gapBelow(tc.expr, tc.minimum)
 		if err != nil || got != tc.want {
-			t.Errorf("shortestGap(%q) = %s, %v; want %s", tc.expr, got, err, tc.want)
+			t.Errorf("gapBelow(%q, %s) = %s, %v; want %s", tc.expr, tc.minimum, got, err, tc.want)
 		}
 	}
-	if _, err := shortestGap("not a cron"); err == nil {
+	if _, err := gapBelow("not a cron", time.Hour); err == nil {
 		t.Error("an expression that does not parse must fail")
 	}
 }
@@ -234,5 +240,29 @@ func TestRaisingAJobKeepsARunItsNewScheduleHas(t *testing.T) {
 	}
 	if next := nextRunOf(t, cs, "often"); !next.Equal(minute.AddDate(0, 0, 1)) {
 		t.Errorf("next run %s, want the same minute tomorrow", next)
+	}
+}
+
+// Start checks every stored job against the minimum before the pod serves its
+// wake, so dense schedules that are allowed must stay cheap to check.
+func TestCheckingManyAllowedDenseJobsAtBootIsQuick(t *testing.T) {
+	jobs := make([]CronJob, 20)
+	for i := range jobs {
+		jobs[i] = CronJob{
+			ID: fmt.Sprintf("job-%d", i), Name: "dense", Enabled: true,
+			Schedule: CronSchedule{Kind: "cron", Expr: "*/30 * * * *"},
+		}
+	}
+	cs := NewCronService(writeStore(t, jobs...), nil)
+	cs.SetMinInterval(30 * time.Minute)
+	cs.mu.Lock()
+	began := time.Now()
+	cs.raiseShortSchedules()
+	took := time.Since(began)
+	cs.mu.Unlock()
+	// About 12 ms on a laptop; a whole year of runs per job takes seconds.
+	t.Logf("checked %d jobs in %s", len(jobs), took)
+	if took > 250*time.Millisecond {
+		t.Errorf("checking %d allowed */30 jobs took %s", len(jobs), took)
 	}
 }

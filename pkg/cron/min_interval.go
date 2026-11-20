@@ -16,16 +16,14 @@ import (
 // recurring job would run more often than the minimum (SetMinInterval).
 var ErrIntervalTooShort = errors.New("schedule runs too often")
 
-// The gap of a cron expression is read from its runs over a week and a day
-// from its first run on or after a fixed hour: every pattern of minutes, hours
-// and weekdays repeats within a week.
+// The gaps of a cron expression are read from its first run on or after a
+// fixed hour, over a period its pattern repeats in plus a margin.
 var gapReference = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 const (
-	gapHorizon = 8 * 24 * time.Hour
-	// Reaching it means the runs average under 5 minutes apart, and the
-	// shortest gap found by then is at most that average.
-	maxGapTicks = 2500
+	dayHorizon  = 2 * 24 * time.Hour   // any day, month and weekday
+	weekHorizon = 8 * 24 * time.Hour   // any day and month
+	yearHorizon = 397 * 24 * time.Hour // a year and a month: December to January, short months
 )
 
 // SetMinInterval sets the shortest time allowed between two runs of a
@@ -63,8 +61,8 @@ func checkInterval(schedule CronSchedule, minimum time.Duration) error {
 			gap = time.Duration(*schedule.EveryMS) * time.Millisecond
 		}
 	case "cron":
-		if shortest, err := shortestGap(schedule.Expr); err == nil {
-			gap = shortest
+		if below, err := gapBelow(schedule.Expr, minimum); err == nil && below > 0 {
+			gap = below
 		}
 	}
 	if gap >= minimum {
@@ -74,27 +72,46 @@ func checkInterval(schedule CronSchedule, minimum time.Duration) error {
 		ErrIntervalTooShort, minutesText(gap), minutesText(minimum))
 }
 
-// shortestGap is the shortest time between two consecutive runs of expr.
-func shortestGap(expr string) (time.Duration, error) {
-	prev, err := gronx.NextTickAfter(expr, gapReference, true)
+// gapBelow is the first gap between two consecutive runs of expr shorter than
+// minimum, or 0 when there is none. It stops at the first one: Start checks
+// every stored job.
+func gapBelow(expr string, minimum time.Duration) (time.Duration, error) {
+	segments, err := gronx.Segments(expr)
 	if err != nil {
 		return 0, err
 	}
-	end := prev.Add(gapHorizon)
-	shortest := time.Duration(math.MaxInt64)
-	for range maxGapTicks {
+	first, err := gronx.NextTickAfter(expr, gapReference, true)
+	if err != nil {
+		return 0, err
+	}
+	horizon := dayHorizon
+	switch {
+	case !anyValue(segments[3]) || !anyValue(segments[4]):
+		// shortcut: 2026 has no 29 February, so gaps next to one go unseen; check a leap year when that matters.
+		horizon = yearHorizon
+	case !anyValue(segments[5]):
+		horizon = weekHorizon
+	}
+	// Pigeonhole: runs at least minimum apart fit horizon/minimum + 1 times in
+	// the horizon, so the loop ends sooner, at a short gap or past the horizon.
+	runs := int(horizon/minimum) + 1
+	prev := first
+	for range runs {
 		next, err := gronx.NextTickAfter(expr, prev, false)
 		// Past an expression's last run (its year is over), gronx fails or hands prev back.
 		if err != nil || !next.After(prev) {
-			return shortest, nil //nolint:nilerr // no later run: no shorter gap
+			return 0, nil //nolint:nilerr // no later run: no short gap
 		}
-		shortest = min(shortest, next.Sub(prev))
-		if next.After(end) {
-			break
+		if gap := next.Sub(prev); gap < minimum {
+			return gap, nil
+		}
+		if next.After(first.Add(horizon)) {
+			return 0, nil
 		}
 		prev = next
 	}
-	return shortest, nil
+	// More runs than fit minimum apart: on average, and so somewhere, closer.
+	return prev.Sub(first) / time.Duration(runs), nil
 }
 
 func anyValue(segment string) bool { return segment == "*" || segment == "?" }
