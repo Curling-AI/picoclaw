@@ -53,6 +53,8 @@ func TestRaiseScheduleKeepsEveryFieldButTheMinute(t *testing.T) {
 		{"*/5 * * * *", time.Hour, "0 * * * *"},
 		{"10,40 8 * * *", 45 * time.Minute, "10 8 * * *"},
 		{"20-50/5 6,18 * * *", time.Hour, "20 6,18 * * *"},
+		{"0 */5 8 25 * * *", 30 * time.Minute, "*/30 8 25 * *"}, // seven fields, any year
+		{"0 */5 8 25 12 * 2027", 30 * time.Minute, "0 */30 8 25 12 * 2027"},
 	} {
 		raised, err := raiseSchedule(CronSchedule{Kind: "cron", Expr: tc.expr}, tc.minimum)
 		if err != nil || raised.Expr != tc.want {

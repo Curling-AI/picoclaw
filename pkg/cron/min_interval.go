@@ -97,6 +97,8 @@ func shortestGap(expr string) (time.Duration, error) {
 	return shortest, nil
 }
 
+func anyValue(segment string) bool { return segment == "*" || segment == "?" }
+
 func minutesText(d time.Duration) string {
 	if d%time.Minute != 0 {
 		return d.String()
@@ -136,8 +138,8 @@ func (cs *CronService) raiseShortSchedules() {
 // raiseSchedule slows schedule down to minimum, at most an hour. An expression
 // keeps every field but the minute, which becomes */M with M the smallest
 // divisor of 60 at or above minimum, or, when that is 60, the first minute the
-// expression ran at. Names (MON, JAN) come back as numbers, and a seconds
-// field is dropped: runs start on the minute.
+// expression ran at. Names (MON, JAN) come back as numbers, a seconds field
+// is dropped (runs start on the minute) and so is a year of "*".
 func raiseSchedule(schedule CronSchedule, minimum time.Duration) (CronSchedule, error) {
 	if schedule.Kind == "every" {
 		everyMS := minimum.Milliseconds()
@@ -164,7 +166,15 @@ func raiseSchedule(schedule CronSchedule, minimum time.Duration) (CronSchedule, 
 		minute = strconv.Itoa(first.Minute())
 	}
 	segments[1] = minute
-	schedule.Expr = strings.Join(segments[1:], " ")
+	fields := segments[1:6]
+	if len(segments) == 7 && !anyValue(segments[6]) {
+		fields = append([]string{"0"}, segments[1:]...) // a year needs the seven-field form
+	}
+	expr := strings.Join(fields, " ")
+	if !gronx.IsValid(expr) {
+		return schedule, fmt.Errorf("rewritten expression %q does not parse", expr)
+	}
+	schedule.Expr = expr
 	return schedule, nil
 }
 
