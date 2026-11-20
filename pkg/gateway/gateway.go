@@ -856,6 +856,7 @@ func setupCronTool(
 
 	cronService := cron.NewCronService(cronStorePath, nil)
 	cronService.SetMinInterval(time.Duration(cfg.Tools.Cron.MinIntervalMinutes) * time.Minute)
+	cronService.SetMaxRunsPerDay(cfg.Tools.Cron.MaxRunsPerDay)
 
 	var cronTool *tools.CronTool
 	if cfg.Tools.IsToolEnabled("cron") {

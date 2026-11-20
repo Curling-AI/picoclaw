@@ -84,14 +84,7 @@ func gapBelow(expr string, minimum time.Duration) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	horizon := dayHorizon
-	switch {
-	case !anyValue(segments[3]) || !anyValue(segments[4]):
-		// shortcut: 2026 has no 29 February, so gaps next to one go unseen; check a leap year when that matters.
-		horizon = yearHorizon
-	case !anyValue(segments[5]):
-		horizon = weekHorizon
-	}
+	horizon := repeatHorizon(segments)
 	// Pigeonhole: runs at least minimum apart fit horizon/minimum + 1 times in
 	// the horizon, so the loop ends sooner, at a short gap or past the horizon.
 	runs := int(horizon/minimum) + 1
@@ -112,6 +105,19 @@ func gapBelow(expr string, minimum time.Duration) (time.Duration, error) {
 	}
 	// More runs than fit minimum apart: on average, and so somewhere, closer.
 	return prev.Sub(first) / time.Duration(runs), nil
+}
+
+// repeatHorizon is a period the runs of an expression's gronx segments repeat
+// in, plus a margin.
+func repeatHorizon(segments []string) time.Duration {
+	switch {
+	case !anyValue(segments[3]) || !anyValue(segments[4]):
+		// shortcut: 2026 has no 29 February, so runs next to one go unseen; check a leap year when that matters.
+		return yearHorizon
+	case !anyValue(segments[5]):
+		return weekHorizon
+	}
+	return dayHorizon
 }
 
 func anyValue(segment string) bool { return segment == "*" || segment == "?" }

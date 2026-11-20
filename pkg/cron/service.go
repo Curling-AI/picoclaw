@@ -133,6 +133,8 @@ type CronService struct {
 	wakeChan             chan struct{}
 	gronx                *gronx.Gronx
 	minInterval          time.Duration
+	maxRunsPerDay        int
+	capExempt            func(job *CronJob) bool
 	execSlots            chan struct{}
 	idleProbe            IdleProbe
 }
@@ -254,6 +256,7 @@ func (cs *CronService) loadAndClaimMissedRuns() ([]string, error) {
 		return nil, fmt.Errorf("load pending cron admissions: %w", err)
 	}
 	rewritten := cs.raiseShortSchedules(time.Now().UnixMilli())
+	cs.pauseJobsPastCap()
 	missed := cs.recomputeNextRuns(grace, rewritten)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		return nil, fmt.Errorf("failed to save store: %w", err)
@@ -932,6 +935,9 @@ func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
 	if err := checkInterval(job.Schedule, cs.minInterval); err != nil {
 		return nil, err
 	}
+	if err := cs.checkRunCap(job); err != nil {
+		return nil, err
+	}
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		// Left in memory, the unsaved job would run, and the caller's retry would duplicate it.
@@ -968,6 +974,11 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 			// can still be renamed or paused until Start rewrites it.
 			if !sameSchedule(previous.Schedule, job.Schedule) {
 				if err := checkInterval(job.Schedule, cs.minInterval); err != nil {
+					return err
+				}
+			}
+			if job.Enabled && (!previous.Enabled || !sameSchedule(previous.Schedule, job.Schedule)) {
+				if err := cs.checkRunCap(*job); err != nil {
 					return err
 				}
 			}
@@ -1087,6 +1098,13 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 		job := &cs.store.Jobs[i]
 		if job.ID == jobID {
 			previous := cloneCronJob(*job)
+			if enabled && !job.Enabled {
+				resumed := *job
+				resumed.Enabled = true
+				if err := cs.checkRunCap(resumed); err != nil {
+					return nil, err
+				}
+			}
 			job.Enabled = enabled
 			job.UpdatedAtMS = time.Now().UnixMilli()
 
