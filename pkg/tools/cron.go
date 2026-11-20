@@ -161,6 +161,10 @@ Recurring jobs may keep a reproducible script at scripts/<id>/run.sh — read/ed
 			"and no two runs of a cron_expr closer than that. Do not offer the user a shorter interval.",
 			minimum.Minutes(), int64(minimum/time.Second))
 	}
+	if limit := t.cronService.MaxRunsPerDay(); limit > 0 {
+		description += fmt.Sprintf("\nAll recurring automations together may run at most %d times a day; "+
+			"a schedule that would pass that is refused.", limit)
+	}
 	return description
 }
 
