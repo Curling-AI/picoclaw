@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -233,6 +234,17 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 			continue
 		}
 
+		// slack-go refuses uploads without FileSize ("FileSize cannot be 0"),
+		// so every media send failed before this. (seucaranguejo fork)
+		info, err := os.Stat(localPath)
+		if err != nil || info.Size() == 0 {
+			logger.ErrorCF("slack", "Skipping unreadable or empty media file", map[string]any{
+				"ref":   part.Ref,
+				"error": fmt.Sprint(err),
+			})
+			continue
+		}
+
 		filename := part.Filename
 		if filename == "" {
 			filename = "file"
@@ -247,6 +259,7 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 			Channel:         channelID,
 			ThreadTimestamp: threadTS,
 			File:            localPath,
+			FileSize:        int(info.Size()),
 			Filename:        filename,
 			Title:           title,
 		})
