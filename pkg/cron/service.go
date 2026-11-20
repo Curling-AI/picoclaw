@@ -977,7 +977,9 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 					return err
 				}
 			}
-			if job.Enabled && (!previous.Enabled || !sameSchedule(previous.Schedule, job.Schedule)) {
+			// Counted again when it starts to count (resumed, or an edit ends its
+			// exemption) or runs differently; checkRunCap skips it if it does not count.
+			if !cs.countsTowardCap(&previous) || !sameSchedule(previous.Schedule, job.Schedule) {
 				if err := cs.checkRunCap(*job); err != nil {
 					return err
 				}

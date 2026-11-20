@@ -59,8 +59,9 @@ func TestRunCapRefusesAddUpdateAndResumePastIt(t *testing.T) {
 	if _, err = add("once", CronSchedule{Kind: "at", AtMS: &at}); err != nil {
 		t.Errorf("a one-time run does not count: %v", err)
 	}
-	if _, err = add(MemoryRefreshJobName, CronSchedule{Kind: "cron", Expr: "*/30 * * * *"}); err != nil {
-		t.Errorf("an exempt job does not count: %v", err)
+	refresh, err := add(MemoryRefreshJobName, CronSchedule{Kind: "cron", Expr: "*/30 * * * *"})
+	if err != nil {
+		t.Fatalf("an exempt job does not count: %v", err)
 	}
 
 	_, err = add("d", CronSchedule{Kind: "cron", Expr: "0 8 * * *"})
@@ -103,6 +104,15 @@ func TestRunCapRefusesAddUpdateAndResumePastIt(t *testing.T) {
 	}
 	if job, _ := cs.GetJob(exact.ID); scheduleText(job.Schedule) != "every 6h0m0s" {
 		t.Errorf("a refused update changed the schedule to %s", scheduleText(job.Schedule))
+	}
+
+	unexempt := *refresh
+	unexempt.Name = "renamed"
+	if err := cs.UpdateJob(&unexempt); !errors.Is(err, ErrTooManyRuns) {
+		t.Errorf("a rename that ends an exemption past the cap: got %v, want ErrTooManyRuns", err)
+	}
+	if job, _ := cs.GetJob(refresh.ID); job.Name != MemoryRefreshJobName {
+		t.Errorf("a refused rename changed the job's name to %q", job.Name)
 	}
 
 	uncapped := NewCronService(filepath.Join(t.TempDir(), "jobs.json"), nil)
