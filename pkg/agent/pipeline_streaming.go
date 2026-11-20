@@ -445,7 +445,7 @@ func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecutio
 		})
 		return false
 	}
-	channelStreaming, ok := p.channelStreamingConfig(ts.channel)
+	channelStreaming, ok := p.channelStreamingConfig(ts.channel, ts.chatID)
 	if !ok || !channelStreaming.Enabled {
 		logger.DebugCF("agent", "configured streaming not used", map[string]any{
 			"agent_id":           ts.agent.ID,
@@ -460,9 +460,15 @@ func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecutio
 	return true
 }
 
-func (p *Pipeline) channelStreamingConfig(channelName string) (config.StreamingConfig, bool) {
+func (p *Pipeline) channelStreamingConfig(channelName, chatID string) (config.StreamingConfig, bool) {
 	if p == nil || p.Cfg == nil {
 		return config.StreamingConfig{}, false
+	}
+	// A channel that decides per chat (channels.StreamingDecider) wins over
+	// its Streaming config, so it streams without a new field in config.json,
+	// which the previous image would refuse. (seucaranguejo fork — MST-957)
+	if enabled, decided := p.Bus.StreamingFor(channelName, chatID); decided {
+		return config.StreamingConfig{Enabled: enabled}, true
 	}
 	ch := p.Cfg.Channels[channelName] // reading a nil map is safe (yields nil)
 	if ch == nil {
