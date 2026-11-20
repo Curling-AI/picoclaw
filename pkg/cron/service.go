@@ -727,7 +727,8 @@ func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
 		if !job.Enabled || cs.hasAdmissionRetry(job.ID) {
 			continue
 		}
-		if late, ok := missedRun(job.State, now); ok {
+		next := cs.computeNextRun(job.ID, &job.Schedule, now)
+		if late, ok := missedRun(job.State, now); ok && !cs.onlyDelayed(job, next) {
 			if late < grace {
 				// Claimed like checkJobs does: cleared, and only recomputed
 				// after the run, so a process reading it next skips it.
@@ -739,9 +740,20 @@ func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
 			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
 				job.Name, late.Round(time.Second), grace)
 		}
-		job.State.NextRunAtMS = cs.computeNextRun(job.ID, &job.Schedule, now)
+		job.State.NextRunAtMS = next
 	}
 	return missed
+}
+
+// onlyDelayed: the stored run is next's own minute, saved before this job had
+// a delay (by a scheduler without a seed). The run moved, it was not missed:
+// replaying it now would run that occurrence again at its delayed time.
+func (cs *CronService) onlyDelayed(job *CronJob, next *int64) bool {
+	if job.Schedule.Kind != "cron" || next == nil || job.State.NextRunAtMS == nil {
+		return false
+	}
+	jitter := Jitter(cs.jitterSeed, job.ID, job.Schedule.Expr)
+	return jitter > 0 && *next-jitter.Milliseconds() == *job.State.NextRunAtMS
 }
 
 // missedRun reports how late the stored run is when it is due and never ran.

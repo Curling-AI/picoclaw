@@ -104,3 +104,46 @@ func TestSchedulerDelaysRoundMinuteJobsOnlyWithASeed(t *testing.T) {
 		t.Errorf("a job that runs every 5 minutes keeps its exact times; got %s", next)
 	}
 }
+
+// A store written before the job had a delay holds the round minute. A pod
+// that wakes after that minute, for the delayed run, must not replay it as
+// missed: the run would happen now and again at its delayed time.
+func TestTurningOnJitterMovesAStoredRunWithoutReplayingIt(t *testing.T) {
+	minute := time.Now().Add(-2 * time.Minute).Truncate(time.Minute)
+	expr := fmt.Sprintf("%d %d * * *", minute.Minute(), minute.Hour())
+	seed := ""
+	for i := 0; seed == ""; i++ {
+		if s := fmt.Sprintf("assistant-%d", i); Jitter(s, "daily", expr) >= 5*time.Minute {
+			seed = s
+		}
+	}
+	start := func(seed string) (*CronService, func() int) {
+		job := CronJob{
+			ID: "daily", Name: "daily", Enabled: true,
+			Schedule: CronSchedule{Kind: "cron", Expr: expr},
+			State:    CronJobState{NextRunAtMS: int64Ptr(minute.UnixMilli())},
+		}
+		runs, count := countRuns()
+		cs := NewCronService(writeStore(t, job), runs)
+		cs.SetJitterSeed(seed)
+		if err := cs.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		t.Cleanup(cs.Stop)
+		return cs, count
+	}
+
+	cs, count := start(seed)
+	time.Sleep(300 * time.Millisecond)
+	if n := count(); n != 0 {
+		t.Fatalf("replayed the stored minute %d time(s); its delayed run is still ahead", n)
+	}
+	job, _ := cs.GetJob("daily")
+	want := minute.Add(Jitter(seed, "daily", expr))
+	if job.State.NextRunAtMS == nil || !time.UnixMilli(*job.State.NextRunAtMS).Equal(want) {
+		t.Errorf("next run %v, want the same minute delayed to %s", job.State.NextRunAtMS, want)
+	}
+
+	_, count = start("")
+	waitForRuns(t, count, 1) // without a delay the minute two minutes ago is a missed run
+}
