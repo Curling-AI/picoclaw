@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,6 +78,73 @@ func TestPruneCronRuns_RemoveVencidosPreservaConversas(t *testing.T) {
 			if !exists(t, filepath.Join(dir, name+suffix)) {
 				t.Errorf("%s%s NÃO deveria ter sido removido", name, suffix)
 			}
+		}
+	}
+}
+
+// Each automation keeps its newest maxCronRunsPerJob runs, counting both key
+// variants and a job ID with '-'. The age rule still removes an old run of a
+// small job, and a conversation is never touched.
+func TestPruneCronRunsCapsRunsPerJob(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(prefix, job string, n int) string {
+		return fmt.Sprintf("%s-%s-%08x-0000-4000-8000-000000000000", prefix, job, n)
+	}
+	busy := make([]string, 0, maxCronRunsPerJob+10)
+	for i := range cap(busy) {
+		prefix := "agent_cron"
+		if i%2 == 1 {
+			prefix = "agent_cronmodel"
+		}
+		busy = append(busy, run(prefix, "busy-job", i))
+		writeSession(t, dir, busy[i], time.Duration(i)*time.Minute)
+	}
+	small := []string{run("agent_cron", "small", 0), run("agent_cron", "small", 1), run("agent_cron", "small", 2)}
+	for i, name := range small {
+		writeSession(t, dir, name, time.Duration(i)*time.Hour)
+	}
+	expired := run("agent_cron", "small", 3)
+	writeSession(t, dir, expired, 15*24*time.Hour)
+	writeSession(t, dir, "sk_v1_conversation", 365*24*time.Hour)
+
+	removed, err := store.PruneCronRuns(14*24*time.Hour, time.Now())
+	if err != nil || removed != 11 {
+		t.Fatalf("PruneCronRuns = %d, %v; want 11 removed", removed, err)
+	}
+	kept := append(append(busy[:maxCronRunsPerJob:maxCronRunsPerJob], small...), "sk_v1_conversation")
+	for _, name := range kept {
+		if !exists(t, filepath.Join(dir, name+".meta.json")) {
+			t.Errorf("%s was removed", name)
+		}
+	}
+	for _, name := range append(busy[maxCronRunsPerJob:], expired) {
+		if exists(t, filepath.Join(dir, name+".meta.json")) || exists(t, filepath.Join(dir, name+".jsonl")) {
+			t.Errorf("%s survived the prune", name)
+		}
+	}
+}
+
+func TestCronRunJob(t *testing.T) {
+	id := "0b89ab77-2375-42d6-ac89-83d2ebc233b6"
+	cases := []struct {
+		name, job string
+		ok        bool
+	}{
+		{"agent_cron-a1b2-" + id, "a1b2", true},
+		{"agent_cronmodel-a1b2-" + id, "a1b2", true},
+		{"agent_cron-job-with-dashes-" + id, "job-with-dashes", true},
+		{"agent_cron-" + id, "", false},
+		{"agent_cron-a1b2-not-a-uuid", "", false},
+		{"agent_task-" + id, "", false},
+		{"sk_v1_conversation", "", false},
+	}
+	for _, tc := range cases {
+		if job, ok := cronRunJob(tc.name); job != tc.job || ok != tc.ok {
+			t.Errorf("cronRunJob(%q) = %q, %v; want %q, %v", tc.name, job, ok, tc.job, tc.ok)
 		}
 	}
 }

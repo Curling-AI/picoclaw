@@ -20,10 +20,10 @@ const (
 	defaultCronRetentionDays = 14
 
 	// cronSweepInterval is how often the sweeper runs after the boot pass.
-	// Sweeping is O(cron files) and entirely off any request path, but on EFS
-	// it is still a directory scan, so once every few hours is plenty for a
-	// backlog that grows by a few hundred files a day.
-	cronSweepInterval = 6 * time.Hour
+	// Sweeping is O(cron files) and entirely off any request path; hourly keeps
+	// a job that fires every few minutes near its per-automation cap
+	// (memory.PruneCronRuns) for the cost of one directory scan an hour.
+	cronSweepInterval = time.Hour
 )
 
 // startCronRunSweeper deletes cron-run sessions older than the retention window
