@@ -241,6 +241,10 @@ type turnExecution struct {
 	// LLM call per-iteration state
 	response            *providers.LLMResponse
 	normalizedToolCalls []providers.ToolCall
+	// progressTitles are the titles the model wrote for this call's tool
+	// calls, by call id, taken out of their arguments (takeProgressTitles).
+	// (seucaranguejo fork — MST-957)
+	progressTitles      map[string]string
 	allResponsesHandled bool
 	streamingPublisher  *streamingChunkPublisher
 	streamingFallback   bool

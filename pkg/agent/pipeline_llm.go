@@ -418,6 +418,13 @@ func (p *Pipeline) CallLLM(
 		delete(exec.llmOpts, "native_search")
 	}
 
+	// A turn whose channel renders tool cards offers every tool the progress
+	// title, after the hooks so none drops it; other turns keep the schemas,
+	// and the prompt cache, they have. (seucaranguejo fork — MST-957)
+	if ts.toolEvents {
+		exec.providerToolDefs = tools.WithProgressTitle(exec.providerToolDefs)
+	}
+
 	exec.llmRequestID = requestIDFromOptions(exec.llmOpts)
 
 	al.emitEvent(
@@ -1453,6 +1460,11 @@ func (p *Pipeline) CallLLM(
 	for _, tc := range exec.response.ToolCalls {
 		exec.normalizedToolCalls = append(exec.normalizedToolCalls, providers.NormalizeToolCall(tc))
 	}
+	// (seucaranguejo fork — MST-957)
+	exec.progressTitles = nil
+	if ts.toolEvents {
+		exec.normalizedToolCalls, exec.progressTitles = takeProgressTitles(ts.agent.Tools, exec.normalizedToolCalls)
+	}
 
 	toolNames := make([]string, 0, len(exec.normalizedToolCalls))
 	for _, tc := range exec.normalizedToolCalls {
@@ -1541,7 +1553,7 @@ func (p *Pipeline) CallLLM(
 			contentStreamed,
 		)
 	} else if shouldPublishToolCallsEvent {
-		al.publishToolCallsEvent(turnCtx, ts, exec.llmModelName, assistantMsg.ToolCalls)
+		al.publishToolCallsEvent(turnCtx, ts, exec.llmModelName, assistantMsg.ToolCalls, exec.progressTitles)
 	}
 
 	return ControlToolLoop, nil

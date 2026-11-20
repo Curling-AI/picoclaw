@@ -13,6 +13,9 @@ type VisibleToolCall struct {
 	Type         string                       `json:"type,omitempty"`
 	Function     *VisibleToolCallFunction     `json:"function,omitempty"`
 	ExtraContent *VisibleToolCallExtraContent `json:"extra_content,omitempty"`
+	// Title is the progress title the model wrote for the call, whole: it is
+	// not part of the arguments preview and its cut. (seucaranguejo fork — MST-957)
+	Title string `json:"title,omitempty"`
 }
 
 type VisibleToolCallFunction struct {

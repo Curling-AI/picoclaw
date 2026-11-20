@@ -4,12 +4,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -69,14 +71,19 @@ func (al *AgentLoop) deliverToolEvent(ctx context.Context, msg bus.OutboundMessa
 }
 
 // publishToolCallsEvent delivers the tool_calls message of a turn whose
-// channel renders tool cards (ts.toolEvents).
+// channel renders tool cards (ts.toolEvents), each call with the progress
+// title the model wrote for it (titles, by call id).
 func (al *AgentLoop) publishToolCallsEvent(
 	ctx context.Context,
 	ts *turnState,
 	modelName string,
 	toolCalls []providers.ToolCall,
+	titles map[string]string,
 ) {
 	visible := utils.BuildVisibleToolCalls(toolCalls, al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength())
+	for i := range visible {
+		visible[i].Title = titles[visible[i].ID]
+	}
 	if msg, ok := toolCallsOutbound(ts, modelName, visible); ok {
 		al.deliverToolEvent(ctx, msg)
 	}
@@ -126,4 +133,39 @@ func (al *AgentLoop) publishToolResultEvent(
 	pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer pubCancel()
 	_ = al.bus.PublishOutbound(pubCtx, msg)
+}
+
+// takeProgressTitles takes tools.ProgressTitleParam out of each call whose
+// tool got it from tools.WithProgressTitle, so validation, hooks, the repeat
+// guard, the history and the tool see only the arguments the tool declares.
+// It returns the calls and the titles by call id. The calls are normalized
+// (providers.NormalizeToolCall sets Function); a call's arguments and
+// FunctionCall are copied before they change, since the provider's response
+// still shares them.
+func takeProgressTitles(
+	registry *tools.ToolRegistry,
+	calls []providers.ToolCall,
+) ([]providers.ToolCall, map[string]string) {
+	var titles map[string]string
+	for i, tc := range calls {
+		if tool, ok := registry.GetRegistered(tc.Name); ok && tools.DeclaresProgressTitle(tool.Parameters()) {
+			continue
+		}
+		title, rest, taken := tools.TakeProgressTitle(tc.Arguments)
+		if !taken {
+			continue
+		}
+		encoded, _ := json.Marshal(rest)
+		fn := *tc.Function
+		fn.Arguments = string(encoded)
+		tc.Arguments, tc.Function = rest, &fn
+		calls[i] = tc
+		if title != "" {
+			if titles == nil {
+				titles = make(map[string]string)
+			}
+			titles[strings.TrimSpace(tc.ID)] = title
+		}
+	}
+	return calls, titles
 }
