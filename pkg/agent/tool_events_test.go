@@ -462,3 +462,60 @@ func TestPublishToolResultEvent(t *testing.T) {
 		})
 	}
 }
+
+// Without a bus, nothing is published and nothing panics: not for a nil loop,
+// not for a loop without a bus, not for a card channel's event without a
+// channel manager either.
+func TestPublishToolResultEventWithoutABus(t *testing.T) {
+	for _, channel := range []string{"grpc", "pico", "slack"} {
+		ts := &turnState{
+			agent:      &AgentInstance{ID: "main"},
+			channel:    channel,
+			chatID:     "C1",
+			toolEvents: true,
+			opts:       processOptions{AllowInterimPicoPublish: true},
+		}
+		var nilLoop *AgentLoop
+		nilLoop.publishToolResultEvent(context.Background(), ts, "call_1", "out", false)
+		(&AgentLoop{}).publishToolResultEvent(context.Background(), ts, "call_1", "out", false)
+	}
+
+	(&AgentLoop{}).deliverToolEvent(context.Background(), bus.OutboundMessage{Channel: "slack", ChatID: "C1"})
+}
+
+// A web channel's tool_result stays on the bus even when the channel manager
+// has a channel under that name: only the card channels are delivered to
+// directly.
+func TestPublishToolResultEventOfAWebChannelStaysOnTheBus(t *testing.T) {
+	msgBus := bus.NewMessageBus()
+	manager, err := channels.NewManager(&config.Config{}, msgBus, nil)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	channel := &recordingToolEventsChannel{}
+	manager.RegisterChannel("pico", channel)
+	al := &AgentLoop{bus: msgBus, channelManager: manager}
+	ts := &turnState{
+		agent:   &AgentInstance{ID: "main"},
+		channel: "pico",
+		chatID:  "C1",
+		opts:    processOptions{AllowInterimPicoPublish: true},
+	}
+
+	al.publishToolResultEvent(context.Background(), ts, "call_1", "out", false)
+
+	if len(channel.sent) != 0 {
+		t.Fatalf("pico channel got %d direct sends, want none", len(channel.sent))
+	}
+	if out := drainOutboundMessages(msgBus); len(out) != 1 || out[0].Content != "out" {
+		t.Fatalf("bus got %v, want the tool_result", outboundKinds(out))
+	}
+}
+
+func TestToolCallsOutboundWithoutCalls(t *testing.T) {
+	ts := &turnState{agent: &AgentInstance{ID: "main"}, channel: "slack", chatID: "C1"}
+
+	if _, ok := toolCallsOutbound(ts, "model", nil); ok {
+		t.Fatal("toolCallsOutbound without calls = ok, want none")
+	}
+}

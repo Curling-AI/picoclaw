@@ -255,3 +255,23 @@ func TestTakeProgressTitlesCopiesWhatTheResponseShares(t *testing.T) {
 		t.Fatalf("call_4 = %v / %s, want no arguments", calls[3].Arguments, calls[3].Function.Arguments)
 	}
 }
+
+// Where the channel renders no cards, the title is not offered and not taken:
+// an argument named like it reaches validation, which refuses it as it does
+// any argument the tool does not declare, and the tool does not run.
+func TestProgressTitleNotTakenWhereItWasNotOffered(t *testing.T) {
+	provider := &toolEventsProvider{
+		toolNames: []string{"record_args"},
+		args:      map[string]any{"value": "x", tools.ProgressTitleParam: "kept"},
+	}
+	delegate := toolEventsDelegate{toolEvents: map[string]bool{"slack:C1": true}}
+	al, _ := newToolEventsTestLoop(t, delegate, provider)
+	tool := &recordingTitleTool{name: "record_args"}
+	al.GetRegistry().GetDefaultAgent().Tools.Register(tool)
+
+	runWebhookTurn(t, al, "slack", "C2")
+
+	if len(tool.got) != 0 {
+		t.Fatalf("tool ran with %v, want the call refused by validation", tool.got)
+	}
+}
