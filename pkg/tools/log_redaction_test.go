@@ -68,6 +68,23 @@ func TestToolRegistry_ExecuteWithContext_LogsMaskedArgsAndError(t *testing.T) {
 	assertLogHasNoSecrets(t, logs, "hunter2", "hunter3", "abcdefghijklmnop1234")
 }
 
+func TestToolRegistry_ExecuteWithContext_MasksKeysUnderShortShellNames(t *testing.T) {
+	readLog := captureLog(t)
+	r := NewToolRegistry()
+	r.Register(newMockTool("exec", "runs a command"))
+
+	r.ExecuteWithContext(context.Background(), "exec", map[string]any{
+		"command": "DDK=0123456789abcdef0123456789abcdef DDA=ddapp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh " +
+			`curl -s -H "DD-APPLICATION-KEY: $DDA" https://api.datadoghq.com/api/v1/validate`,
+	}, "", "", nil)
+
+	logs := readLog()
+	if !strings.Contains(logs, "api.datadoghq.com/api/v1/validate") {
+		t.Fatalf("log is missing the command:\n%s", logs)
+	}
+	assertLogHasNoSecrets(t, logs, "0123456789abcdef", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+}
+
 type scriptedToolCallProvider struct {
 	calls    int
 	toolCall providers.ToolCall

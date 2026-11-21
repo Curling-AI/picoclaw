@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // A shell word: bare characters and quoted runs, glued (`admin:'hunter 2'`).
@@ -47,21 +48,30 @@ var (
 	// identifies the key without exposing it.
 	hulkKeyRe = regexp.MustCompile(`(\bhulk_[a-z]+\.key_[A-Za-z0-9]+\.)[A-Za-z0-9_-]{16,}`)
 	// Well-known key formats: OpenAI/Anthropic, GitHub, Slack, AWS, Google,
-	// Stripe and Telegram bot tokens (no word boundary: they follow `bot` in URLs).
+	// Stripe, Datadog application keys and Telegram bot tokens (no word
+	// boundary: they follow `bot` in URLs).
 	keyPrefixRe = regexp.MustCompile(`\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|` +
 		`github_pat_[A-Za-z0-9_]{20,}|xox[abeprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|` +
-		`AIza[0-9A-Za-z_-]{35}|[rs]k_live_[0-9A-Za-z]{16,})|\d{6,}:AA[A-Za-z0-9_-]{30,}`)
+		`AIza[0-9A-Za-z_-]{35}|[rs]k_live_[0-9A-Za-z]{16,}|ddapp_[A-Za-z0-9]{30,})|` +
+		`\d{6,}:AA[A-Za-z0-9_-]{30,}`)
 	// Environment variables named after a secret: `DB_PASS=x`, `MYSQL_PWD=x`,
 	// `STRIPE_KEY=x`. A bare `PWD=` (the working directory) has no prefix.
 	envSecretRe = regexp.MustCompile(
 		`(\b[A-Z][A-Z0-9_]*_(?:PASS|PASSWD|PASSWORD|PWD|SECRET|TOKEN|KEY)=)(` + shellWord + `)`)
+	// A shell variable set to what reads as a token, whatever its name: a
+	// model writes `DDK=0123…`, `A=ddapp_…` or `export DD_APP=…`, and the
+	// name says nothing about a key. shellToken decides by the value.
+	// Lowercase names are left out: they are log fields (`tool=…`) and URL
+	// parameters. A JSON-escaped line break (`\nDDK=…`) also starts a name.
+	shellTokenRe = regexp.MustCompile(`(?:\b|\\[nrt])([A-Z][A-Z0-9_]*)=(?:\\?["'])?([A-Za-z0-9_+/=-]{20,})`)
 	// `password=x`, `"api_key": "x y"`, `senha => 'x'`, `Senha: x`. A quoted
 	// value is masked to its closing quote, escaped quotes included. The name
 	// is confirmed by sensitiveKey, so `max_tokens=100` or `secretName: db`
 	// stay. The match starts at the keyword: a leading wildcard would cost a
 	// regex attempt at every byte of every log line.
 	assignmentRe = regexp.MustCompile(
-		`(?i)((?:password|passwd|senha|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*)` +
+		`(?i)((?:password|passwd|senha|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|` +
+			`app(?:lication)?[_-]?key)[A-Za-z0-9_.-]*)` +
 			`(\\?["']?\s*(?:=>|[:=])\s*)` +
 			`(\\"(?:[^"\\]|\\[^"])*|"(?:[^"\\]|\\.)*|'[^']*|[^\s"'\\&,;}]+)`)
 	// An upload as the pod stores it: a random 8-hex prefix and the person's
@@ -119,7 +129,10 @@ var textRules = []textRule{
 	{[]string{"eyj"}, replaceWith(jwtRe, Mask)},
 	{[]string{"hulk_"}, replaceWith(hulkKeyRe, "${1}"+Mask)},
 	{
-		[]string{"sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xox", "akia", "aiza", "k_live_", ":aa"},
+		[]string{
+			"sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "xox", "akia", "aiza", "k_live_",
+			"ddapp_", ":aa",
+		},
 		replaceWith(keyPrefixRe, Mask),
 	},
 	{[]string{"_pass", "_pwd", "_secret", "_token", "_key"}, maskTailOf(envSecretRe)},
@@ -127,10 +140,14 @@ var textRules = []textRule{
 		[]string{
 			"password", "passwd", "senha", "secret", "token", "api_key", "api-key", "apikey",
 			"access_key", "access-key", "accesskey", "private_key", "private-key", "privatekey",
+			"app_key", "app-key", "appkey", "application_key", "application-key", "applicationkey",
 		},
 		func(s string) string { return assignmentRe.ReplaceAllStringFunc(s, maskAssignment) },
 	},
 	{[]string{"-"}, maskUploadNames},
+	// After assignmentRe: it masks a quoted value to its closing quote, and
+	// this rule, which stops at the first space, would leave the rest.
+	{[]string{"="}, maskShellTokens},
 }
 
 // Text masks the credentials found in free text, and the file name in the path
@@ -184,6 +201,69 @@ func maskCredentialWord(re *regexp.Regexp, s string) string {
 		}
 		return parts[1] + user + ":" + Mask + closing
 	})
+}
+
+// maskShellTokens masks the value of each shell assignment that shellToken
+// accepts. Most lines hold `=` only after lowercase log fields, so a byte
+// scan for an uppercase name before `=` runs ahead of the regex.
+func maskShellTokens(s string) string {
+	if !hasUpperAssignment(s) {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range shellTokenRe.FindAllStringSubmatchIndex(s, -1) {
+		name, start, end := s[m[2]:m[3]], m[4], m[5]
+		if !shellToken(name, s[start:end], s[end:]) {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(Mask)
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// shellToken says whether a value matched by shellTokenRe reads as a token:
+// it holds a letter and a digit, and is not a flag
+// (`--max-old-space-size=4096`) or an absolute path. The match stops where a
+// token's characters end; a `.`, `:` or `@` going on into a letter or digit
+// means the value is part of a longer name (`…-k.ec2.internal`,
+// `registry-…:5000`) and stays. The name can still say the value is no
+// secret: `RUN_ID`, `LOG_PATH`.
+func shellToken(name, value, rest string) bool {
+	if len(rest) > 1 && strings.IndexByte(".:@", rest[0]) >= 0 && isASCIIAlnum(rest[1]) {
+		return false
+	}
+	if value[0] == '-' || value[0] == '/' {
+		return false
+	}
+	if !strings.ContainsAny(value, "0123456789") || strings.IndexFunc(value, unicode.IsLetter) < 0 {
+		return false
+	}
+	return !hasSuffixAny(keyNameReplacer.Replace(strings.ToLower(name)), nonSecretSuffixes)
+}
+
+func isASCIIAlnum(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
+// hasUpperAssignment reports whether some `=` follows an uppercase letter,
+// a digit or an underscore, as in a shell variable name.
+func hasUpperAssignment(s string) bool {
+	for i := 1; i < len(s); i++ {
+		if s[i] != '=' {
+			continue
+		}
+		if c := s[i-1]; c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+			return true
+		}
+	}
+	return false
 }
 
 // maskUploadNames keeps the prefix, which tells two uploads apart, and a known
