@@ -146,7 +146,7 @@ toolLoop:
 		skipToolCall := func(content string) {
 			exec.allResponsesHandled = false
 			skipped := providers.ToolCall{ID: tc.ID, Name: toolName}
-			messages = append(messages, al.skipToolCalls(ts, []providers.ToolCall{skipped}, content, content)...)
+			messages = append(messages, al.skipToolCalls(turnCtx, ts, []providers.ToolCall{skipped}, content, content)...)
 		}
 		denyTool := func() bool {
 			if selectedTool != "" && toolName != selectedTool {
@@ -389,7 +389,7 @@ toolLoop:
 									"reason":    skipReason,
 								})
 							messages = append(messages,
-								al.skipToolCalls(ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
+								al.skipToolCalls(turnCtx, ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
 						}
 						break toolLoop
 					}
@@ -456,7 +456,7 @@ toolLoop:
 						"iteration":   iteration,
 					})
 				messages = append(messages, al.skipToolCalls(
-					ts, normalizedToolCalls[i+1:], "repeated refused call", repeatStopSkipContent)...)
+					turnCtx, ts, normalizedToolCalls[i+1:], "repeated refused call", repeatStopSkipContent)...)
 				exec.messages = messages
 				if providerForTurn(turnCtx, ts.turnID) != nil {
 					exec.incomplete = true
@@ -849,7 +849,7 @@ toolLoop:
 						"reason":    skipReason,
 					})
 				messages = append(messages,
-					al.skipToolCalls(ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
+					al.skipToolCalls(turnCtx, ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
 			}
 			break toolLoop
 		}
@@ -963,6 +963,7 @@ toolLoop:
 // skipToolCalls answers calls with content instead of running them, so the
 // assistant message that requested them keeps a result for each.
 func (al *AgentLoop) skipToolCalls(
+	ctx context.Context,
 	ts *turnState,
 	calls []providers.ToolCall,
 	reason, content string,
@@ -986,6 +987,12 @@ func (al *AgentLoop) skipToolCalls(
 		if !ts.opts.NoHistory {
 			ts.appendHistoryMessage(skippedMsg)
 			ts.recordPersistedMessage(skippedMsg)
+		}
+		// The channel opened the call's card from the tool_calls message;
+		// it closes as failed. The structured web channels keep what they
+		// had. (seucaranguejo fork — MST-957)
+		if ts.toolEvents {
+			al.publishToolResultEvent(ctx, ts, tc.ID, content, true)
 		}
 	}
 	return answered

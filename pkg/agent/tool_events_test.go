@@ -278,6 +278,99 @@ func TestToolEventsResultOfAHookAnsweredCall(t *testing.T) {
 	}
 }
 
+// denyToolApprover refuses the named tool.
+type denyToolApprover struct{ tool string }
+
+func (h denyToolApprover) ApproveTool(_ context.Context, req *ToolApprovalRequest) (ApprovalDecision, error) {
+	return ApprovalDecision{Approved: req.Tool != h.tool, Reason: "blocked"}, nil
+}
+
+// A call answered without running (here refused by the approval hook) closes
+// its card as failed, and the batch goes on; the web channels get no
+// tool_result for it, as before.
+func TestToolEventsResultOfASkippedCall(t *testing.T) {
+	for channel, want := range map[string]string{
+		"slack": "tool_calls,tool_result,tool_result",
+		"pico":  "thought,tool_calls",
+	} {
+		t.Run(channel, func(t *testing.T) {
+			provider := &toolEventsProvider{
+				toolNames: []string{"tool_limit_test_tool", "empty_event_tool"},
+				args:      map[string]any{"value": "x"},
+			}
+			delegate := toolEventsDelegate{toolEvents: map[string]bool{"slack:C1": true}}
+			al, msgBus := newToolEventsTestLoop(t, delegate, provider)
+			if err := al.MountHook(NamedHook("deny", denyToolApprover{tool: "tool_limit_test_tool"})); err != nil {
+				t.Fatalf("MountHook() error = %v", err)
+			}
+
+			runWebhookTurn(t, al, channel, "C1")
+
+			out := drainOutboundMessages(msgBus)
+			if got := strings.Join(outboundKinds(out), ","); got != want {
+				t.Fatalf("outbound kinds = %q, want %q", got, want)
+			}
+			if channel != "slack" {
+				return
+			}
+			denied, ran := out[1].Context.Raw, out[2].Context.Raw
+			if denied[metadataKeyToolCallID] != "call_1" || denied[metadataKeyToolIsError] != "true" {
+				t.Fatalf("first tool_result raw = %v, want call_1 marked as failed", denied)
+			}
+			if ran[metadataKeyToolCallID] != "call_2" || ran[metadataKeyToolIsError] != "" {
+				t.Fatalf("second tool_result raw = %v, want call_2 not failed", ran)
+			}
+		})
+	}
+}
+
+// skipToolCalls, which also answers the rest of a batch the turn stops,
+// closes each call's card as failed, and only on a turn whose channel renders
+// cards.
+func TestSkipToolCallsClosesTheirCards(t *testing.T) {
+	calls := []providers.ToolCall{{ID: "call_2", Name: "a"}, {ID: "call_3", Name: "b"}}
+	for _, tc := range []struct {
+		name       string
+		channel    string
+		toolEvents bool
+		want       []string
+	}{
+		{name: "card channel", channel: "slack", toolEvents: true, want: []string{"call_2", "call_3"}},
+		{name: "chat without cards", channel: "slack"},
+		{name: "structured web", channel: "pico"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msgBus := bus.NewMessageBus()
+			al := &AgentLoop{bus: msgBus}
+			ts := &turnState{
+				agent:      &AgentInstance{ID: "main"},
+				channel:    tc.channel,
+				chatID:     "C1",
+				toolEvents: tc.toolEvents,
+				opts:       processOptions{AllowInterimPicoPublish: true, NoHistory: true},
+			}
+
+			answered := al.skipToolCalls(context.Background(), ts, calls, "graceful interrupt requested", "Skipped.")
+
+			if len(answered) != len(calls) {
+				t.Fatalf("answered %d calls, want %d", len(answered), len(calls))
+			}
+			out := drainOutboundMessages(msgBus)
+			got := make([]string, 0, len(out))
+			for _, msg := range out {
+				if msg.Context.Raw[metadataKeyMessageKind] != messageKindToolResult ||
+					msg.Context.Raw[metadataKeyToolIsError] != "true" || msg.Content != "" {
+					t.Fatalf("published %+v, want a failed tool_result without text", msg)
+				}
+				got = append(got, msg.Context.Raw[metadataKeyToolCallID])
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("tool_result for %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // The card waits for its result even when the tool says nothing; the web
 // channels keep skipping an empty one.
 func TestToolEventsResultOfAnEmptyCall(t *testing.T) {
