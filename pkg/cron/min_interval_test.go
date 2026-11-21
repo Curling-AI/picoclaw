@@ -215,8 +215,9 @@ func TestRaisingAJobDoesNotReplayARunItsNewScheduleLacks(t *testing.T) {
 	waitForRuns(t, count, 1) // without a minimum it is a missed run
 }
 
-// A stored run the new schedule has is kept: replayed when due.
-func TestRaisingAJobKeepsARunItsNewScheduleHas(t *testing.T) {
+// Even a stored run the new schedule has is not replayed at the boot that
+// rewrites the job: it would come sooner than the minimum after the last run.
+func TestRaisingAJobDoesNotReplayEvenARunItsNewScheduleHas(t *testing.T) {
 	minute := time.Now().Add(-2 * time.Minute).Truncate(time.Minute)
 	if minute.Minute() == 59 {
 		minute = minute.Add(-time.Minute) // keep a range of minutes to raise
@@ -233,7 +234,10 @@ func TestRaisingAJobKeepsARunItsNewScheduleHas(t *testing.T) {
 	}
 	t.Cleanup(cs.Stop)
 
-	waitForRuns(t, count, 1) // the kept minute is two minutes late
+	time.Sleep(300 * time.Millisecond)
+	if n := count(); n != 0 {
+		t.Fatalf("replayed the stored minute %d time(s)", n)
+	}
 	job, _ := cs.GetJob("often")
 	if raised := fmt.Sprintf("%d %d * * *", minute.Minute(), minute.Hour()); job.Schedule.Expr != raised {
 		t.Errorf("schedule %q, want %q", job.Schedule.Expr, raised)
@@ -257,7 +261,7 @@ func TestCheckingManyAllowedDenseJobsAtBootIsQuick(t *testing.T) {
 	cs.SetMinInterval(30 * time.Minute)
 	cs.mu.Lock()
 	began := time.Now()
-	cs.raiseShortSchedules()
+	cs.raiseShortSchedules(time.Now().UnixMilli())
 	took := time.Since(began)
 	cs.mu.Unlock()
 	// About 12 ms on a laptop; a whole year of runs per job takes seconds.
@@ -267,33 +271,96 @@ func TestCheckingManyAllowedDenseJobsAtBootIsQuick(t *testing.T) {
 	}
 }
 
-// The first run after a boot rewrite keeps the minimum after the last run: a
-// */5 job that ran at 10:25 and is due at 10:30 runs next at 11:00 as */30.
+// The first run after a boot rewrite comes no sooner than the boot or the
+// minimum after the last run, and never replays the stored one.
 func TestRaisingAJobKeepsTheMinimumAfterItsLastRun(t *testing.T) {
 	at := func(h, m int) int64 { return time.Date(2026, 3, 2, h, m, 0, 0, time.Local).UnixMilli() }
+	fiveMinutes := (5 * time.Minute).Milliseconds()
+	cron5 := CronSchedule{Kind: "cron", Expr: "*/5 * * * *"}
+	every5 := CronSchedule{Kind: "every", EveryMS: &fiveMinutes}
 	for _, tc := range []struct {
-		name       string
-		last, want int64
+		name            string
+		schedule        CronSchedule
+		last, now, want int64
 	}{
-		{"ran 5 minutes before the stored run", at(10, 25), at(11, 0)},
-		{"ran long before the stored run", at(9, 0), at(10, 30)},
+		{"ran 5 minutes before the boot", cron5, at(10, 25), at(10, 28), at(11, 0)},
+		{"ran long ago, stored run ahead", cron5, at(9, 0), at(10, 28), at(10, 30)},
+		{"stored run expired an hour ago", cron5, at(10, 25), at(11, 31), at(12, 0)},
+		{"every, ran 5 minutes before the boot", every5, at(10, 25), at(10, 28), at(10, 58)},
 	} {
 		cs := NewCronService(writeStore(t, CronJob{
-			ID: "often", Name: "often", Enabled: true,
-			Schedule: CronSchedule{Kind: "cron", Expr: "*/5 * * * *"},
-			State:    CronJobState{LastRunAtMS: int64Ptr(tc.last), NextRunAtMS: int64Ptr(at(10, 30))},
+			ID: "often", Name: "often", Enabled: true, Schedule: tc.schedule,
+			State: CronJobState{LastRunAtMS: int64Ptr(tc.last), NextRunAtMS: int64Ptr(at(10, 30))},
 		}), nil)
 		cs.SetMinInterval(30 * time.Minute)
 		cs.mu.Lock()
-		cs.raiseShortSchedules()
+		rewritten := cs.raiseShortSchedules(tc.now)
 		job := cs.store.Jobs[0]
 		cs.mu.Unlock()
-		got := "none"
-		if job.State.NextRunAtMS != nil {
-			got = time.UnixMilli(*job.State.NextRunAtMS).String()
+		if !rewritten["often"] || job.State.NextRunAtMS == nil || *job.State.NextRunAtMS != tc.want {
+			t.Errorf("%s: rewritten=%v %s next %v, want %s", tc.name, rewritten, scheduleText(job.Schedule),
+				job.State.NextRunAtMS, time.UnixMilli(tc.want))
 		}
-		if job.Schedule.Expr != "*/30 * * * *" || job.State.NextRunAtMS == nil || *job.State.NextRunAtMS != tc.want {
-			t.Errorf("%s: %q next run %s, want */30 at %s", tc.name, job.Schedule.Expr, got, time.UnixMilli(tc.want))
-		}
+	}
+}
+
+// Through Start: a job that ran 5 minutes ago and is rewritten to a minute
+// due in two waits a whole minimum after its last run instead.
+func TestBootAfterARewriteWaitsTheMinimumAfterTheLastRun(t *testing.T) {
+	now := time.Now()
+	soon := now.Add(2 * time.Minute).Truncate(time.Minute)
+	if soon.Minute() == 59 {
+		soon = soon.Add(time.Minute) // keep a range of minutes to raise
+	}
+	last := now.Add(-5 * time.Minute)
+	runs, count := countRuns()
+	cs := NewCronService(writeStore(t, CronJob{
+		ID: "often", Name: "often", Enabled: true,
+		Schedule: CronSchedule{Kind: "cron", Expr: fmt.Sprintf("%d-59 * * * *", soon.Minute())},
+		State: CronJobState{
+			LastRunAtMS: int64Ptr(last.UnixMilli()),
+			NextRunAtMS: int64Ptr(now.Add(-time.Minute).UnixMilli()),
+		},
+	}), runs)
+	cs.SetMinInterval(time.Hour)
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(cs.Stop)
+
+	time.Sleep(300 * time.Millisecond)
+	if n := count(); n != 0 {
+		t.Fatalf("the rewritten job caught up %d time(s) at boot", n)
+	}
+	if next := nextRunOf(t, cs, "often"); next.Before(last.Add(time.Hour)) {
+		t.Errorf("next run %s, sooner than an hour after the last run at %s", next, last)
+	}
+}
+
+// Through Start: a rewritten job whose stored run expired over an hour ago
+// does not catch up, although a run of its new schedule fell within the grace.
+func TestBootDoesNotReplayALongExpiredRunOfARewrittenJob(t *testing.T) {
+	now := time.Now()
+	runs, count := countRuns()
+	cs := NewCronService(writeStore(t, CronJob{
+		ID: "often", Name: "often", Enabled: true,
+		Schedule: CronSchedule{Kind: "cron", Expr: "*/5 * * * *"},
+		State: CronJobState{
+			LastRunAtMS: int64Ptr(now.Add(-66 * time.Minute).UnixMilli()),
+			NextRunAtMS: int64Ptr(now.Add(-61 * time.Minute).UnixMilli()),
+		},
+	}), runs)
+	cs.SetMinInterval(30 * time.Minute)
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(cs.Stop)
+
+	time.Sleep(300 * time.Millisecond)
+	if n := count(); n != 0 {
+		t.Fatalf("the rewritten job caught up %d time(s) at boot", n)
+	}
+	if next := nextRunOf(t, cs, "often"); next.Before(now) {
+		t.Errorf("next run %s is in the past", next)
 	}
 }
