@@ -856,6 +856,8 @@ func setupCronTool(
 
 	cronService := cron.NewCronService(cronStorePath, nil)
 	cronService.SetMinInterval(time.Duration(cfg.Tools.Cron.MinIntervalMinutes) * time.Minute)
+	cronService.SetMaxRunsPerDay(cfg.Tools.Cron.MaxRunsPerDay)
+	cronService.SetCapExempt(isSeededJob)
 
 	var cronTool *tools.CronTool
 	if cfg.Tools.IsToolEnabled("cron") {
@@ -881,6 +883,13 @@ func setupCronTool(
 
 // memoryRefreshJobName is the stable name used to keep the seed idempotent.
 const memoryRefreshJobName = cron.MemoryRefreshJobName
+
+// isSeededJob is the job seedMemoryRefreshJob adds, which the daily run cap
+// neither counts nor pauses. Without a chat: the agent's cron tool always
+// records one, so naming a job memory-refresh does not exempt it.
+func isSeededJob(job *cron.CronJob) bool {
+	return job.Name == memoryRefreshJobName && job.Payload.Channel == ""
+}
 
 // seedMemoryRefreshJob adds a self-managed daily job (once, by name) that has
 // the agent review recent conversations and refresh durable memory in
