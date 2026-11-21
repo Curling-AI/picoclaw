@@ -517,6 +517,12 @@ func (p *Pipeline) CallLLM(
 						filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile),
 						"web_search",
 					)
+					// The registry's web_search comes without the progress
+					// title the other tools of a card turn have; the ones
+					// that have it stay as they are. (seucaranguejo fork — MST-957)
+					if ts.toolEvents {
+						candidateTools = tools.WithProgressTitle(candidateTools)
+					}
 				}
 			}
 			candidateCfg := resolveActiveModelConfig(

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"reflect"
 	"strings"
@@ -90,6 +91,55 @@ func TestProgressTitleOfferedToEveryToolWhereTheChannelRendersCards(t *testing.T
 	}
 	if _, changed := mcpSchema["properties"].(map[string]any)[tools.ProgressTitleParam]; changed {
 		t.Fatal("the MCP tool's own schema got the argument")
+	}
+}
+
+// rateLimitedNativeSearchProvider searches natively and is rate limited, so
+// the turn falls back to the next candidate.
+type rateLimitedNativeSearchProvider struct{}
+
+func (rateLimitedNativeSearchProvider) Chat(
+	context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any,
+) (*providers.LLMResponse, error) {
+	return nil, errors.New("API request failed:\n  Status: 429\n  Body:   rate limit exceeded")
+}
+
+func (rateLimitedNativeSearchProvider) GetDefaultModel() string    { return "primary" }
+func (rateLimitedNativeSearchProvider) SupportsNativeSearch() bool { return true }
+
+// The web_search a fallback without native search gets back comes from the
+// registry: a card turn offers it the progress title as well, another turn
+// does not.
+func TestProgressTitleOfTheWebSearchAFallbackGetsBack(t *testing.T) {
+	for chatID, want := range map[string]bool{"C1": true, "C2": false} {
+		t.Run(chatID, func(t *testing.T) {
+			fallback := &toolEventsProvider{}
+			delegate := toolEventsDelegate{toolEvents: map[string]bool{"slack:C1": true}}
+			al, _ := newToolEventsTestLoop(t, delegate, fallback)
+			al.cfg.Tools.Web.Enabled = true
+			al.cfg.Tools.Web.PreferNative = true
+			agent := al.GetRegistry().GetDefaultAgent()
+			agent.Tools.Register(&recordingTitleTool{name: "web_search"})
+			primary := providers.FallbackCandidate{Provider: "openai", Model: "primary"}
+			backup := providers.FallbackCandidate{Provider: "openai", Model: "backup"}
+			agent.Provider = rateLimitedNativeSearchProvider{}
+			agent.Candidates = []providers.FallbackCandidate{primary, backup}
+			agent.CandidateProviders = map[string]providers.LLMProvider{candidateProviderKey(backup): fallback}
+
+			runWebhookTurn(t, al, "slack", chatID)
+
+			if len(fallback.requests) == 0 {
+				t.Fatal("the fallback was not called")
+			}
+			offered := map[string]bool{}
+			for _, def := range fallback.requests[0] {
+				offered[def.Function.Name] = offersProgressTitle(def)
+			}
+			if got, found := offered["web_search"]; !found || got != want {
+				t.Fatalf("fallback got web_search = %v with %s = %v (offered: %v), want %v",
+					found, tools.ProgressTitleParam, got, offered, want)
+			}
+		})
 	}
 }
 
