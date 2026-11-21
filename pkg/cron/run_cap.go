@@ -95,10 +95,41 @@ func (cs *CronService) pauseJobsPastCap() {
 		job := &jobs[counted[k]]
 		job.Enabled = false
 		job.State.NextRunAtMS = nil
+		job.State.PausedBy = PausedByDailyLimit
 		log.Printf("[cron] job %s paused: its %d runs a day took the automations to %d, the limit is %d",
 			job.ID, loads[k], total, cs.maxRunsPerDay)
 		total -= loads[k]
 	}
+}
+
+// RunsPerDay is how many runs a day job takes from the cap, or would take
+// resumed: 0 without a cap or for a job that does not count (a one-shot or an
+// exempt one). A job over the cap alone reports the cap plus one.
+func (cs *CronService) RunsPerDay(job CronJob) int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	job.Enabled = true
+	if cs.maxRunsPerDay <= 0 || !cs.countsTowardCap(&job) {
+		return 0
+	}
+	return dailyRuns(job.Schedule, time.Local, cs.maxRunsPerDay)
+}
+
+// RunsPerDayInUse is the total checkRunCap holds against the cap: the runs a
+// day of every enabled job that counts. 0 without a cap.
+func (cs *CronService) RunsPerDayInUse() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.maxRunsPerDay <= 0 {
+		return 0
+	}
+	total := 0
+	for i := range cs.store.Jobs {
+		if job := &cs.store.Jobs[i]; cs.countsTowardCap(job) {
+			total += dailyRuns(job.Schedule, time.Local, cs.maxRunsPerDay)
+		}
+	}
+	return total
 }
 
 // dailyRuns is the most runs schedule makes on one calendar day in loc, the

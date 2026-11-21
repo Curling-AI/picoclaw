@@ -153,6 +153,10 @@ func (cs *CronService) raiseShortSchedules(nowMS int64) map[string]bool {
 		}
 		log.Printf("[cron] job %s ran more often than %s: schedule %q rewritten to %q",
 			job.ID, cs.minInterval, scheduleText(job.Schedule), scheduleText(raised))
+		if job.State.SlowedFrom == nil {
+			previous := job.Schedule
+			job.State.SlowedFrom = &previous
+		}
 		job.Schedule = raised
 		rewritten[job.ID] = true
 		if !job.Enabled || cs.hasAdmissionRetry(job.ID) {
