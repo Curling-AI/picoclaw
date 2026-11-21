@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -222,7 +223,9 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 	}
 
 	caption := slackFirstMediaCaption(msg.Parts)
-	sentAny := false
+	sent := 0
+	// notSent are the files left out as empty or unreadable. (seucaranguejo fork — MST-957)
+	var notSent []string
 	for _, part := range msg.Parts {
 		localPath, err := store.Resolve(part.Ref)
 		if err != nil {
@@ -230,6 +233,22 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 				"ref":   part.Ref,
 				"error": err.Error(),
 			})
+			continue
+		}
+
+		// slack-go refuses uploads without FileSize ("FileSize cannot be 0"),
+		// so every media send failed before this. (seucaranguejo fork)
+		info, err := os.Stat(localPath)
+		if err != nil || info.Size() == 0 {
+			logger.ErrorCF("slack", "Skipping unreadable or empty media file", map[string]any{
+				"ref":   part.Ref,
+				"error": fmt.Sprint(err),
+			})
+			name := part.Filename
+			if name == "" {
+				name = part.Ref
+			}
+			notSent = append(notSent, name)
 			continue
 		}
 
@@ -247,6 +266,7 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 			Channel:         channelID,
 			ThreadTimestamp: threadTS,
 			File:            localPath,
+			FileSize:        int(info.Size()),
 			Filename:        filename,
 			Title:           title,
 		})
@@ -257,13 +277,21 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 			})
 			return nil, fmt.Errorf("slack send media: %w", channels.ErrTemporary)
 		}
-		sentAny = true
+		sent++
 	}
 
-	if sentAny && caption != "" {
+	if sent > 0 && caption != "" {
 		if err := c.postTextFn(ctx, channelID, threadTS, caption); err != nil {
 			return nil, fmt.Errorf("slack send media caption fallback: %w", channels.ErrTemporary)
 		}
+	}
+
+	// A file left out fails the send once the others are up, naming it for
+	// the agent. The failure is permanent, so the channel manager does not
+	// send the others again. (seucaranguejo fork — MST-957)
+	if len(notSent) > 0 {
+		return nil, fmt.Errorf("slack send media: sent %d of %d files; empty or unreadable, not sent: %s: %w",
+			sent, len(msg.Parts), strings.Join(notSent, ", "), channels.ErrSendFailed)
 	}
 
 	// UploadFile does not expose the posted message timestamp in its
