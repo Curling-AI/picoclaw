@@ -364,3 +364,43 @@ func TestBootDoesNotReplayALongExpiredRunOfARewrittenJob(t *testing.T) {
 		t.Errorf("next run %s is in the past", next)
 	}
 }
+
+// A second restart keeps the minimum too: the job rewritten at the first boot is
+// compliant now, and recomputing it from now must not land closer to its last run.
+func TestRestartKeepsTheMinimumAfterTheLastRunOfACompliantJob(t *testing.T) {
+	now := time.Now()
+	tick := now.Truncate(30 * time.Minute).Add(30 * time.Minute) // the next */30 run after now
+	if time.Until(tick) < 2*time.Second {
+		// Start must read the clock before tick, or it sees the next slot and passes without the fix.
+		time.Sleep(time.Until(tick) + time.Second)
+		now = time.Now()
+		tick = now.Truncate(30 * time.Minute).Add(30 * time.Minute)
+	}
+	last := tick.Add(-5 * time.Minute) // so that run is under 30 min after the last one
+	if last.After(now) {
+		last = now
+	}
+	runs, count := countRuns()
+	cs := NewCronService(writeStore(t, CronJob{
+		ID: "rewritten", Name: "rewritten", Enabled: true,
+		Schedule: CronSchedule{Kind: "cron", Expr: "*/30 * * * *"},
+		State: CronJobState{
+			LastRunAtMS: int64Ptr(last.UnixMilli()),
+			NextRunAtMS: int64Ptr(tick.Add(30 * time.Minute).UnixMilli()),
+		},
+	}), runs)
+	cs.SetMinInterval(30 * time.Minute)
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(cs.Stop)
+	if !time.Now().Before(tick) {
+		t.Fatalf("setup crossed the %s slot, so the check below would prove nothing", tick)
+	}
+	if next := nextRunOf(t, cs, "rewritten"); next.Before(last.Add(30 * time.Minute)) {
+		t.Errorf("next run %s is under 30 min after the last one at %s", next, last)
+	}
+	if n := count(); n != 0 {
+		t.Errorf("ran %d time(s) at the restart", n)
+	}
+}
