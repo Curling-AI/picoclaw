@@ -2,8 +2,11 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	slacksdk "github.com/slack-go/slack"
@@ -28,6 +31,21 @@ func newMediaTestChannel(t *testing.T, body []byte) (*SlackChannel, string) {
 		t.Fatalf("Store() error = %v", err)
 	}
 	return ch, ref
+}
+
+// assertNotSent checks the error of a send that left the named files out: a
+// permanent failure (channels.ErrSendFailed), which the channel manager does
+// not retry, that names them. (seucaranguejo fork — MST-957)
+func assertNotSent(t *testing.T, err error, names ...string) {
+	t.Helper()
+	if !errors.Is(err, channels.ErrSendFailed) {
+		t.Fatalf("SendMedia() error = %v, want %v", err, channels.ErrSendFailed)
+	}
+	for _, name := range names {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("SendMedia() error = %q, want it to name %s", err, name)
+		}
+	}
 }
 
 func TestSendMedia_SetsFileSize(t *testing.T) {
@@ -57,13 +75,14 @@ func TestSendMedia_SkipsEmptyFile(t *testing.T) {
 		uploads++
 		return nil
 	}
-	_, _ = ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
+	_, err := ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
 		ChatID: "C123456",
 		Parts:  []bus.MediaPart{{Ref: ref, Type: "file", Filename: "report.txt", ContentType: "text/plain"}},
 	})
 	if uploads != 0 {
 		t.Fatalf("uploads = %d, want 0 for an empty file", uploads)
 	}
+	assertNotSent(t, err, "report.txt", "sent 0 of 1")
 }
 
 // goneMediaStore resolves every ref to a path that does not exist, so the
@@ -88,11 +107,87 @@ func TestSendMedia_SkipsMissingFile(t *testing.T) {
 		uploads++
 		return nil
 	}
-	_, _ = ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
+	_, err := ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
 		ChatID: "C123456",
 		Parts:  []bus.MediaPart{{Ref: ref, Type: "file", Filename: "report.txt", ContentType: "text/plain"}},
 	})
 	if uploads != 0 {
 		t.Fatalf("uploads = %d, want 0 for a missing file", uploads)
 	}
+	assertNotSent(t, err, "report.txt")
+}
+
+// A batch with an empty file sends the other files, and the caption, and
+// reports only the one it left out. (seucaranguejo fork — MST-957)
+func TestSendMedia_SendsTheRestAndReportsTheEmptyFile(t *testing.T) {
+	ch, ref := newMediaTestChannel(t, []byte("attachment body"))
+	emptyPath := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	emptyRef, err := ch.GetMediaStore().Store(emptyPath, media.MediaMeta{Filename: "empty.txt"}, "test-scope")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	var uploaded, posted []string
+	ch.uploadFileFn = func(ctx context.Context, params slacksdk.UploadFileParameters) error {
+		uploaded = append(uploaded, params.Filename)
+		return nil
+	}
+	ch.postTextFn = func(ctx context.Context, channelID, threadTS, text string) error {
+		posted = append(posted, text)
+		return nil
+	}
+
+	_, err = ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
+		ChatID: "C123456",
+		Parts: []bus.MediaPart{
+			{Ref: emptyRef, Type: "file", Filename: "empty.txt"},
+			{Ref: ref, Type: "file", Filename: "report.txt", Caption: "the report"},
+		},
+	})
+
+	if !reflect.DeepEqual(uploaded, []string{"report.txt"}) || !reflect.DeepEqual(posted, []string{"the report"}) {
+		t.Fatalf("uploaded %v and posted %v, want report.txt and its caption", uploaded, posted)
+	}
+	assertNotSent(t, err, "empty.txt", "sent 1 of 2")
+	if strings.Contains(err.Error(), "report.txt") {
+		t.Fatalf("SendMedia() error = %q, names the file it sent", err)
+	}
+}
+
+// When no file goes up the caption does not either, and a file without a name
+// is reported by its ref. (seucaranguejo fork — MST-957)
+func TestSendMedia_PostsNoCaptionWhenNoFileWentUp(t *testing.T) {
+	ch, ref := newMediaTestChannel(t, nil)
+	unnamedPath := filepath.Join(t.TempDir(), "unnamed")
+	if err := os.WriteFile(unnamedPath, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	unnamedRef, err := ch.GetMediaStore().Store(unnamedPath, media.MediaMeta{}, "test-scope")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	uploads, posts := 0, 0
+	ch.uploadFileFn = func(ctx context.Context, params slacksdk.UploadFileParameters) error {
+		uploads++
+		return nil
+	}
+	ch.postTextFn = func(ctx context.Context, channelID, threadTS, text string) error {
+		posts++
+		return nil
+	}
+
+	_, err = ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
+		ChatID: "C123456",
+		Parts: []bus.MediaPart{
+			{Ref: ref, Type: "file", Filename: "report.txt", Caption: "the report"},
+			{Ref: unnamedRef, Type: "file"},
+		},
+	})
+
+	if uploads != 0 || posts != 0 {
+		t.Fatalf("uploads = %d, posts = %d, want none", uploads, posts)
+	}
+	assertNotSent(t, err, "sent 0 of 2", "report.txt, "+unnamedRef)
 }
