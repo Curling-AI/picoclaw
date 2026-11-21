@@ -148,7 +148,7 @@ func (t *CronTool) Name() string {
 
 // Description returns the tool description
 func (t *CronTool) Description() string {
-	return `Schedule, inspect, and update reminders, tasks, or system commands. 
+	description := `Schedule, inspect, and update reminders, tasks, or system commands. 
 IMPORTANT: When user asks to be reminded or scheduled, you MUST call this tool. 
 Use 'at_seconds' for one-time reminders (e.g., 'remind me in 10 minutes' → at_seconds=600). 
 Use 'every_seconds' ONLY for recurring tasks (e.g., 'every 2 hours' → every_seconds=7200). 
@@ -156,6 +156,12 @@ Use 'cron_expr' for complex recurring schedules.
 Use 'command' to execute shell commands directly.
 To CHANGE what a recurring job does, use 'list' then 'get' to find its id.
 Recurring jobs may keep a reproducible script at scripts/<id>/run.sh — read/edit that script to change the behavior.`
+	if minimum := t.cronService.MinInterval(); minimum > 0 {
+		description += fmt.Sprintf("\nRecurring jobs must run at least %g minutes apart: every_seconds of %d or more, "+
+			"and no two runs of a cron_expr closer than that. Do not offer the user a shorter interval.",
+			minimum.Minutes(), int64(minimum/time.Second))
+	}
+	return description
 }
 
 // Parameters returns the tool parameters schema

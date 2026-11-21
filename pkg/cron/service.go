@@ -132,6 +132,7 @@ type CronService struct {
 	stopChan             chan struct{}
 	wakeChan             chan struct{}
 	gronx                *gronx.Gronx
+	minInterval          time.Duration
 	execSlots            chan struct{}
 	idleProbe            IdleProbe
 }
@@ -252,6 +253,7 @@ func (cs *CronService) loadAndClaimMissedRuns() ([]string, error) {
 	if err := cs.loadExecutionAdmissions(); err != nil {
 		return nil, fmt.Errorf("load pending cron admissions: %w", err)
 	}
+	cs.raiseShortSchedules()
 	missed := cs.recomputeNextRuns(grace)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		return nil, fmt.Errorf("failed to save store: %w", err)
@@ -917,6 +919,9 @@ func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPa
 }
 
 func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
+	if err := checkInterval(job.Schedule, cs.minInterval); err != nil {
+		return nil, err
+	}
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		// Left in memory, the unsaved job would run, and the caller's retry would duplicate it.
@@ -949,6 +954,13 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 	for i := range cs.store.Jobs {
 		if cs.store.Jobs[i].ID == job.ID {
 			previous := cs.store.Jobs[i]
+			// Only a new schedule is checked: a job saved under a lower minimum
+			// can still be renamed or paused until Start rewrites it.
+			if !sameSchedule(previous.Schedule, job.Schedule) {
+				if err := checkInterval(job.Schedule, cs.minInterval); err != nil {
+					return err
+				}
+			}
 			updated := cloneCronJob(*job)
 			if _, prefixed := utils.StripAutomationRunPrefix(updated.Name); prefixed {
 				updated.Name = utils.AutomationName(updated.Name, updated.Payload.Message)

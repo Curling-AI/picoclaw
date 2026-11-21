@@ -855,6 +855,7 @@ func setupCronTool(
 	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
 
 	cronService := cron.NewCronService(cronStorePath, nil)
+	cronService.SetMinInterval(time.Duration(cfg.Tools.Cron.MinIntervalMinutes) * time.Minute)
 
 	var cronTool *tools.CronTool
 	if cfg.Tools.IsToolEnabled("cron") {
