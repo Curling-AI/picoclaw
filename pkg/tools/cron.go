@@ -165,8 +165,8 @@ Recurring jobs may keep a reproducible script at scripts/<id>/run.sh — read/ed
 		description += fmt.Sprintf("\nAll recurring automations together may run at most %d times a day; "+
 			"a schedule that would pass that is refused.", limit)
 		description += "\n'list' shows the runs a day in use and what each job takes. A job 'paused by the daily limit' " +
-			"was paused by the platform, not the user: tell the user, and resume it only after freeing its runs a day " +
-			"(slowing down or removing another job) with the user's agreement."
+			"was paused by the platform, not the user: tell the user. Resume it only with the user's agreement, and " +
+			"only once its runs a day fit what is left, slowing down or removing another job if they do not."
 	}
 	return description
 }
@@ -367,18 +367,25 @@ func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
 	}
 	jobs = accessibleJobs
 
+	// The cap counts every chat's jobs, so the budget shows even where none is visible.
+	var budget string
+	limit := t.cronService.MaxRunsPerDay()
+	if limit > 0 {
+		budget = fmt.Sprintf("Runs a day in use: %d of %d.\n", t.cronService.RunsPerDayInUse(), limit)
+	}
 	if len(jobs) == 0 {
-		return SilentResult("No scheduled jobs")
+		return SilentResult(budget + "No scheduled jobs")
 	}
 
 	var result strings.Builder
 	result.WriteString("Scheduled jobs:\n")
-	if limit := t.cronService.MaxRunsPerDay(); limit > 0 {
-		fmt.Fprintf(&result, "Runs a day in use: %d of %d.\n", t.cronService.RunsPerDayInUse(), limit)
-	}
+	result.WriteString(budget)
 	for _, j := range jobs {
 		scheduleInfo := jobScheduleText(j.Schedule)
-		if runs := t.cronService.RunsPerDay(j); runs > 0 {
+		switch runs := t.cronService.RunsPerDay(j); {
+		case runs > limit:
+			scheduleInfo += fmt.Sprintf(", more than %d runs a day", limit) // counting stops past the cap
+		case runs > 0:
 			scheduleInfo += fmt.Sprintf(", %d runs a day", runs)
 		}
 		switch {

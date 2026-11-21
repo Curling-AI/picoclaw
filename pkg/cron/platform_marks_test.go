@@ -63,6 +63,12 @@ func TestStartMarksWhatItPausesAndSlowsAndTheOwnerClearsIt(t *testing.T) {
 	if storedJob(t, path, "c").State.PausedBy != PausedByDailyLimit {
 		t.Fatal("a refused resume cleared the mark")
 	}
+	if _, err := cs.EnableJob("c", false); err != nil {
+		t.Fatal(err)
+	}
+	if storedJob(t, path, "c").State.PausedBy != "" {
+		t.Fatal("the owner's own pause of a job the limit paused kept the platform's reason")
+	}
 	if _, err := cs.EnableJob("a", false); err != nil {
 		t.Fatal(err)
 	}

@@ -1128,9 +1128,7 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 					return nil, err
 				}
 			}
-			if enabled || job.Enabled {
-				job.State.PausedBy = "" // resumed, or paused by its owner
-			}
+			job.State.PausedBy = "" // the owner's own resume or pause
 			job.Enabled = enabled
 			job.UpdatedAtMS = time.Now().UnixMilli()
 
