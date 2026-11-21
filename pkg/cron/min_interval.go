@@ -125,10 +125,12 @@ func minutesText(d time.Duration) string {
 
 // raiseShortSchedules rewrites the stored jobs, enabled or paused, that run
 // more often than the minimum: saved before it, or under a lower one, they
-// would otherwise refuse every edit while running as before. A stored run
-// moves to the new schedule's first run at or after it, so recomputeNextRuns
-// replays it only if the new schedule has it. The caller holds cs.mu.
-func (cs *CronService) raiseShortSchedules() {
+// would otherwise refuse every edit while running as before. It returns their
+// IDs, which recomputeNextRuns leaves alone: a rewritten job does not catch up
+// at this boot, and runs next no sooner than now or the minimum after its last
+// run. The caller holds cs.mu.
+func (cs *CronService) raiseShortSchedules(nowMS int64) map[string]bool {
+	rewritten := map[string]bool{}
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
 		if checkInterval(job.Schedule, cs.minInterval) == nil {
@@ -146,10 +148,23 @@ func (cs *CronService) raiseShortSchedules() {
 		log.Printf("[cron] job %s ran more often than %s: schedule %q rewritten to %q",
 			job.ID, cs.minInterval, scheduleText(job.Schedule), scheduleText(raised))
 		job.Schedule = raised
-		if job.State.NextRunAtMS != nil {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, *job.State.NextRunAtMS-1)
+		rewritten[job.ID] = true
+		if !job.Enabled || cs.hasAdmissionRetry(job.ID) {
+			continue // as recomputeNextRuns: no next run to set
 		}
+		var lastMS int64
+		if job.State.LastRunAtMS != nil {
+			lastMS = *job.State.LastRunAtMS
+		}
+		// Not before now (no catch-up) nor the minimum after the last run: "every"
+		// runs an interval after from, an expression at its first run after from.
+		from := max(nowMS, lastMS)
+		if job.Schedule.Kind == "cron" {
+			from = max(nowMS, lastMS+cs.minInterval.Milliseconds()) - 1
+		}
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, from)
 	}
+	return rewritten
 }
 
 // raiseSchedule slows schedule down to minimum, at most an hour. An expression

@@ -253,8 +253,8 @@ func (cs *CronService) loadAndClaimMissedRuns() ([]string, error) {
 	if err := cs.loadExecutionAdmissions(); err != nil {
 		return nil, fmt.Errorf("load pending cron admissions: %w", err)
 	}
-	cs.raiseShortSchedules()
-	missed := cs.recomputeNextRuns(grace)
+	rewritten := cs.raiseShortSchedules(time.Now().UnixMilli())
+	missed := cs.recomputeNextRuns(grace, rewritten)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		return nil, fmt.Errorf("failed to save store: %w", err)
 	}
@@ -719,13 +719,14 @@ func (cs *CronService) notify() {
 }
 
 // recomputeNextRuns returns the missed runs it claimed, those less than grace
-// late, for the caller to dispatch once the claim is saved.
-func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
+// late, for the caller to dispatch once the claim is saved. Jobs in skip were
+// just scheduled by raiseShortSchedules.
+func (cs *CronService) recomputeNextRuns(grace time.Duration, skip map[string]bool) []string {
 	now := time.Now().UnixMilli()
 	var missed []string
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
-		if !job.Enabled || cs.hasAdmissionRetry(job.ID) {
+		if !job.Enabled || cs.hasAdmissionRetry(job.ID) || skip[job.ID] {
 			continue
 		}
 		if late, ok := missedRun(job.State, now); ok {
