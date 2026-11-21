@@ -147,7 +147,13 @@ func (cs *CronService) raiseShortSchedules() {
 			job.ID, cs.minInterval, scheduleText(job.Schedule), scheduleText(raised))
 		job.Schedule = raised
 		if job.State.NextRunAtMS != nil {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, *job.State.NextRunAtMS-1)
+			from := *job.State.NextRunAtMS
+			// The first run of a rewritten expression keeps the minimum after the last one;
+			// "every" already starts a whole interval after the stored run.
+			if last := job.State.LastRunAtMS; last != nil && job.Schedule.Kind == "cron" {
+				from = max(from, *last+cs.minInterval.Milliseconds())
+			}
+			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, from-1)
 		}
 	}
 }

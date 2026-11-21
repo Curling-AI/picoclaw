@@ -266,3 +266,34 @@ func TestCheckingManyAllowedDenseJobsAtBootIsQuick(t *testing.T) {
 		t.Errorf("checking %d allowed */30 jobs took %s", len(jobs), took)
 	}
 }
+
+// The first run after a boot rewrite keeps the minimum after the last run: a
+// */5 job that ran at 10:25 and is due at 10:30 runs next at 11:00 as */30.
+func TestRaisingAJobKeepsTheMinimumAfterItsLastRun(t *testing.T) {
+	at := func(h, m int) int64 { return time.Date(2026, 3, 2, h, m, 0, 0, time.Local).UnixMilli() }
+	for _, tc := range []struct {
+		name       string
+		last, want int64
+	}{
+		{"ran 5 minutes before the stored run", at(10, 25), at(11, 0)},
+		{"ran long before the stored run", at(9, 0), at(10, 30)},
+	} {
+		cs := NewCronService(writeStore(t, CronJob{
+			ID: "often", Name: "often", Enabled: true,
+			Schedule: CronSchedule{Kind: "cron", Expr: "*/5 * * * *"},
+			State:    CronJobState{LastRunAtMS: int64Ptr(tc.last), NextRunAtMS: int64Ptr(at(10, 30))},
+		}), nil)
+		cs.SetMinInterval(30 * time.Minute)
+		cs.mu.Lock()
+		cs.raiseShortSchedules()
+		job := cs.store.Jobs[0]
+		cs.mu.Unlock()
+		got := "none"
+		if job.State.NextRunAtMS != nil {
+			got = time.UnixMilli(*job.State.NextRunAtMS).String()
+		}
+		if job.Schedule.Expr != "*/30 * * * *" || job.State.NextRunAtMS == nil || *job.State.NextRunAtMS != tc.want {
+			t.Errorf("%s: %q next run %s, want */30 at %s", tc.name, job.Schedule.Expr, got, time.UnixMilli(tc.want))
+		}
+	}
+}
