@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -189,4 +190,95 @@ func TestPublicPrefixVerificationChecksItsSupplementWithoutHashingRetainedArtifa
 	if strings.Join(projector.seen, ",") != "prefix,prefix supplement,nested supplement" {
 		t.Fatal("prefix verification omitted its supplement", projector.seen)
 	}
+}
+
+// Nothing displays a cron run's own transcript, so its session keeps only the
+// model history: no .jsonl.public/.index pair to write on every message. The
+// run survives a rollback cut and a truncating save, its projection readers
+// report missing coverage, the prune still removes every file, and a
+// conversation keeps its projection.
+func TestCronRunSessionKeepsNoPublicProjection(t *testing.T) {
+	store := newTestStore(t)
+	ctx := t.Context()
+	conversation := "sk_v1_conversation"
+	runs := []string{
+		"agent:cron-job-1-0b89ab77-2375-42d6-ac89-83d2ebc233b6",
+		"agent:cronmodel-job-1-1c89ab77-2375-42d6-ac89-83d2ebc233b6",
+	}
+	done := providers.Message{Role: "assistant", Content: "done"}
+	for _, key := range append([]string{conversation}, runs...) {
+		// The agent records the session's metadata before its first message.
+		if err := store.UpsertSessionMeta(ctx, key, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddMessage(ctx, key, "user", "run the report"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AppendHistoryReceipt(ctx, key, done); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, key := range runs {
+		if err := store.AddMessage(ctx, key, "user", "aborted turn"); err != nil {
+			t.Fatal(err)
+		}
+		history, err := store.GetHistory(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = store.SetHistory(ctx, key, history[:2]); err != nil {
+			t.Fatal("rollback:", err)
+		}
+		if err = store.TruncateHistory(ctx, key, 1); err != nil {
+			t.Fatal("truncate:", err)
+		}
+		if err = store.CompactForSessionSave(ctx, key); err != nil {
+			t.Fatal("save:", err)
+		}
+		history, err = store.GetHistory(ctx, key)
+		if err != nil || len(history) != 1 || history[0].Content != "done" {
+			t.Fatalf("%s history = %+v, %v; want the retained reply", key, history, err)
+		}
+		_, err = store.ReadPublicHistoryPage(ctx, PublicHistoryPageRequest{Key: key})
+		if !errors.Is(err, ErrPublicHistoryCoverage) {
+			t.Fatalf("%s page read = %v, want missing coverage", key, err)
+		}
+		if _, err = store.PreparePublicHistory(ctx, key, ""); !errors.Is(err, ErrPublicHistoryCoverage) {
+			t.Fatalf("%s preparation = %v, want missing coverage", key, err)
+		}
+		name := sanitizeKey(key)
+		want := []string{name + ".jsonl", name + ".jsonl.order-witness", name + ".meta.json"}
+		if got := sessionFileNames(t, store.dir, name); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s files = %v, want %v", key, got, want)
+		}
+	}
+	if !exists(t, store.publicHistoryPath(conversation)) || !exists(t, store.publicIndexPath(conversation)) {
+		t.Fatal("a conversation lost its public projection")
+	}
+
+	removed, err := store.PruneCronRuns(time.Hour, time.Now().Add(48*time.Hour))
+	if err != nil || removed != len(runs) {
+		t.Fatalf("prune removed %d runs (%v), want %d", removed, err, len(runs))
+	}
+	for _, key := range runs {
+		if got := sessionFileNames(t, store.dir, sanitizeKey(key)); len(got) != 0 {
+			t.Fatalf("%s left %v behind", key, got)
+		}
+	}
+}
+
+func sessionFileNames(t *testing.T, dir, name string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), name+".") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
 }
