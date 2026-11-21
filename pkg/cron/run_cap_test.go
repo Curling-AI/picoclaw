@@ -194,7 +194,7 @@ func TestCountingManyDenseJobsAtBootIsQuick(t *testing.T) {
 	cs.SetMaxRunsPerDay(1000)
 	cs.mu.Lock()
 	began := time.Now()
-	cs.raiseShortSchedules()
+	cs.raiseShortSchedules(time.Now().UnixMilli())
 	cs.pauseJobsPastCap()
 	took := time.Since(began)
 	cs.mu.Unlock()
