@@ -741,7 +741,16 @@ func (cs *CronService) recomputeNextRuns(grace time.Duration, skip map[string]bo
 			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
 				job.Name, late.Round(time.Second), grace)
 		}
-		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		from := now
+		// A restart never brings a cron job closer to its last run than the minimum: a job
+		// rewritten at an earlier boot is compliant now and would restart from now.
+		// "every" already starts a whole interval after now.
+		if last := job.State.LastRunAtMS; last != nil && cs.minInterval > 0 && job.Schedule.Kind == "cron" {
+			if floor := *last + cs.minInterval.Milliseconds(); floor > now {
+				from = floor - 1
+			}
+		}
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, from)
 	}
 	return missed
 }
