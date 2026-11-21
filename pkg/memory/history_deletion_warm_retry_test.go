@@ -93,6 +93,7 @@ func TestHistoryDeletionCronWarmDiscoveryAfterMetadataRemoval(t *testing.T) {
 				t.Fatal(err)
 			}
 			key := "agent:cron-audit-cleanup-retry"
+			projectedCronRun(t, s, key)
 			for _, role := range []string{"user", "assistant", "user", "assistant"} {
 				if err = s.AddMessage(t.Context(), key, role, "same"); err != nil {
 					t.Fatal(err)

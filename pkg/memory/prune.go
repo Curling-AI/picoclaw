@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // cronRunKeyPrefixes are the session-key prefixes of cron RUN sessions: a
@@ -14,6 +17,20 @@ import (
 // (agent:cronmodel-<job>-<uuid>). Matching only the first is a known pitfall —
 // the model variant has leaked into listings that filtered just "agent:cron-".
 var cronRunKeyPrefixes = []string{"agent:cron-", "agent:cronmodel-"}
+
+// maxCronRunsPerJob is how many runs of one automation survive the prune: a job
+// that fires every few minutes keeps thousands of runs inside the retention
+// window, and every run's files sit in the one directory each listing reads.
+const maxCronRunsPerJob = 50
+
+// cronRunSettleAge is how long a run's meta must go unwritten before the cap may
+// remove it: manual runs overlap scheduled ones, and a run untouched for a day has ended.
+const cronRunSettleAge = 24 * time.Hour
+
+type cronRun struct {
+	sanitized string
+	modified  time.Time
+}
 
 // IsCronRunSessionKey reports whether a session key belongs to a cron run.
 // Both variants count, for the same reason isCronRunFile matches both.
@@ -56,7 +73,9 @@ func isCronRunFile(name string) bool {
 // Candidates are selected by modification time rather than the meta's UpdatedAt.
 // Recovery guards can retain a candidate whose history cannot safely be removed.
 // An in-flight run is never at risk: its files were just written, so they fall
-// far inside the retention window. A retention of zero or less disables pruning.
+// far inside the retention window. Within the window, each automation keeps
+// only its newest maxCronRunsPerJob runs plus any not yet settled (capCronRuns).
+// A retention of zero or less disables pruning.
 func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int, error) {
 	if retention <= 0 {
 		return 0, nil
@@ -69,6 +88,7 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 	cutoff := now.Add(-retention)
 	removed := 0
 	seen := make(map[string]bool)
+	recent := make(map[string][]cronRun)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -85,6 +105,12 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 			continue
 		}
 		info, ierr := entry.Info()
+		if ierr == nil && suffix == ".meta.json" && !info.ModTime().Before(cutoff) {
+			sanitized := strings.TrimSuffix(entry.Name(), suffix)
+			if job, ok := cronRunJob(sanitized); ok {
+				recent[job] = append(recent[job], cronRun{sanitized: sanitized, modified: info.ModTime()})
+			}
+		}
 		if ierr != nil || (suffix != ".jsonl.commit.json" && !info.ModTime().Before(cutoff)) {
 			continue
 		}
@@ -101,7 +127,44 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 			removed++
 		}
 	}
-	return removed, nil
+	return removed + s.capCronRuns(recent, now), nil
+}
+
+// capCronRuns removes each automation's runs past its newest maxCronRunsPerJob,
+// newest by .meta.json mtime like the age rule. Between writes an executing run
+// holds no lock or journal, and a manual run can outlast 50 scheduled ones, so
+// only runs settled for cronRunSettleAge go. The removal takes the session lock
+// and resumes a pending deletion, and recovery guards can still retain a run.
+func (s *JSONLStore) capCronRuns(recent map[string][]cronRun, now time.Time) int {
+	settled := now.Add(-cronRunSettleAge)
+	removed := 0
+	for _, runs := range recent {
+		if len(runs) <= maxCronRunsPerJob {
+			continue
+		}
+		newestFirst := slices.SortedFunc(slices.Values(runs), func(a, b cronRun) int {
+			return b.modified.Compare(a.modified)
+		})
+		for _, run := range newestFirst[maxCronRunsPerJob:] {
+			if run.modified.Before(settled) && s.removeSessionFiles(run.sanitized) == nil {
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
+// cronRunJob returns the automation a run file belongs to. Both prefixes share
+// the job, and the run ID is the trailing UUID because job IDs may hold '-'.
+func cronRunJob(sanitized string) (string, bool) {
+	for _, prefix := range cronRunKeyPrefixes {
+		rest, isRun := strings.CutPrefix(sanitized, sanitizeKey(prefix))
+		cut := len(rest) - len(uuid.Nil.String()) - 1
+		if isRun && cut > 0 && rest[cut] == '-' && uuid.Validate(rest[cut+1:]) == nil {
+			return rest[:cut], true
+		}
+	}
+	return "", false
 }
 
 func (s *JSONLStore) pruneSessionFilesLocked(sanitized string, cutoff time.Time) (bool, error) {

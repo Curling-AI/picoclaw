@@ -181,7 +181,7 @@ func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
 				s.jsonlPath(key),
 				s.historyRecoveryPath(key),
 				s.historyDecisionPath(key),
-				s.historyOrderWitnessPath(key), s.publicHistoryPath(key), s.publicIndexPath(key),
+				s.historyOrderWitnessPath(key), // a cron run keeps no public projection
 			}
 			for _, path := range paths {
 				if operationErr := os.Chtimes(path, old, old); operationErr != nil {

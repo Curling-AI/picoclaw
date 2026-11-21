@@ -132,6 +132,9 @@ type CronService struct {
 	stopChan             chan struct{}
 	wakeChan             chan struct{}
 	gronx                *gronx.Gronx
+	minInterval          time.Duration
+	maxRunsPerDay        int
+	capExempt            func(job *CronJob) bool
 	execSlots            chan struct{}
 	idleProbe            IdleProbe
 }
@@ -252,7 +255,9 @@ func (cs *CronService) loadAndClaimMissedRuns() ([]string, error) {
 	if err := cs.loadExecutionAdmissions(); err != nil {
 		return nil, fmt.Errorf("load pending cron admissions: %w", err)
 	}
-	missed := cs.recomputeNextRuns(grace)
+	rewritten := cs.raiseShortSchedules(time.Now().UnixMilli())
+	cs.pauseJobsPastCap()
+	missed := cs.recomputeNextRuns(grace, rewritten)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		return nil, fmt.Errorf("failed to save store: %w", err)
 	}
@@ -717,13 +722,14 @@ func (cs *CronService) notify() {
 }
 
 // recomputeNextRuns returns the missed runs it claimed, those less than grace
-// late, for the caller to dispatch once the claim is saved.
-func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
+// late, for the caller to dispatch once the claim is saved. Jobs in skip were
+// just scheduled by raiseShortSchedules.
+func (cs *CronService) recomputeNextRuns(grace time.Duration, skip map[string]bool) []string {
 	now := time.Now().UnixMilli()
 	var missed []string
 	for i := range cs.store.Jobs {
 		job := &cs.store.Jobs[i]
-		if !job.Enabled || cs.hasAdmissionRetry(job.ID) {
+		if !job.Enabled || cs.hasAdmissionRetry(job.ID) || skip[job.ID] {
 			continue
 		}
 		if late, ok := missedRun(job.State, now); ok {
@@ -738,7 +744,16 @@ func (cs *CronService) recomputeNextRuns(grace time.Duration) []string {
 			log.Printf("[cron] job '%s' missed its run by %s (grace %s); skipping to the next one",
 				job.Name, late.Round(time.Second), grace)
 		}
-		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		from := now
+		// A restart never brings a cron job closer to its last run than the minimum: a job
+		// rewritten at an earlier boot is compliant now and would restart from now.
+		// "every" already starts a whole interval after now.
+		if last := job.State.LastRunAtMS; last != nil && cs.minInterval > 0 && job.Schedule.Kind == "cron" {
+			if floor := *last + cs.minInterval.Milliseconds(); floor > now {
+				from = floor - 1
+			}
+		}
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, from)
 	}
 	return missed
 }
@@ -917,6 +932,12 @@ func (cs *CronService) newJob(name string, schedule CronSchedule, payload CronPa
 }
 
 func (cs *CronService) addJobUnsafe(job CronJob) (*CronJob, error) {
+	if err := checkInterval(job.Schedule, cs.minInterval); err != nil {
+		return nil, err
+	}
+	if err := cs.checkRunCap(job); err != nil {
+		return nil, err
+	}
 	cs.store.Jobs = append(cs.store.Jobs, job)
 	if err := cs.saveStoreUnsafe(); err != nil {
 		// Left in memory, the unsaved job would run, and the caller's retry would duplicate it.
@@ -949,6 +970,20 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 	for i := range cs.store.Jobs {
 		if cs.store.Jobs[i].ID == job.ID {
 			previous := cs.store.Jobs[i]
+			// Only a new schedule is checked: a job saved under a lower minimum
+			// can still be renamed or paused until Start rewrites it.
+			if !sameSchedule(previous.Schedule, job.Schedule) {
+				if err := checkInterval(job.Schedule, cs.minInterval); err != nil {
+					return err
+				}
+			}
+			// Counted again when it starts to count (resumed, or an edit ends its
+			// exemption) or runs differently; checkRunCap skips it if it does not count.
+			if !cs.countsTowardCap(&previous) || !sameSchedule(previous.Schedule, job.Schedule) {
+				if err := cs.checkRunCap(*job); err != nil {
+					return err
+				}
+			}
 			updated := cloneCronJob(*job)
 			if _, prefixed := utils.StripAutomationRunPrefix(updated.Name); prefixed {
 				updated.Name = utils.AutomationName(updated.Name, updated.Payload.Message)
@@ -1065,6 +1100,13 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 		job := &cs.store.Jobs[i]
 		if job.ID == jobID {
 			previous := cloneCronJob(*job)
+			if enabled && !job.Enabled {
+				resumed := *job
+				resumed.Enabled = true
+				if err := cs.checkRunCap(resumed); err != nil {
+					return nil, err
+				}
+			}
 			job.Enabled = enabled
 			job.UpdatedAtMS = time.Now().UnixMilli()
 

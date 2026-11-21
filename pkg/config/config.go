@@ -1203,6 +1203,12 @@ type CronToolsConfig struct {
 	// obrigavam a dois model_name, e um model_name que parece nome de modelo
 	// acabou vazando para o provedor. Vazio = deixa como o modelo vier. (fork)
 	ReasoningEffort string `json:"reasoning_effort,omitempty" env:"PICOCLAW_TOOLS_CRON_REASONING_EFFORT"`
+	// MinIntervalMinutes is the shortest time between two runs of a recurring
+	// job (cron.CronService.SetMinInterval). 0 means no minimum.
+	MinIntervalMinutes int `json:"min_interval_minutes" env:"PICOCLAW_TOOLS_CRON_MIN_INTERVAL_MINUTES"`
+	// MaxRunsPerDay caps the runs a day of all recurring jobs together
+	// (cron.CronService.SetMaxRunsPerDay). 0 means no cap.
+	MaxRunsPerDay int `json:"max_runs_per_day" env:"PICOCLAW_TOOLS_CRON_MAX_RUNS_PER_DAY"`
 }
 
 // EffectiveMemoryRefreshSchedule returns the configured cron expr or the

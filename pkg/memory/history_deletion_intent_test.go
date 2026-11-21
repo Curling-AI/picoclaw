@@ -265,6 +265,7 @@ func TestHistoryDeletionIntentWarmRetentionRetryIgnoresOnlyItsOwnFreshJournal(t 
 		t.Fatal(err)
 	}
 	key := "agent:cron-cleanup-retry"
+	projectedCronRun(t, s, key)
 	for _, role := range []string{"user", "assistant", "user", "assistant"} {
 		if err = s.AddFullMessage(
 			t.Context(),
