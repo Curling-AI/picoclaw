@@ -53,7 +53,16 @@ type CronJobState struct {
 	LastRunAtMS *int64 `json:"lastRunAtMs,omitempty"`
 	LastStatus  string `json:"lastStatus,omitempty"`
 	LastError   string `json:"lastError,omitempty"`
+	// PausedBy names who paused the job when it was not its owner
+	// (PausedByDailyLimit); resuming or pausing it again clears it.
+	PausedBy string `json:"pausedBy,omitempty"`
+	// SlowedFrom is the schedule Start replaced to meet the minimum interval;
+	// a new schedule clears it.
+	SlowedFrom *CronSchedule `json:"slowedFrom,omitempty"`
 }
+
+// PausedByDailyLimit marks a job Start paused to fit the daily run cap.
+const PausedByDailyLimit = "daily_limit"
 
 // MemoryRefreshJobName names the job the gateway seeds to curate memory.
 const MemoryRefreshJobName = "memory-refresh"
@@ -985,6 +994,14 @@ func (cs *CronService) UpdateJob(job *CronJob) error {
 				}
 			}
 			updated := cloneCronJob(*job)
+			// The platform's marks follow the stored job, never the caller's copy.
+			updated.State.PausedBy, updated.State.SlowedFrom = previous.State.PausedBy, previous.State.SlowedFrom
+			if updated.Enabled || previous.Enabled {
+				updated.State.PausedBy = ""
+			}
+			if !sameSchedule(previous.Schedule, updated.Schedule) {
+				updated.State.SlowedFrom = nil
+			}
 			if _, prefixed := utils.StripAutomationRunPrefix(updated.Name); prefixed {
 				updated.Name = utils.AutomationName(updated.Name, updated.Payload.Message)
 			}
@@ -1028,6 +1045,10 @@ func cloneCronJob(job CronJob) CronJob {
 	if job.State.LastRunAtMS != nil {
 		lastRunAtMS := *job.State.LastRunAtMS
 		clone.State.LastRunAtMS = &lastRunAtMS
+	}
+	if slowed := job.State.SlowedFrom; slowed != nil {
+		schedule := cloneCronJob(CronJob{Schedule: *slowed}).Schedule
+		clone.State.SlowedFrom = &schedule
 	}
 	clone.Payload.Connectors = slices.Clone(job.Payload.Connectors)
 	return clone
@@ -1107,6 +1128,7 @@ func (cs *CronService) EnableJob(jobID string, enabled bool) (*CronJob, error) {
 					return nil, err
 				}
 			}
+			job.State.PausedBy = "" // the owner's own resume or pause
 			job.Enabled = enabled
 			job.UpdatedAtMS = time.Now().UnixMilli()
 
