@@ -1279,6 +1279,13 @@ func (c *LoopDetectionConfig) Validate() error {
 // MessagesConfig controls user-facing message behavior.
 type MessagesConfig struct {
 	SuppressToolErrors bool `json:"suppress_tool_errors" env:"PICOCLAW_MESSAGES_SUPPRESS_TOOL_ERRORS"`
+	// The texts a turn ends with when the model gave no reply, ran out of
+	// max_tool_iterations, or kept repeating a refused call, in the language
+	// of whoever reads them. Empty keeps the built-in English text.
+	// RepeatStop names the tool where it says {tool}. (seucaranguejo fork)
+	EmptyResponse string `json:"empty_response,omitempty" env:"PICOCLAW_MESSAGES_EMPTY_RESPONSE"`
+	ToolLimit     string `json:"tool_limit,omitempty"     env:"PICOCLAW_MESSAGES_TOOL_LIMIT"`
+	RepeatStop    string `json:"repeat_stop,omitempty"    env:"PICOCLAW_MESSAGES_REPEAT_STOP"`
 }
 
 type SkillsToolsConfig struct {

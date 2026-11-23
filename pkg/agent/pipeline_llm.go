@@ -148,20 +148,38 @@ const undeliveredAnnouncementNudge = "[System] Your last reply announced an acti
 const maxInterruptedStreamRetries = 1
 
 // maxDanglingColonRetries caps retries IN A ROW after a reply that ended on a
-// colon once tools had run. Like maxTruncatedToolCallRetries, the count starts
-// over when the model emits a real call: a long spec run can stop this way
-// again dozens of iterations later, and that occurrence deserves its own retry.
+// colon, or on a promise of the next step, once tools had run. Like
+// maxTruncatedToolCallRetries, the count starts over when the model emits a
+// real call: a long spec run can stop this way again dozens of iterations
+// later, and that occurrence deserves its own retry.
 const maxDanglingColonRetries = 1
 
 // danglingColonNudge quotes the tail it discarded. The model never sees that
 // reply again, and a bare "carry on" leaves it re-reading the whole turn to
 // guess which step it was about to take.
 func danglingColonNudge(reply string) string {
+	if !endsOnDanglingColon(reply) {
+		return undeliveredPromiseNudge(reply)
+	}
 	return "[System] Your last reply ended on a colon and nothing followed it: «" + replyTail(reply) + "». " +
 		"It carried no tool call, so the step it introduced never ran and the user is still waiting. " +
 		"Carry on with the task now by emitting the tool call for that step. If the work is finished, write the " +
 		"final answer in full instead of introducing it. If what the colon introduced was already delivered by a " +
 		"tool in this turn (a file, a card, buttons), do not send it again: close with one short sentence."
+}
+
+// undeliveredPromiseNudge is danglingColonNudge for a reply that closed on
+// "vou refazer…" instead of a colon. It allows for a step that did run, and
+// for a person who asked only for the plan: the detector reads prose, and
+// running a publish or a send twice, or against what was asked, is worse than
+// one more call.
+func undeliveredPromiseNudge(reply string) string {
+	all := sentences(strings.TrimRight(reply, trailingEmphasis))
+	return "[System] Your last reply ended by promising the next step: «" + all[len(all)-1] + "». " +
+		"It carried no tool call, so that step never ran and the user is still waiting. " +
+		"Carry on with the task now by emitting the tool call for that step. If a tool in this turn already did " +
+		"it, do not run it again: write the final answer, saying what was done. If the user asked you only to " +
+		"describe or plan the step, not to do it, send your last reply again unchanged."
 }
 
 // maxDegenerateResponseRetries caps same-turn retries after the model looped on
@@ -189,6 +207,16 @@ func announcesUndeliveredCall(exec *turnExecution, content string) bool {
 	return !exec.gracefulTerminal && !exec.toolRanThisTurn &&
 		len(exec.providerToolDefs) > 0 &&
 		looksLikeUndeliveredAnnouncement(content)
+}
+
+// deliversUndeliveredPromise reports whether content, about to go out as the
+// final answer, still reads as a promise of a step: by the check of the guard
+// that covers this point of the turn. (seucaranguejo fork)
+func deliversUndeliveredPromise(exec *turnExecution, content string) bool {
+	if exec.toolRanThisTurn {
+		return endsOnUnfinishedStep(content)
+	}
+	return looksLikeUndeliveredAnnouncement(content)
 }
 
 // keepWatchedReply puts a direct reply the person already watched being
@@ -1399,33 +1427,48 @@ func (p *Pipeline) CallLLM(
 		// empty-response fallback would read as if nothing had happened. It
 		// also stands down once the tool-budget wrap-up went out, which told
 		// the model to deliver instead of starting the next step.
+		//
+		// The same stop in plain prose, without the colon, is the common one:
+		// "Vou refazer com uma ideia visual melhor: mostrar que…" came back with
+		// stop after five tools and ended the turn. It shares the colon's
+		// budget: either way it is one stop, and it gets one retry.
 		if !exec.gracefulTerminal && exec.toolRanThisTurn && !exec.wrapUpNudged &&
 			!ts.atIterationCap(iteration) &&
 			len(exec.providerToolDefs) > 0 &&
-			endsOnDanglingColon(responseContent) {
-			if exec.danglingColonRetries < maxDanglingColonRetries {
-				exec.danglingColonRetries++
-				cancelConfiguredStreamingLLM(turnCtx, exec)
-				p.reviveDiscoveredTools(ts, exec, iteration)
-				exec.danglingColonNudge = danglingColonNudge(responseContent)
-				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
-					Role:    "user",
-					Content: exec.danglingColonNudge,
-				})
-				logger.WarnCF("agent", "LLM ended a reply on a colon without a tool call; retrying",
-					map[string]any{
-						"agent_id":      ts.agent.ID,
-						"iteration":     iteration,
-						"retry":         exec.danglingColonRetries,
-						"content_chars": len(responseContent),
-					})
-				return ControlContinue, nil
-			}
-			logger.WarnCF("agent", "LLM kept ending on a colon without a tool call; delivering the reply",
+			exec.danglingColonRetries < maxDanglingColonRetries &&
+			endsOnUnfinishedStep(responseContent) {
+			exec.danglingColonRetries++
+			cancelConfiguredStreamingLLM(turnCtx, exec)
+			p.reviveDiscoveredTools(ts, exec, iteration)
+			exec.danglingColonNudge = danglingColonNudge(responseContent)
+			exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
+				Role:    "user",
+				Content: exec.danglingColonNudge,
+			})
+			logger.WarnCF("agent", "LLM ended a reply on an unfinished step without a tool call; retrying",
 				map[string]any{
 					"agent_id":      ts.agent.ID,
 					"iteration":     iteration,
+					"retry":         exec.danglingColonRetries,
 					"content_chars": len(responseContent),
+					"colon":         endsOnDanglingColon(responseContent),
+				})
+			return ControlContinue, nil
+		}
+
+		// What still reads as a promise goes out from here, out of retries or
+		// where no guard applies. One line per delivery, so the stops the guards
+		// miss or give up on can be counted; the text stays out of the log.
+		if !exec.gracefulTerminal && deliversUndeliveredPromise(exec, responseContent) {
+			logger.WarnCF("agent", "Final reply still promises a step that never ran; delivering it",
+				map[string]any{
+					"agent_id":           ts.agent.ID,
+					"iteration":          iteration,
+					"content_chars":      len(responseContent),
+					"tool_ran_this_turn": exec.toolRanThisTurn,
+					"retried":            exec.danglingColonRetries > 0,
+					"model":              exec.llmModelName,
+					"request_id":         exec.response.ProviderRequestID,
 				})
 		}
 

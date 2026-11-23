@@ -67,7 +67,9 @@ func replyThenFollowUp(messages []providers.Message, reply, followUp string) boo
 // arrived. It vanished from the history the screen reloads, and the next call
 // wrote it again without knowing it had.
 func TestConfiguredStreaming_MessageAfterAWatchedReplyKeepsTheReply(t *testing.T) {
-	const reply, followUp = "Vou montar os slides agora.", "prossiga"
+	// Not a promise ("Vou montar os slides agora." is one): that is dropped for
+	// its own reason, below.
+	const reply, followUp = "Roteiro pronto: cinco slides, um por tópico.", "prossiga"
 	al, provider, streamer, opts := steeredWhileStreaming(t, reply, followUp)
 
 	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
@@ -155,7 +157,9 @@ func TestConfiguredStreaming_MessageAfterAWatchedStalledCallDropsTheReply(t *tes
 // A reply nobody saw yet (no streaming, as on a channel that sends only the
 // final) is still the stale answer: the next call answers both messages.
 func TestConfiguredStreaming_MessageAfterAnUnseenReplyDropsTheReply(t *testing.T) {
-	const reply, followUp = "Vou montar os slides agora.", "prossiga"
+	// Not a promise ("Vou montar os slides agora." is one): that is dropped for
+	// its own reason, below.
+	const reply, followUp = "Roteiro pronto: cinco slides, um por tópico.", "prossiga"
 	cfg := newConfiguredStreamingTestConfig(t, false, false, nil)
 	provider := &steeringDuringChatProvider{replies: []string{reply, "Pronto!"}, followUp: followUp}
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
