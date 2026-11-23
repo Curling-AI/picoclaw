@@ -32,6 +32,15 @@ func age(t *testing.T, store *JSONLStore, key string, idle time.Duration) {
 	}
 }
 
+// projectedCronRun starts a run with the public projection that runs written
+// before they stopped keeping one still carry: ClearHistory creates it.
+func projectedCronRun(t *testing.T, store *JSONLStore, key string) {
+	t.Helper()
+	if err := store.ClearHistory(t.Context(), key); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // seedGhost leaves what a deleted conversation left behind before sessions had
 // a delete: the clear that the pod fell back to (history and summary emptied).
 func seedGhost(t *testing.T, store *JSONLStore, key string) {

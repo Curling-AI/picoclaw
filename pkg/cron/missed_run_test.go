@@ -24,13 +24,13 @@ func startWithStoredJob(t *testing.T, job CronJob) (*CronService, func() int) {
 	return cs, count
 }
 
-func writeStore(t *testing.T, job CronJob) string {
+func writeStore(t *testing.T, jobs ...CronJob) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cron", "jobs.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(CronStore{Version: 1, Jobs: []CronJob{job}})
+	data, err := json.Marshal(CronStore{Version: 1, Jobs: jobs})
 	if err != nil {
 		t.Fatal(err)
 	}

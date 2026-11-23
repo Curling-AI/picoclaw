@@ -17,6 +17,7 @@ func TestPublicHistoryIndexFreshWriteRetainsCronUntilAllCompanionsAreOld(t *test
 		t.Fatal(err)
 	}
 	key := "agent:cron-public-index-retention"
+	projectedCronRun(t, store, key)
 	if operationErr := store.SetHistory(
 		t.Context(),
 		key,

@@ -34,6 +34,12 @@ func (s *JSONLStore) preparePublicAppend(
 ) (publicHistoryChange, error) {
 	projectionUnavailable := next.publicProjectionUnavailable
 	next.publicProjectionUnavailable = false
+	// No reader displays a cron run's own transcript, so its first write latches it out of the projection.
+	// shortcut: a full rewrite of a run keeps -1's raw prefix and can leave it recovery-required (kept by the prune),
+	// fine while runs only append, truncate and cut back; give runs a plain rewrite if that changes.
+	if original.PublicHistoryVersion == 0 && IsCronRunSessionKey(key) {
+		next.PublicHistoryVersion = -1
+	}
 	if original.PublicHistoryPreparation != nil || original.PublicHistoryVersion < 0 ||
 		next.PublicHistoryVersion < 0 {
 		return publicHistoryChange{}, nil

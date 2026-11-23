@@ -148,7 +148,7 @@ func (t *CronTool) Name() string {
 
 // Description returns the tool description
 func (t *CronTool) Description() string {
-	return `Schedule, inspect, and update reminders, tasks, or system commands. 
+	description := `Schedule, inspect, and update reminders, tasks, or system commands. 
 IMPORTANT: When user asks to be reminded or scheduled, you MUST call this tool. 
 Use 'at_seconds' for one-time reminders (e.g., 'remind me in 10 minutes' → at_seconds=600). 
 Use 'every_seconds' ONLY for recurring tasks (e.g., 'every 2 hours' → every_seconds=7200). 
@@ -156,6 +156,19 @@ Use 'cron_expr' for complex recurring schedules.
 Use 'command' to execute shell commands directly.
 To CHANGE what a recurring job does, use 'list' then 'get' to find its id.
 Recurring jobs may keep a reproducible script at scripts/<id>/run.sh — read/edit that script to change the behavior.`
+	if minimum := t.cronService.MinInterval(); minimum > 0 {
+		description += fmt.Sprintf("\nRecurring jobs must run at least %g minutes apart: every_seconds of %d or more, "+
+			"and no two runs of a cron_expr closer than that. Do not offer the user a shorter interval.",
+			minimum.Minutes(), int64(minimum/time.Second))
+	}
+	if limit := t.cronService.MaxRunsPerDay(); limit > 0 {
+		description += fmt.Sprintf("\nAll recurring automations together may run at most %d times a day; "+
+			"a schedule that would pass that is refused.", limit)
+		description += "\n'list' shows the runs a day in use and what each job takes. A job 'paused by the daily limit' " +
+			"was paused by the platform, not the user: tell the user. Resume it only with the user's agreement, and " +
+			"only once its runs a day fit what is left, slowing down or removing another job if they do not."
+	}
+	return description
 }
 
 // Parameters returns the tool parameters schema
@@ -354,30 +367,55 @@ func (t *CronTool) listJobs(ctx context.Context) *ToolResult {
 	}
 	jobs = accessibleJobs
 
+	// The cap counts every chat's jobs, so the budget shows even where none is visible.
+	var budget string
+	limit := t.cronService.MaxRunsPerDay()
+	if limit > 0 {
+		budget = fmt.Sprintf("Runs a day in use: %d of %d.\n", t.cronService.RunsPerDayInUse(), limit)
+	}
 	if len(jobs) == 0 {
-		return SilentResult("No scheduled jobs")
+		return SilentResult(budget + "No scheduled jobs")
 	}
 
 	var result strings.Builder
 	result.WriteString("Scheduled jobs:\n")
+	result.WriteString(budget)
 	for _, j := range jobs {
-		var scheduleInfo string
-		if j.Schedule.Kind == "every" && j.Schedule.EveryMS != nil {
-			scheduleInfo = fmt.Sprintf("every %ds", *j.Schedule.EveryMS/1000)
-		} else if j.Schedule.Kind == "cron" {
-			scheduleInfo = j.Schedule.Expr
-		} else if j.Schedule.Kind == "at" {
-			scheduleInfo = "one-time"
-		} else {
-			scheduleInfo = "unknown"
+		scheduleInfo := jobScheduleText(j.Schedule)
+		switch runs := t.cronService.RunsPerDay(j); {
+		case runs > limit:
+			scheduleInfo += fmt.Sprintf(", more than %d runs a day", limit) // counting stops past the cap
+		case runs > 0:
+			scheduleInfo += fmt.Sprintf(", %d runs a day", runs)
 		}
-		if !j.Enabled {
+		switch {
+		case !j.Enabled && j.State.PausedBy == cron.PausedByDailyLimit:
+			scheduleInfo += ", paused by the daily limit"
+		case !j.Enabled:
 			scheduleInfo += ", disabled"
+		}
+		if j.State.SlowedFrom != nil {
+			scheduleInfo += fmt.Sprintf(
+				", slowed from %s to the minimum interval",
+				jobScheduleText(*j.State.SlowedFrom),
+			)
 		}
 		result.WriteString(fmt.Sprintf("- %s (id: %s, %s)\n", j.Name, j.ID, scheduleInfo))
 	}
 
 	return SilentResult(result.String())
+}
+
+func jobScheduleText(schedule cron.CronSchedule) string {
+	switch {
+	case schedule.Kind == "every" && schedule.EveryMS != nil:
+		return fmt.Sprintf("every %ds", *schedule.EveryMS/1000)
+	case schedule.Kind == "cron":
+		return schedule.Expr
+	case schedule.Kind == "at":
+		return "one-time"
+	}
+	return "unknown"
 }
 
 // Agents refused here used to add a replacement job, leaving the original
