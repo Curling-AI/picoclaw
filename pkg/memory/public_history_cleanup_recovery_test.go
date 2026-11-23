@@ -114,7 +114,7 @@ func TestPublicCleanupExternalDeletionRetiresOnlyJournalOwnedDisplay(t *testing.
 				t.Fatal(err)
 			}
 			offset := *meta.HistoryBytes
-			if err = store.beginHistoryWrite(
+			if err = beginHistoryWriteLocked(t, store,
 				t.Context(),
 				key,
 				historyWriteRecovery{Meta: meta, Next: meta, AppendOffset: &offset},
@@ -168,7 +168,7 @@ func TestPublicCleanupExternalDeletionDefersUntilCapabilityInstalled(t *testing.
 		t.Fatal(err)
 	}
 	offset := *meta.HistoryBytes
-	if err = store.beginHistoryWrite(
+	if err = beginHistoryWriteLocked(t, store,
 		t.Context(),
 		key,
 		historyWriteRecovery{Meta: meta, Next: meta, AppendOffset: &offset},

@@ -47,6 +47,9 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 	qualifyContent bool,
 	outcome *historyAppendOutcome,
 ) ([]CommittedHistoryMessage, error) {
+	if err := s.requireSessionLock(key); err != nil {
+		return nil, err
+	}
 	original, err := s.readMeta(key)
 	if err != nil {
 		return nil, err
@@ -222,6 +225,8 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 		}
 		return nil, commitErr
 	}
+	// beginHistoryWrite ended by proving the lock still held (checkSessionLock):
+	// a holder that lost its lease does not reach this truncate.
 	// Discard only an incomplete suffix. Complete external rows are before
 	// offset, so even a failure of this append rolls back to their preserved EOF.
 	if truncateErr := file.Truncate(offset); truncateErr != nil {
@@ -288,6 +293,9 @@ func (s *JSONLStore) appendHistoryMessagesOutcome(
 }
 
 func (s *JSONLStore) rollbackHistoryAppend(key string, size int64) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	file, err := os.OpenFile(s.jsonlPath(key), os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("memory: open append rollback: %w", err)

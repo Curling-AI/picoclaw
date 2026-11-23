@@ -21,7 +21,7 @@ func TestTruncateHistoryExcludesAnUnterminatedLegacyRow(t *testing.T) {
 	if operationErr := os.WriteFile(s.jsonlPath(key), raw, 0o600); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if operationErr := s.writeMeta(key, SessionMeta{Count: 4}); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, SessionMeta{Count: 4}); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	if operationErr := s.TruncateHistory(t.Context(), key, 10); operationErr != nil {
@@ -58,7 +58,7 @@ func TestSetHistorySuffixRetiresLegacyPhysicalGaps(t *testing.T) {
 	if operationErr := os.WriteFile(s.jsonlPath(key), raw, 0o600); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if operationErr := s.writeMeta(key, SessionMeta{Count: 3}); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, SessionMeta{Count: 3}); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	before, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
@@ -99,7 +99,7 @@ func TestHistoryCleanupFailureFencesLaterMetadataChanges(t *testing.T) {
 	if operationErr := s.AddMessage(t.Context(), key, "assistant", "confirmed append"); operationErr == nil {
 		t.Fatal("unlink failure was hidden")
 	}
-	if decision, err := s.recoverHistoryWriteDecision(key); decision != historyWriteUnknown || err == nil {
+	if decision, err := recoverHistoryWriteDecisionLocked(t, s, key); decision != historyWriteUnknown || err == nil {
 		t.Fatal("metadata NEW was confused with a durable recovery decision", decision, err)
 	}
 	if operationErr := s.TruncateHistory(t.Context(), key, 2); operationErr == nil {
@@ -117,7 +117,7 @@ func TestHistoryCleanupFailureFencesLaterMetadataChanges(t *testing.T) {
 		}
 		return nil
 	}
-	if decision, err := s.recoverHistoryWriteDecision(key); decision != historyWriteNew || err == nil {
+	if decision, err := recoverHistoryWriteDecisionLocked(t, s, key); decision != historyWriteNew || err == nil {
 		t.Fatal("unlink failure lost the durable NEW decision", decision, err)
 	}
 	if operationErr := os.Chmod(s.dir, 0o755); operationErr != nil {
@@ -225,7 +225,11 @@ func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
 			}
 			for _, path := range paths {
 				_, err := os.Stat(path)
-				if (!refreshed && !errors.Is(err, os.ErrNotExist)) || (refreshed && err != nil) {
+				// Taking the session's lock resolved the writer's journal and
+				// decision first; a refreshed session keeps everything else.
+				resolved := path == s.historyRecoveryPath(key) || path == s.historyDecisionPath(key)
+				if (err != nil && !errors.Is(err, os.ErrNotExist)) ||
+					errors.Is(err, os.ErrNotExist) != (!refreshed || resolved) {
 					t.Fatal("prune left an unexpected recovery artifact", path, err)
 				}
 			}
@@ -400,7 +404,7 @@ func TestHistoryDeletionDoesNotRestoreAnOrphanedRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operationErr := s.beginHistoryWrite(
+	if operationErr := beginHistoryWriteLocked(t, s,
 		t.Context(), key,
 		historyWriteRecovery{Meta: meta, Next: meta, Data: data, Existed: true},
 	); operationErr != nil {
@@ -482,7 +486,7 @@ func TestHistoryUnrecognizedCheckpointFencesInsteadOfRollingBack(t *testing.T) {
 	offset := *old.HistoryBytes
 	next := old
 	next.Count++
-	if operationErr := s.beginHistoryWrite(
+	if operationErr := beginHistoryWriteLocked(t, s,
 		t.Context(), key,
 		historyWriteRecovery{Meta: old, Next: next, AppendOffset: &offset},
 	); operationErr != nil {
@@ -490,7 +494,7 @@ func TestHistoryUnrecognizedCheckpointFencesInsteadOfRollingBack(t *testing.T) {
 	}
 	newer := old
 	newer.Count += 2
-	if operationErr := s.writeMeta(key, newer); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, newer); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	before, err := os.ReadFile(s.jsonlPath(key))

@@ -2,7 +2,10 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,6 +92,9 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 	removed := 0
 	seen := make(map[string]bool)
 	recent := make(map[string][]cronRun)
+	skipped := 0
+	failures := cronPruneFailures{}
+	defer failures.log()
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -119,15 +125,34 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 			continue
 		}
 		seen[sanitized] = true
-		lock := s.sessionLock(sanitized)
-		lock.Lock()
+		unlock, locked, lockErr := s.trySessionLock(sanitized)
+		if lockErr != nil {
+			log.Printf("memory: prune cron run %s: %v", sanitized, lockErr)
+			continue
+		}
+		if !locked {
+			skipped++
+			continue
+		}
 		pruned, pruneErr := s.pruneSessionFilesLocked(sanitized, cutoff)
-		lock.Unlock()
-		if pruneErr == nil && pruned {
+		unlock()
+		if pruneErr != nil {
+			failures.add(sanitized, pruneErr)
+		} else if pruned {
 			removed++
 		}
 	}
-	return removed + s.capCronRuns(recent, now), nil
+	capped, capSkipped := s.capCronRuns(recent, now, failures)
+	logSkippedSessions(skipped + capSkipped)
+	return removed + capped, nil
+}
+
+// logSkippedSessions reports, once per sweep, the sessions it left alone
+// because another process held their lock.
+func logSkippedSessions(skipped int) {
+	if skipped > 0 {
+		log.Printf("memory: %d sessions skipped: locked by another process", skipped)
+	}
 }
 
 // capCronRuns removes each automation's runs past its newest maxCronRunsPerJob,
@@ -135,9 +160,10 @@ func (s *JSONLStore) PruneCronRuns(retention time.Duration, now time.Time) (int,
 // holds no lock or journal, and a manual run can outlast 50 scheduled ones, so
 // only runs settled for cronRunSettleAge go. The removal takes the session lock
 // and resumes a pending deletion, and recovery guards can still retain a run.
-func (s *JSONLStore) capCronRuns(recent map[string][]cronRun, now time.Time) int {
+func (s *JSONLStore) capCronRuns(
+	recent map[string][]cronRun, now time.Time, failures cronPruneFailures,
+) (removed, skipped int) {
 	settled := now.Add(-cronRunSettleAge)
-	removed := 0
 	for _, runs := range recent {
 		if len(runs) <= maxCronRunsPerJob {
 			continue
@@ -146,12 +172,61 @@ func (s *JSONLStore) capCronRuns(recent map[string][]cronRun, now time.Time) int
 			return b.modified.Compare(a.modified)
 		})
 		for _, run := range newestFirst[maxCronRunsPerJob:] {
-			if run.modified.Before(settled) && s.removeSessionFiles(run.sanitized) == nil {
+			if !run.modified.Before(settled) {
+				continue
+			}
+			unlock, locked, lockErr := s.trySessionLock(run.sanitized)
+			if lockErr != nil {
+				log.Printf("memory: cap cron run %s: %v", run.sanitized, lockErr)
+				continue
+			}
+			if !locked {
+				skipped++
+				continue
+			}
+			err := s.removeSessionFilesLocked(run.sanitized)
+			unlock()
+			if err != nil {
+				failures.add(run.sanitized, err)
+			} else {
 				removed++
 			}
 		}
 	}
-	return removed
+	return removed, skipped
+}
+
+// cronPruneFailures counts the runs a cron prune could not remove, by kind, and
+// logs one line per kind with the first run's error: a run whose session lock
+// was lost, or that a guard keeps, shows up once per sweep, not once per run.
+type cronPruneFailures map[string]*cronPruneFailure
+
+type cronPruneFailure struct {
+	count int
+	first string
+}
+
+var cronPruneFailureKinds = []error{ErrSessionLockLost, ErrSessionBusy, ErrHistoryRecoveryRequired}
+
+func (f cronPruneFailures) add(sanitized string, err error) {
+	kind := "other"
+	for _, known := range cronPruneFailureKinds {
+		if errors.Is(err, known) {
+			kind = known.Error()
+			break
+		}
+	}
+	if failure := f[kind]; failure != nil {
+		failure.count++
+		return
+	}
+	f[kind] = &cronPruneFailure{count: 1, first: fmt.Sprintf("%s: %v", sanitized, err)}
+}
+
+func (f cronPruneFailures) log() {
+	for _, kind := range slices.Sorted(maps.Keys(f)) {
+		log.Printf("memory: prune cron runs: %d not removed (%s), first %s", f[kind].count, kind, f[kind].first)
+	}
 }
 
 // cronRunJob returns the automation a run file belongs to. Both prefixes share
@@ -194,13 +269,18 @@ func (s *JSONLStore) pruneSessionFilesLocked(sanitized string, cutoff time.Time)
 // sanitized name and drops it from the meta cache, so a later listing cannot
 // resurrect it from memory.
 func (s *JSONLStore) removeSessionFiles(sanitized string) error {
-	lock := s.sessionLock(sanitized)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockSession(sanitized)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return s.removeSessionFilesLocked(sanitized)
 }
 
 func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...string) error {
+	if err := s.requireSessionLock(sanitized); err != nil {
+		return err
+	}
 	if resumed, err := s.resumeHistoryDeletion(sanitized); resumed || err != nil {
 		return err
 	}
@@ -235,6 +315,10 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...strin
 			return err
 		}
 		return s.recoverHistoryWrite(meta.Key)
+	}
+	// One proof of the lock before the removals start, not one per file.
+	if err = s.checkSessionLock(sanitized); err != nil {
+		return err
 	}
 	metaPath := filepath.Join(s.dir, sanitized+".meta.json")
 	jsonlPath := filepath.Join(s.dir, sanitized+".jsonl")
@@ -275,6 +359,7 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...strin
 	if err := os.Remove(s.historyOrderWitnessPath(sanitized)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	s.removeSessionLockFile(sanitized)
 
 	s.metaMu.Lock()
 	delete(s.metaCache, sanitized)

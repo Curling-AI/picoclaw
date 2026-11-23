@@ -311,7 +311,7 @@ func TestHistoryRecoveryMarkerCannotBeClearedByMetadataOrCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireUnprovenPage(t, s, key, "")
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 2}); err != nil {
 		t.Fatal(err)
 	}
 	meta, err := s.readRecoveryMeta(key)

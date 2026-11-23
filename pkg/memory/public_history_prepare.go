@@ -75,9 +75,11 @@ func (s *JSONLStore) PreparePublicHistory(
 	key, cursor string,
 ) (PublicHistoryPreparationResult, error) {
 	canonical := key
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(canonical)
+	if lockErr != nil {
+		return PublicHistoryPreparationResult{}, lockErr
+	}
+	defer unlock()
 	if operationErr := ctx.Err(); operationErr != nil {
 		return PublicHistoryPreparationResult{}, operationErr
 	}

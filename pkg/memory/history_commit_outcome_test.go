@@ -172,7 +172,10 @@ func TestContentMutationAppendNEWKeepsOperationalErrorAndAcceptedBody(t *testing
 				t.Fatal("unfinished recovery emitted a new frame", readErr)
 			}
 			s.writeFile, s.contentCheckpointSyncFailure = nil, nil
-			if _, readErr = s.readMeta(key); readErr != nil {
+			unlock := holdSessionLockForTest(t, s, key)
+			_, readErr = s.readMeta(key)
+			unlock()
+			if readErr != nil {
 				t.Fatal(readErr)
 			}
 			history, readErr := s.GetHistory(t.Context(), key)

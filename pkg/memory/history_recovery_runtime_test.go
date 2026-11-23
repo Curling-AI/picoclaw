@@ -2,10 +2,10 @@ package memory
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
@@ -20,7 +20,7 @@ func TestHistoryPageRejectsUncountedLegacyRowBeforeAppend(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), []byte(rows), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 2}); err != nil {
 		t.Fatal(err)
 	}
 	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
@@ -38,7 +38,7 @@ func TestHistoryPageRejectsRowOnlyRecoveryMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An unaware writer preserved only the row's private marker.
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
@@ -48,10 +48,14 @@ func TestHistoryPageRejectsRowOnlyRecoveryMarker(t *testing.T) {
 	requireHistoryContents(t, s, key, "unproven")
 }
 
-func TestHistoryWarmMetadataDoesNotProbeMarkerFilesystem(t *testing.T) {
+// Plain reads serve warm metadata without touching the marker. A write takes
+// the session's lock, which drops the cache, so it checks the marker on disk and
+// fails closed when it cannot read it, as a proof boundary does.
+func TestHistoryWarmReadsDoNotProbeMarkerFilesystem(t *testing.T) {
 	s := newTestStore(t)
-	for _, key := range []string{"cache-a", "cache-b", "cache-c"} {
-		if err := s.writeMeta(key, SessionMeta{Key: key, Summary: "cached"}); err != nil {
+	keys := []string{"cache-a", "cache-b", "cache-c"}
+	for _, key := range keys {
+		if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Summary: "cached"}); err != nil {
 			t.Fatal(err)
 		}
 		// A marker probe is observable as ELOOP, without stubbing cache behavior.
@@ -62,20 +66,18 @@ func TestHistoryWarmMetadataDoesNotProbeMarkerFilesystem(t *testing.T) {
 		if meta, err := s.GetSessionMeta(t.Context(), key); err != nil || meta.Summary != "cached" {
 			t.Fatal("hot metadata attempted marker filesystem I/O", meta, err)
 		}
-		if err := s.SetSummary(t.Context(), key, "updated"); err != nil {
-			t.Fatal("write-through metadata attempted marker filesystem I/O", err)
-		}
-		metaBytes, err := os.ReadFile(s.metaPath(key))
-		if err != nil || !json.Valid(metaBytes) {
-			t.Fatal("summary update was not persisted", err)
+	}
+	if metas := s.ListSessionMetas(); len(metas) != 3 {
+		t.Fatal("a hot listing probed recovery markers", metas)
+	}
+	for _, key := range keys {
+		if err := s.SetSummary(t.Context(), key, "updated"); !errors.Is(err, syscall.ELOOP) {
+			t.Fatal("a write under the session lock did not check its unreadable marker", err)
 		}
 		// Proof boundaries still check the filesystem and fail closed.
 		if _, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); err == nil {
 			t.Fatal("a proof request ignored its unreadable marker")
 		}
-	}
-	if metas := s.ListSessionMetas(); len(metas) != 3 {
-		t.Fatal("a hot listing probed recovery markers", metas)
 	}
 }
 

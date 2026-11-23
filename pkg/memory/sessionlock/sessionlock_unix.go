@@ -8,10 +8,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sipeed/picoclaw/pkg/memory/internal/locktest"
 )
 
 const (
@@ -197,11 +200,32 @@ func (l *Lock) Check() error {
 	}
 	_, err := pwriteLockFile(int(l.file.Fd()), []byte{0}, 0)
 	if err == nil {
-		err = l.file.Sync()
+		err = syncLockFile(l.file)
 	}
 	if err != nil {
 		l.lost = true
 		return fmt.Errorf("%w: %w", ErrLost, err)
+	}
+	return nil
+}
+
+// syncLockFile makes the Check's byte reach the server, through fsync(2). On
+// darwin File.Sync is F_FULLFSYNC, which also flushes the drive's cache and
+// costs milliseconds; fsync(2) already reaches an NFS server. Elsewhere File.Sync
+// is fsync(2). The fsync's test seam is locktest.Sync.
+func syncLockFile(f *os.File) error {
+	if locktest.Sync != nil {
+		return locktest.Sync(f)
+	}
+	if runtime.GOOS != "darwin" {
+		return f.Sync()
+	}
+	err := unix.Fsync(int(f.Fd()))
+	for errors.Is(err, unix.EINTR) {
+		err = unix.Fsync(int(f.Fd()))
+	}
+	if err != nil {
+		return &os.PathError{Op: "fsync", Path: f.Name(), Err: err}
 	}
 	return nil
 }
@@ -214,8 +238,9 @@ func (l *Lock) Lost() bool { return l.lost }
 
 // Release drops the lock; closing the fd drops the flock. A lock marked for
 // removal unlinks its path first, while held: unlinking after the release
-// would let a waiter lock the old inode while a newcomer locks a new one. A
-// lost lock removes nothing, since another process may own the path by now.
+// would let a waiter lock the old inode while a newcomer locks a new one. It
+// unlinks only after a Check: a lost lock removes nothing, since another
+// process may own the path by now, and a third would lock a new file beside it.
 // Only the first call acts: by a second one, the path may be the next
 // owner's lock.
 func (l *Lock) Release() error {
@@ -224,7 +249,7 @@ func (l *Lock) Release() error {
 	}
 	l.released = true
 	var err error
-	if l.remove && !l.lost {
+	if l.remove && l.Check() == nil {
 		err = l.removeHeldPath()
 	}
 	return errors.Join(err, l.file.Close())

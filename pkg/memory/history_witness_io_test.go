@@ -185,7 +185,7 @@ func TestConfirmedWitnessLossKeepsItsFenceAfterReadableRetry(t *testing.T) {
 				if metaErr != nil {
 					t.Fatal(metaErr)
 				}
-				if err := store.markHistoryRecoveryRequired(key, &meta); err != nil {
+				if err := markHistoryRecoveryRequiredLocked(t, store, key, &meta); err != nil {
 					t.Fatal(err)
 				}
 			}

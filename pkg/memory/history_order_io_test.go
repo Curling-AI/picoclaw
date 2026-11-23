@@ -31,7 +31,7 @@ func TestHistoryOriginReadFailureDoesNotLatchRecoveryAndCanRetry(t *testing.T) {
 					); writeErr != nil {
 						t.Fatal(writeErr)
 					}
-					if writeErr := store.writeMeta(key, SessionMeta{Key: key, Count: 1}); writeErr != nil {
+					if writeErr := writeMetaLocked(t, store, key, SessionMeta{Key: key, Count: 1}); writeErr != nil {
 						t.Fatal(writeErr)
 					}
 				} else {
@@ -176,7 +176,7 @@ func TestContentAppendAfterCheckpointBeyondEOFKeepsTranscript(t *testing.T) {
 	}
 	beyond := *meta.HistoryBytes + 100
 	meta.HistoryBytes = &beyond
-	if writeErr := store.writeMeta(key, meta); writeErr != nil {
+	if writeErr := writeMetaLocked(t, store, key, meta); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 	if appendErr := store.AddFullMessage(

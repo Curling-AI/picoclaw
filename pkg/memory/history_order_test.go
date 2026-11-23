@@ -163,7 +163,7 @@ func TestHistoryOrderLegacyRemainsUnproven(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	read, err := s.ReadHistoryWithReceipts(t.Context(), key)
@@ -193,7 +193,7 @@ func TestHistoryOrderLegacyCorruptRowsRemainFilteredAfterRollout(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 2}); err != nil {
 		t.Fatal(err)
 	}
 	appended, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "ordered"})
@@ -271,7 +271,7 @@ func TestHistoryOrderLegacyUpgradeDoesNotAttestAnUncommittedTail(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	receipt, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "next"})
@@ -405,7 +405,7 @@ func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 2}); err != nil {
 		t.Fatal(err)
 	}
 	v1, err := s.AppendHistoryReceipt(t.Context(), key, providers.Message{Role: "assistant", Content: "first v1"})
@@ -456,7 +456,7 @@ func TestHistoryOrderLegacyOriginSurvivesEditAndRemovalOfAllActiveV1(t *testing.
 	}
 	meta.HistoryOrderVersion, meta.HistoryStreamID, meta.HistorySequence = 0, "", 0
 	meta.HistoryLegacyFileGeneration, meta.HistoryLegacyBytes = "", 0
-	if operationErr := s.writeMeta(key, meta); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	if _, readErr := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(readErr, ErrHistoryOrderUnavailable) {
@@ -507,7 +507,7 @@ func TestHistoryOrderMissingModernProofIsNotGenuineLegacy(t *testing.T) {
 				size := int64(len(data))
 				meta.HistoryBytes = &size
 			}
-			if writeErr := s.writeMeta(key, meta); writeErr != nil {
+			if writeErr := writeMetaLocked(t, s, key, meta); writeErr != nil {
 				t.Fatal(writeErr)
 			}
 			if _, readErr := s.ReadHistoryWithReceipts(
@@ -537,7 +537,7 @@ func TestHistoryOrderRewriteCannotReuseAnOldLegacyByteFence(t *testing.T) {
 			if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.writeMeta(key, SessionMeta{Key: key, Count: 2}); err != nil {
+			if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 2}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.AppendHistoryReceipt(
@@ -584,7 +584,7 @@ func TestHistoryOrderRewriteCannotReuseAnOldLegacyByteFence(t *testing.T) {
 			}
 			size := int64(len(data))
 			meta.HistoryBytes = &size
-			if err := s.writeMeta(key, meta); err != nil {
+			if err := writeMetaLocked(t, s, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(err, ErrHistoryOrderUnavailable) {
@@ -848,7 +848,7 @@ func TestHistoryOrderExhaustionDoesNotWriteOrRotateStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	meta.HistorySequence = MaxHistorySequence
-	if operationErr := s.writeMeta(key, meta); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	before, err := os.ReadFile(s.jsonlPath(key))
@@ -984,7 +984,7 @@ func TestHistoryOrderInvalidOrForeignProofIsNotLegacyZero(t *testing.T) {
 			}
 			size := int64(len(data))
 			meta.HistoryBytes = &size
-			if writeErr := s.writeMeta(key, meta); writeErr != nil {
+			if writeErr := writeMetaLocked(t, s, key, meta); writeErr != nil {
 				t.Fatal(writeErr)
 			}
 			if _, readErr := s.ReadHistoryWithReceipts(

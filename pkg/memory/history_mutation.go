@@ -188,6 +188,9 @@ func sameHistoryCore(a, b providers.Message) bool {
 }
 
 func (s *JSONLStore) appendHistorySuffix(key string, messages []providers.Message, original SessionMeta) (bool, error) {
+	if err := s.requireSessionLock(key); err != nil {
+		return false, err
+	}
 	meta := original
 	activeCount := meta.Count - meta.Skip
 	if !validHistoryDigest(meta.HistoryDigest) || activeCount < 0 || len(messages) < activeCount {

@@ -96,8 +96,7 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 				}
 				// The resolver has read its owner, but cannot finish its directory scan
 				// while the unrelated last key is locked. Revoke under the real key lock.
-				ownerLock := store.sessionLock(canonical)
-				ownerLock.Lock()
+				unlockOwner := holdSessionLockForTest(t, store, canonical)
 				changed := original
 				if change == "revoke alias" {
 					changed.Aliases = nil
@@ -105,7 +104,7 @@ func TestHistoryReceiptRechecksOwnerAfterResolution(t *testing.T) {
 					changed.Key = "different_owner"
 				}
 				changeErr := store.writeMeta(canonical, changed)
-				ownerLock.Unlock()
+				unlockOwner()
 				if changeErr != nil {
 					unlock()
 					t.Fatal(changeErr)
@@ -175,7 +174,7 @@ func TestHistoryReceiptRejectsDuplicateSequenceOnDistinctOccurrences(t *testing.
 	}
 	size := int64(len(changed))
 	meta.HistoryBytes = &size
-	if metaErr := store.writeMeta(key, meta); metaErr != nil {
+	if metaErr := writeMetaLocked(t, store, key, meta); metaErr != nil {
 		t.Fatal(metaErr)
 	}
 	if _, readErr := store.ReadHistoryWithReceipts(t.Context(), key); !errors.Is(readErr, ErrHistoryOrderUnavailable) {

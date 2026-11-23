@@ -20,7 +20,7 @@ func TestPublicPreparationPreservesDisplayWithoutReattestingIndependentProofs(t 
 			}
 			meta.PublicHistoryVersion, meta.PublicHistoryRevision, meta.PublicHistoryBytes, meta.PublicHistoryCount = 0, 0, 0, 0
 			meta.PublicHistoryGeneration, meta.PublicHistoryDigest, meta.PublicHistoryComplete = "", "", false
-			if err = store.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, store, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			if err = os.Remove(store.publicHistoryPath(key)); err != nil {

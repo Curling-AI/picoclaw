@@ -51,7 +51,7 @@ func TestDeliveryIdentityNewAppendsAreDistinctAndSurviveProofLoss(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operationErr := store.markHistoryRecoveryRequired(key, &meta); operationErr != nil {
+	if operationErr := markHistoryRecoveryRequiredLocked(t, store, key, &meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	second, err := store.AppendHistoryContentInput(t.Context(), key, first.Entry.Message)
@@ -129,7 +129,7 @@ func TestDeliveryIdentityInvalidAndDuplicateKeepContent(t *testing.T) {
 			if operationErr := os.WriteFile(store.jsonlPath(key), []byte(message+message), 0o600); operationErr != nil {
 				t.Fatal(operationErr)
 			}
-			if operationErr := store.writeMeta(key, SessionMeta{Key: key, Count: 2}); operationErr != nil {
+			if operationErr := writeMetaLocked(t, store, key, SessionMeta{Key: key, Count: 2}); operationErr != nil {
 				t.Fatal(operationErr)
 			}
 			history, err := store.ReadHistoryContent(t.Context(), key)
@@ -160,7 +160,7 @@ func TestDeliveryIdentityMalformedOptionalFieldKeepsBody(t *testing.T) {
 			if operationErr := os.WriteFile(store.jsonlPath(key), []byte(raw), 0o600); operationErr != nil {
 				t.Fatal(operationErr)
 			}
-			if operationErr := store.writeMeta(key, SessionMeta{Key: key, Count: 1}); operationErr != nil {
+			if operationErr := writeMetaLocked(t, store, key, SessionMeta{Key: key, Count: 1}); operationErr != nil {
 				t.Fatal(operationErr)
 			}
 			history, err := store.ReadHistoryContent(t.Context(), key)
@@ -180,7 +180,7 @@ func TestDeliveryIdentityDuplicateScopeIncludesSkippedRows(t *testing.T) {
 	if operationErr := os.WriteFile(store.jsonlPath(key), []byte(raw+raw), 0o600); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if operationErr := store.writeMeta(key, SessionMeta{Key: key, Count: 2, Skip: 1}); operationErr != nil {
+	if operationErr := writeMetaLocked(t, store, key, SessionMeta{Key: key, Count: 2, Skip: 1}); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	history, err := store.ReadHistoryContent(t.Context(), key)
@@ -195,7 +195,7 @@ func TestDeliveryIdentityDuplicateScopeIncludesSkippedRows(t *testing.T) {
 	if operationErr := os.WriteFile(store.jsonlPath(other), []byte(raw), 0o600); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if operationErr := store.writeMeta(other, SessionMeta{Key: other, Count: 1}); operationErr != nil {
+	if operationErr := writeMetaLocked(t, store, other, SessionMeta{Key: other, Count: 1}); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	history, err = store.ReadHistoryContent(t.Context(), other)

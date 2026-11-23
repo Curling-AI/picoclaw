@@ -1657,8 +1657,14 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 		t.Fatal("confirmed deletion resurrected previous history", history, historyErr)
 	}
 	after, err := store.GetSessionMeta(t.Context(), sessionKey)
+	// The write under the session's lock reread the meta from disk, where the
+	// scope is stored indented: compare it as JSON.
+	var compactScope bytes.Buffer
+	if err == nil {
+		err = json.Compact(&compactScope, after.Scope)
+	}
 	if err != nil || after.Count != 1 || after.Skip != 0 || after.Summary != "" ||
-		!bytes.Equal(after.Scope, scope) || len(after.Aliases) != 1 || after.Aliases[0] != "fresh-alias" {
+		!bytes.Equal(compactScope.Bytes(), scope) || len(after.Aliases) != 1 || after.Aliases[0] != "fresh-alias" {
 		t.Fatal("fresh metadata lost scope/aliases or retained deleted bookkeeping", after, err)
 	}
 }

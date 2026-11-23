@@ -33,9 +33,11 @@ func (s *JSONLStore) PrepareNativeHistoryArchive(ctx context.Context, key string
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return err
 	}

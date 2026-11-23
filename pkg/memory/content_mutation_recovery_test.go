@@ -375,10 +375,10 @@ func TestContentMutationPreimageExclusiveAndReadOnlyGetters(t *testing.T) {
 		Version: 1, Key: key, DomainID: frame.DomainID, MutationID: plan.MutationID,
 		ID: uuid.NewString(), Bytes: int64(len(data)), Digest: contentDigest(data),
 	}
-	if err := s.createContentPreimage(t.Context(), image, data); err != nil {
+	if err := createContentPreimageLocked(t, s, t.Context(), image, data); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.createContentPreimage(t.Context(), image, data); !errors.Is(err, os.ErrExist) {
+	if err := createContentPreimageLocked(t, s, t.Context(), image, data); !errors.Is(err, os.ErrExist) {
 		t.Fatal("immutable preimage was overwritten on collision", err)
 	}
 	got, err := s.readContentPreimage(t.Context(), key, frame.DomainID, plan.MutationID, &image)
@@ -394,6 +394,9 @@ func TestContentMutationPreimageExclusiveAndReadOnlyGetters(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
 		before[entry.Name()], err = os.ReadFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
 			t.Fatal(err)

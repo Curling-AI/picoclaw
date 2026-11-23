@@ -352,7 +352,7 @@ func prepareUnprovenRuntimeFixture(t *testing.T, store *JSONLStore, key, state s
 	if writeErr := os.WriteFile(store.jsonlPath(key), raw, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	if writeErr := store.writeMeta(key, meta); writeErr != nil {
+	if writeErr := writeMetaLocked(t, store, key, meta); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 	return append([]byte(nil), raw...)

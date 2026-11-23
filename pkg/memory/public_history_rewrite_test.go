@@ -108,7 +108,7 @@ func TestPublicHistoryRewritePreservesUncoveredPhysicalPrefix(t *testing.T) {
 				t.Fatal(err)
 			}
 			meta.Skip = 79
-			if err = s.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, s, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(s.jsonlPath(key))

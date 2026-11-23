@@ -55,7 +55,7 @@ func TestMetadataUpsertRecoversPendingJournalBeforeRecreatingDeletedSource(t *te
 	offset := *before.HistoryBytes
 	next := before
 	next.Count++
-	if operationErr := s.beginHistoryWrite(
+	if operationErr := beginHistoryWriteLocked(t, s,
 		t.Context(), key,
 		historyWriteRecovery{Meta: before, Next: next, AppendOffset: &offset},
 	); operationErr != nil {
@@ -142,7 +142,14 @@ func TestMetadataUpsertDoesNotRetireAmbiguousSource(t *testing.T) {
 				t.Fatal(operationErr)
 			}
 			after, err := s.GetSessionMeta(t.Context(), key)
-			if err != nil || after.Count != before.Count || after.HistoryGeneration != before.HistoryGeneration ||
+			if replacement {
+				// With no meta on disk, the update under the session's lock cannot
+				// know the old identity (the cache is never a base for a write);
+				// the surviving order witness fences the recreated meta instead.
+				if err != nil || !after.HistoryRecoveryRequired || reissuedHistoryStream(after, before) {
+					t.Fatal("metadata update proved or reordered an ambiguous replacement", after, err)
+				}
+			} else if err != nil || after.Count != before.Count || after.HistoryGeneration != before.HistoryGeneration ||
 				after.HistoryBytes == nil || *after.HistoryBytes != *before.HistoryBytes {
 				t.Fatal("metadata update inferred a confirmed source deletion", after, err)
 			}
@@ -166,10 +173,8 @@ func TestMetadataUpsertDoesNotRetireAmbiguousSource(t *testing.T) {
 					t.Fatal("replacement content was lost or received new order", history, historyErr)
 				}
 				fenced, metaErr := s.GetSessionMeta(t.Context(), key)
-				if metaErr != nil || fenced.HistoryGeneration != before.HistoryGeneration ||
-					fenced.HistoryFileGeneration != before.HistoryFileGeneration ||
-					fenced.HistoryStreamID != before.HistoryStreamID || fenced.HistorySequence != before.HistorySequence {
-					t.Fatal("replacement retired identity or reconstructed stream/sequence", fenced, metaErr)
+				if metaErr != nil || reissuedHistoryStream(fenced, before) {
+					t.Fatal("replacement reconstructed stream/sequence", fenced, metaErr)
 				}
 				if _, markerErr := os.Stat(s.historyRecoveryRequiredPath(key)); markerErr != nil {
 					t.Fatal("unproven replacement did not durably retain recovery", markerErr)
@@ -182,8 +187,7 @@ func TestMetadataUpsertDoesNotRetireAmbiguousSource(t *testing.T) {
 				requireHistoryContents(t, reopened, key, content)
 				requireContentRecoveryFence(t, reopened, key)
 				persisted, metaErr := reopened.GetSessionMeta(t.Context(), key)
-				if metaErr != nil || persisted.HistoryGeneration != before.HistoryGeneration ||
-					persisted.HistoryStreamID != before.HistoryStreamID || persisted.HistorySequence != before.HistorySequence {
+				if metaErr != nil || reissuedHistoryStream(persisted, before) {
 					t.Fatal("reopen reattested an ambiguous replacement", persisted, metaErr)
 				}
 				return
@@ -198,12 +202,12 @@ func TestMetadataUpsertDoesNotRetireAmbiguousSource(t *testing.T) {
 	}
 }
 
+// Only the meta was removed. The update under the session's lock reads the
+// disk, not the meta this process had cached, so the surviving source keeps
+// every row but no proof: it is fenced for explicit recovery, as after a
+// restart, instead of being reattested from memory.
 func TestMetadataUpsertPreservesContentWhenOnlyMetadataWasRemoved(t *testing.T) {
 	s, key := pagedStore(t, 2)
-	before, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-	if err != nil {
-		t.Fatal(err)
-	}
 	data, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil {
 		t.Fatal(err)
@@ -217,15 +221,26 @@ func TestMetadataUpsertPreservesContentWhenOnlyMetadataWasRemoved(t *testing.T) 
 	if operationErr := s.AddMessage(t.Context(), key, "user", "next"); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	after, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
-	if err != nil || len(after.Entries) != 3 || after.Generation != before.Generation ||
-		after.Entries[0].ID != before.Entries[0].ID || after.Entries[1].ID != before.Entries[1].ID {
-		t.Fatal("metadata loss retired or lost a surviving source", after, err)
+	requireHistoryContents(t, s, key, "synthetic-0", "synthetic-1", "next")
+	if _, markerErr := os.Stat(s.historyRecoveryRequiredPath(key)); markerErr != nil {
+		t.Fatal("metadata loss did not durably fence the surviving source", markerErr)
+	}
+	if _, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); !errors.Is(err, ErrHistoryRecoveryRequired) {
+		t.Fatal("metadata loss reattested a surviving source", err)
 	}
 	retained, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil || !bytes.HasPrefix(retained, data) {
 		t.Fatal("metadata upsert rewrote durable history", err)
 	}
+}
+
+// reissuedHistoryStream reports that meta carries an order stream that is not
+// the one before recorded: a new stream, or the old one advanced.
+func reissuedHistoryStream(meta, before SessionMeta) bool {
+	if meta.HistoryStreamID == "" {
+		return meta.HistorySequence != 0
+	}
+	return meta.HistoryStreamID != before.HistoryStreamID || meta.HistorySequence > before.HistorySequence
 }
 
 func TestMetadataUpsertKeepsASurvivingRecoveryMarker(t *testing.T) {

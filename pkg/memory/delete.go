@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -29,7 +30,10 @@ import (
 // legacy key. Left behind, it would be promoted back into the canonical session
 // on the next message (PromoteAliasHistory), so the aliases go first, each under
 // the pair lock that promotion takes. The main session's alias is every agent's
-// shared fallback, not one conversation's, and stays.
+// shared fallback, not one conversation's, and stays. Another process may name
+// a new alias meanwhile, so the meta on disk is read again under the session's
+// lock, and the delete fails, keeping the canonical meta, if it names one that
+// was not removed.
 //
 // Clearing a session (empty history, empty summary) is not a delete: the meta
 // and the transcript stay, and the session stays in every listing with no
@@ -45,13 +49,21 @@ func (s *JSONLStore) DeleteSession(ctx context.Context, sessionKey string) error
 		return err
 	}
 
+	aliases, err := s.legacyAliases(sessionKey)
+	if err != nil {
+		return fmt.Errorf("memory: delete session: %w", err)
+	}
 	var errs []error
-	for _, alias := range s.legacyAliases(sessionKey) {
-		unlock := s.lockSessionPair(sessionKey, alias)
-		if err := s.deleteSessionFilesLocked(ctx, alias, true); err != nil {
-			errs = append(errs, err)
+	for _, alias := range aliases {
+		unlockPair, lockErr := s.lockSessionPairFiles(sessionKey, alias)
+		if lockErr != nil {
+			errs = append(errs, lockErr)
+			continue
 		}
-		unlock()
+		if deleteErr := s.deleteSessionFilesLocked(ctx, alias, true); deleteErr != nil {
+			errs = append(errs, deleteErr)
+		}
+		unlockPair()
 	}
 	// The canonical meta is the only list of the aliases: it stays until every
 	// alias is gone, so a retry still finds the ones that failed.
@@ -59,34 +71,87 @@ func (s *JSONLStore) DeleteSession(ctx context.Context, sessionKey string) error
 		return fmt.Errorf("memory: delete session: %w", errors.Join(errs...))
 	}
 
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
-	if err := s.deleteSessionFilesLocked(ctx, sessionKey); err != nil {
+	unlock, err := s.lockSession(sessionKey)
+	if err != nil {
+		return fmt.Errorf("memory: delete session: %w", err)
+	}
+	defer unlock()
+	added, err := s.aliasesAddedOnDisk(sessionKey, aliases)
+	if err != nil {
+		return fmt.Errorf("memory: delete session: %w", err)
+	}
+	if len(added) > 0 {
+		return fmt.Errorf("memory: delete session: %w: %s", errAliasesAddedDuringDelete, strings.Join(added, ", "))
+	}
+	if err = s.deleteSessionFilesLocked(ctx, sessionKey); err != nil {
 		return fmt.Errorf("memory: delete session: %w", err)
 	}
 	return nil
 }
 
+// errAliasesAddedDuringDelete: the canonical meta named an alias the delete
+// had not removed; the meta stays, so a retry finds it.
+var errAliasesAddedDuringDelete = errors.New("aliases named during the delete")
+
 // legacyAliases are the aliases in a session's meta that hold a conversation of
-// their own: not the session's key, and not the main session's. A meta that
-// cannot be read names none; the session itself is still deleted.
-func (s *JSONLStore) legacyAliases(sessionKey string) []string {
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	meta, err := s.readMeta(sessionKey)
-	l.Unlock()
+// their own. It reads under the session's lock, after readMeta has recovered a
+// journal pending in this process, and from the meta file rather than this
+// process's cache, which another process may have outdated. A readMeta failure
+// other than a lost lock does not hide them: the meta file still names them.
+func (s *JSONLStore) legacyAliases(sessionKey string) ([]string, error) {
+	unlock, err := s.lockSession(sessionKey)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	var aliases []string
-	for _, alias := range meta.Aliases {
+	defer unlock()
+	if _, readErr := s.readMeta(sessionKey); errors.Is(readErr, ErrSessionLockLost) {
+		return nil, readErr
+	}
+	return s.legacyAliasesOnDisk(sessionKey)
+}
+
+// legacyAliasesOnDisk reads the legacy aliases from the meta file itself; the
+// caller holds the session's lock. A missing meta names none, and so does one
+// that does not decode; any other read error fails, because the meta is the
+// only list of the aliases.
+func (s *JSONLStore) legacyAliasesOnDisk(sessionKey string) ([]string, error) {
+	meta, _, err := s.readMetaFile(sessionKey)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read the aliases: %w", err)
+	}
+	return legacyAliasesOf(sessionKey, meta.Aliases), nil
+}
+
+// aliasesAddedOnDisk are the legacy aliases the meta on disk names now that
+// removed lacks; the caller holds the session's lock.
+func (s *JSONLStore) aliasesAddedOnDisk(sessionKey string, removed []string) ([]string, error) {
+	onDisk, err := s.legacyAliasesOnDisk(sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	var added []string
+	for _, alias := range onDisk {
+		if !slices.Contains(removed, alias) {
+			added = append(added, alias)
+		}
+	}
+	return added, nil
+}
+
+// legacyAliasesOf keeps the aliases that are not the session's key and not the
+// main session's.
+func legacyAliasesOf(sessionKey string, aliases []string) []string {
+	var legacy []string
+	for _, alias := range aliases {
 		if alias == "" || alias == sessionKey || isMainSessionAlias(alias) {
 			continue
 		}
-		aliases = append(aliases, alias)
+		legacy = append(legacy, alias)
 	}
-	return aliases
+	return legacy
 }
 
 // PruneEmptySessions deletes the sessions that hold nothing and have not been
@@ -133,10 +198,14 @@ func (s *JSONLStore) PruneEmptySessions(
 		return nil, discoveryErr
 	}
 	seen := make(map[string]bool)
+	skipped := 0
+	defer func() { logSkippedSessions(skipped) }()
 	for _, key := range pending {
 		seen[sanitizeKey(key)] = true
 		done, err := s.pruneIfEmpty(key, cutoff, beforeRemove)
-		if err != nil {
+		if errors.Is(err, errSessionSkipped) {
+			skipped++
+		} else if err != nil {
 			errs = append(errs, err)
 		} else if done {
 			removed = append(removed, key)
@@ -148,6 +217,10 @@ func (s *JSONLStore) PruneEmptySessions(
 		}
 		done, err := s.pruneIfEmpty(meta.Key, cutoff, beforeRemove)
 		if errors.Is(err, ErrKeepSession) {
+			continue
+		}
+		if errors.Is(err, errSessionSkipped) {
+			skipped++
 			continue
 		}
 		if err != nil {
@@ -166,6 +239,10 @@ func (s *JSONLStore) PruneEmptySessions(
 // a delete, and the caller may hold something of its own for that session.
 var ErrKeepSession = errors.New("memory: session kept by the caller")
 
+// errSessionSkipped is pruneIfEmpty leaving a session alone because another
+// process holds its lock; it is not a failure.
+var errSessionSkipped = errors.New("memory: session skipped: locked by another process")
+
 func isEmptyMeta(meta SessionMeta) bool {
 	return meta.Count == 0 && meta.Skip == 0 && meta.PublicHistoryCount == 0 && strings.TrimSpace(meta.Summary) == "" &&
 		!meta.HistoryRecoveryRequired
@@ -175,9 +252,14 @@ func isEmptyMeta(meta SessionMeta) bool {
 // themselves, what PruneEmptySessions decided from the listing: a message may
 // have been written in between, and the cache is not the disk.
 func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove func(SessionMeta) error) (bool, error) {
-	l := s.sessionLock(key)
-	l.Lock()
-	defer l.Unlock()
+	unlock, locked, lockErr := s.trySessionLock(key)
+	if lockErr != nil {
+		return false, lockErr
+	}
+	if !locked {
+		return false, errSessionSkipped
+	}
+	defer unlock()
 	if resumed, err := s.resumeHistoryDeletion(key); resumed || err != nil {
 		return resumed && err == nil, err
 	}
@@ -232,6 +314,10 @@ func (s *JSONLStore) pruneIfEmpty(key string, cutoff time.Time, beforeRemove fun
 	}
 
 	if beforeRemove != nil {
+		// The hook removes what the caller holds of the session.
+		if err := s.checkSessionLock(key); err != nil {
+			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
+		}
 		if err := beforeRemove(meta); err != nil {
 			return false, fmt.Errorf("memory: prune empty sessions: %w", err)
 		}

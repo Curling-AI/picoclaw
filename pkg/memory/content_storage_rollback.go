@@ -12,9 +12,11 @@ func (s *JSONLStore) PrepareHistoryContentInlineRollback(ctx context.Context, ke
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	if err := s.contentMutationWriterPreflight(ctx, key); err != nil {
 		return err
 	}

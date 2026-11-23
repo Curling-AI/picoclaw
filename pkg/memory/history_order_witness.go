@@ -160,6 +160,11 @@ func (s *JSONLStore) ensureDurableHistoryOrderWitness(key string, recovery histo
 		if encodeErr != nil {
 			return encodeErr
 		}
+		// The first witness replaces the file: after a lost lease it would
+		// replace the next holder's witness and void its order proofs.
+		if err := s.checkSessionLock(key); err != nil {
+			return err
+		}
 		if writeErr := s.writeSessionFile(s.historyOrderWitnessPath(key), append(data, '\n'), 0o600); writeErr != nil {
 			return writeErr
 		}

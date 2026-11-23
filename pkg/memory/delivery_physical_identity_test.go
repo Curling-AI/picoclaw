@@ -26,7 +26,7 @@ func physicalDeliverySource(t *testing.T, filtered string, skip int) (*JSONLStor
 	if writeErr := os.WriteFile(store.jsonlPath(key), data, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	if writeErr := store.writeMeta(key, SessionMeta{Key: key, Count: 3, Skip: skip}); writeErr != nil {
+	if writeErr := writeMetaLocked(t, store, key, SessionMeta{Key: key, Count: 3, Skip: skip}); writeErr != nil {
 		t.Fatal(writeErr)
 	}
 	return store, key, data

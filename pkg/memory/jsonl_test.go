@@ -839,7 +839,7 @@ func TestTruncateHistory_IgnoresTransientThoughtForKeepLast(t *testing.T) {
 	if err := os.WriteFile(store.jsonlPath(sessionKey), []byte(rawJSONL), 0o644); err != nil {
 		t.Fatalf("WriteFile(jsonl): %v", err)
 	}
-	if err := store.writeMeta(sessionKey, SessionMeta{
+	if err := writeMetaLocked(t, store, sessionKey, SessionMeta{
 		Key:       sessionKey,
 		Count:     5,
 		Skip:      0,

@@ -251,9 +251,22 @@ func (s *JSONLStore) appendHistoryContent(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return ContentAppendResult{}, lockErr
+	}
+	defer unlock()
+	return redoAfterForeignJournal(s, key, func() (ContentAppendResult, error) {
+		return s.appendHistoryContentLocked(ctx, key, message, qualified)
+	})
+}
+
+func (s *JSONLStore) appendHistoryContentLocked(
+	ctx context.Context,
+	key string,
+	message providers.Message,
+	qualified bool,
+) (ContentAppendResult, error) {
 	// Activation status is deliberately ignored here: unproved identity must
 	// not disable a normal durable content append. Only the metadata ownership
 	// preflight is required; the writer validates refs against its safe prefix.

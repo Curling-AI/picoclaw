@@ -17,6 +17,9 @@ func (s *JSONLStore) retireAbsentHistorySource(ctx context.Context, key string, 
 		return ErrHistoryOwnershipUnavailable
 	}
 	key = recovery.Meta.Key
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	if recovery.PublicMediaCleanup && !s.requiresPublicHistoryCleanup() {
 		return errPublicHistoryCleanupUnavailable
 	}
