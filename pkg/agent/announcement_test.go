@@ -95,6 +95,18 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 		{"empty", "", false},
 		{"whitespace only", "   \n\t ", false},
 		{
+			"answer closing on a line it hands the person to say",
+			"5. “Isso é com outro setor.” Motivo: o cliente sente que foi empurrado de um lado para o outro.\n\n" +
+				"Em vez de “não sei”, diga “boa pergunta, vou verificar agora e já te retorno”.",
+			false,
+		},
+		{
+			"answer quoting the phrase with straight quotes",
+			`Para o cliente, responda "vou verificar e te aviso hoje".`,
+			false,
+		},
+		{"promise naming files in quotes", `Salvei "a.md". Agora vou verificar o "b.md".`, true},
+		{
 			"plain answer",
 			"A capital do Brasil é Brasília.",
 			false,

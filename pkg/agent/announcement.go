@@ -29,13 +29,25 @@ var (
 // make the promise a bug — no tool ran yet this turn, no tool call, tools were
 // offered — so this only has to judge the prose.
 func looksLikeUndeliveredAnnouncement(text string) bool {
-	tail := replyTail(text)
+	tail := replyTail(withoutQuotedSpeech(text))
 	if tail == "" {
 		return false
 	}
 	// A reply that stops on a colon promised something that never followed.
 	intent := announcementIntent.MatchString(tail) || endsOnDanglingColon(tail)
 	return intent && announcementAction.MatchString(tail)
+}
+
+// quotedSpan is a span between double quotes; RE2 pairs each opening quote
+// with the next closing one.
+var quotedSpan = regexp.MustCompile(`“[^”]*”|"[^"]*"|«[^»]*»`)
+
+// withoutQuotedSpeech drops what a reply quotes: words it hands the person to
+// say or write, as in «diga “vou verificar agora e já te retorno”», are not the
+// assistant's own next step. Taken for a promise, a complete answer was
+// retried, came back the same and was dropped: the person got nothing.
+func withoutQuotedSpeech(text string) string {
+	return quotedSpan.ReplaceAllString(text, "")
 }
 
 // replyTail is the closing stretch of a reply, where an undelivered promise
