@@ -117,6 +117,49 @@ func TestSendMedia_SkipsMissingFile(t *testing.T) {
 	assertNotSent(t, err, "report.txt")
 }
 
+// A ref whose file was removed after it was stored does not resolve in the
+// real FileMediaStore. The batch sends the other file and names the gone one,
+// as it does an empty file. (seucaranguejo fork — MST-957)
+func TestSendMedia_ReportsARefWhoseFileIsGone(t *testing.T) {
+	ch, ref := newMediaTestChannel(t, []byte("attachment body"))
+	store := ch.GetMediaStore()
+	gonePath := filepath.Join(t.TempDir(), "gone.txt")
+	if err := os.WriteFile(gonePath, []byte("gone body"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	goneRef, err := store.Store(gonePath, media.MediaMeta{Filename: "gone.txt"}, "test-scope")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	if err = os.Remove(gonePath); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	var uploaded []string
+	ch.uploadFileFn = func(ctx context.Context, params slacksdk.UploadFileParameters) error {
+		uploaded = append(uploaded, params.Filename)
+		return nil
+	}
+
+	_, err = ch.SendMedia(context.Background(), bus.OutboundMediaMessage{
+		ChatID: "C123456",
+		Parts: []bus.MediaPart{
+			{Ref: goneRef, Type: "file", Filename: "gone.txt"},
+			{Ref: ref, Type: "file", Filename: "report.txt"},
+		},
+	})
+
+	if !reflect.DeepEqual(uploaded, []string{"report.txt"}) {
+		t.Fatalf("uploaded %v, want only report.txt", uploaded)
+	}
+	assertNotSent(t, err, "gone.txt", "sent 1 of 2")
+	if n := strings.Count(err.Error(), "gone.txt"); n != 1 {
+		t.Fatalf("SendMedia() error = %q, names gone.txt %d times, want once", err, n)
+	}
+	if _, resolveErr := store.Resolve(goneRef); resolveErr == nil {
+		t.Fatalf("Resolve(%s) error = nil, want the store to fail a removed file", goneRef)
+	}
+}
+
 // A batch with an empty file sends the other files, and the caption, and
 // reports only the one it left out. (seucaranguejo fork — MST-957)
 func TestSendMedia_SendsTheRestAndReportsTheEmptyFile(t *testing.T) {

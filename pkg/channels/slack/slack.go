@@ -224,7 +224,8 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 
 	caption := slackFirstMediaCaption(msg.Parts)
 	sent := 0
-	// notSent are the files left out as empty or unreadable. (seucaranguejo fork — MST-957)
+	// notSent are the files left out as missing, empty or unreadable.
+	// (seucaranguejo fork — MST-957)
 	var notSent []string
 	for _, part := range msg.Parts {
 		localPath, err := store.Resolve(part.Ref)
@@ -233,6 +234,9 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 				"ref":   part.Ref,
 				"error": err.Error(),
 			})
+			// FileMediaStore fails the ref of a removed file here, before the
+			// stat below. (seucaranguejo fork — MST-957)
+			notSent = append(notSent, slackMediaPartName(part))
 			continue
 		}
 
@@ -244,11 +248,7 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 				"ref":   part.Ref,
 				"error": fmt.Sprint(err),
 			})
-			name := part.Filename
-			if name == "" {
-				name = part.Ref
-			}
-			notSent = append(notSent, name)
+			notSent = append(notSent, slackMediaPartName(part))
 			continue
 		}
 
@@ -290,13 +290,22 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 	// the agent. The failure is permanent, so the channel manager does not
 	// send the others again. (seucaranguejo fork — MST-957)
 	if len(notSent) > 0 {
-		return nil, fmt.Errorf("slack send media: sent %d of %d files; empty or unreadable, not sent: %s: %w",
+		return nil, fmt.Errorf("slack send media: sent %d of %d files; missing, empty or unreadable, not sent: %s: %w",
 			sent, len(msg.Parts), strings.Join(notSent, ", "), channels.ErrSendFailed)
 	}
 
 	// UploadFile does not expose the posted message timestamp in its
 	// response; returning nil avoids conflating file IDs with message IDs.
 	return nil, nil
+}
+
+// slackMediaPartName names a file of SendMedia in its error: the filename, or
+// the ref when it has none. (seucaranguejo fork — MST-957)
+func slackMediaPartName(part bus.MediaPart) string {
+	if part.Filename != "" {
+		return part.Filename
+	}
+	return part.Ref
 }
 
 func slackFirstMediaCaption(parts []bus.MediaPart) string {
