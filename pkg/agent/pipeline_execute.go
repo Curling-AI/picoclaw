@@ -146,7 +146,7 @@ toolLoop:
 		skipToolCall := func(content string) {
 			exec.allResponsesHandled = false
 			skipped := providers.ToolCall{ID: tc.ID, Name: toolName}
-			messages = append(messages, al.skipToolCalls(ts, []providers.ToolCall{skipped}, content, content)...)
+			messages = append(messages, al.skipToolCalls(turnCtx, ts, []providers.ToolCall{skipped}, content, content)...)
 		}
 		denyTool := func() bool {
 			if selectedTool != "" && toolName != selectedTool {
@@ -353,23 +353,9 @@ toolLoop:
 						ts.ingestMessage(turnCtx, al, toolResultMsg)
 					}
 
-					// Surface the tool result to structured-interim web channels
-					// (pico/grpc) so the UI can show each result as it lands, not
-					// only after the whole turn. Truncated to keep the live frame
-					// small; the full result is in history. (seucaranguejo fork)
-					if (ts.channel == "pico" || ts.channel == "grpc") && ts.opts.AllowInterimPicoPublish && al != nil && al.bus != nil {
-						if rc := strings.TrimSpace(contentForLLM); rc != "" {
-							if len(rc) > 2000 {
-								rc = rc[:2000] + "…"
-							}
-							resCtx, resCancel := context.WithTimeout(turnCtx, 3*time.Second)
-							_ = al.bus.PublishOutbound(resCtx, outboundMessageForTurnWithOptions(ts, rc, outboundTurnMessageOptions{
-								kind: messageKindToolResult,
-								raw:  map[string]string{metadataKeyToolCallID: tc.ID},
-							}))
-							resCancel()
-						}
-					}
+					// Surface the tool result as it lands (publishToolResultEvent).
+					// (seucaranguejo fork)
+					al.publishToolResultEvent(turnCtx, ts, tc.ID, contentForLLM, hookResult.IsError)
 
 					if hookResult.EndTurn && hookResult.IsError {
 						return finishFailedToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:], hookResult.ForUser)
@@ -403,7 +389,7 @@ toolLoop:
 									"reason":    skipReason,
 								})
 							messages = append(messages,
-								al.skipToolCalls(ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
+								al.skipToolCalls(turnCtx, ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
 						}
 						break toolLoop
 					}
@@ -470,7 +456,7 @@ toolLoop:
 						"iteration":   iteration,
 					})
 				messages = append(messages, al.skipToolCalls(
-					ts, normalizedToolCalls[i+1:], "repeated refused call", repeatStopSkipContent)...)
+					turnCtx, ts, normalizedToolCalls[i+1:], "repeated refused call", repeatStopSkipContent)...)
 				exec.messages = messages
 				if providerForTurn(turnCtx, ts.turnID) != nil {
 					exec.incomplete = true
@@ -796,24 +782,10 @@ toolLoop:
 			ts.ingestMessage(turnCtx, al, toolResultMsg)
 		}
 
-		// Surface the tool result to structured-interim web channels (pico/grpc)
-		// so the UI can show each result as it lands, not only after the whole
-		// turn. This is the main (no post-tool-hook) execution path; the hooked
-		// path above publishes the same way. Truncated to keep the live frame
-		// small; the full result is in history. (seucaranguejo fork)
-		if (ts.channel == "pico" || ts.channel == "grpc") && ts.opts.AllowInterimPicoPublish && al != nil && al.bus != nil {
-			if rc := strings.TrimSpace(contentForLLM); rc != "" {
-				if len(rc) > 2000 {
-					rc = rc[:2000] + "…"
-				}
-				resCtx, resCancel := context.WithTimeout(turnCtx, 3*time.Second)
-				_ = al.bus.PublishOutbound(resCtx, outboundMessageForTurnWithOptions(ts, rc, outboundTurnMessageOptions{
-					kind: messageKindToolResult,
-					raw:  map[string]string{metadataKeyToolCallID: toolCallID},
-				}))
-				resCancel()
-			}
-		}
+		// Surface the tool result as it lands (publishToolResultEvent). This is
+		// the main (no post-tool-hook) execution path; the hooked path above
+		// publishes the same way. (seucaranguejo fork)
+		al.publishToolResultEvent(turnCtx, ts, toolCallID, contentForLLM, toolResult.IsError)
 
 		if toolResult.EndTurn && toolResult.IsError {
 			return finishFailedToolHandoff(turnCtx, ts, exec, messages, normalizedToolCalls[i+1:], toolResult.ForUser)
@@ -877,7 +849,7 @@ toolLoop:
 						"reason":    skipReason,
 					})
 				messages = append(messages,
-					al.skipToolCalls(ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
+					al.skipToolCalls(turnCtx, ts, normalizedToolCalls[i+1:], skipReason, skipMessage)...)
 			}
 			break toolLoop
 		}
@@ -991,6 +963,7 @@ toolLoop:
 // skipToolCalls answers calls with content instead of running them, so the
 // assistant message that requested them keeps a result for each.
 func (al *AgentLoop) skipToolCalls(
+	ctx context.Context,
 	ts *turnState,
 	calls []providers.ToolCall,
 	reason, content string,
@@ -1014,6 +987,12 @@ func (al *AgentLoop) skipToolCalls(
 		if !ts.opts.NoHistory {
 			ts.appendHistoryMessage(skippedMsg)
 			ts.recordPersistedMessage(skippedMsg)
+		}
+		// The channel opened the call's card from the tool_calls message;
+		// it closes as failed. The structured web channels keep what they
+		// had. (seucaranguejo fork — MST-957)
+		if ts.toolEvents {
+			al.publishToolResultEvent(ctx, ts, tc.ID, content, true)
 		}
 	}
 	return answered

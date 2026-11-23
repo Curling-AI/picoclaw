@@ -55,6 +55,7 @@ func (al *AgentLoop) runTurn(
 		// this one wrote to memory or skills. (seucaranguejo fork)
 		defer func() { go ts.agent.ContextBuilder.RefreshSystemPromptCache() }()
 	}
+	ts.toolEvents = al.toolEventsWanted(ts)
 	al.registerActiveTurn(ts)
 	defer al.clearActiveTurn(ts)
 	defer func() {

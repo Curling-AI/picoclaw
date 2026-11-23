@@ -245,30 +245,13 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 		}
 	}
 
-	if len(visibleToolCalls) == 0 {
+	msg, ok := toolCallsOutbound(ts, modelName, visibleToolCalls)
+	if !ok {
 		return
 	}
-
-	rawToolCalls, err := json.Marshal(visibleToolCalls)
-	if err != nil {
-		logger.WarnCF("agent", "Failed to serialize pico tool calls", map[string]any{
-			"channel": ts.channel,
-			"chat_id": ts.chatID,
-			"error":   err.Error(),
-		})
-		return
-	}
-
-	msg := outboundMessageForTurnWithOptions(ts, "", outboundTurnMessageOptions{
-		kind:      messageKindToolCalls,
-		modelName: modelName,
-		raw: map[string]string{
-			metadataKeyToolCalls: string(rawToolCalls),
-		},
-	})
 
 	pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
-	err = al.bus.PublishOutbound(pubCtx, msg)
+	err := al.bus.PublishOutbound(pubCtx, msg)
 	pubCancel()
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
 		!errors.Is(err, context.Canceled) &&
@@ -279,6 +262,36 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			"error":   err.Error(),
 		})
 	}
+}
+
+// toolCallsOutbound builds the tool_calls message of a turn; false without
+// calls, or when they don't serialize. Shared by the structured web channels
+// and the channels that render tool cards (publishToolCallsEvent).
+// (seucaranguejo fork)
+func toolCallsOutbound(
+	ts *turnState,
+	modelName string,
+	visibleToolCalls []utils.VisibleToolCall,
+) (bus.OutboundMessage, bool) {
+	if len(visibleToolCalls) == 0 {
+		return bus.OutboundMessage{}, false
+	}
+	rawToolCalls, err := json.Marshal(visibleToolCalls)
+	if err != nil {
+		logger.WarnCF("agent", "Failed to serialize pico tool calls", map[string]any{
+			"channel": ts.channel,
+			"chat_id": ts.chatID,
+			"error":   err.Error(),
+		})
+		return bus.OutboundMessage{}, false
+	}
+	return outboundMessageForTurnWithOptions(ts, "", outboundTurnMessageOptions{
+		kind:      messageKindToolCalls,
+		modelName: modelName,
+		raw: map[string]string{
+			metadataKeyToolCalls: string(rawToolCalls),
+		},
+	}), true
 }
 
 // maxToolCallProgressArgsLen bounds the partial-argument payload sent on each

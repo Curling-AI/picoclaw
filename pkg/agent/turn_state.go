@@ -241,6 +241,10 @@ type turnExecution struct {
 	// LLM call per-iteration state
 	response            *providers.LLMResponse
 	normalizedToolCalls []providers.ToolCall
+	// progressTitles are the titles the model wrote for this call's tool
+	// calls, by call id, taken out of their arguments (takeProgressTitles).
+	// (seucaranguejo fork — MST-957)
+	progressTitles      map[string]string
 	allResponsesHandled bool
 	streamingPublisher  *streamingChunkPublisher
 	streamingFallback   bool
@@ -411,6 +415,10 @@ type turnState struct {
 	finishedChan    chan struct{}      // Closed when turn finishes
 	// onStep hears this sub-turn's tool calls, for the live view. (seucaranguejo fork)
 	onStep func(tools.SubTurnStep) func(failed bool)
+	// toolEvents marks a turn whose channel renders tool cards for its chat
+	// (channels.ToolEventsCapable); see toolEventsWanted. Set by runTurn
+	// before the turn is visible to other goroutines. (seucaranguejo fork — MST-957)
+	toolEvents bool
 
 	// Token budget tracking
 	tokenBudget      *atomic.Int64        // Shared token budget counter

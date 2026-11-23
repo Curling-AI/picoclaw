@@ -35,6 +35,14 @@ func (a *messageBusAdapter) GetStreamer(ctx context.Context, channel, chatID, se
 	return a.inner.GetStreamer(ctx, channel, chatID, sessionKey)
 }
 
+func (a *messageBusAdapter) ToolEventsFor(channel, chatID string) bool {
+	return a.inner.ToolEventsFor(channel, chatID)
+}
+
+func (a *messageBusAdapter) StreamingFor(channel, chatID string) (enabled, decided bool) {
+	return a.inner.StreamingFor(channel, chatID)
+}
+
 func (a *messageBusAdapter) InboundChan() <-chan bus.InboundMessage {
 	return a.inner.InboundChan()
 }
