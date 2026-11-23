@@ -920,3 +920,81 @@ func TestClearFinalizedStreamReachesADelegateThatTracksThem(t *testing.T) {
 		t.Fatalf("cleared = %v, want [pico:chat:s]", d.cleared)
 	}
 }
+
+// decidingDelegate answers the per-chat decisions of a channel manager:
+// tool events and streaming, keyed by "channel:chatID". (seucaranguejo fork)
+type decidingDelegate struct {
+	toolEvents map[string]bool
+	streaming  map[string]bool
+}
+
+func (*decidingDelegate) GetStreamer(context.Context, string, string, string) (Streamer, bool) {
+	return nil, false
+}
+
+func (d *decidingDelegate) ToolEventsFor(channel, chatID string) bool {
+	return d.toolEvents[channel+":"+chatID]
+}
+
+func (d *decidingDelegate) StreamingFor(channel, chatID string) (enabled, decided bool) {
+	enabled, decided = d.streaming[channel+":"+chatID]
+	return enabled, decided
+}
+
+// A bus keeps one delegate type for its life (atomic.Value), so each case
+// takes its own bus.
+func TestToolEventsForAsksADelegateThatTells(t *testing.T) {
+	if NewMessageBus().ToolEventsFor("slack", "C1") {
+		t.Fatal("ToolEventsFor without a delegate = true, want false")
+	}
+
+	silent := NewMessageBus()
+	silent.SetStreamDelegate(&clearingDelegate{}) // tracks streams, says nothing about tool events
+	if silent.ToolEventsFor("slack", "C1") {
+		t.Fatal("ToolEventsFor with a delegate that doesn't tell = true, want false")
+	}
+
+	mb := NewMessageBus()
+	mb.SetStreamDelegate(&decidingDelegate{toolEvents: map[string]bool{"slack:C1": true}})
+	if !mb.ToolEventsFor("slack", "C1") {
+		t.Fatal("ToolEventsFor(slack, C1) = false, want true")
+	}
+	if mb.ToolEventsFor("slack", "C2") {
+		t.Fatal("ToolEventsFor(slack, C2) = true, want false")
+	}
+}
+
+func TestStreamingForReportsOnlyADelegateDecision(t *testing.T) {
+	if enabled, decided := NewMessageBus().StreamingFor("slack", "C1"); enabled || decided {
+		t.Fatalf("StreamingFor without a delegate = (%v, %v), want (false, false)", enabled, decided)
+	}
+
+	silent := NewMessageBus()
+	silent.SetStreamDelegate(&clearingDelegate{})
+	if enabled, decided := silent.StreamingFor("slack", "C1"); enabled || decided {
+		t.Fatalf("StreamingFor with a delegate that doesn't decide = (%v, %v), want (false, false)", enabled, decided)
+	}
+
+	mb := NewMessageBus()
+	mb.SetStreamDelegate(&decidingDelegate{streaming: map[string]bool{"slack:C1": true, "slack:C2": false}})
+	if enabled, decided := mb.StreamingFor("slack", "C1"); !enabled || !decided {
+		t.Fatalf("StreamingFor(slack, C1) = (%v, %v), want (true, true)", enabled, decided)
+	}
+	if enabled, decided := mb.StreamingFor("slack", "C2"); enabled || !decided {
+		t.Fatalf("StreamingFor(slack, C2) = (%v, %v), want (false, true)", enabled, decided)
+	}
+	if enabled, decided := mb.StreamingFor("slack", "C3"); enabled || decided {
+		t.Fatalf("StreamingFor(slack, C3) = (%v, %v), want (false, false)", enabled, decided)
+	}
+}
+
+// An agent loop built without a bus holds a nil *MessageBus.
+func TestChannelDecisionsOnANilBus(t *testing.T) {
+	var mb *MessageBus
+	if mb.ToolEventsFor("slack", "C1") {
+		t.Fatal("nil bus ToolEventsFor = true, want false")
+	}
+	if enabled, decided := mb.StreamingFor("slack", "C1"); enabled || decided {
+		t.Fatalf("nil bus StreamingFor = (%v, %v), want (false, false)", enabled, decided)
+	}
+}

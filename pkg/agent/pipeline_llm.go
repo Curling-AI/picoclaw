@@ -418,6 +418,13 @@ func (p *Pipeline) CallLLM(
 		delete(exec.llmOpts, "native_search")
 	}
 
+	// A turn whose channel renders tool cards offers every tool the progress
+	// title, after the hooks so none drops it; other turns keep the schemas,
+	// and the prompt cache, they have. (seucaranguejo fork — MST-957)
+	if ts.toolEvents {
+		exec.providerToolDefs = tools.WithProgressTitle(exec.providerToolDefs)
+	}
+
 	exec.llmRequestID = requestIDFromOptions(exec.llmOpts)
 
 	al.emitEvent(
@@ -510,6 +517,12 @@ func (p *Pipeline) CallLLM(
 						filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile),
 						"web_search",
 					)
+					// The registry's web_search comes without the progress
+					// title the other tools of a card turn have; the ones
+					// that have it stay as they are. (seucaranguejo fork — MST-957)
+					if ts.toolEvents {
+						candidateTools = tools.WithProgressTitle(candidateTools)
+					}
 				}
 			}
 			candidateCfg := resolveActiveModelConfig(
@@ -1022,6 +1035,10 @@ func (p *Pipeline) CallLLM(
 	// tool calls live (seucaranguejo fork).
 	structuredInterimChannel := ts.channel == "pico" || ts.channel == "grpc"
 	shouldPublishPicoToolCallInterim := structuredInterimChannel && len(exec.response.ToolCalls) > 0
+	// A channel that renders tool cards for this chat gets the tool_calls
+	// message only: its reasoning and narration keep the path below.
+	// (seucaranguejo fork — MST-957)
+	shouldPublishToolCallsEvent := !structuredInterimChannel && ts.toolEvents && len(exec.response.ToolCalls) > 0
 	if shouldPublishPicoToolCallInterim {
 		// Pico tool-call turns publish their reasoning/content/tool summary as a
 		// structured sequence after the tool-call payload is normalized below.
@@ -1449,6 +1466,11 @@ func (p *Pipeline) CallLLM(
 	for _, tc := range exec.response.ToolCalls {
 		exec.normalizedToolCalls = append(exec.normalizedToolCalls, providers.NormalizeToolCall(tc))
 	}
+	// (seucaranguejo fork — MST-957)
+	exec.progressTitles = nil
+	if ts.toolEvents {
+		exec.normalizedToolCalls, exec.progressTitles = takeProgressTitles(ts.agent.Tools, exec.normalizedToolCalls)
+	}
 
 	toolNames := make([]string, 0, len(exec.normalizedToolCalls))
 	for _, tc := range exec.normalizedToolCalls {
@@ -1536,6 +1558,8 @@ func (p *Pipeline) CallLLM(
 			assistantMsg.ToolCalls,
 			contentStreamed,
 		)
+	} else if shouldPublishToolCallsEvent {
+		al.publishToolCallsEvent(turnCtx, ts, exec.llmModelName, assistantMsg.ToolCalls, exec.progressTitles)
 	}
 
 	return ControlToolLoop, nil

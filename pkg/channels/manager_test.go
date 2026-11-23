@@ -3560,3 +3560,81 @@ func TestClearFinalizedStreamForgetsTheSessionMarker(t *testing.T) {
 		t.Fatal("another session's marker was cleared")
 	}
 }
+
+// mockToolEventsChannel decides per chat whether it wants tool events and
+// whether it streams. (seucaranguejo fork)
+type mockToolEventsChannel struct {
+	mockStreamingChannel
+	toolEventsChats map[string]bool
+	streamingChats  map[string]bool
+}
+
+func (m *mockToolEventsChannel) ToolEventsFor(chatID string) bool {
+	return m.toolEventsChats[chatID]
+}
+
+func (m *mockToolEventsChannel) StreamingFor(chatID string) bool {
+	return m.streamingChats[chatID]
+}
+
+func TestToolEventsFor_AsksTheChannelForTheChat(t *testing.T) {
+	m := newTestManager()
+	m.channels["slack"] = &mockToolEventsChannel{toolEventsChats: map[string]bool{"C1": true}}
+	m.channels["telegram"] = &mockStreamingChannel{}
+
+	cases := []struct {
+		channel, chatID string
+		want            bool
+	}{
+		{"slack", "C1", true},
+		{"slack", "C2", false},
+		{"telegram", "C1", false}, // not ToolEventsCapable
+		{"discord", "C1", false},  // not registered
+	}
+	for _, tc := range cases {
+		if got := m.ToolEventsFor(tc.channel, tc.chatID); got != tc.want {
+			t.Errorf("ToolEventsFor(%q, %q) = %v, want %v", tc.channel, tc.chatID, got, tc.want)
+		}
+	}
+}
+
+func TestStreamingFor_DecidedOnlyByADecidingChannel(t *testing.T) {
+	m := newTestManager()
+	m.channels["slack"] = &mockToolEventsChannel{streamingChats: map[string]bool{"C1": true}}
+	m.channels["telegram"] = &mockStreamingChannel{}
+
+	cases := []struct {
+		channel, chatID  string
+		enabled, decided bool
+	}{
+		{"slack", "C1", true, true},
+		{"slack", "C2", false, true},
+		{"telegram", "C1", false, false}, // not a StreamingDecider
+		{"discord", "C1", false, false},  // not registered
+	}
+	for _, tc := range cases {
+		enabled, decided := m.StreamingFor(tc.channel, tc.chatID)
+		if enabled != tc.enabled || decided != tc.decided {
+			t.Errorf("StreamingFor(%q, %q) = (%v, %v), want (%v, %v)",
+				tc.channel, tc.chatID, enabled, decided, tc.enabled, tc.decided)
+		}
+	}
+}
+
+// The agent loop reaches the channel's decisions through the bus, where the
+// manager is the stream delegate.
+func TestManagerAnswersTheBusForTheChannelDecisions(t *testing.T) {
+	m := newTestManager()
+	m.bus.SetStreamDelegate(m)
+	m.channels["slack"] = &mockToolEventsChannel{
+		toolEventsChats: map[string]bool{"C1": true},
+		streamingChats:  map[string]bool{"C1": true},
+	}
+
+	if !m.bus.ToolEventsFor("slack", "C1") {
+		t.Fatal("bus ToolEventsFor(slack, C1) = false, want true")
+	}
+	if enabled, decided := m.bus.StreamingFor("slack", "C1"); !enabled || !decided {
+		t.Fatalf("bus StreamingFor(slack, C1) = (%v, %v), want (true, true)", enabled, decided)
+	}
+}

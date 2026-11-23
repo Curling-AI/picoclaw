@@ -24,6 +24,16 @@ type MessageBus interface {
 	// GetStreamer returns a channel streamer when the active channel supports streaming.
 	GetStreamer(ctx context.Context, channel, chatID, sessionKey string) (bus.Streamer, bool)
 
+	// ToolEventsFor reports whether the channel renders the structured tool
+	// events (tool_calls, tool_result) and the tool call title for the chat.
+	// (seucaranguejo fork)
+	ToolEventsFor(channel, chatID string) bool
+
+	// StreamingFor reports the channel's own streaming decision for the chat;
+	// decided is false when the channel leaves it to its Streaming config.
+	// (seucaranguejo fork)
+	StreamingFor(channel, chatID string) (enabled, decided bool)
+
 	// InboundChan returns the channel for receiving inbound messages.
 	InboundChan() <-chan bus.InboundMessage
 }

@@ -77,6 +77,20 @@ type FinalizedStreamClearer interface {
 	ClearFinalizedStream(channel, chatID, sessionKey string)
 }
 
+// ToolEventsDelegate is implemented by a StreamDelegate whose channels may
+// want the structured tool events (tool_calls, tool_result) and the tool call
+// title for a chat. (seucaranguejo fork)
+type ToolEventsDelegate interface {
+	ToolEventsFor(channel, chatID string) bool
+}
+
+// StreamingDecisionDelegate is implemented by a StreamDelegate whose channels
+// may decide per chat whether they stream; decided is false when the channel
+// leaves it to its Streaming config. (seucaranguejo fork)
+type StreamingDecisionDelegate interface {
+	StreamingFor(channel, chatID string) (enabled, decided bool)
+}
+
 // Streamer pushes incremental content to a streaming-capable channel.
 // Defined here so the agent loop can use it without importing pkg/channels.
 type Streamer interface {
@@ -346,6 +360,29 @@ func (mb *MessageBus) ClearFinalizedStream(channel, chatID, sessionKey string) {
 	if c, ok := mb.streamDelegate.Load().(FinalizedStreamClearer); ok && c != nil {
 		c.ClearFinalizedStream(channel, chatID, sessionKey)
 	}
+}
+
+// ToolEventsFor reports whether the delegate's channel wants the structured
+// tool events for the chat. False without a delegate that tells, and on a nil
+// bus (an agent loop built without one). (seucaranguejo fork)
+func (mb *MessageBus) ToolEventsFor(channel, chatID string) bool {
+	if mb == nil {
+		return false
+	}
+	d, ok := mb.streamDelegate.Load().(ToolEventsDelegate)
+	return ok && d.ToolEventsFor(channel, chatID)
+}
+
+// StreamingFor reports the delegate's per-chat streaming decision. decided is
+// false without a delegate that decides, and on a nil bus. (seucaranguejo fork)
+func (mb *MessageBus) StreamingFor(channel, chatID string) (enabled, decided bool) {
+	if mb == nil {
+		return false, false
+	}
+	if d, ok := mb.streamDelegate.Load().(StreamingDecisionDelegate); ok {
+		return d.StreamingFor(channel, chatID)
+	}
+	return false, false
 }
 
 func (mb *MessageBus) Stats() MessageBusStats {
