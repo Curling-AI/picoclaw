@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"time"
 
@@ -130,11 +131,11 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	if plan.DomainID != frame.DomainID || plan.BeforeState != frame.StateToken {
 		return ContentTransition{}, ErrContentStateChanged
 	}
-	if state.Pending != nil {
-		if time.Now().After(state.Pending.Transition.ExpiresAt) {
-			return ContentTransition{}, ErrContentLineageExpired
-		}
+	if state.Pending != nil && !overdueCompaction(state.Pending) {
 		return ContentTransition{}, ErrContentLineagePending
+	}
+	if state.Pending != nil {
+		logReleasedCompaction(ctx, state.Pending)
 	}
 	if uuid.Validate(plan.MutationID) != nil || len(plan.Retained) > len(state.Rows) {
 		return ContentTransition{}, ErrContentStateChanged
@@ -419,6 +420,57 @@ func (s *JSONLStore) commitContentArchiveAck(ctx context.Context, key string, im
 		s.retireAppliedContentImages(ctx, key, state.Last.Mutation.Retired)
 	}
 	return nil
+}
+
+// overdueCompaction reports a compaction whose archive confirmation is past its
+// deadline. Content sessions never compact physically, so releasing it keeps
+// every row on disk and only gives up the archive copy.
+func overdueCompaction(pending *contentPending) bool {
+	return pending != nil && pending.Mutation == nil && time.Now().After(pending.Transition.ExpiresAt)
+}
+
+func logReleasedCompaction(ctx context.Context, pending *contentPending) {
+	slog.WarnContext(ctx, "overdue history compaction released",
+		"mutation_id", pending.Transition.MutationID,
+		"expired_at", pending.Transition.ExpiresAt)
+}
+
+// releaseOverdueCompaction clears an overdue compaction so the operation that
+// met it proceeds instead of failing. The caller holds the session lock and
+// rereads its metadata when this reports a release.
+func (s *JSONLStore) releaseOverdueCompaction(ctx context.Context, key string, meta SessionMeta) (bool, error) {
+	if meta.ContentIdentity == nil || len(meta.ContentIdentity.opaque) != 0 ||
+		!overdueCompaction(meta.ContentIdentity.Pending) {
+		return false, nil
+	}
+	image, _, err := s.contentMutationImage(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	pending := image.Meta.ContentIdentity.Pending
+	if !overdueCompaction(pending) {
+		return false, nil
+	}
+	next := copyMeta(image.Meta)
+	next.ContentIdentity.Pending = nil
+	if err = s.commitContentMetadata(ctx, key, image, next); err != nil {
+		return false, err
+	}
+	logReleasedCompaction(ctx, pending)
+	return true, nil
+}
+
+// metaAfterOverdueCompaction is releaseOverdueCompaction for readMeta callers.
+func (s *JSONLStore) metaAfterOverdueCompaction(
+	ctx context.Context,
+	key string,
+	meta SessionMeta,
+) (SessionMeta, error) {
+	released, err := s.releaseOverdueCompaction(ctx, key, meta)
+	if err != nil || !released {
+		return meta, err
+	}
+	return s.readMeta(key)
 }
 
 func (s *JSONLStore) contentPendingGuard(meta SessionMeta) error {

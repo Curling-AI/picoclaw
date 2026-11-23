@@ -991,6 +991,9 @@ func (s *JSONLStore) TruncateHistory(
 	if err != nil {
 		return err
 	}
+	if meta, err = s.metaAfterOverdueCompaction(ctx, sessionKey, meta); err != nil {
+		return err
+	}
 	before := copyMeta(meta)
 	if operationErr := s.contentPendingGuard(meta); operationErr != nil {
 		return operationErr
@@ -1067,6 +1070,9 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	if err != nil {
 		return err
 	}
+	if meta, err = s.metaAfterOverdueCompaction(ctx, sessionKey, meta); err != nil {
+		return err
+	}
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
 	}
@@ -1129,11 +1135,13 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
 	}
+	if meta.ContentIdentity != nil && proofOptional {
+		// Save never compacts a content session physically: its compaction archive
+		// may be released unacknowledged, and the rows are its history of record.
+		return s.checkRetainedContentSource(ctx, sessionKey)
+	}
 	if meta.ContentIdentity != nil && meta.ContentIdentity.Pending != nil {
-		// Save uses Compact after an ordinary durable turn. A delayed archive
-		// confirmation retains the physical prefix but must not turn that
-		// already-persisted reply into a failed or empty response. Its overdue
-		// status remains observable through ReadPendingHistoryCompaction.
+		// An explicit Compact retains the prefix while its archive is pending.
 		return nil
 	}
 	if meta.Skip == 0 {
@@ -1188,13 +1196,7 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 			// No independent proof permits physical GC. The ordinary content
 			// is already durable; retain it without converting Save into a
 			// failed turn. Recheck real ownership/journal errors separately.
-			if journalErr := s.checkContentJournalSettled(sessionKey); journalErr != nil {
-				return journalErr
-			}
-			if _, ownershipErr := s.contentIdentityActiveLocked(ctx, sessionKey); ownershipErr != nil {
-				return ownershipErr
-			}
-			return nil
+			return s.checkRetainedContentSource(ctx, sessionKey)
 		}
 		return err
 	}
@@ -1234,6 +1236,16 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 		)
 		return nil
 	}
+	return err
+}
+
+// checkRetainedContentSource reports the journal and ownership failures that a
+// Save retaining its physical rows must not hide.
+func (s *JSONLStore) checkRetainedContentSource(ctx context.Context, sessionKey string) error {
+	if err := s.checkContentJournalSettled(sessionKey); err != nil {
+		return err
+	}
+	_, err := s.contentIdentityActiveLocked(ctx, sessionKey)
 	return err
 }
 

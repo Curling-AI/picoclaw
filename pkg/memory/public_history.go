@@ -319,6 +319,13 @@ func (s *JSONLStore) importPublicHistory(
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
 	}
+	if released, releaseErr := s.releaseOverdueCompaction(ctx, canonical, meta); releaseErr != nil {
+		return PublicHistory{}, releaseErr
+	} else if released {
+		if meta, _, payloadErr = s.readContentMeta(canonical); payloadErr != nil {
+			return PublicHistory{}, payloadErr
+		}
+	}
 	if operationErr7 := validateCanonicalHistoryKey(request.Key, canonical, meta); operationErr7 != nil {
 		return PublicHistory{}, operationErr7
 	}

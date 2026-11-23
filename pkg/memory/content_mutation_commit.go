@@ -75,6 +75,13 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 	if err != nil {
 		return ContentMutationResult{}, err
 	}
+	if released, releaseErr := s.releaseOverdueCompaction(ctx, key, meta); releaseErr != nil {
+		return ContentMutationResult{}, releaseErr
+	} else if released {
+		if meta, err = s.readContentMutationMeta(key); err != nil {
+			return ContentMutationResult{}, err
+		}
+	}
 	if result, found, replayErr := replayContentMutationPlan(meta, plan, digest); found || replayErr != nil {
 		return result, replayErr
 	}
