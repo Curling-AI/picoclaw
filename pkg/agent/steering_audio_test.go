@@ -287,7 +287,9 @@ func (b *blockingTranscriber) Transcribe(ctx context.Context, _ string) (*asr.Tr
 }
 
 // A stop during the transcription cuts it with the turn: it runs on the
-// turn's context, not on one of its own.
+// turn's context, not on one of its own. The audio did not fail, so the
+// history keeps the note that says the reply was interrupted, not the
+// failure note. (MST-553)
 func TestSteerSession_StopCutsTheTranscription(t *testing.T) {
 	provider := newSessionRecordingProvider("stale answer", "later")
 	al := newSessionSteeringLoop(t, provider)
@@ -323,6 +325,13 @@ func TestSteerSession_StopCutsTheTranscription(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the turn did not end after the stop")
+	}
+	history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(conversationA)
+	if n := occurrences(history, interruptedTranscriptionAudioNote); n != 1 {
+		t.Errorf("the history holds the interrupted note %d times, want once", n)
+	}
+	if occurrences(history, failedTranscriptionAudioNote) != 0 {
+		t.Error("the history calls a transcription the stop cut a failure")
 	}
 }
 

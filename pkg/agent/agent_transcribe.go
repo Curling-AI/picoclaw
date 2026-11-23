@@ -33,6 +33,12 @@ const (
 	noSpeechAudioNote = "[audio not transcribed: no speech was detected in it. " +
 		"If the user expected words in it, tell them none were detected. " +
 		untranscribedAudioRule
+	// The turn ended (a stop, or its deadline) before the transcription did.
+	// Nothing failed, and the history keeps what the model is told. (MST-553)
+	interruptedTranscriptionAudioNote = "[audio not transcribed: " +
+		"the reply was interrupted before the transcription finished. " +
+		"If the user still needs what it says, ask them to send it again. " +
+		untranscribedAudioRule
 )
 
 func (al *AgentLoop) transcribeAudioInMessage(ctx context.Context, msg bus.InboundMessage) bus.InboundMessage {
@@ -111,7 +117,8 @@ func (al *AgentLoop) resolveAudioRef(ref string) (string, media.MediaMeta, error
 }
 
 // transcribeAudio returns the text, or the note that replaces the audio when
-// there is none: no transcriber, a failed call, or no speech in the audio.
+// there is none: no transcriber, a turn that ended first, a failed call, or no
+// speech in the audio.
 func (al *AgentLoop) transcribeAudio(ctx context.Context, path string) (text, note string) {
 	// (seucaranguejo fork) Leitura única, sob lock: SetTranscriber troca o campo.
 	tr := al.currentTranscriber()
@@ -119,6 +126,13 @@ func (al *AgentLoop) transcribeAudio(ctx context.Context, path string) (text, no
 		return "", noTranscriberAudioNote
 	}
 	result, err := tr.Transcribe(ctx, path)
+	// The turn's context, not the error, says the turn ended: an HTTP client's
+	// own timeout also matches context.DeadlineExceeded, and that one is a
+	// failure. (seucaranguejo fork, MST-553)
+	if err != nil && ctx.Err() != nil {
+		logger.InfoCF("voice", "Transcription interrupted", map[string]any{"extension": filepath.Ext(path)})
+		return "", interruptedTranscriptionAudioNote
+	}
 	if err != nil {
 		// (seucaranguejo fork) Extension only: the path of a web upload carries
 		// the person's file name.
