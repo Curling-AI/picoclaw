@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -77,12 +78,30 @@ var channelRateConfig = map[string]float64{
 }
 
 type channelWorker struct {
-	ch         Channel
+	ch Channel
+	// registered is the channel RegisterChannel put under the worker's name
+	// after the worker started, when it takes over the outbound
+	// (OutboundTakeover); the send path reads it through channel().
+	// (seucaranguejo fork — MST-1021)
+	registered atomic.Pointer[registeredChannel]
 	queue      chan bus.OutboundMessage
 	mediaQueue chan bus.OutboundMediaMessage
 	done       chan struct{}
 	mediaDone  chan struct{}
 	limiter    *rate.Limiter
+}
+
+// registeredChannel boxes a Channel for channelWorker.registered: channels of
+// different types go through the same pointer. (seucaranguejo fork — MST-1021)
+type registeredChannel struct{ ch Channel }
+
+// channel is the channel the worker sends through: the one registered last
+// under its name, or the one it was built with. (seucaranguejo fork — MST-1021)
+func (w *channelWorker) channel() Channel {
+	if r := w.registered.Load(); r != nil {
+		return r.ch
+	}
+	return w.ch
 }
 
 type Manager struct {
@@ -619,6 +638,38 @@ func (m *Manager) SetMediaStore(store media.MediaStore) {
 // duplicate. (seucaranguejo fork)
 func (m *Manager) ClearFinalizedStream(channelName, chatID, sessionKey string) {
 	m.streamActive.Delete(streamSuppressionKey(channelName, chatID, sessionKey))
+}
+
+// ToolEventsFor reports whether the named channel wants the structured tool
+// events and the tool call title for the chat (ToolEventsCapable), for the
+// agent loop through bus.ToolEventsDelegate. (seucaranguejo fork)
+func (m *Manager) ToolEventsFor(channelName, chatID string) bool {
+	m.mu.RLock()
+	ch, exists := m.channels[channelName]
+	m.mu.RUnlock()
+	if !exists {
+		return false
+	}
+	capable, ok := ch.(ToolEventsCapable)
+	return ok && capable.ToolEventsFor(chatID)
+}
+
+// StreamingFor reports whether the named channel streams to the chat, when the
+// channel decides it (StreamingDecider). decided is false otherwise, and the
+// agent loop falls back to the channel's Streaming config
+// (bus.StreamingDecisionDelegate). (seucaranguejo fork)
+func (m *Manager) StreamingFor(channelName, chatID string) (enabled, decided bool) {
+	m.mu.RLock()
+	ch, exists := m.channels[channelName]
+	m.mu.RUnlock()
+	if !exists {
+		return false, false
+	}
+	decider, ok := ch.(StreamingDecider)
+	if !ok {
+		return false, false
+	}
+	return decider.StreamingFor(chatID), true
 }
 
 // GetStreamer implements bus.StreamDelegate.
@@ -1496,7 +1547,7 @@ func (m *Manager) runWorker(ctx context.Context, name string, w *channelWorker) 
 				return
 			}
 			maxLen := 0
-			if mlp, ok := w.ch.(MessageLengthProvider); ok {
+			if mlp, ok := w.channel().(MessageLengthProvider); ok {
 				maxLen = mlp.MaxMessageLength()
 			}
 
@@ -1598,7 +1649,8 @@ func (m *Manager) sendWithRetry(
 	}
 
 	// Pre-send: stop typing and try to edit placeholder
-	if msgIDs, handled := m.preSend(ctx, name, msg, w.ch); handled {
+	ch := w.channel()
+	if msgIDs, handled := m.preSend(ctx, name, msg, ch); handled {
 		m.publishOutboundSent(name, msg, msgIDs)
 		return msgIDs, nil
 	}
@@ -1606,7 +1658,7 @@ func (m *Manager) sendWithRetry(
 	var lastErr error
 	var msgIDs []string
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		msgIDs, lastErr = w.ch.Send(ctx, msg)
+		msgIDs, lastErr = ch.Send(ctx, msg)
 		if lastErr == nil {
 			m.publishOutboundSent(name, msg, msgIDs)
 			return msgIDs, nil
@@ -1770,7 +1822,8 @@ func (m *Manager) sendMediaWithRetry(
 	w *channelWorker,
 	msg bus.OutboundMediaMessage,
 ) ([]string, error) {
-	ms, ok := w.ch.(MediaSender)
+	ch := w.channel()
+	ms, ok := ch.(MediaSender)
 	if !ok {
 		err := fmt.Errorf("channel %q does not support media sending", name)
 		logger.WarnCF("channels", "Channel does not support MediaSender", map[string]any{
@@ -1796,7 +1849,7 @@ func (m *Manager) sendMediaWithRetry(
 	}
 
 	// Pre-send: stop typing and clean up any placeholder before sending media.
-	m.preSendMedia(ctx, name, msg, w.ch)
+	m.preSendMedia(ctx, name, msg, ch)
 
 	var lastErr error
 	var msgIDs []string
@@ -2045,6 +2098,15 @@ func (m *Manager) RegisterChannel(name string, channel Channel) {
 // registerChannelLocked is RegisterChannel for callers that ALREADY hold m.mu.
 func (m *Manager) registerChannelLocked(name string, channel Channel) {
 	m.channels[name] = channel
+	// A worker already running for the name sends through the channel
+	// registered now only when that channel asks to (OutboundTakeover);
+	// otherwise it keeps the one it started with. (seucaranguejo fork —
+	// MST-1021)
+	if takeover, ok := channel.(OutboundTakeover); ok && takeover.TakesOverOutbound() {
+		if w := m.workers[name]; w != nil {
+			w.registered.Store(&registeredChannel{ch: channel})
+		}
+	}
 	if m.mux != nil {
 		m.registerChannelHTTPHandler(name, channel)
 	}
@@ -2097,7 +2159,7 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	}
 
 	maxLen := 0
-	if mlp, ok := w.ch.(MessageLengthProvider); ok {
+	if mlp, ok := w.channel().(MessageLengthProvider); ok {
 		maxLen = mlp.MaxMessageLength()
 	}
 	// A falha definitiva vira erro: quem chama (a ferramenta message) dizia

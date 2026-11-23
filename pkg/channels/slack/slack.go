@@ -2,9 +2,12 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -31,7 +34,21 @@ type SlackChannel struct {
 	pendingAcks  sync.Map
 	uploadFileFn func(context.Context, slack.UploadFileParameters) error
 	postTextFn   func(context.Context, string, string, string) error
+	// mediaRetryWait replaces the timer of waitMediaRetry in tests.
+	// (seucaranguejo fork — MST-957)
+	mediaRetryWait func(context.Context, time.Duration) error
 }
+
+// The retry in place of a step of SendMedia once a file is up: the first try
+// and three more, the wait doubling from 500ms, as the channel manager's
+// sendMediaWithRetry (maxRetries, baseBackoff). A rate limit waits its
+// Retry-After instead, when longer, and stops the send when longer than
+// slackMediaMaxWait. (seucaranguejo fork — MST-957)
+const (
+	slackMediaStepAttempts = 4
+	slackMediaStepBackoff  = 500 * time.Millisecond
+	slackMediaMaxWait      = 30 * time.Second
+)
 
 type slackMessageRef struct {
 	ChannelID string
@@ -222,14 +239,32 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 	}
 
 	caption := slackFirstMediaCaption(msg.Parts)
-	sentAny := false
-	for _, part := range msg.Parts {
+	sent := 0
+	// notSent are the files left out as missing, empty or unreadable.
+	// (seucaranguejo fork — MST-957)
+	var notSent []string
+	for i, part := range msg.Parts {
 		localPath, err := store.Resolve(part.Ref)
 		if err != nil {
 			logger.ErrorCF("slack", "Failed to resolve media ref", map[string]any{
 				"ref":   part.Ref,
 				"error": err.Error(),
 			})
+			// FileMediaStore fails the ref of a removed file here, before the
+			// stat below. (seucaranguejo fork — MST-957)
+			notSent = append(notSent, slackMediaPartName(part))
+			continue
+		}
+
+		// slack-go refuses uploads without FileSize ("FileSize cannot be 0"),
+		// so every media send failed before this. (seucaranguejo fork)
+		info, err := os.Stat(localPath)
+		if err != nil || info.Size() == 0 {
+			logger.ErrorCF("slack", "Skipping unreadable or empty media file", map[string]any{
+				"ref":   part.Ref,
+				"error": fmt.Sprint(err),
+			})
+			notSent = append(notSent, slackMediaPartName(part))
 			continue
 		}
 
@@ -243,32 +278,134 @@ func (c *SlackChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessa
 			title = filename
 		}
 
-		err = c.uploadFileFn(ctx, slack.UploadFileParameters{
+		params := slack.UploadFileParameters{
 			Channel:         channelID,
 			ThreadTimestamp: threadTS,
 			File:            localPath,
+			FileSize:        int(info.Size()),
 			Filename:        filename,
 			Title:           title,
-		})
+		}
+		// Before any file is up, the channel manager's retry sends the batch
+		// again with nothing in the conversation. After, it would send the
+		// files up again, so the upload that failed is retried here, alone.
+		// (seucaranguejo fork — MST-957)
+		attempts := 1
+		if sent > 0 {
+			attempts = slackMediaStepAttempts
+		}
+		err = c.retryMediaStep(ctx, attempts, func() error { return c.uploadFileFn(ctx, params) })
 		if err != nil {
 			logger.ErrorCF("slack", "Failed to upload media", map[string]any{
 				"filename": filename,
 				"error":    err.Error(),
 			})
-			return nil, fmt.Errorf("slack send media: %w", channels.ErrTemporary)
+			if sent == 0 {
+				return nil, fmt.Errorf("slack send media: %w", channels.ErrTemporary)
+			}
+			left := make([]string, 0, len(msg.Parts)-i+1)
+			for _, leftPart := range msg.Parts[i:] {
+				left = append(left, slackMediaPartName(leftPart))
+			}
+			if caption != "" {
+				left = append(left, "the caption")
+			}
+			return nil, slackPartialMediaError(sent, len(msg.Parts),
+				"upload of "+left[0]+" failed, not sent: "+strings.Join(left, ", "), notSent)
 		}
-		sentAny = true
+		sent++
 	}
 
-	if sentAny && caption != "" {
-		if err := c.postTextFn(ctx, channelID, threadTS, caption); err != nil {
-			return nil, fmt.Errorf("slack send media caption fallback: %w", channels.ErrTemporary)
+	if sent > 0 && caption != "" {
+		err := c.retryMediaStep(ctx, slackMediaStepAttempts, func() error {
+			return c.postTextFn(ctx, channelID, threadTS, caption)
+		})
+		if err != nil {
+			logger.ErrorCF("slack", "Failed to post media caption", map[string]any{
+				"error": err.Error(),
+			})
+			return nil, slackPartialMediaError(sent, len(msg.Parts),
+				"posting the caption failed, not sent: the caption", notSent)
 		}
+	}
+
+	if len(notSent) > 0 {
+		return nil, slackPartialMediaError(sent, len(msg.Parts), "", notSent)
 	}
 
 	// UploadFile does not expose the posted message timestamp in its
 	// response; returning nil avoids conflating file IDs with message IDs.
 	return nil, nil
+}
+
+// slackPartialMediaError fails a send that left something out once the rest
+// was up: what stopped it, the files missing, empty or unreadable, and, when
+// files went up, not to send them again. The failure is permanent
+// (channels.ErrSendFailed), so the channel manager does not send the batch
+// again. (seucaranguejo fork — MST-957)
+func slackPartialMediaError(sent, total int, stopped string, notSent []string) error {
+	text := fmt.Sprintf("slack send media: sent %d of %d files", sent, total)
+	if stopped != "" {
+		text += "; " + stopped
+	}
+	if len(notSent) > 0 {
+		text += "; missing, empty or unreadable, not sent: " + strings.Join(notSent, ", ")
+	}
+	if sent > 0 {
+		text += "; the files sent are in the conversation, do not send them again"
+	}
+	return fmt.Errorf("%s: %w", text, channels.ErrSendFailed)
+}
+
+// retryMediaStep runs an upload or the caption post of SendMedia up to
+// attempts times, the wait doubling from slackMediaStepBackoff. A rate limit
+// waits its Retry-After when longer, and one longer than slackMediaMaxWait
+// ends the retries, as does the end of ctx. It returns the step's last error.
+// (seucaranguejo fork — MST-957)
+func (c *SlackChannel) retryMediaStep(ctx context.Context, attempts int, step func() error) error {
+	err := step()
+	backoff := slackMediaStepBackoff
+	for try := 1; err != nil && try < attempts; try++ {
+		wait := backoff
+		var limited *slack.RateLimitedError
+		if errors.As(err, &limited) {
+			if limited.RetryAfter > slackMediaMaxWait {
+				return err
+			}
+			wait = max(wait, limited.RetryAfter)
+		}
+		if c.waitMediaRetry(ctx, wait) != nil {
+			return err
+		}
+		backoff *= 2
+		err = step()
+	}
+	return err
+}
+
+// waitMediaRetry waits d before a retry in place of SendMedia, or less when
+// ctx ends. (seucaranguejo fork — MST-957)
+func (c *SlackChannel) waitMediaRetry(ctx context.Context, d time.Duration) error {
+	if c.mediaRetryWait != nil {
+		return c.mediaRetryWait(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// slackMediaPartName names a file of SendMedia in its error: the filename, or
+// the ref when it has none. (seucaranguejo fork — MST-957)
+func slackMediaPartName(part bus.MediaPart) string {
+	if part.Filename != "" {
+		return part.Filename
+	}
+	return part.Ref
 }
 
 func slackFirstMediaCaption(parts []bus.MediaPart) string {

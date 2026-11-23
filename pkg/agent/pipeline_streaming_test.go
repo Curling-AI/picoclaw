@@ -1324,3 +1324,76 @@ func TestSynthesizedReplyWithoutAStreamClearsTheFinalizedMarker(t *testing.T) {
 		}
 	}
 }
+
+// streamingDecidingDelegate streams through streamer and decides per chat,
+// keyed by "channel:chatID". (seucaranguejo fork — MST-957)
+type streamingDecidingDelegate struct {
+	streamer  bus.Streamer
+	decisions map[string]bool
+}
+
+func (d streamingDecidingDelegate) GetStreamer(context.Context, string, string, string) (bus.Streamer, bool) {
+	return d.streamer, d.streamer != nil
+}
+
+func (d streamingDecidingDelegate) StreamingFor(channel, chatID string) (enabled, decided bool) {
+	enabled, decided = d.decisions[channel+":"+chatID]
+	return enabled, decided
+}
+
+func TestConfiguredStreamingChannelDecisionWinsOverItsConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		channel          string
+		channelStreaming bool
+		decisions        map[string]bool
+		wantStreamCalls  int
+		wantChatCalls    int
+	}{
+		{
+			name:            "channel without streaming config streams when it decides so",
+			channel:         "slack",
+			decisions:       map[string]bool{"slack:session-1": true},
+			wantStreamCalls: 1,
+		},
+		{
+			name:          "channel without streaming config and no decision uses chat",
+			channel:       "slack",
+			wantChatCalls: 1,
+		},
+		{
+			name:             "decision against streaming wins over an enabled config",
+			channel:          "pico",
+			channelStreaming: true,
+			decisions:        map[string]bool{"pico:session-1": false},
+			wantChatCalls:    1,
+		},
+		{
+			name:             "decision for another chat leaves the config",
+			channel:          "pico",
+			channelStreaming: true,
+			decisions:        map[string]bool{"pico:session-2": false},
+			wantStreamCalls:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, tt.channelStreaming, true, nil)
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(streamingDecidingDelegate{
+				streamer:  &recordingStreamer{},
+				decisions: tt.decisions,
+			})
+			provider := &configuredStreamingProvider{}
+			al := NewAgentLoop(cfg, msgBus, provider)
+
+			runConfiguredStreamingTurn(t, al, tt.channel)
+
+			if provider.streamCalls != tt.wantStreamCalls || provider.chatCalls != tt.wantChatCalls {
+				t.Fatalf("calls = stream:%d chat:%d, want stream:%d chat:%d",
+					provider.streamCalls, provider.chatCalls, tt.wantStreamCalls, tt.wantChatCalls)
+			}
+		})
+	}
+}

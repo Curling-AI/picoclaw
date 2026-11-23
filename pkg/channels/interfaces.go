@@ -60,6 +60,25 @@ type StreamingCapable interface {
 	BeginStream(ctx context.Context, chatID string) (Streamer, error)
 }
 
+// ToolEventsCapable — channels that render structured tool events
+// (tool_calls, tool_result) and the tool call title for some conversations.
+// (seucaranguejo fork)
+type ToolEventsCapable interface {
+	ToolEventsFor(chatID string) bool
+}
+
+// StreamingDecider — channels that decide per conversation whether they
+// stream, ahead of the channel's Streaming config. (seucaranguejo fork)
+type StreamingDecider interface {
+	StreamingFor(chatID string) bool
+}
+
+// OutboundTakeover — channels registered over a running channel that want the
+// existing outbound worker to send through them. (seucaranguejo fork)
+type OutboundTakeover interface {
+	TakesOverOutbound() bool
+}
+
 // Streamer is defined in pkg/bus to avoid circular imports.
 // This alias keeps channel implementations using channels.Streamer unchanged.
 type Streamer = bus.Streamer
