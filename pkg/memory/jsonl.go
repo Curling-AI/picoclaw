@@ -1142,6 +1142,8 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	}
 	if meta.ContentIdentity != nil && meta.ContentIdentity.Pending != nil {
 		// An explicit Compact retains the prefix while its archive is pending.
+		// shortcut: after a release it collects unarchived rows, upgrade if
+		// anything but tests calls Compact on a content session.
 		return nil
 	}
 	if meta.Skip == 0 {

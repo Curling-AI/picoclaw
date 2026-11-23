@@ -134,9 +134,7 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	if state.Pending != nil && !overdueCompaction(state.Pending) {
 		return ContentTransition{}, ErrContentLineagePending
 	}
-	if state.Pending != nil {
-		logReleasedCompaction(ctx, state.Pending)
-	}
+	released := state.Pending
 	if uuid.Validate(plan.MutationID) != nil || len(plan.Retained) > len(state.Rows) {
 		return ContentTransition{}, ErrContentStateChanged
 	}
@@ -202,6 +200,9 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	}
 	if err = s.commitContentMetadata(ctx, key, image, next); err != nil {
 		return ContentTransition{}, err
+	}
+	if released != nil {
+		logReleasedCompaction(ctx, released)
 	}
 	if next.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
 		if err := s.prepareNativeHistoryArchiveLocked(ctx, key); err != nil {

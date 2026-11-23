@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/memory/testdata/lineagefixture"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 // overdueContent leaves key with a compaction whose archive confirmation is
@@ -59,8 +60,14 @@ func TestOverdueCompactionIsReleasedByTheOperationThatMeetsIt(t *testing.T) {
 		"set history": func(t *testing.T, s *JSONLStore, key string) error {
 			return s.SetHistory(t.Context(), key, nil)
 		},
-		"delete": func(t *testing.T, s *JSONLStore, key string) error {
-			return s.DeleteSession(t.Context(), key)
+		"retention prune": func(t *testing.T, s *JSONLStore, key string) error {
+			if err := s.removeSessionFiles(sanitizeKey(key)); err != nil {
+				return err
+			}
+			if _, err := os.Stat(s.jsonlPath(key)); !os.IsNotExist(err) {
+				t.Fatal("prune kept the session it reported removed", err)
+			}
+			return nil
 		},
 		"edit": func(t *testing.T, s *JSONLStore, key string) error {
 			frame, err := s.ReadHistoryContentFrame(t.Context(), key)
@@ -125,5 +132,26 @@ func TestSaveKeepsTheRowsOfAReleasedCompaction(t *testing.T) {
 	after, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil || !bytes.HasPrefix(after, before) {
 		t.Fatal("Save dropped rows whose archive was never confirmed", err)
+	}
+}
+
+func TestRewriteAfterReleaseKeepsTheUnarchivedRows(t *testing.T) {
+	key := "sk_v1_overdue_rewrite"
+	s, _ := overdueContent(t, key)
+	before, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restore point that diverges from the active window, as an aborted turn writes.
+	if err = s.SetHistory(t.Context(), key, []providers.Message{{Role: "user", Content: "restored"}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(s.jsonlPath(key))
+	if err != nil || !bytes.HasPrefix(after, before) {
+		t.Fatal("rewrite dropped rows whose archive was never confirmed", err)
+	}
+	history, err := s.GetHistory(t.Context(), key)
+	if err != nil || len(history) != 1 || history[0].Content != "restored" {
+		t.Fatal("rewrite did not install the restore point", history, err)
 	}
 }
