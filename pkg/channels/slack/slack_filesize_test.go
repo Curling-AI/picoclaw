@@ -197,6 +197,8 @@ func TestSendMedia_SendsTheRestAndReportsTheEmptyFile(t *testing.T) {
 	if strings.Contains(err.Error(), "report.txt") {
 		t.Fatalf("SendMedia() error = %q, names the file it sent", err)
 	}
+	assertErrorText(t, err, "slack send media: sent 1 of 2 files; missing, empty or unreadable, not sent: empty.txt; "+
+		"the files sent are in the conversation, do not send them again: send failed")
 }
 
 // When no file goes up the caption does not either, and a file without a name
@@ -233,4 +235,7 @@ func TestSendMedia_PostsNoCaptionWhenNoFileWentUp(t *testing.T) {
 		t.Fatalf("uploads = %d, posts = %d, want none", uploads, posts)
 	}
 	assertNotSent(t, err, "sent 0 of 2", "report.txt, "+unnamedRef)
+	// Nothing went up, so nothing to warn against sending again.
+	assertErrorText(t, err, "slack send media: sent 0 of 2 files; missing, empty or unreadable, not sent: report.txt, "+
+		unnamedRef+": send failed")
 }
