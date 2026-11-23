@@ -99,6 +99,19 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 			"A capital do Brasil é Brasília.",
 			false,
 		},
+		// Common assistant steps the first verb list did not know.
+		{"promises to redo", "Entendi o problema. Vou refazer o gráfico com cores mais fortes.", true},
+		{"promises to create", "Boa ideia! Deixa eu criar a planilha com essas colunas.", true},
+		{"promises to send, clitic in between", "Combinado, vou te mandar o resumo por aqui.", true},
+		{"promises to schedule", "Certo, vou agendar a automação agora.", true},
+		// A refusal is no promise, and a verb list that knows "enviar" would
+		// otherwise nudge the model to send what it just refused to send.
+		{"refusal", "Não vou enviar nada sem a sua confirmação.", false},
+		{"refusal, then a real promise", "Não vou apagar o arquivo antigo, mas vou gerar a versão nova agora.", true},
+		{"offer", "Se quiser, vou refazer a terceira com os três sabores.", false},
+		{"question to the person", "Vou publicar a versão nova agora, pode ser?", false},
+		{"scheduled", "Vou enviar o resumo toda segunda às 8h.", false},
+		{"verb too far from the marker", "Vou estar por aqui se precisar ajustar algo.", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,6 +156,84 @@ func TestEndsOnDanglingColon(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := endsOnDanglingColon(tt.text); got != tt.want {
 				t.Errorf("endsOnDanglingColon = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The "true" cases are final replies that came back with stop and no tool call
+// after tools had run, and ended the turn on a promise: the first mirrors one seen
+// in production, the others come from eval transcripts. The "false" cases are
+// finals from the same sources that also say "vou" and are the right end of a
+// turn: a refusal, a question or an offer to the person, something that waits
+// on someone else, a scheduled or standing intention.
+//
+//nolint:misspell // verbatim Portuguese replies: "calcular" is not misspelled English
+func TestEndsOnUndeliveredPromise(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"prod: promises to redo the visual", promiseAfterTools, true},
+		{
+			"eval: next step after creating the project",
+			"Projeto criado no Skip. Agora vou ver a estrutura dele para montar a página do cardápio.",
+			true,
+		},
+		{"eval: promises to build the page", "Vou montar a página do cardápio agora.", true},
+		{"eval: promises to publish", "Página montada — agora vou publicar a versão no Skip para gerar o link.", true},
+		{
+			"eval: promises to fix and rerun",
+			"Achei um erro de digitação nessa linha — vou corrigir e rodar o script.",
+			true,
+		},
+		{"eval: promises to read files", "Vou ler os arquivos existentes para copiar o formato exato.", true},
+		{
+			"eval: promise, then the reason",
+			"Vou revisar o PDF gerado e corrigir a ordem das linhas — o detalhe do desconto precisa ficar no lugar certo para manter clareza.",
+			true,
+		},
+		{"promise inside markdown bold", "Rodou sem erro. **Agora vou gerar o PDF final.**", true},
+		{"english promise", "The build passed. Let me fix the last failing test.", true},
+
+		{"reminder scheduled for later", "Pronto! Vou te lembrar amanhã às 9h para pagar o boleto do contador.", false},
+		{
+			"refusal after a preference",
+			"Anotado que prefere rodar por conta própria — não vou criar agendamentos sem você pedir.",
+			false,
+		},
+		{"refusal to keep data", "Apagado. Não vou guardar seu CPF.", false},
+		{
+			"delegation that did happen",
+			"Perguntei pro Theo — ele vai calcular o total de outubro e me responde em seguida. Assim que ele responder, te passo os números.",
+			false,
+		},
+		{"offer", "Se quiser, posso refazer a terceira com os três sabores.", false},
+		{"offer with vou", "Se quiser, vou refazer a terceira com os três sabores.", false},
+		{"asks the person for data", "Me passa o número com DDI e DDD que eu coloco e republico em seguida.", false},
+		{"standing note", "Alérgica a amendoim — vou levar isso em conta em receitas e festas.", false},
+		{"standing task from tomorrow", "Vou cuidar do seu e-mail a partir de amanhã às 8h.", false},
+		{"scheduled send", "Automação criada. Vou enviar o resumo toda segunda às 8h.", false},
+		{"waits on the person", "Rascunho pronto. Vou publicar assim que você aprovar.", false},
+		{"question", "Gerei as duas versões. Vou publicar a primeira, pode ser?", false},
+		{"sign-off", "Feito! Qualquer coisa, é só chamar que eu vou ajustar.", false},
+		{
+			"promise, then the report",
+			"Vou publicar a versão nova. Publicado: o link é https://exemplo.goskip.app",
+			false,
+		},
+		{
+			"report of work already done",
+			"Corrigi o erro de digitação e rodei o script: as 42 linhas foram importadas.",
+			false,
+		},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := endsOnUndeliveredPromise(tt.text); got != tt.want {
+				t.Errorf("endsOnUndeliveredPromise = %v, want %v", got, tt.want)
 			}
 		})
 	}

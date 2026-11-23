@@ -106,7 +106,7 @@ func (al *AgentLoop) continueSession(
 	if metaStore, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok {
 		scope = metaStore.GetSessionScope(sessionKey)
 	}
-	opts := continuationOptions(sessionKey, channel, chatID, scope)
+	opts := al.continuationOptions(sessionKey, channel, chatID, scope)
 	if shape != nil {
 		var err error
 		if opts, err = shape(opts); err != nil {

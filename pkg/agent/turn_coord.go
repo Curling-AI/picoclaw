@@ -401,7 +401,7 @@ func (al *AgentLoop) runTurn(
 		if ts.atIterationCap(ts.currentIteration()) {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
-			finalContent = toolLimitResponse
+			finalContent = al.toolLimitText()
 		} else {
 			finalContent = ts.opts.DefaultResponse
 			exec.finalIsFallback = true
