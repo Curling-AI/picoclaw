@@ -206,8 +206,8 @@ Explicit `/clear` commits empty history and summary together. Its owned journal 
 
 Emergency compression uses logical truncation only at a safe turn boundary. With a single protected turn and no safe boundary, it leaves persisted history intact; prompt fitting can still trim the in-memory model context.
 
-`JSONLBackend.Save` maps onto `store.Compact(...)`.
-In other words, `Save` is no longer "flush dirty memory to disk"; it is now "reclaim dead lines after logical truncation".
+`JSONLBackend.Save` maps onto `store.CompactForSessionSave(...)` when the store has it, and onto `store.Compact(...)` otherwise.
+In other words, `Save` is no longer "flush dirty memory to disk"; it is now "reclaim dead lines after logical truncation or a confirmed compaction". In a content session it keeps the prefix while an archive is pending or while the prefix holds rows of a compaction released without confirmation.
 
 ## Concurrency Model
 
