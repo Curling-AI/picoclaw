@@ -316,18 +316,22 @@ func (s *JSONLStore) importPublicHistory(
 	if err := s.contentMutationWriterPreflight(ctx, canonical); err != nil {
 		return PublicHistory{}, err
 	}
-	meta, _, payloadErr := s.readContentMeta(canonical)
+	readImportMeta := func(key string) (SessionMeta, error) {
+		meta, _, err := s.readContentMeta(key)
+		if err != nil {
+			return SessionMeta{}, err
+		}
+		if err = s.probeHistoryRecoveryMarker(key, &meta); err != nil {
+			return SessionMeta{}, err
+		}
+		return meta, s.prepareContentMutationOrderFence(key, &meta)
+	}
+	meta, payloadErr := readImportMeta(canonical)
 	if payloadErr != nil {
 		return PublicHistory{}, payloadErr
 	}
 	if operationErr7 := validateCanonicalHistoryKey(request.Key, canonical, meta); operationErr7 != nil {
 		return PublicHistory{}, operationErr7
-	}
-	if operationErr8 := s.probeHistoryRecoveryMarker(canonical, &meta); operationErr8 != nil {
-		return PublicHistory{}, operationErr8
-	}
-	if operationErr := s.prepareContentMutationOrderFence(canonical, &meta); operationErr != nil {
-		return PublicHistory{}, operationErr
 	}
 	if operationErr := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); operationErr != nil {
 		return PublicHistory{}, operationErr
@@ -345,6 +349,11 @@ func (s *JSONLStore) importPublicHistory(
 	}
 	if origin == publicImportExternal && meta.ContentIdentity != nil &&
 		meta.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
+		// Only this policy holds an import on the pending archive, so only here
+		// does an overdue one give way; elsewhere a late ACK is still accepted.
+		if meta, payloadErr = s.metaAfterOverdueCompaction(ctx, canonical, meta, readImportMeta); payloadErr != nil {
+			return PublicHistory{}, payloadErr
+		}
 		if meta.ContentIdentity.Pending != nil && meta.ContentIdentity.Pending.Mutation == nil {
 			return PublicHistory{}, ErrContentLineagePending
 		}

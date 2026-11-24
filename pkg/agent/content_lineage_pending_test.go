@@ -87,46 +87,90 @@ func (p *contentSummaryCountingProvider) Chat(
 func (*contentSummaryCountingProvider) GetDefaultModel() string { return "mock-model" }
 
 func TestContentLineagePendingStopsSummaryWorkBeforeProvider(t *testing.T) {
-	for _, expired := range []bool{false, true} {
-		for _, mode := range []string{"summarize", "force"} {
-			t.Run(map[bool]string{false: "pending", true: "expired"}[expired]+"/"+mode, func(t *testing.T) {
-				al, store, _, key := contentPendingLoop(t, expired)
-				for i := range 12 {
-					role := "user"
-					if i%2 == 1 {
-						role = "assistant"
-					}
-					if err := store.AddMessage(t.Context(), key, role, "more content"); err != nil {
-						t.Fatal(err)
-					}
+	for _, mode := range []string{"summarize", "force"} {
+		t.Run("pending/"+mode, func(t *testing.T) {
+			al, store, _, key := contentPendingLoop(t, false)
+			for i := range 12 {
+				role := "user"
+				if i%2 == 1 {
+					role = "assistant"
 				}
-				before, err := store.ReadHistoryContentFrame(t.Context(), key)
-				if err != nil {
+				if err := store.AddMessage(t.Context(), key, role, "more content"); err != nil {
 					t.Fatal(err)
 				}
-				agent := al.registry.GetDefaultAgent()
-				provider := &contentSummaryCountingProvider{}
-				agent.Provider, agent.KeepLastMessages = provider, 2
-				manager := al.contextManager.(*legacyContextManager)
-				if mode == "summarize" {
-					manager.summarizeSession(context.Background(), agent, key)
-				} else {
-					_, changed, compactErr := manager.forceCompressionContext(t.Context(), key, 0)
-					if changed || (!errors.Is(compactErr, memory.ErrContentLineagePending) &&
-						!errors.Is(compactErr, memory.ErrContentLineageExpired)) {
-						t.Fatal("pending force compression did not expose its guard", changed, compactErr)
-					}
+			}
+			before, err := store.ReadHistoryContentFrame(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent := al.registry.GetDefaultAgent()
+			provider := &contentSummaryCountingProvider{}
+			agent.Provider, agent.KeepLastMessages = provider, 2
+			manager := al.contextManager.(*legacyContextManager)
+			if mode == "summarize" {
+				manager.summarizeSession(context.Background(), agent, key)
+			} else {
+				_, changed, compactErr := manager.forceCompressionContext(t.Context(), key, 0)
+				if changed || !errors.Is(compactErr, memory.ErrContentLineagePending) {
+					t.Fatal("pending force compression did not expose its guard", changed, compactErr)
 				}
-				if provider.calls != 0 {
-					t.Fatalf("uncommittable summary called provider %d times", provider.calls)
+			}
+			if provider.calls != 0 {
+				t.Fatalf("uncommittable summary called provider %d times", provider.calls)
+			}
+			after, err := store.ReadHistoryContentFrame(t.Context(), key)
+			if err != nil || before.StateToken != after.StateToken || before.Summary != after.Summary ||
+				len(before.Entries) != len(after.Entries) {
+				t.Fatal("pending compaction partially changed the source", after, err)
+			}
+		})
+	}
+}
+
+func TestContentLineageOverdueArchiveDoesNotStopSummaryWork(t *testing.T) {
+	for _, mode := range []string{"summarize", "force"} {
+		t.Run(mode, func(t *testing.T) {
+			al, store, dir, key := contentPendingLoop(t, true)
+			for i := range 12 {
+				role := "user"
+				if i%2 == 1 {
+					role = "assistant"
 				}
-				after, err := store.ReadHistoryContentFrame(t.Context(), key)
-				if err != nil || before.StateToken != after.StateToken || before.Summary != after.Summary ||
-					len(before.Entries) != len(after.Entries) {
-					t.Fatal("pending compaction partially changed the source", after, err)
+				if err := store.AddMessage(t.Context(), key, role, "more content"); err != nil {
+					t.Fatal(err)
 				}
-			})
-		}
+			}
+			rows, err := os.ReadFile(filepath.Join(dir, key+".jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.ReadHistoryContentFrame(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent := al.registry.GetDefaultAgent()
+			provider := &contentSummaryCountingProvider{}
+			agent.Provider, agent.KeepLastMessages = provider, 2
+			manager := al.contextManager.(*legacyContextManager)
+			if mode == "summarize" {
+				manager.summarizeSession(context.Background(), agent, key)
+			} else if _, changed, compactErr := manager.forceCompressionContext(t.Context(), key, 0); !changed ||
+				compactErr != nil {
+				t.Fatal("overdue archive still blocked force compression", changed, compactErr)
+			}
+			// Force compression drops the oldest turns without asking the provider.
+			if mode == "summarize" && provider.calls == 0 {
+				t.Fatal("overdue archive stopped the summary before the provider")
+			}
+			after, err := store.ReadHistoryContentFrame(t.Context(), key)
+			if err != nil || after.StateToken == before.StateToken || len(after.Entries) >= len(before.Entries) {
+				t.Fatal("overdue archive kept the session from compacting", after, err)
+			}
+			retained, err := os.ReadFile(filepath.Join(dir, key+".jsonl"))
+			if err != nil || !bytes.HasPrefix(retained, rows) {
+				t.Fatal("compaction after an overdue archive dropped physical rows", err)
+			}
+		})
 	}
 }
 
