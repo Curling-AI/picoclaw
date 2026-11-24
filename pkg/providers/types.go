@@ -23,6 +23,7 @@ type (
 	CacheControl           = protocoltypes.CacheControl
 	Attachment             = protocoltypes.Attachment
 	Delivery               = protocoltypes.Delivery
+	DecisionQuestion       = protocoltypes.DecisionQuestion
 )
 
 type LLMProvider interface {
@@ -34,6 +35,14 @@ type LLMProvider interface {
 		options map[string]any,
 	) (*LLMResponse, error)
 	GetDefaultModel() string
+}
+
+// Decider is an optional interface for providers whose gateway answers yes/no
+// questions with a decision model (the Decisions API). Each answer is the
+// probability of yes, by question name; a question the model refused has none.
+// (seucaranguejo fork)
+type Decider interface {
+	Decide(ctx context.Context, model, input string, questions []DecisionQuestion) (map[string]float64, error)
 }
 
 type StatefulProvider interface {

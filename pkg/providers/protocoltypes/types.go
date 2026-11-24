@@ -271,3 +271,10 @@ type ToolFunctionDefinition struct {
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
 }
+
+// DecisionQuestion is one yes/no question a decision model answers about an
+// input, with the probability of yes. (seucaranguejo fork)
+type DecisionQuestion struct {
+	Name         string
+	Instructions string
+}

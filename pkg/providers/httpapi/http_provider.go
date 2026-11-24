@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers/openai_compat"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type HTTPProvider struct {
@@ -86,6 +87,16 @@ func (p *HTTPProvider) ChatStreamEvents(
 
 func (p *HTTPProvider) GetDefaultModel() string {
 	return ""
+}
+
+// Decide forwards to the OpenAI-compatible gateway's Decisions API.
+// (seucaranguejo fork)
+func (p *HTTPProvider) Decide(
+	ctx context.Context,
+	model, input string,
+	questions []protocoltypes.DecisionQuestion,
+) (map[string]float64, error) {
+	return p.delegate.Decide(ctx, model, input, questions)
 }
 
 func (p *HTTPProvider) SupportsNativeSearch() bool {

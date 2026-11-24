@@ -136,26 +136,17 @@ type turnExecution struct {
 	// stuck in that shape still ends the turn; reset by the next real call.
 	truncatedToolCallRetries int
 
-	// undeliveredAnnouncementRetries counts same-turn retries after the model
-	// promised an action in prose and emitted no tool call. Capped like the two
-	// above so a model that keeps promising still ends the turn.
-	undeliveredAnnouncementRetries int
-
-	// toolRanThisTurn records whether any tool has executed in THIS turn. It is
-	// what separates a promise from narration: before the first tool runs, "vou
-	// buscar" is a call the model failed to emit; after it, the same words are
-	// the agent describing work it already did. Iteration count cannot stand in
-	// for this — a retry advances it without any tool having run. After it, only
-	// a reply that ends on a colon still counts as a step that never ran (see
-	// endsOnDanglingColon).
+	// toolRanThisTurn records whether any tool has executed in THIS turn. The
+	// promise judge reads it: before the first tool, "vou buscar" is a call the
+	// model failed to emit; after it, a report of what ran.
 	toolRanThisTurn bool
 
-	// danglingColonRetries counts retries in a row after a reply ended on a
-	// colon with no tool call once tools had run; a real call resets it.
-	// danglingColonNudge is the note that went out, kept so the reset can take
-	// it back out of transientTurnMessages.
-	danglingColonRetries int
-	danglingColonNudge   string
+	// promiseRetries counts retries in a row after a reply was judged to stop
+	// on a step it only announced; a real call resets it. promiseNudge is the
+	// note that went out, kept so the reset can take it back out of
+	// transientTurnMessages.
+	promiseRetries int
+	promiseNudge   string
 
 	// wrapUpNudged records that the 85% tool-budget warning went out. From
 	// there the model was told to deliver what it has, and a nudge to carry on
