@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -187,6 +188,11 @@ func assertFallbackKeptAsNotice(t *testing.T, history []providers.Message, fallb
 	assertRoles(t, history, "user", "assistant")
 	if n := history[1]; !n.Notice || n.Content != fallback || n.ReasoningContent != "" {
 		t.Fatalf("last message = %+v, want the fallback kept as a notice without reasoning", n)
+	}
+	// A reader of the history (the eval harness) tells the notice by its kind,
+	// whatever language the configured text is in.
+	if n := history[1]; n.Fallback != protocoltypes.FallbackEmptyResponse {
+		t.Fatalf("notice fallback kind = %q, want %q", n.Fallback, protocoltypes.FallbackEmptyResponse)
 	}
 }
 
