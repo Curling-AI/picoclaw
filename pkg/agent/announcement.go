@@ -17,28 +17,38 @@ const announcementTailWindow = 220
 // or "gerado" in the same sentence describe a state, not a step.
 //
 //nolint:misspell // Portuguese stems ("instal…"), not misspelled English
-const actionVerbs = `(busc\w+|pesquis\w+|procur\w+|consult\w+|verific\w+|confirm\w+|chec\w+|execut\w+|` +
+const actionVerbs = `(` + schedulingVerbs + `|busc\w+|pesquis\w+|procur\w+|consult\w+|verific\w+|confirm\w+|chec\w+|execut\w+|` +
 	`rod(ar|ando)\b|abr(ir|indo)\b|acess\w+|baix\w+|analis\w+|[lv](er|endo) (o|a|os|as)\b|(ler|lendo)\b|` +
 	`(re)?faz(er|endo)\b|cri(ar|ando)\b|ger(ar|ando)\b|mont(ar|ando)\b|prepar(ar|ando)\b|escrev(er|endo)\b|` +
 	`redig(ir|indo)\b|ajust(ar|ando)\b|corrig(ir|indo)\b|consert(ar|ando)\b|revis(ar|ando)\b|edit(ar|ando)\b|` +
 	`(re)?public(ar|ando)\b|envi(ar|ando)\b|mand(ar|ando)\b|salv(ar|ando)\b|atualiz(ar|ando)\b|` +
 	`calcul(ar|ando)\b|renderiz(ar|ando)\b|test(ar|ando)\b|convert(er|endo)\b|organiz(ar|ando)\b|` +
-	`cancel(ar|ando)\b|agend(ar|ando)\b|instal(ar|ando)\b|aplic(ar|ando)\b|adicion(ar|ando)\b|inclu(ir|indo)\b|` +
+	`cancel(ar|ando)\b|instal(ar|ando)\b|aplic(ar|ando)\b|adicion(ar|ando)\b|inclu(ir|indo)\b|` +
 	`remov(er|endo)\b|apag(ar|ando)\b|exclu(ir|indo)\b|import(ar|ando)\b|export(ar|ando)\b|desenh(ar|ando)\b|` +
 	`traduz(ir|indo)\b|compil(ar|ando)\b|implement(ar|ando)\b|tent(ar|ando)\b|contin(uar|uando)\b|` +
 	`search\w*|look up\b|fetch\w*|open\w*|browse\w*|read the\b|run the\b|fix\w*|creat\w*|generat\w*|` +
 	`build\w*|writ\w*|updat\w*|send\w*|publish\w*|redo\b|check\w*|edit\w*|test\w*|render\w*|sav(e|ing)\b)`
 
+// schedulingVerbs are the steps whose later time belongs to what they
+// schedule: "vou agendar o lembrete para amanhã" is to be done now.
+const schedulingVerbs = `agend(ar|ando)\b|program(ar|ando)\b|schedul(e|ing)\b`
+
+// promiseGap is what may sit between the marker and the verb: a clitic or an
+// adverb ("vou te mandar", "deixa eu só confirmar"). Any two words read
+// "vou explicar como criar uma pasta", a complete how-to, as a promise.
+const promiseGap = `(\s+(te|lhe|lhes|me|nos|j[áa]|agora|s[óo]|logo|ent[ãa]o|aqui|tamb[ée]m|primeiro|mesmo|rapidinho|` +
+	`\S+mente|just|now|first|quickly|also)){0,2}\s+`
+
 var (
 	announcementAction = regexp.MustCompile(`(?i)\b` + actionVerbs)
 	// nextStepPromise is a first-person immediate-future marker with an action
-	// verb at most two words later: "vou corrigir", "deixa eu só confirmar",
-	// "vou te mandar". The marker alone is no promise — "Deixa eu só lembrar:
-	// às 17h30…" answers —, nor is a verb further off: "vou estar por aqui se
-	// precisar ajustar algo" signs off.
+	// verb right after it or past a promiseGap: "vou corrigir", "deixa eu só
+	// confirmar", "vou te mandar". The marker alone is no promise — "Deixa eu
+	// só lembrar: às 17h30…" answers —, nor is a verb further off: "vou estar
+	// por aqui se precisar ajustar algo" signs off.
 	nextStepPromise = regexp.MustCompile(
 		`(?i)(\bvou|\birei|\bdeixa eu|\bdeixe-me|\bdeixa-me|\bj[áa] volto|\bseguindo com|\blet me|\bi['’]?ll|` +
-			`\bi['’]?m going to|\bi am going to)(\s+\S+){0,2}?\s+` + actionVerbs,
+			`\bi['’]?m going to|\bi am going to)` + promiseGap + actionVerbs,
 	)
 	// negatedIntent is a refusal, "não vou criar agendamentos sem você pedir":
 	// dropped before the match, so a promise later in the sentence still counts.
@@ -51,11 +61,11 @@ var (
 		`\bse (você |vc )?(quiser|preferir|precisar|achar melhor)|\bcaso (você |vc )?(queira|prefira|precise)|` +
 		`\bquer que eu\b|\bqualquer coisa\b|(^|\s)é só |` +
 		`\bme (passa|passe|manda|mande|envia|envie|diz|diga|fala|fale|confirma|confirme|avisa|avise)\b|` +
-		`\b(assim que|logo que|depois que)\b|\bquando (você|(vc|eles?|elas?)\b)|` + //nolint:misspell // Portuguese "eles", not English
+		`\b(assim que|logo que|depois que|quando)\b|` +
 		`\b(aprov(ar|e|em)|aprova[çc][ãa]o|autoriz(ar|e|em)|autoriza[çc][ãa]o)\b|` +
 		`\bem (conta|considera)|\blembr(ar|o|ando)\b|\bavis(ar|o)\b|\bde olho\b|\bmonitor\w*|` +
 		`\bif you (want|like|prefer|need)\b|\bwould you like\b|\bwhen you\b|\bonce (you|they|he|she)\b|` +
-		`\bremind\w*|\bkeep (it|this|that) in mind\b`,
+		`\bremind(s|ing)?\b|\bkeep (it|this|that) in mind\b`,
 	)
 	// laterOn is a step set for another time, "vou enviar o resumo toda segunda
 	// às 8h": not this turn's to do.
@@ -66,9 +76,7 @@ var (
 		`(^|\s)às \d|\b\d{1,2}h\d{0,2}\b|\b\d{1,2}:\d{2}\b|` +
 		`\btomorrow\b|\btonight\b|\bnext (week|month)\b|\bevery (day|week|morning|evening|night)\b`,
 	)
-	// schedulingStep is a step whose later time belongs to what it schedules:
-	// "vou agendar o lembrete para amanhã" is to be done now.
-	schedulingStep = regexp.MustCompile(`(?i)\b(agend(ar|ando)|program(ar|ando)|schedul(e|ing))\b`)
+	schedulingStep = regexp.MustCompile(`(?i)\b(` + schedulingVerbs + `)`)
 	// emphasisMarks are the markdown that can sit between the marker and the
 	// verb, "vou **buscar** o artigo".
 	emphasisMarks = strings.NewReplacer("*", "", "_", "", "`", "")

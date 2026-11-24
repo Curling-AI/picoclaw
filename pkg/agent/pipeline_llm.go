@@ -179,7 +179,7 @@ func undeliveredPromiseNudge(reply string) string {
 		"It carried no tool call, so that step never ran and the user is still waiting. " +
 		"Carry on with the task now by emitting the tool call for that step. If a tool in this turn already did " +
 		"it, do not run it again: write the final answer, saying what was done. If the user asked you only to " +
-		"describe or plan the step, not to do it, send your last reply again unchanged."
+		"describe or plan the step, not to do it, write that answer again in full."
 }
 
 // maxDegenerateResponseRetries caps same-turn retries after the model looped on
