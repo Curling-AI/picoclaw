@@ -137,7 +137,11 @@ func TestHistoryCleanupFailureFencesLaterMetadataChanges(t *testing.T) {
 	}
 }
 
-func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
+// A prune does not wait for a writer of this process: it skips the session and
+// touches none of its files. The next prune decides under the session's lock,
+// which resolves the writer's journal and decision first, and removes the run
+// only if it is still expired.
+func TestPruneHistorySkipsAnActiveWriterThenRemovesItsRecovery(t *testing.T) {
 	for _, refreshed := range []bool{false, true} {
 		name := "expired"
 		if refreshed {
@@ -194,18 +198,27 @@ func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
 				count int
 				err   error
 			}
-			done, started := make(chan result, 1), make(chan struct{})
+			done := make(chan result, 1)
 			go func() {
-				close(started)
 				count, err := s.PruneCronRuns(7*24*time.Hour, time.Now())
 				done <- result{count, err}
 			}()
-			<-started
 			select {
 			case got := <-done:
+				if got.err != nil || got.count != 0 {
+					lock.Unlock()
+					t.Fatal("prune removed a run under an active session writer", got)
+				}
+			case <-time.After(5 * time.Second): // guard only, not synchronization
 				lock.Unlock()
-				t.Fatal("prune bypassed an active session writer", got)
-			case <-time.After(100 * time.Millisecond):
+				<-done
+				t.Fatal("prune waited for an active session writer")
+			}
+			for _, path := range paths {
+				if _, statErr := os.Stat(path); statErr != nil {
+					lock.Unlock()
+					t.Fatal("prune touched a run under an active session writer", path, statErr)
+				}
 			}
 			if refreshed {
 				now := time.Now()
@@ -215,13 +228,13 @@ func TestPruneHistoryWaitsForWriterAndRemovesItsRecovery(t *testing.T) {
 				}
 			}
 			lock.Unlock()
-			got := <-done
+			count, err := s.PruneCronRuns(7*24*time.Hour, time.Now())
 			want := 1
 			if refreshed {
 				want = 0
 			}
-			if got.err != nil || got.count != want {
-				t.Fatal("prune ignored the locked retention state", got)
+			if err != nil || count != want {
+				t.Fatal("prune ignored the locked retention state", count, err)
 			}
 			for _, path := range paths {
 				_, err := os.Stat(path)

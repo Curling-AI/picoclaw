@@ -1336,8 +1336,10 @@ func (s *JSONLStore) ListSessions() []string {
 // on EFS the per-file reads, not the ReadDir, are what made every listing
 // cost seconds. A cached meta may be older than another process's last write
 // to the session (session_cache.go). Like a sweep, the listing never waits for
-// another process's lock: a session it must recover first while another
-// process holds it is left out and counted in one log line.
+// a session's lock: a session it must recover first while another process
+// holds the lock, or a write of this process holds its shard, is left out and
+// counted in one log line. Its plain meta read still takes the shard mutex, as
+// every plain read does, so it can wait behind a write of this process.
 func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

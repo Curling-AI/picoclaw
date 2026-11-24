@@ -74,9 +74,10 @@ func (s *JSONLStore) lockSession(key string) (func(), error) {
 }
 
 // trySessionLock is lockSession that does not wait: ok is false, with no error,
-// when another process holds the session's lock. A sweep skips that session,
-// since its holder is writing it and recovers it under the lock itself. A busy
-// try does not start the busy backoff: only a timed-out wait does.
+// when another process holds the session's lock, or its shard mutex is in use
+// in this process. A sweep skips that session: whoever next takes its
+// lock recovers it (adoptSessionLock). A busy try does not start the busy
+// backoff: only a timed-out wait does.
 func (s *JSONLStore) trySessionLock(key string) (unlock func(), ok bool, err error) {
 	unlock, err = s.acquireSessionLocks(0, key)
 	if errors.Is(err, ErrSessionBusy) {
@@ -97,11 +98,23 @@ func (s *JSONLStore) lockSessionPairFiles(keyA, keyB string) (func(), error) {
 }
 
 // acquireSessionLocks is the one acquisition path of the store: one or two
-// keys, waiting up to wait (zero tries once). Once the file locks are held it
-// runs adoptSessionLock for each session in name order, before the caller
-// reads anything. On any error it releases what it took and returns the error.
+// keys, waiting up to wait (zero tries once). A try takes the shard mutexes
+// only if they are free: a write of this process holds its shard while it
+// waits for another process's lock, and a sweep must not wait behind it, even
+// for another session of the shard. A busy shard is ErrSessionBusy, as a busy
+// flock is, and starts no backoff. Once the file locks are held it runs
+// adoptSessionLock for each session in name order, before the caller reads
+// anything. On any error it releases what it took and returns the error.
 func (s *JSONLStore) acquireSessionLocks(wait time.Duration, keys ...string) (func(), error) {
-	unlockShards := s.lockSessionPair(keys[0], keys[len(keys)-1])
+	var unlockShards func()
+	if wait > 0 {
+		unlockShards = s.lockSessionPair(keys[0], keys[len(keys)-1])
+	} else {
+		unlockShards = s.tryLockSessionPair(keys[0], keys[len(keys)-1])
+	}
+	if unlockShards == nil {
+		return nil, fmt.Errorf("%w: %s", ErrSessionBusy, sessionLockName(keys[0]))
+	}
 	if s.skipFileLockForTest {
 		return unlockShards, nil
 	}
@@ -121,6 +134,29 @@ func (s *JSONLStore) acquireSessionLocks(wait time.Duration, keys ...string) (fu
 		}
 	}
 	return release, nil
+}
+
+// tryLockSessionPair is lockSessionPair without waiting: in the same shard
+// order, or nil, holding nothing, when either shard is in use.
+func (s *JSONLStore) tryLockSessionPair(keyA, keyB string) func() {
+	first, second := lockShard(keyA), lockShard(keyB)
+	if first > second {
+		first, second = second, first
+	}
+	if !s.locks[first].TryLock() {
+		return nil
+	}
+	if first == second {
+		return s.locks[first].Unlock
+	}
+	if !s.locks[second].TryLock() {
+		s.locks[first].Unlock()
+		return nil
+	}
+	return func() {
+		s.locks[second].Unlock()
+		s.locks[first].Unlock()
+	}
 }
 
 // readSessionLocked runs a read of key's session under its shard mutex alone,

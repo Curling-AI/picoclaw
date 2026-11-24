@@ -47,8 +47,8 @@ func (s *JSONLStore) RefreshSessionMeta(_ context.Context, sessionKey string) er
 
 // readListedMeta is readSessionLocked for a listing, which reads like a sweep:
 // a read that must write first tries the session's lock once instead of
-// waiting. skipped reports that another process holds it; that process
-// recovers the session under its lock, and the listing leaves it out.
+// waiting. skipped reports that the lock, or its shard, was in use; whoever
+// next takes the lock recovers the session, and the listing leaves it out.
 func (s *JSONLStore) readListedMeta(name string) (meta SessionMeta, skipped bool, err error) {
 	shard := s.sessionLock(name)
 	shard.Lock()

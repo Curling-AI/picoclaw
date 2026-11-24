@@ -479,3 +479,58 @@ func TestPruneSkipsARunAnotherStoreHolds(t *testing.T) {
 		}
 	}
 }
+
+// A write of this process holds its shard mutex while it waits for another
+// process's lock. A try of another session in that shard (a sweep, or a
+// listing that must recover the session) skips it at once instead of waiting
+// behind the write, and starts no backoff; once the shard is free it locks.
+func TestTrySessionLockSkipsABusyShard(t *testing.T) {
+	dir := t.TempDir()
+	writing := keyInShard(t, "agent:main:direct:writing", 9)
+	other := keyInShard(t, "agent:main:direct:other", 9)
+	s := openTwoStore(t, dir)
+	withSessionLockWait(t, 2*time.Second)
+	foreign := holdForeignSessionLock(t, dir, writing)
+	waiting := make(chan struct{})
+	var once sync.Once
+	s.sessionFlockForTest = func(name string, held bool) {
+		if name == sessionLockName(writing) && !held {
+			once.Do(func() { close(waiting) })
+		}
+	}
+	writer := make(chan error, 1)
+	go func() {
+		unlock, err := s.lockSession(writing)
+		if err == nil {
+			unlock()
+		}
+		writer <- err
+	}()
+	waitTwoStore(t, waiting, "the write to wait for the other process's lock")
+
+	start := time.Now()
+	unlock, locked, err := s.trySessionLock(other)
+	took := time.Since(start)
+	if locked {
+		unlock()
+	}
+	if releaseErr := foreign.Release(); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	writeErr := <-writer
+	if err != nil || locked || took > 500*time.Millisecond {
+		t.Fatalf("try behind a waiting write of the same shard = locked %v, err %v after %v; want a skip at once",
+			locked, err, took)
+	}
+	if writeErr != nil {
+		t.Fatalf("write after the other process released = %v", writeErr)
+	}
+	if s.sessionBusy(sessionLockName(other)) {
+		t.Fatal("a busy shard started the backoff")
+	}
+	unlock, locked, err = s.trySessionLock(other)
+	if err != nil || !locked {
+		t.Fatalf("try with the shard free = locked %v, err %v; want the lock", locked, err)
+	}
+	unlock()
+}
