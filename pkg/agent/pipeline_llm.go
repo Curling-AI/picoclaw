@@ -433,6 +433,7 @@ func (p *Pipeline) CallLLM(
 
 		al.activeRequestsInc()
 		defer al.activeRequestsDec()
+		exec.servedModel = exec.activeModel
 
 		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
 			providerCtx,
@@ -530,10 +531,12 @@ func (p *Pipeline) CallLLM(
 					map[string]any{"agent_id": ts.agent.ID, "iteration": iteration},
 				)
 			}
+			exec.servedModel = ""
 			for _, candidate := range exec.activeCandidates {
 				if candidate.StableKey() != fbResult.IdentityKey {
 					continue
 				}
+				exec.servedModel = candidate.Model
 				exec.llmModelName = resolvedCandidateModelName(
 					[]providers.FallbackCandidate{candidate},
 					exec.llmModelName,
@@ -656,7 +659,11 @@ func (p *Pipeline) CallLLM(
 
 		errMsg := strings.ToLower(err.Error())
 		retryReason, isTransientError := transientLLMRetryReason(err)
-		isContextError := !isTransientError && (strings.Contains(errMsg, "context_length_exceeded") ||
+		// See isSizeRefusal. (seucaranguejo fork)
+		pastMeasuredWindow := estimateCallTokens(exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens) >
+			ts.agent.refusalWindow(exec.activeModel, turnContextWindow(ts, exec), ts.agent.MaxTokens)
+		isContextError := !isTransientError && (isSizeRefusal(err, pastMeasuredWindow) ||
+			strings.Contains(errMsg, "context_length_exceeded") ||
 			strings.Contains(errMsg, "context window") ||
 			strings.Contains(errMsg, "context_window") ||
 			strings.Contains(errMsg, "maximum context length") ||
@@ -737,7 +744,7 @@ func (p *Pipeline) CallLLM(
 			// Compact/trim to the model actually serving this turn: a media turn
 			// routed to the small-context vision model needs its (128K) budget, not
 			// the main model's 1M, or the retry never trims enough and 400s again.
-			effectiveCW := turnContextWindow(ts, exec)
+			effectiveCW := ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec), ts.agent.MaxTokens)
 			if learned := exec.learnedContextWindow(); learned > 0 {
 				effectiveCW = min(effectiveCW, learned)
 			}
@@ -1059,6 +1066,13 @@ func (p *Pipeline) CallLLM(
 		llmResponseFields["prompt_tokens"] = exec.response.Usage.PromptTokens
 		llmResponseFields["completion_tokens"] = exec.response.Usage.CompletionTokens
 		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
+		ts.agent.recordPromptTokens(
+			exec.servedModel,
+			turnContextWindow(ts, exec),
+			exec.callMessages,
+			exec.providerToolDefs,
+			exec.response.Usage.PromptTokens,
+		)
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
 
