@@ -17,7 +17,6 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/memory"
-	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
@@ -194,7 +193,7 @@ func buildTaskRecordID(input TurnCaseInput, createdAt time.Time) string {
 
 func buildRecordSummary(input TurnCaseInput) string {
 	// The server-injected [SENDER] tag carries the owner's id and name: it must not become a pattern, skill name or cluster key.
-	if goal := summarizeText(messageutil.StripSenderTag(input.UserMessage), 160); goal != "" {
+	if goal := summarizeText(withoutSenderTag(input.UserMessage), 160); goal != "" {
 		return goal
 	}
 	return fmt.Sprintf("turn %s finished with status=%s", input.TurnID, input.Status)

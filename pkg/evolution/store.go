@@ -162,21 +162,31 @@ func (s *Store) loadRecordsFromPath(path string) ([]LearningRecord, error) {
 	return records, nil
 }
 
-// legacySenderTag is the tag the server prepends to a message,
-// [SENDER id="…" name="…" …] with Go-quoted values that may hold "]", as the
-// summaries written before buildRecordSummary dropped it start with. Only that
+// serverSenderTag is the tag the server prepends to a person's message,
+// [SENDER id="…" name="…" …] with Go-quoted values that may hold "]". Only that
 // shape: a person's own "[SENDER] …" text is not one.
-var legacySenderTag = regexp.MustCompile(`^\s*\[SENDER(?:\s+[a-z_]+="(?:[^"\\]|\\.)*")+\]\s*`)
+var serverSenderTag = regexp.MustCompile(`^\s*\[SENDER(?:\s+[a-z_]+="(?:[^"\\]|\\.)*")+\]\s*`)
 
 // legacyCutSenderTag is such a tag the old 160-rune cut ended inside: no "]",
 // no line break before the person's text, and the cut's "...".
 var legacyCutSenderTag = regexp.MustCompile(`^\s*\[SENDER id="[^\n]*\.\.\.$`)
 
-// withoutLegacySenderTag is summary without the server's tag; a summary the
-// cut left with nothing but the tag is empty, which keeps it out of clustering.
+// withoutSenderTag is text without the server's tag. Writing and reading a
+// summary share it: a looser match stopped at a "]" inside a name and left the
+// rest of the tag as the start of the summary.
+func withoutSenderTag(text string) string {
+	if loc := serverSenderTag.FindStringIndex(text); loc != nil {
+		return text[loc[1]:]
+	}
+	return text
+}
+
+// withoutLegacySenderTag is a summary written before buildRecordSummary
+// dropped the tag, without it; a summary the cut left with nothing but the tag
+// is empty, which keeps it out of clustering.
 func withoutLegacySenderTag(summary string) string {
-	if loc := legacySenderTag.FindStringIndex(summary); loc != nil {
-		return summary[loc[1]:]
+	if stripped := withoutSenderTag(summary); stripped != summary {
+		return stripped
 	}
 	if legacyCutSenderTag.MatchString(summary) {
 		return ""

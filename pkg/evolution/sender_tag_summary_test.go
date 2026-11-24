@@ -31,13 +31,20 @@ func TestRuntime_FinalizeTurnSummaryDropsSenderTag(t *testing.T) {
 		"agende uma reunião com o time amanhã às 10h",
 		"traduza este parágrafo para o inglês",
 	}
+	// A "]" inside a name does not end the tag: the rest of it, with the name,
+	// would start the summary and the cluster key again.
+	tags := []string{
+		ownerTag,
+		`[SENDER id="user_test_owner_01" name="Loja [Centro]" channel="web" role="owner"]` + "\n",
+		`[SENDER id="user_test_owner_01" name="[Admin] Pessoa Teste" channel="web" role="owner"]` + "\n",
+	}
 	for i, task := range tasks {
 		if finalizeErr := rt.FinalizeTurn(context.Background(), evolution.TurnCaseInput{
 			Workspace:    workspace,
 			TurnID:       fmt.Sprintf("turn-%d", i),
 			SessionKey:   "agent:main:web:direct:user_test_owner_01",
 			Status:       "completed",
-			UserMessage:  ownerTag + task,
+			UserMessage:  tags[i] + task,
 			FinalContent: "Pronto.",
 		}); finalizeErr != nil {
 			t.Fatalf("FinalizeTurn %d: %v", i, finalizeErr)
@@ -48,7 +55,8 @@ func TestRuntime_FinalizeTurnSummaryDropsSenderTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if strings.Contains(string(raw), "SENDER") || strings.Contains(string(raw), "Pessoa Teste") {
+	if strings.Contains(string(raw), "SENDER") || strings.Contains(string(raw), "Pessoa Teste") ||
+		strings.Contains(string(raw), "Centro") {
 		t.Fatalf("task records kept the sender tag:\n%s", raw)
 	}
 	records, err := evolution.NewStore(evolution.NewPaths(workspace, "")).LoadTaskRecords()
