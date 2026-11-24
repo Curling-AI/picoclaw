@@ -11,6 +11,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/common"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/routing"
 )
@@ -75,9 +76,17 @@ func TestCalibratedWindow(t *testing.T) {
 			window,
 			reserve,
 		), int(
-			promptShare/unmeasuredRefusalRatio,
+			promptShare/minRefusalRatio,
 		)+reserve; got != want {
 			t.Fatalf("refusalWindow of an unmeasured model = %d, want %d", got, want)
+		}
+	})
+	t.Run("a lighter measurement keeps the refusal floor", func(t *testing.T) {
+		a := &AgentInstance{promptTokenRatios: &sync.Map{}}
+		a.recordPromptTokens("m", callWindow, msgs, nil, estimated/2)
+		nominal := float64(window)
+		if got, want := a.refusalWindow("m", window, 0), int(nominal/minRefusalRatio); got != want {
+			t.Fatalf("refusalWindow after a lighter call = %d, want %d", got, want)
 		}
 	})
 	var bare *AgentInstance
@@ -103,6 +112,22 @@ func TestIsSizeRefusal(t *testing.T) {
 		{"a stopped call was not refused", context.Canceled, true, false},
 		{"a call past its deadline was not refused", fmt.Errorf("call: %w", context.DeadlineExceeded), true, false},
 		{"an auth refusal stays an auth refusal", status(401), true, false},
+		{
+			"a 404 with an error code names its cause",
+			&common.HTTPError{StatusCode: 404, ErrorCode: "model_not_found"},
+			true,
+			false,
+		},
+		{"a 404 without one is the size", &common.HTTPError{StatusCode: 404}, true, true},
+		{
+			"a 404 naming a missing model with a numeric code names its cause",
+			&common.HTTPError{
+				StatusCode:  404,
+				BodyPreview: `{"error":{"code":404,"message":"Model Not Known","type":"not_found"}}`,
+			},
+			true,
+			false,
+		},
 		{"a billing refusal stays a billing refusal", status(402), true, false},
 	}
 	for _, c := range cases {
