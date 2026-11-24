@@ -625,6 +625,17 @@ func (p *Pipeline) CallLLM(
 			// so the rest of the turn sends the note instead, to any model.
 			// Outside the retry budget, like the case below. (seucaranguejo fork)
 			if withNote, marked := markImagesUnreadable(exec, exec.callMessages); marked {
+				al.emitEvent(
+					runtimeevents.KindAgentLLMRetry,
+					ts.eventMeta("runTurn", "turn.llm.retry"),
+					LLMRetryPayload{
+						Attempt:    retry + 1,
+						MaxRetries: maxRetries,
+						Reason:     "invalid_image",
+						Error:      err.Error(),
+						RequestID:  nextRequestID,
+					},
+				)
 				logger.WarnCF("agent", "Provider refused an image as invalid; leaving it out for the rest of the turn",
 					map[string]any{
 						"agent_id":   ts.agent.ID,

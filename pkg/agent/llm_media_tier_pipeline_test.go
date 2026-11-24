@@ -527,13 +527,17 @@ func TestImageTurn_InvalidOlderInlineImageIsRefusedOncePerTurn(t *testing.T) {
 	if resp != "answered by main-model" {
 		t.Fatalf("response = %q, want the main model to answer", resp)
 	}
+	calls := provider.turnCalls()
 	withImage := 0
-	for _, c := range provider.turnCalls() {
+	for _, c := range calls {
 		if c.media {
 			withImage++
 		}
 	}
 	if withImage != 1 {
 		t.Fatalf("turn calls carrying the older image = %d, want 1", withImage)
+	}
+	if last := calls[len(calls)-1]; !strings.Contains(last.content, unreadableImageNote) {
+		t.Fatal("the answering call lost the note that stands in for the older image")
 	}
 }
