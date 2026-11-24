@@ -656,7 +656,14 @@ func (p *Pipeline) CallLLM(
 
 		errMsg := strings.ToLower(err.Error())
 		retryReason, isTransientError := transientLLMRetryReason(err)
-		isContextError := !isTransientError && (strings.Contains(errMsg, "context_length_exceeded") ||
+		// A call past the window measured for its model is refused for its size,
+		// whatever the error says: a gateway that tried several upstreams reports
+		// the last one's, and Vercel's last Anthropic upstream answers 404.
+		// (seucaranguejo fork)
+		pastMeasuredWindow := estimateCallTokens(exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens) >
+			ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec))
+		isContextError := !isTransientError && (pastMeasuredWindow ||
+			strings.Contains(errMsg, "context_length_exceeded") ||
 			strings.Contains(errMsg, "context window") ||
 			strings.Contains(errMsg, "context_window") ||
 			strings.Contains(errMsg, "maximum context length") ||
@@ -737,7 +744,7 @@ func (p *Pipeline) CallLLM(
 			// Compact/trim to the model actually serving this turn: a media turn
 			// routed to the small-context vision model needs its (128K) budget, not
 			// the main model's 1M, or the retry never trims enough and 400s again.
-			effectiveCW := turnContextWindow(ts, exec)
+			effectiveCW := ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec))
 			if learned := exec.learnedContextWindow(); learned > 0 {
 				effectiveCW = min(effectiveCW, learned)
 			}
@@ -1059,6 +1066,12 @@ func (p *Pipeline) CallLLM(
 		llmResponseFields["prompt_tokens"] = exec.response.Usage.PromptTokens
 		llmResponseFields["completion_tokens"] = exec.response.Usage.CompletionTokens
 		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
+		ts.agent.recordPromptTokens(
+			exec.activeModel,
+			exec.callMessages,
+			exec.providerToolDefs,
+			exec.response.Usage.PromptTokens,
+		)
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
 

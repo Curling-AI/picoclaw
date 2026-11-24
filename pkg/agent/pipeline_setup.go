@@ -78,7 +78,8 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	// the session through more prompt builds.
 	if !ts.opts.NoHistory && ctx.Err() == nil {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
-		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
+		window := ts.agent.calibratedWindow(expectedTurnModel(ts), ts.agent.ContextWindow)
+		if isOverContextBudget(window, messages, toolDefs, ts.agent.MaxTokens) {
 			rebuild := func(trimmedHistory []providers.Message) []providers.Message {
 				rebuildPromptReq := promptBuildRequestForTurn(
 					ts,
@@ -95,7 +96,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 			// What the call takes with no history at all: the system prompt, the
 			// turn's message, the tool definitions and the output reserve.
 			fixed := estimateCallTokens(rebuild(nil), toolDefs, ts.agent.MaxTokens)
-			if fixed > ts.agent.ContextWindow {
+			if fixed > window {
 				// Even an empty-history prompt exceeds the budget: the overflow
 				// is structural (context_window/max_tokens misconfigured, or an
 				// oversized tool set / system prompt), not conversational.
@@ -109,7 +110,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 					"Context budget exceeded even with empty history — skipping compaction (check context_window/max_tokens)",
 					map[string]any{
 						"session_key":    ts.sessionKey,
-						"context_window": ts.agent.ContextWindow,
+						"context_window": window,
 						"max_tokens":     ts.agent.MaxTokens,
 						"tool_defs":      len(toolDefs),
 					},
@@ -120,7 +121,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				if err := p.ContextManager.Compact(ctx, &CompactRequest{
 					SessionKey: ts.sessionKey,
 					Reason:     ContextCompressReasonProactive,
-					Budget:     ts.agent.ContextWindow,
+					Budget:     window,
 				}); err != nil {
 					logger.WarnCF("agent", "Proactive compact failed", map[string]any{
 						"session_key": ts.sessionKey,
@@ -130,7 +131,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				ts.refreshRestorePointFromSession(ts.agent)
 				if resp, err := p.ContextManager.Assemble(ctx, &AssembleRequest{
 					SessionKey: ts.sessionKey,
-					Budget:     ts.agent.ContextWindow,
+					Budget:     window,
 					MaxTokens:  ts.agent.MaxTokens,
 				}); err == nil && resp != nil {
 					history = resp.History
@@ -144,8 +145,8 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				history, messages, fit = trimHistory(
 					history,
 					rebuild,
-					callBudget{window: ts.agent.ContextWindow, toolDefs: toolDefs, maxTokens: ts.agent.MaxTokens},
-					(ts.agent.ContextWindow-fixed)*ts.agent.SummarizeTokenPercent/100,
+					callBudget{window: window, toolDefs: toolDefs, maxTokens: ts.agent.MaxTokens},
+					(window-fixed)*ts.agent.SummarizeTokenPercent/100,
 				)
 				// The rebuilt call is shorter: the turn's message moved with it.
 				currentTurnStart = turnStart(messages)
@@ -154,7 +155,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 						"session_key":     ts.sessionKey,
 						"dropped_msgs":    dropped,
 						"remaining_msgs":  len(history),
-						"context_window":  ts.agent.ContextWindow,
+						"context_window":  window,
 						"max_tokens":      ts.agent.MaxTokens,
 						"still_overlimit": !fit,
 					})
@@ -163,7 +164,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 						"after proactive compaction rebuild", map[string]any{
 						"session_key":    ts.sessionKey,
 						"history_msgs":   len(history),
-						"context_window": ts.agent.ContextWindow,
+						"context_window": window,
 						"max_tokens":     ts.agent.MaxTokens,
 					})
 				}

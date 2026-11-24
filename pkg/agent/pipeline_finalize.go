@@ -85,7 +85,7 @@ func (p *Pipeline) Finalize(
 			&CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonSummarize,
-				Budget:     ts.agent.ContextWindow,
+				Budget:     ts.agent.calibratedWindow(exec.activeModel, ts.agent.ContextWindow),
 			},
 		)
 	}
