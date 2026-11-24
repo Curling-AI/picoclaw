@@ -178,6 +178,13 @@ type Attachment struct {
 	ContentType string `json:"content_type,omitempty"`
 }
 
+// The kinds of Message.Fallback. (seucaranguejo fork)
+const (
+	FallbackEmptyResponse = "empty_response"
+	FallbackToolLimit     = "tool_limit"
+	FallbackRepeatStop    = "repeat_stop"
+)
+
 type Message struct {
 	// HistoryPublicMessage is a private immutable display-version witness.
 	// It never enters provider JSON or the model session projection.
@@ -211,6 +218,12 @@ type Message struct {
 	// the model to answer with nothing again. (seucaranguejo fork — see
 	// agent/pipeline_finalize.go)
 	Notice bool `json:"notice,omitempty"`
+
+	// Fallback names the fixed text the runtime wrote in place of the model's
+	// reply (FallbackEmptyResponse, FallbackToolLimit, FallbackRepeatStop), so a
+	// reader tells it apart by kind instead of by its configurable, translated
+	// words. It changes nothing the model reads. (seucaranguejo fork)
+	Fallback string `json:"fallback,omitempty"`
 
 	// Prompt metadata is internal to the agent runtime. It records where a
 	// message or system part came from without changing provider/session JSON.
