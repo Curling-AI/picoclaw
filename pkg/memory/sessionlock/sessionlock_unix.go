@@ -74,7 +74,7 @@ func AcquireAll(dir string, names []string, create bool, wait time.Duration) ([]
 }
 
 func releaseAll(locks []*Lock) error {
-	var errs []error
+	errs := make([]error, 0, len(locks))
 	for _, lock := range slices.Backward(locks) {
 		errs = append(errs, lock.Release())
 	}

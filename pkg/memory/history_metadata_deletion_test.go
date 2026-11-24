@@ -225,8 +225,9 @@ func TestMetadataUpsertPreservesContentWhenOnlyMetadataWasRemoved(t *testing.T) 
 	if _, markerErr := os.Stat(s.historyRecoveryRequiredPath(key)); markerErr != nil {
 		t.Fatal("metadata loss did not durably fence the surviving source", markerErr)
 	}
-	if _, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); !errors.Is(err, ErrHistoryRecoveryRequired) {
-		t.Fatal("metadata loss reattested a surviving source", err)
+	_, pageErr := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
+	if !errors.Is(pageErr, ErrHistoryRecoveryRequired) {
+		t.Fatal("metadata loss reattested a surviving source", pageErr)
 	}
 	retained, err := os.ReadFile(s.jsonlPath(key))
 	if err != nil || !bytes.HasPrefix(retained, data) {

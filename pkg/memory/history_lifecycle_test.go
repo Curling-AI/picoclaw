@@ -200,8 +200,8 @@ func TestPruneHistorySkipsAnActiveWriterThenRemovesItsRecovery(t *testing.T) {
 			}
 			done := make(chan result, 1)
 			go func() {
-				count, err := s.PruneCronRuns(7*24*time.Hour, time.Now())
-				done <- result{count, err}
+				count, pruneErr := s.PruneCronRuns(7*24*time.Hour, time.Now())
+				done <- result{count, pruneErr}
 			}()
 			select {
 			case got := <-done:
@@ -228,13 +228,13 @@ func TestPruneHistorySkipsAnActiveWriterThenRemovesItsRecovery(t *testing.T) {
 				}
 			}
 			lock.Unlock()
-			count, err := s.PruneCronRuns(7*24*time.Hour, time.Now())
+			count, pruneErr := s.PruneCronRuns(7*24*time.Hour, time.Now())
 			want := 1
 			if refreshed {
 				want = 0
 			}
-			if err != nil || count != want {
-				t.Fatal("prune ignored the locked retention state", count, err)
+			if pruneErr != nil || count != want {
+				t.Fatal("prune ignored the locked retention state", count, pruneErr)
 			}
 			for _, path := range paths {
 				_, err := os.Stat(path)
