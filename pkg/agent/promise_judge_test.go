@@ -221,6 +221,17 @@ func TestReplyWithoutAClearYesIsDeliveredWithoutRetry(t *testing.T) {
 			if (answer.err != nil) != strings.Contains(log, "Promise judge unavailable") {
 				t.Errorf("judge error logged = %v, want %v", !(answer.err != nil), answer.err != nil)
 			}
+			// Every reply the judge answered on and let through leaves one line with
+			// its probability; an error already has its own.
+			if got, want := strings.Count(log, judgeLetThroughLine), map[bool]int{true: 0, false: 1}[answer.err != nil]; got != want {
+				t.Errorf("let-through lines = %d, want %d", got, want)
+			}
+			if answered := answer.err == nil && !answer.refused; answered != strings.Contains(log, `"judge_p"`) {
+				t.Errorf("judge_p logged = %v, want %v", !answered, answered)
+			}
+			if strings.Contains(log, promiseAfterTools) {
+				t.Error("the reply text reached the log")
+			}
 		})
 	}
 }

@@ -34,6 +34,9 @@ const promiseQuestion = "Does the assistant's last message end by announcing an 
 
 const promiseQuestionName = "stopped_on_promise"
 
+// judgeLetThroughLine logs each reply the judge did not call a promise.
+const judgeLetThroughLine = "Promise judge let the reply through"
+
 const (
 	// promiseYes and promiseNo are the judge's thresholds; in between is doubt,
 	// and a doubtful reply goes out as it is.

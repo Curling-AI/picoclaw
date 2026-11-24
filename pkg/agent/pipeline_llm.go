@@ -1365,6 +1365,10 @@ func (p *Pipeline) CallLLM(
 				fields["model"] = exec.llmModelName
 				fields["request_id"] = exec.response.ProviderRequestID
 				logger.WarnCF("agent", "Final reply still promises a step that never ran; delivering it", fields)
+			case verdict.model != "":
+				// One line per reply the judge let through, with its probability, so a
+				// missed promise can be told from a doubtful one; the text stays out.
+				logger.InfoCF("agent", judgeLetThroughLine, fields)
 			}
 		}
 
