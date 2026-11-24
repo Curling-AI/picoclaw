@@ -2,9 +2,15 @@ package providers
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
 )
+
+// errNoDecisions is what Decide answers when the wrapped provider has no
+// Decisions API.
+var errNoDecisions = errors.New("provider cannot answer decisions")
 
 type toolSchemaTransformProvider struct {
 	delegate  LLMProvider
@@ -98,6 +104,21 @@ func (p *toolSchemaTransformProvider) SupportsThinking() bool {
 func (p *toolSchemaTransformProvider) SupportsNativeSearch() bool {
 	ns, ok := p.delegate.(NativeSearchCapable)
 	return ok && ns.SupportsNativeSearch()
+}
+
+// Decide forwards to the wrapped provider: without it the transform hid the
+// gateway's Decisions API, and every guard that asks the decision model went
+// off with no error. (seucaranguejo fork)
+func (p *toolSchemaTransformProvider) Decide(
+	ctx context.Context,
+	model, input string,
+	questions []DecisionQuestion,
+) (map[string]float64, error) {
+	decider, ok := p.delegate.(Decider)
+	if !ok {
+		return nil, fmt.Errorf("%T: %w", p.delegate, errNoDecisions)
+	}
+	return decider.Decide(ctx, model, input, questions)
 }
 
 func (p *toolSchemaTransformProvider) Close() {

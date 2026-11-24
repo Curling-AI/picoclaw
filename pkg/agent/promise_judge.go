@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -65,8 +67,12 @@ type promiseVerdict struct {
 // announced, before or after the turn's tools ran.
 func (p *Pipeline) judgePromise(ctx context.Context, ts *turnState, exec *turnExecution, reply string) promiseVerdict {
 	model := strings.TrimSpace(p.Cfg.Agents.Defaults.DecisionModel)
+	if model == "" || strings.TrimSpace(reply) == "" {
+		return promiseVerdict{}
+	}
 	decider, ok := ts.agent.Provider.(providers.Decider)
-	if model == "" || !ok || strings.TrimSpace(reply) == "" {
+	if !ok {
+		p.warnUndecided(ts.agent)
 		return promiseVerdict{}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, promiseJudgeTimeout)
@@ -81,6 +87,17 @@ func (p *Pipeline) judgePromise(ctx context.Context, ts *turnState, exec *turnEx
 	verdict.probability, verdict.answered = answers[promiseQuestionName]
 	verdict.promised = verdict.answered && verdict.probability >= promiseYes
 	return verdict
+}
+
+// warnUndecided says, once per agent, that a decision model is configured but
+// the agent's provider cannot ask it: the guard is off for that agent, and
+// without the line nothing showed it.
+func (p *Pipeline) warnUndecided(agent *AgentInstance) {
+	if _, warned := p.al.undecidedAgents.LoadOrStore(agent.ID, struct{}{}); warned {
+		return
+	}
+	logger.WarnCF("agent", "Decision model configured but the provider cannot answer it; promise guard off",
+		map[string]any{"agent_id": agent.ID, "provider": fmt.Sprintf("%T", agent.Provider)})
 }
 
 // fields are the verdict for a log line; the reply's text never goes there.

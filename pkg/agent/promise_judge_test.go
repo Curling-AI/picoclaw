@@ -159,6 +159,35 @@ func TestNoDecisionModelAsksNoJudge(t *testing.T) {
 	}
 }
 
+// A decision model configured over a provider that cannot ask it leaves the
+// guard off: the reply goes out as it is, and the log says so once for the
+// agent instead of on every turn, or never.
+func TestAProviderThatCannotDecideIsLoggedOnce(t *testing.T) {
+	logs := captureAgentLog(t)
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.DecisionModel = testDecisionModel
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &scriptedProvider{script: []providers.LLMResponse{
+		readFileCall("call_1"),
+		{Content: promiseAfterTools},
+		readFileCall("call_2"),
+		{Content: promiseAfterTools},
+	}})
+
+	for _, session := range []string{"undecided-1", "undecided-2"} {
+		resp, err := al.ProcessDirect(context.Background(), "o visual ficou fraco", session)
+		if err != nil {
+			t.Fatalf("ProcessDirect: %v", err)
+		}
+		if resp != promiseAfterTools {
+			t.Errorf("response = %q, want the reply untouched", resp)
+		}
+	}
+	if n := strings.Count(logs(), "provider cannot answer it; promise guard off"); n != 1 {
+		t.Errorf("guard-off warnings = %d, want 1 for the agent", n)
+	}
+}
+
 // Whatever the judge does short of a clear yes — no, doubt, refusal, error —
 // the reply goes out as it is, without a retry.
 func TestReplyWithoutAClearYesIsDeliveredWithoutRetry(t *testing.T) {
