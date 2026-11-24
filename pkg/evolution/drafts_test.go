@@ -125,12 +125,15 @@ func TestDefaultDraftGenerator_CombinedSkillIncludesEvidenceAndSourceOperations(
 		"Add 31 to the input value",
 		"Add 42 to the current value",
 		"Subtract 53 from the current value",
-		"100 + 31 = 131",
 		"task-1",
 	} {
 		if !strings.Contains(draft.BodyOrPatch, want) && draft.TargetSkillName != want {
 			t.Fatalf("draft missing %q:\nname=%s\n%s", want, draft.TargetSkillName, draft.BodyOrPatch)
 		}
+	}
+	// The source answer is evidence, not a procedure: the skill must not replay it.
+	if strings.Contains(draft.BodyOrPatch, "100 + 31 = 131") {
+		t.Fatalf("draft copied the source task output:\n%s", draft.BodyOrPatch)
 	}
 }
 
