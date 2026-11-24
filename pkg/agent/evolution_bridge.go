@@ -150,7 +150,12 @@ func wireModelID(cfg *config.Config, raw string) string {
 // (seucaranguejo fork)
 func evolutionSuccessJudge(cfg *config.Config, provider providers.LLMProvider, modelID string) evolution.SuccessJudge {
 	decisionModel := strings.TrimSpace(cfg.Agents.Defaults.DecisionModel)
-	if decider, ok := provider.(providers.Decider); ok && decisionModel != "" {
+	gateway := provider
+	if observed, ok := provider.(*observedProvider); ok {
+		// The metering wrapper embeds only the chat interface, which hides Decide.
+		gateway = observed.LLMProvider
+	}
+	if decider, ok := gateway.(providers.Decider); ok && decisionModel != "" {
 		return evolution.NewDecisionTaskSuccessJudge(decider, decisionModel, &evolution.HeuristicSuccessJudge{})
 	}
 	return evolution.NewLLMTaskSuccessJudge(provider, modelID, &evolution.HeuristicSuccessJudge{})
