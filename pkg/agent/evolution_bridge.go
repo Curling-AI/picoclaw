@@ -83,7 +83,7 @@ func newEvolutionBridge(
 			return evolution.NewDraftGeneratorForWorkspace(workspace, provider, draftModelID)
 		},
 		SuccessJudgeFactory: func(workspace string) evolution.SuccessJudge {
-			return evolution.NewLLMTaskSuccessJudge(provider, modelID, &evolution.HeuristicSuccessJudge{})
+			return evolutionSuccessJudge(cfg, provider, modelID)
 		},
 		ApplierFactory: func(workspace string) *evolution.Applier {
 			return evolution.NewApplier(evolution.NewPaths(workspace, cfg.Evolution.StateDir), nil)
@@ -143,6 +143,17 @@ func wireModelID(cfg *config.Config, raw string) string {
 		}
 	}
 	return raw
+}
+
+// evolutionSuccessJudge asks the decision model when the deployment has one and
+// its gateway answers decisions, and the cheap chat model otherwise.
+// (seucaranguejo fork)
+func evolutionSuccessJudge(cfg *config.Config, provider providers.LLMProvider, modelID string) evolution.SuccessJudge {
+	decisionModel := strings.TrimSpace(cfg.Agents.Defaults.DecisionModel)
+	if decider, ok := provider.(providers.Decider); ok && decisionModel != "" {
+		return evolution.NewDecisionTaskSuccessJudge(decider, decisionModel, &evolution.HeuristicSuccessJudge{})
+	}
+	return evolution.NewLLMTaskSuccessJudge(provider, modelID, &evolution.HeuristicSuccessJudge{})
 }
 
 func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider) string {
