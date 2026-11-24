@@ -262,12 +262,15 @@ func TestRuntime_RunColdPathOnce_DraftModeRefreshesExistingCandidateWithEvidence
 		"calculate-100-via-theorems",
 		"Add 31 to the input value",
 		"Subtract 53 from the current value",
-		"100 + 31 = 131",
 		"task-1",
 	} {
 		if !strings.Contains(drafts[0].BodyOrPatch, want) && drafts[0].TargetSkillName != want {
 			t.Fatalf("refreshed draft missing %q:\nname=%s\n%s", want, drafts[0].TargetSkillName, drafts[0].BodyOrPatch)
 		}
+	}
+	// The source answer is evidence, not a procedure: the skill must not replay it.
+	if strings.Contains(drafts[0].BodyOrPatch, "100 + 31 = 131") {
+		t.Fatalf("draft copied the source task output:\n%s", drafts[0].BodyOrPatch)
 	}
 }
 

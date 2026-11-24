@@ -984,7 +984,7 @@ func synthesizeSkillDocumentFromPartialDraft(
 		bodyContent,
 		"",
 		"## Expected Result",
-		synthesizedExpectedResultLine(evidence),
+		fallbackExpectedResult,
 		"",
 		"## Source Evidence",
 		synthesizedEvidenceLine(rule, evidence),
@@ -1022,7 +1022,7 @@ func synthesizeCombinedSkillDocument(
 		synthesizedCombinedLearnedContent(draft.BodyOrPatch, rule),
 		"",
 		"## Expected Result",
-		synthesizedExpectedResultLine(evidence),
+		fallbackExpectedResult,
 		"",
 		"## Source Evidence",
 		synthesizedEvidenceLine(rule, evidence),
@@ -1044,7 +1044,7 @@ func synthesizeCombinedSkillAppendBody(
 		fmt.Sprintf("- Task summary: %s", fallbackEvolutionSummary(rule)),
 		fmt.Sprintf("- Wrapped path: %s", synthesizedWrappedPathLine(rule)),
 		"- Guidance: prefer this shortcut directly instead of replaying the whole path when the task matches.",
-		fmt.Sprintf("- Expected result: %s", synthesizedExpectedResultLine(evidence)),
+		fmt.Sprintf("- Expected result: %s", fallbackExpectedResult),
 		fmt.Sprintf("- Evidence: %s", synthesizedEvidenceLine(rule, evidence)),
 		"",
 		"### Source Skills",
@@ -1097,13 +1097,6 @@ func synthesizedCombinedProcedure(matches []skills.SkillInfo, rule LearningRecor
 		)
 	}
 	return "Follow the source skill guidance below as one compact procedure, then return the final result without replaying unnecessary discovery steps."
-}
-
-func synthesizedExpectedResultLine(evidence DraftEvidence) string {
-	if excerpt := firstFinalOutputExcerpt(evidence, 360); excerpt != "" {
-		return excerpt
-	}
-	return "Return the completed result for the matched task without restating unrelated discovery steps."
 }
 
 func synthesizedEvidenceLine(rule LearningRecord, evidence DraftEvidence) string {
