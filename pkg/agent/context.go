@@ -1501,6 +1501,10 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			sanitized = append(sanitized, msg)
 
 		case "assistant":
+			// Shown to the person, never to the model. (seucaranguejo fork)
+			if msg.Notice {
+				continue
+			}
 			// What the turn's own script sent joins the message before it, the
 			// round's last result or the user's: as a turn of its own it would
 			// break the tool-call chain that follows, or be joined with the

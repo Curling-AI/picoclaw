@@ -297,7 +297,8 @@ func (m *legacyContextManager) summarizeSession(ctx context.Context, agent *Agen
 	omitted := false
 
 	for _, msg := range toSummarize {
-		if msg.Role != "user" && msg.Role != "assistant" {
+		// A notice is shown to the person, never to the model. (seucaranguejo fork)
+		if msg.Role != "user" && msg.Role != "assistant" || msg.Notice {
 			continue
 		}
 		msgTokens := len(msg.Content) / 2

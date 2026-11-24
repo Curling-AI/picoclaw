@@ -205,6 +205,13 @@ type Message struct {
 	// as a dated line instead. (seucaranguejo fork — see agent/delivery_mirror.go)
 	Delivery *Delivery `json:"delivery,omitempty"`
 
+	// Notice marks an assistant message the runtime wrote in place of a reply
+	// the model did not give. It stays in the conversation for whoever reads
+	// it and never reaches the model: read back as its own reply, it taught
+	// the model to answer with nothing again. (seucaranguejo fork — see
+	// agent/pipeline_finalize.go)
+	Notice bool `json:"notice,omitempty"`
+
 	// Prompt metadata is internal to the agent runtime. It records where a
 	// message or system part came from without changing provider/session JSON.
 	PromptLayer  string `json:"-"`
@@ -263,4 +270,11 @@ type ToolFunctionDefinition struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
+}
+
+// DecisionQuestion is one yes/no question a decision model answers about an
+// input, with the probability of yes. (seucaranguejo fork)
+type DecisionQuestion struct {
+	Name         string
+	Instructions string
 }

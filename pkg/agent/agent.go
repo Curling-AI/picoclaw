@@ -65,6 +65,9 @@ type AgentLoop struct {
 	// sessão e consumido no próximo turno. (seucaranguejo fork)
 	pendingModelTier sync.Map
 	pendingStops     sync.Map
+	// undecidedAgents are the agents already warned that their provider cannot
+	// answer the decision model. (seucaranguejo fork)
+	undecidedAgents sync.Map
 	// loopResolver traduz chave de sessão → Loop. Instalado pelo control-plane,
 	// que é quem conhece o vínculo. Nil = todo turno roda no escopo global.
 	// (seucaranguejo fork — ver loop.go)

@@ -10,6 +10,9 @@ type (
 	HTTPProvider   = httpapi.HTTPProvider
 )
 
+// The pods' gateway provider answers the turn's decisions. (seucaranguejo fork)
+var _ Decider = (*HTTPProvider)(nil)
+
 func NewGeminiProvider(
 	apiKey string,
 	apiBase string,
