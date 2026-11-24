@@ -439,6 +439,10 @@ type AgentDefaults struct {
 	ModelFallbacks            []string `json:"model_fallbacks,omitempty"`
 	ImageModel                string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks       []string `json:"image_model_fallbacks,omitempty"`
+	// DecisionModel answers the turn's yes/no checks through the gateway's
+	// Decisions API, such as whether a reply stopped on a step it only promised.
+	// Empty turns those checks off. (seucaranguejo fork)
+	DecisionModel string `json:"decision_model,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_DECISION_MODEL"`
 	// ImageContextWindow is the context window of the image/vision model, which is
 	// usually far smaller than the main model's (glm-4.6v 128K vs glm-5.2 1M). When
 	// a media turn routes to the image model, compaction targets this budget so a
@@ -1279,6 +1283,13 @@ func (c *LoopDetectionConfig) Validate() error {
 // MessagesConfig controls user-facing message behavior.
 type MessagesConfig struct {
 	SuppressToolErrors bool `json:"suppress_tool_errors" env:"PICOCLAW_MESSAGES_SUPPRESS_TOOL_ERRORS"`
+	// The texts a turn ends with when the model gave no reply, ran out of
+	// max_tool_iterations, or kept repeating a refused call, in the language
+	// of whoever reads them. Empty keeps the built-in English text.
+	// RepeatStop names the tool where it says {tool}. (seucaranguejo fork)
+	EmptyResponse string `json:"empty_response,omitempty" env:"PICOCLAW_MESSAGES_EMPTY_RESPONSE"`
+	ToolLimit     string `json:"tool_limit,omitempty"     env:"PICOCLAW_MESSAGES_TOOL_LIMIT"`
+	RepeatStop    string `json:"repeat_stop,omitempty"    env:"PICOCLAW_MESSAGES_REPEAT_STOP"`
 }
 
 type SkillsToolsConfig struct {

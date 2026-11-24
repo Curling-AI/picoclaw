@@ -178,6 +178,13 @@ type Attachment struct {
 	ContentType string `json:"content_type,omitempty"`
 }
 
+// The kinds of Message.Fallback. (seucaranguejo fork)
+const (
+	FallbackEmptyResponse = "empty_response"
+	FallbackToolLimit     = "tool_limit"
+	FallbackRepeatStop    = "repeat_stop"
+)
+
 type Message struct {
 	// HistoryPublicMessage is a private immutable display-version witness.
 	// It never enters provider JSON or the model session projection.
@@ -204,6 +211,19 @@ type Message struct {
 	// API. Providers never receive it; the history sent to the model carries it
 	// as a dated line instead. (seucaranguejo fork — see agent/delivery_mirror.go)
 	Delivery *Delivery `json:"delivery,omitempty"`
+
+	// Notice marks an assistant message the runtime wrote in place of a reply
+	// the model did not give. It stays in the conversation for whoever reads
+	// it and never reaches the model: read back as its own reply, it taught
+	// the model to answer with nothing again. (seucaranguejo fork — see
+	// agent/pipeline_finalize.go)
+	Notice bool `json:"notice,omitempty"`
+
+	// Fallback names the fixed text the runtime wrote in place of the model's
+	// reply (FallbackEmptyResponse, FallbackToolLimit, FallbackRepeatStop), so a
+	// reader tells it apart by kind instead of by its configurable, translated
+	// words. It changes nothing the model reads. (seucaranguejo fork)
+	Fallback string `json:"fallback,omitempty"`
 
 	// Prompt metadata is internal to the agent runtime. It records where a
 	// message or system part came from without changing provider/session JSON.
@@ -263,4 +283,11 @@ type ToolFunctionDefinition struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"parameters"`
+}
+
+// DecisionQuestion is one yes/no question a decision model answers about an
+// input, with the probability of yes. (seucaranguejo fork)
+type DecisionQuestion struct {
+	Name         string
+	Instructions string
 }

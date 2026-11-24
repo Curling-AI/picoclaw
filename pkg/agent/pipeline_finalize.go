@@ -46,12 +46,24 @@ func (p *Pipeline) Finalize(
 		// Sent while the reply was being written: before the reply, as the user
 		// got them. (seucaranguejo fork — see self_delivery.go)
 		al.writeSelfDeliveriesBeforeReply(ts, exec)
-		// Coordinator-synthesized fallback text (empty-response/tool-limit
-		// boilerplate) is shown to the user but kept OUT of session history:
-		// persisted fallbacks read as the model's own prior replies and make
-		// it reproduce the failure on every following turn of the session.
-		if !exec.finalIsFallback && providerForTurn(turnCtx, ts.turnID) == nil {
+		// Coordinator-synthesized fallback text (the empty-response notice) is
+		// kept out of what the model reads: persisted as a reply, it reads as
+		// the model's own and makes it reproduce the failure on every
+		// following turn of the session. It is still the turn's last message
+		// for the person, who saw it and must find it again on a reload, so it
+		// goes in as a notice the history sent to the model skips. Not ingested
+		// either: a context manager with its own store would hand it back.
+		// (seucaranguejo fork)
+		switch {
+		case providerForTurn(turnCtx, ts.turnID) != nil:
+		case !exec.finalIsFallback:
 			p.persistAssistantReply(turnCtx, ts, assistantReply(exec, finalContent))
+		case finalContent != "":
+			notice := assistantReply(exec, finalContent)
+			// What the empty call thought, maybe a cut-off loop, is not the notice's.
+			notice.Notice, notice.ReasoningContent = true, ""
+			ts.appendHistoryMessage(notice)
+			ts.recordPersistedMessage(notice)
 		}
 		if err := ts.agent.Sessions.Save(ts.sessionKey); err != nil {
 			al.emitEvent(
@@ -117,6 +129,7 @@ func assistantReply(exec *turnExecution, content string) providers.Message {
 		ReasoningContent: responseReasoningContent(exec.response),
 		LLMCall:          llmCallRecord(exec.llmRequestID, exec.response),
 		HistoryCallID:    exec.historyCallID,
+		Fallback:         exec.fallbackKind,
 	}
 }
 
