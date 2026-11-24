@@ -120,6 +120,7 @@ func TestPromiseJudgeReadsThePersonsMessageAndTheEndOfTheReply(t *testing.T) {
 	}
 	for _, want := range []string{
 		"publica a página do cardápio", "yes, some tools ran", "Agora vou publicar a versão nova no Skip.", "[…]",
+		"Its final sentence: Agora vou publicar a versão nova no Skip.",
 	} {
 		if !strings.Contains(got.input, want) {
 			t.Errorf("judge input lacks %q", want)
@@ -223,8 +224,12 @@ func TestReplyWithoutAClearYesIsDeliveredWithoutRetry(t *testing.T) {
 			}
 			// Every reply the judge answered on and let through leaves one line with
 			// its probability; an error already has its own.
-			if got, want := strings.Count(log, judgeLetThroughLine), map[bool]int{true: 0, false: 1}[answer.err != nil]; got != want {
-				t.Errorf("let-through lines = %d, want %d", got, want)
+			wantLines := 1
+			if answer.err != nil {
+				wantLines = 0
+			}
+			if got := strings.Count(log, judgeLetThroughLine); got != wantLines {
+				t.Errorf("let-through lines = %d, want %d", got, wantLines)
 			}
 			if answered := answer.err == nil && !answer.refused; answered != strings.Contains(log, `"judge_p"`) {
 				t.Errorf("judge_p logged = %v, want %v", !answered, answered)
@@ -233,5 +238,33 @@ func TestReplyWithoutAClearYesIsDeliveredWithoutRetry(t *testing.T) {
 				t.Error("the reply text reached the log")
 			}
 		})
+	}
+}
+
+// The judge reads the reply's last sentence apart: after a delivery, the step
+// announced at the very end is what leaves the person waiting.
+func TestFinalSentenceIsTheReplysLastSentence(t *testing.T) {
+	for name, tc := range map[string]struct{ reply, want string }{
+		"after a delivery": {
+			"Os três relatórios estão prontos na pasta. Vou refazer o gráfico com as cores novas.",
+			"Vou refazer o gráfico com as cores novas.",
+		},
+		"last line of a list": {
+			"Resumo:\n- receita subiu 12%\n- custo caiu 3%\n\nAgora vou montar a planilha.",
+			"Agora vou montar a planilha.",
+		},
+		"bullet marker dropped":                 {"Feito.\n- Vou enviar o convite agora.", "Vou enviar o convite agora."},
+		"trailing emoji kept with its sentence": {"Tudo certo por aqui. Vou publicar a página. 🚀", "Vou publicar a página. 🚀"},
+		"single sentence":                       {"  Deixa eu abrir o artigo  ", "Deixa eu abrir o artigo"},
+		"no terminator":                         {"Quer que eu ajuste o tom", "Quer que eu ajuste o tom"},
+		"decimal is not a sentence end":         {"O total ficou em 12.5 mil. Vou lançar no ERP.", "Vou lançar no ERP."},
+	} {
+		if got := finalSentence(tc.reply); got != tc.want {
+			t.Errorf("%s: finalSentence = %q, want %q", name, got, tc.want)
+		}
+	}
+	long := strings.Repeat("palavra ", 100) + "fim."
+	if got := []rune(finalSentence(long)); len(got) != finalSentenceClip {
+		t.Errorf("long sentence kept %d runes, want %d", len(got), finalSentenceClip)
 	}
 }

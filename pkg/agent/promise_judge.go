@@ -5,32 +5,37 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// promiseQuestion asks the decision model whether a reply that ends the turn
-// left the person waiting on a step it only announced. It replaced the verb
-// lists and exceptions of the regex guards: probed against every labeled reply
-// in their tables (prod, eval and review cases, in Portuguese and English),
-// none that delivers, asks or waits came back yes. (seucaranguejo fork)
-const promiseQuestion = "Does the assistant's last message end by announcing an action it was about to take right then, such " +
-	"as searching, opening, reading, running, creating, writing, fixing, sending, publishing or " +
-	"scheduling something, without having taken it, leaving it undone and without asking the person " +
-	"anything? Answer yes, for example, for \"I'll redo the chart with a clearer idea.\", \"Now I'll publish " +
-	"the page.\", \"Let me check the reminder.\", \"Vou refazer o gráfico.\", \"Deixa eu abrir o artigo.\". " +
-	"Creating a reminder, an automation or a scheduled task is an action to take right then even when " +
-	"what it sets up is for later: \"I'll schedule the reminder for tomorrow\" is yes. A message that ends " +
-	"by introducing something (a report, a list, a batch, the next step) with a colon and nothing after " +
-	"it is also yes: what it introduced never came. Answer no when the message delivers what the person " +
-	"asked for (an answer, a text, a list, a file, a confirmation of what was done), even if it ends " +
-	"offering more (\"if you want, I can adjust the tone\") or giving tips; when it asks the person a " +
-	"question or for confirmation; when it says it is waiting for someone else, an approval or something " +
-	"still to be sent; when it says the assistant itself will do something at a later time (\"I'll remind " +
-	"you tomorrow at 9\"); or when it promises a way of behaving (\"I won't store your ID\", \"I'll keep that " +
-	"in mind\"). Words like \"I'll check\" inside a text the assistant wrote for the person to use (a draft, " +
-	"a script, a caption, a quoted phrase) are not the assistant announcing anything."
+// promiseQuestion asks the decision model whether the reply that ends the turn
+// left the person waiting on a step it only announced. It reads the final
+// sentence on its own: in production the stops it missed delivered something
+// first and announced the next step at the very end. (seucaranguejo fork)
+const promiseQuestion = "Judge the final sentence of the assistant's last message. Does it announce an action the assistant " +
+	"was about to take right then, such as searching, opening, reading, running, creating, writing, " +
+	"fixing, redoing, correcting, preparing, sending, publishing or scheduling something, that it did not " +
+	"take in this turn, leaving the person waiting on it? Judge that final sentence even when the rest of " +
+	"the message already delivers something: a message that delivers part of the work and then ends with " +
+	"\"Now I'll redo the cut with the new photos.\" or \"Vou classificar esse gasto como aluguel.\" is yes. " +
+	"Also answer yes, for example, for \"I'll redo the chart with a clearer idea.\", \"Now I'll publish the " +
+	"page.\", \"Let me check the reminder.\", \"Deixa eu abrir o artigo.\"; for long work announced as " +
+	"continuing (\"I'll keep going and report my progress\", \"Vou fazendo e te reportando\"); for an action " +
+	"in parallel (\"While you restart it, I'll prepare a test\"); for a self-correction (\"I need to fix " +
+	"that in my notes, fixing it now\"); and for creating a reminder, an automation or a scheduled task, " +
+	"which is an action to take right then even when what it sets up is for later (\"I'll schedule the " +
+	"reminder for tomorrow\" is yes). A message that ends by introducing something (a report, a list, a " +
+	"batch, the next step) with a colon and nothing after it is also yes: what it introduced never came. " +
+	"Answer no when the final sentence reports what was done or delivers the answer; offers more (\"if you " +
+	"want, I can adjust the tone\") or gives tips; asks the person a question or for confirmation; says it " +
+	"is waiting for someone else, an approval, a file or something still to be sent; says the assistant " +
+	"itself will do something at a later time (\"I'll remind you tomorrow at 9\"); or promises a way of " +
+	"behaving (\"I won't store your ID\", \"I'll keep that in mind\"). Words like \"I'll check\" inside a text " +
+	"the assistant wrote for the person to use (a draft, a script, a caption, a quoted phrase) are not " +
+	"the assistant announcing anything."
 
 const promiseQuestionName = "stopped_on_promise"
 
@@ -126,7 +131,40 @@ func promiseInput(asked string, toolRan bool, reply string) string {
 	return "The assistant's turn ends after its last message below: it stopped and waited for the person to " +
 		"write again.\n\nThe person wrote: " + clipMiddle(asked, promiseAskedClip) +
 		"\nTools the assistant used in this turn: " + tools +
-		"\n\nThe assistant's last message:\n" + clipMiddle(reply, promiseReplyClip)
+		"\n\nThe assistant's last message:\n" + clipMiddle(reply, promiseReplyClip) +
+		"\n\nIts final sentence: " + finalSentence(reply)
+}
+
+// finalSentenceClip bounds the final sentence the judge reads apart.
+const finalSentenceClip = 300
+
+// finalSentence is the reply's last sentence, given to the judge on its own: a
+// reply that delivers something first can still end on a step it never took.
+func finalSentence(reply string) string {
+	lines := strings.Split(strings.TrimSpace(reply), "\n")
+	line := ""
+	for i := len(lines) - 1; i >= 0 && line == ""; i-- {
+		line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(lines[i]), "-*#> "))
+	}
+	runes := []rune(line)
+	var sentences []string
+	start := 0
+	for i := 0; i+1 < len(runes); i++ {
+		if strings.ContainsRune(".!?…", runes[i]) && unicode.IsSpace(runes[i+1]) {
+			sentences = append(sentences, strings.TrimSpace(string(runes[start:i+1])))
+			start = i + 1
+		}
+	}
+	sentences = append(sentences, strings.TrimSpace(string(runes[start:])))
+	last := sentences[len(sentences)-1]
+	// A trailing emoji or "ok." is not the sentence that says what comes next.
+	if len([]rune(last)) < 4 && len(sentences) > 1 {
+		last = sentences[len(sentences)-2] + " " + last
+	}
+	if tail := []rune(last); len(tail) > finalSentenceClip {
+		last = string(tail[len(tail)-finalSentenceClip:])
+	}
+	return last
 }
 
 // clipMiddle keeps text within limit runes by cutting its middle: the end of a
