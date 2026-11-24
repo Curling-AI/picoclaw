@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 )
 
 // SessionRecord summarizes a stored session for listing, without exposing its
@@ -47,7 +49,16 @@ func (sm *SessionManager) DeleteSession(key string) error {
 	if storage == "" {
 		return nil
 	}
-	path := filepath.Join(storage, sanitizeFilename(key)+".json")
+	name := sanitizeFilename(key)
+	// No MarkRemove: the .json is not the JSONL store's file, so the lock file
+	// stays for the store's own writers.
+	lock, err := sessionlock.Acquire(storage, name, sessionManagerLockWait)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
+
+	path := filepath.Join(storage, name+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}

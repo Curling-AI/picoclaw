@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
@@ -19,6 +20,10 @@ type Session struct {
 	Created  time.Time           `json:"created"`
 	Updated  time.Time           `json:"updated"`
 }
+
+// sessionManagerLockWait is how long a write waits for another holder of the
+// session's file lock before failing with sessionlock.ErrBusy.
+var sessionManagerLockWait = 10 * time.Second
 
 type SessionManager struct {
 	sessions map[string]*Session
@@ -230,8 +235,19 @@ func (sm *SessionManager) Save(key string) error {
 		return err
 	}
 
-	sessionPath := filepath.Join(sm.storage, filename+".json")
-	tmpFile, err := os.CreateTemp(sm.storage, "session-*.tmp")
+	// The file is never written without the session's lock: another process
+	// may share this folder (two pods of one assistant during a rollout).
+	lock, err := sessionlock.Acquire(sm.storage, filename, sessionManagerLockWait)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
+
+	return writeFileAtomic(sm.storage, filepath.Join(sm.storage, filename+".json"), data)
+}
+
+func writeFileAtomic(dir, sessionPath string, data []byte) error {
+	tmpFile, err := os.CreateTemp(dir, "session-*.tmp")
 	if err != nil {
 		return err
 	}

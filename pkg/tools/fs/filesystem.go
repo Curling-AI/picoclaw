@@ -1263,10 +1263,12 @@ type fileSystem interface {
 }
 
 // hostFs is an unrestricted fileReadWriter that operates directly on the host filesystem.
-type hostFs struct{}
+type hostFs struct{ workspace string }
 
 func (h *hostFs) withWriteLock(path string, write func() error) error {
-	return fileutil.WithFileLock(path, write)
+	return withSessionWriteLock(h.workspace, path, func() error {
+		return fileutil.WithFileLock(path, write)
+	})
 }
 
 func (h *hostFs) ReadFile(path string) ([]byte, error) {
@@ -1317,7 +1319,9 @@ func (r *sandboxFs) withWriteLock(path string, write func() error) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WithFileLock(filepath.Join(r.workspace, relative), write)
+	return withSessionWriteLock(r.workspace, filepath.Join(r.workspace, relative), func() error {
+		return fileutil.WithFileLock(filepath.Join(r.workspace, relative), write)
+	})
 }
 
 func (r *sandboxFs) execute(path string, fn func(root *os.Root, relPath string) error) error {
@@ -1510,11 +1514,11 @@ func (w *whitelistFs) Open(path string) (fs.File, error) {
 // settings and optional path whitelist patterns.
 func buildFs(workspace string, restrict bool, patterns []*regexp.Regexp) fileSystem {
 	if !restrict {
-		return &hostFs{}
+		return &hostFs{workspace: workspace}
 	}
 	sandbox := &sandboxFs{workspace: workspace}
 	if len(patterns) > 0 {
-		return &whitelistFs{sandbox: sandbox, patterns: patterns}
+		return &whitelistFs{sandbox: sandbox, host: hostFs{workspace: workspace}, patterns: patterns}
 	}
 	return sandbox
 }
