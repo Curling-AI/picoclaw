@@ -205,10 +205,13 @@ func (m *seahorseContextManager) bootstrapSession(ctx context.Context, sessionKe
 		return
 	}
 
-	// Convert provider messages to seahorse messages
-	msgs := make([]seahorse.Message, len(history))
-	for i, h := range history {
-		msgs[i] = providerToSeahorseMessage(h)
+	// Convert provider messages to seahorse messages. A notice is shown to the
+	// person, never to the model, and Ingest never stores one. (seucaranguejo fork)
+	msgs := make([]seahorse.Message, 0, len(history))
+	for _, h := range history {
+		if !h.Notice {
+			msgs = append(msgs, providerToSeahorseMessage(h))
+		}
 	}
 
 	if err := m.engine.Bootstrap(ctx, sessionKey, msgs); err != nil {

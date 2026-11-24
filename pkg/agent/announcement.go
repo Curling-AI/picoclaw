@@ -44,22 +44,34 @@ var (
 	// dropped before the match, so a promise later in the sentence still counts.
 	negatedIntent = regexp.MustCompile(`(?i)\b(n[ãa]o|nunca|jamais|nem)\s+(vou|irei)\b`)
 	// notAPromise is what makes a "vou + verb" sentence a legitimate end of a
-	// turn: an offer, a step that waits on someone else, a scheduled or standing
-	// intention. Nudging any of these to "perform the action now" would run it
-	// early or a second time.
+	// turn: an offer, a step that waits on someone else, a standing intention.
+	// Nudging any of these to "perform the action now" would run it early or a
+	// second time: "vou publicar assim que a Ana aprovar" must not publish.
 	notAPromise = regexp.MustCompile(`(?i)` +
 		`\bse (você |vc )?(quiser|preferir|precisar|achar melhor)|\bcaso (você |vc )?(queira|prefira|precise)|` +
 		`\bquer que eu\b|\bqualquer coisa\b|(^|\s)é só |` +
 		`\bme (passa|passe|manda|mande|envia|envie|diz|diga|fala|fale|confirma|confirme|avisa|avise)\b|` +
-		`\b(assim que|quando|depois que) (você|(vc|eles?|elas?)\b)|` + //nolint:misspell // Portuguese "eles", not English
+		`\b(assim que|logo que|depois que)\b|\bquando (você|(vc|eles?|elas?)\b)|` + //nolint:misspell // Portuguese "eles", not English
+		`\b(aprov(ar|e|em)|aprova[çc][ãa]o|autoriz(ar|e|em)|autoriza[çc][ãa]o)\b|` +
+		`\bem (conta|considera)|\blembr(ar|o|ando)\b|\bavis(ar|o)\b|\bde olho\b|\bmonitor\w*|` +
+		`\bif you (want|like|prefer|need)\b|\bwould you like\b|\bwhen you\b|\bonce (you|they|he|she)\b|` +
+		`\bremind\w*|\bkeep (it|this|that) in mind\b`,
+	)
+	// laterOn is a step set for another time, "vou enviar o resumo toda segunda
+	// às 8h": not this turn's to do.
+	laterOn = regexp.MustCompile(`(?i)` +
 		`\bamanh|\bdepois de amanh|\bsemana que vem\b|\bpr[óo]xim[ao] (semana|m[êe]s)|\bm[êe]s que vem\b|` +
 		`\bmais tarde\b|(^|\s)à noite\b|\btod[ao]s? (os |as )?(dia|semana|manh|tarde|noite|m[êe]s|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo)|` +
 		`\b(diariamente|semanalmente|mensalmente)\b|\ba partir de (amanh|hoje|agora|segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|\d)|` +
 		`(^|\s)às \d|\b\d{1,2}h\d{0,2}\b|\b\d{1,2}:\d{2}\b|` +
-		`\bem (conta|considera)|\blembr(ar|o|ando)\b|\bavis(ar|o)\b|\bde olho\b|\bmonitor\w*|` +
-		`\bif you (want|like|prefer|need)\b|\bwould you like\b|\bwhen you\b|\btomorrow\b|\btonight\b|` +
-		`\bnext (week|month)\b|\bevery (day|week|morning|evening|night)\b|\bremind\w*|\bkeep (it|this|that) in mind\b`,
+		`\btomorrow\b|\btonight\b|\bnext (week|month)\b|\bevery (day|week|morning|evening|night)\b`,
 	)
+	// schedulingStep is a step whose later time belongs to what it schedules:
+	// "vou agendar o lembrete para amanhã" is to be done now.
+	schedulingStep = regexp.MustCompile(`(?i)\b(agend(ar|ando)|program(ar|ando)|schedul(e|ing))\b`)
+	// emphasisMarks are the markdown that can sit between the marker and the
+	// verb, "vou **buscar** o artigo".
+	emphasisMarks = strings.NewReplacer("*", "", "_", "", "`", "")
 	// sentenceEnd is where a sentence stops: its closing marks and the space
 	// after them, or a line break.
 	sentenceEnd = regexp.MustCompile(`[.!?…]+\s+|\n+`)
@@ -102,8 +114,11 @@ func endsOnUnfinishedStep(text string) bool {
 // promisesNextStep judges one sentence. A question hands the turn to the
 // person, so it is a legitimate stop whatever it announces.
 func promisesNextStep(sentence string) bool {
-	s := negatedIntent.ReplaceAllString(sentence, "")
-	return nextStepPromise.MatchString(s) && !strings.HasSuffix(s, "?") && !notAPromise.MatchString(s)
+	s := negatedIntent.ReplaceAllString(emphasisMarks.Replace(sentence), "")
+	if !nextStepPromise.MatchString(s) || strings.HasSuffix(s, "?") || notAPromise.MatchString(s) {
+		return false
+	}
+	return !laterOn.MatchString(s) || schedulingStep.MatchString(s)
 }
 
 // sentences splits text where sentences end, each keeping its closing mark.

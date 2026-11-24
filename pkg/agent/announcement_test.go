@@ -112,6 +112,7 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 		{"question to the person", "Vou publicar a versão nova agora, pode ser?", false},
 		{"scheduled", "Vou enviar o resumo toda segunda às 8h.", false},
 		{"verb too far from the marker", "Vou estar por aqui se precisar ajustar algo.", false},
+		{"bold verb", "Vou **buscar** o artigo do DCRainmaker sobre o Fenix 9.", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -216,6 +217,12 @@ func TestEndsOnUndeliveredPromise(t *testing.T) {
 		{"standing task from tomorrow", "Vou cuidar do seu e-mail a partir de amanhã às 8h.", false},
 		{"scheduled send", "Automação criada. Vou enviar o resumo toda segunda às 8h.", false},
 		{"waits on the person", "Rascunho pronto. Vou publicar assim que você aprovar.", false},
+		{"waits on someone named", "Rascunho pronto. Vou publicar assim que a Ana aprovar.", false},
+		{"waits on someone's material", "Página montada. Vou publicar assim que o Pedro mandar as fotos.", false},
+		{"waits on an approval", "Deixei o post no rascunho; vou publicar depois da aprovação do cliente.", false},
+		{"schedules now what happens tomorrow", "Entendi. Vou agendar agora o lembrete para amanhã.", true},
+		{"schedules a send for later", "Combinado, vou agendar o envio para segunda às 8h.", true},
+		{"bold verb", "Achei o link. Vou **buscar** o artigo.", true},
 		{"question", "Gerei as duas versões. Vou publicar a primeira, pode ser?", false},
 		{"sign-off", "Feito! Qualquer coisa, é só chamar que eu vou ajustar.", false},
 		{
