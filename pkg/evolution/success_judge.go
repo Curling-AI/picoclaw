@@ -3,9 +3,11 @@ package evolution
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
 
 type TaskSuccessDecision struct {
@@ -144,4 +146,81 @@ func buildTaskSuccessJudgePrompt(record LearningRecord) string {
 		"Used skills: " + joinOrFallback(record.UsedSkillNames, "none"),
 	}
 	return strings.Join(lines, "\n")
+}
+
+// taskSuccessQuestion is the success judge's question to a decision model: a
+// yes/no read of the record, in any language, with no JSON to parse.
+// (seucaranguejo fork)
+const taskSuccessQuestion = "Did this assistant task truly achieve what the person asked for? Answer yes when " +
+	"the final output gives the person a concrete result, a finished piece of work, a completed procedure or a " +
+	"direct answer to their question. A result shown as a card, table or interface markup (such as an " +
+	"openui-lang block), an image or an attached file counts as delivered. Answer no when it only plans, " +
+	"describes or promises future steps, stops partway, reports a failure, or does not deliver the requested outcome."
+
+const taskSuccessQuestionName = "task_succeeded"
+
+// taskSuccessYes and taskSuccessNo are the decision model's thresholds; in
+// between is doubt, which falls back.
+const (
+	taskSuccessYes = 0.8
+	taskSuccessNo  = 0.2
+)
+
+// DecisionTaskSuccessJudge asks a decision model whether a task record
+// achieved the person's goal: cheaper and faster than a chat model writing
+// JSON, and it reads any language. Doubt, a refusal or an error falls back;
+// the account out of credit stops the cold path, as the LLM judge does.
+// (seucaranguejo fork)
+type DecisionTaskSuccessJudge struct {
+	decider  providers.Decider
+	model    string
+	fallback SuccessJudge
+}
+
+func NewDecisionTaskSuccessJudge(
+	decider providers.Decider,
+	model string,
+	fallback SuccessJudge,
+) *DecisionTaskSuccessJudge {
+	if fallback == nil {
+		fallback = &HeuristicSuccessJudge{}
+	}
+	return &DecisionTaskSuccessJudge{decider: decider, model: strings.TrimSpace(model), fallback: fallback}
+}
+
+func (j *DecisionTaskSuccessJudge) JudgeTaskRecord(
+	ctx context.Context,
+	record LearningRecord,
+) (TaskSuccessDecision, error) {
+	if j.decider == nil || j.model == "" {
+		return j.fallback.JudgeTaskRecord(ctx, record)
+	}
+	callCtx, cancel := withLLMCallTimeout(ctx, llmTaskSuccessJudgeTimeout())
+	defer cancel()
+	answers, err := j.decider.Decide(callCtx, j.model, buildTaskSuccessDecisionInput(record),
+		[]providers.DecisionQuestion{{Name: taskSuccessQuestionName, Instructions: taskSuccessQuestion}})
+	if isNoCreditError(err) {
+		return TaskSuccessDecision{}, noCreditError(err)
+	}
+	// A canceled run is not this step failing: see LLMTaskSuccessJudge.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return TaskSuccessDecision{}, ctxErr
+	}
+	p, answered := answers[taskSuccessQuestionName]
+	if err != nil || !answered || p > taskSuccessNo && p < taskSuccessYes {
+		return j.fallback.JudgeTaskRecord(ctx, record)
+	}
+	return TaskSuccessDecision{Success: p >= taskSuccessYes, Reason: fmt.Sprintf("decision p=%.2f", p)}, nil
+}
+
+// buildTaskSuccessDecisionInput is what the decision model reads: what the
+// person asked, the final output and the skills used.
+func buildTaskSuccessDecisionInput(record LearningRecord) string {
+	// A task record's summary is the person's message, clipped; turns record no goal.
+	asked := fallbackString(record.UserGoal, messageutil.StripSenderTag(record.Summary))
+	return strings.Join([]string{
+		"The person asked: " + fallbackString(asked, "not recorded"),
+		"Final output: " + fallbackString(record.FinalOutput, "none"),
+		"Used skills: " + joinOrFallback(record.UsedSkillNames, "none"),
+	}, "\n")
 }

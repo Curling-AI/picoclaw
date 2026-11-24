@@ -67,7 +67,7 @@ func replyThenFollowUp(messages []providers.Message, reply, followUp string) boo
 // arrived. It vanished from the history the screen reloads, and the next call
 // wrote it again without knowing it had.
 func TestConfiguredStreaming_MessageAfterAWatchedReplyKeepsTheReply(t *testing.T) {
-	const reply, followUp = "Vou montar os slides agora.", "prossiga"
+	const reply, followUp = "Roteiro pronto: cinco slides, um por tópico.", "prossiga"
 	al, provider, streamer, opts := steeredWhileStreaming(t, reply, followUp)
 
 	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
@@ -122,40 +122,51 @@ func steeredWhileStreaming(
 	return al, provider, streamer, opts
 }
 
-// Miguel-MCM on picoclaw#125. The guards below the steering check keep two
-// direct answers out of the session, a tool call written out as markup and
-// a promise of one before any tool ran: persisted, either teaches the model
-// to write its calls as prose. Watched or not, a message arriving as one of
-// them ends does not let it in.
+// Miguel-MCM on picoclaw#125. The truncation guard below the steering check
+// keeps a tool call written out as markup out of the session: persisted, it
+// teaches the model to write its calls as prose. Watched or not, a message
+// arriving as one ends does not let it in.
 func TestConfiguredStreaming_MessageAfterAWatchedStalledCallDropsTheReply(t *testing.T) {
-	for name, reply := range map[string]string{
-		"call written as markup": "O resumo do artigo ficou assim.\n<parameter=path>resumo.md</parameter>",
-		"call only announced":    announcedToolCall,
-	} {
-		t.Run(name, func(t *testing.T) {
-			al, _, _, opts := steeredWhileStreaming(t, reply, "prossiga")
+	const reply = "O resumo do artigo ficou assim.\n<parameter=path>resumo.md</parameter>"
+	al, _, _, opts := steeredWhileStreaming(t, reply, "prossiga")
 
-			if _, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts); err != nil {
-				t.Fatalf("runAgentLoop: %v", err)
-			}
+	if _, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts); err != nil {
+		t.Fatalf("runAgentLoop: %v", err)
+	}
 
-			history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(opts.SessionKey)
-			if len(history) == 0 {
-				t.Fatal("session history is empty: the check below would be vacuous")
-			}
-			for _, m := range history {
-				if m.Role == "assistant" && m.Content == reply {
-					t.Fatal("a stalled call went into the history")
-				}
-			}
-		})
+	history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(opts.SessionKey)
+	if len(history) == 0 {
+		t.Fatal("session history is empty: the check below would be vacuous")
+	}
+	for _, m := range history {
+		if m.Role == "assistant" && m.Content == reply {
+			t.Fatal("a call written as markup went into the history")
+		}
+	}
+}
+
+// A watched reply that only announced a step stays when the person's message
+// arrives: they read it, and the turn goes on with what they sent. The regex
+// guard dropped it, and the history lost what the screen had shown.
+func TestConfiguredStreaming_MessageAfterAWatchedPromiseKeepsTheReply(t *testing.T) {
+	al, _, _, opts := steeredWhileStreaming(t, announcedToolCall, "prossiga")
+
+	if _, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts); err != nil {
+		t.Fatalf("runAgentLoop: %v", err)
+	}
+
+	history := al.GetRegistry().GetDefaultAgent().Sessions.GetHistory(opts.SessionKey)
+	if !replyThenFollowUp(history, announcedToolCall, "prossiga") {
+		t.Error("the history lost the watched reply, or keeps it after the follow-up")
 	}
 }
 
 // A reply nobody saw yet (no streaming, as on a channel that sends only the
 // final) is still the stale answer: the next call answers both messages.
 func TestConfiguredStreaming_MessageAfterAnUnseenReplyDropsTheReply(t *testing.T) {
-	const reply, followUp = "Vou montar os slides agora.", "prossiga"
+	// Not a promise ("Vou montar os slides agora." is one): that is dropped for
+	// its own reason, below.
+	const reply, followUp = "Roteiro pronto: cinco slides, um por tópico.", "prossiga"
 	cfg := newConfiguredStreamingTestConfig(t, false, false, nil)
 	provider := &steeringDuringChatProvider{replies: []string{reply, "Pronto!"}, followUp: followUp}
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)

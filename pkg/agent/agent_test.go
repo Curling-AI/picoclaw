@@ -26,6 +26,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -5538,6 +5539,10 @@ func TestAgentLoop_ToolLimitUsesDedicatedFallback(t *testing.T) {
 		t.Fatalf("history len = %d, want 4", len(history))
 	}
 	assertRoles(t, history, "user", "assistant", "tool", "assistant")
+	if history[1].Fallback != "" || history[3].Fallback != protocoltypes.FallbackToolLimit {
+		t.Fatalf("fallback kinds = %q, %q; want none on the model's call and %q on the tool-limit reply",
+			history[1].Fallback, history[3].Fallback, protocoltypes.FallbackToolLimit)
+	}
 	if history[3].Content != toolLimitResponse {
 		t.Fatalf("final assistant content = %q, want %q", history[3].Content, toolLimitResponse)
 	}

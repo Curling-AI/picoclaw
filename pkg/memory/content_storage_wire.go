@@ -82,6 +82,7 @@ type contentWireIdentity struct {
 	Unavailable     bool                 `json:"unavailable,omitempty"`
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
 	ArchivePolicy   string               `json:"archivePolicy,omitempty"`
+	CollectableSkip int                  `json:"collectableSkip,omitempty"`
 	DiskVersion     uint8                `json:"diskVersion"`
 	Storage         contentStorageHeader `json:"storage"`
 }
@@ -106,6 +107,7 @@ func contentIdentityWire(state *contentIdentityState) any {
 		Unavailable:     state.Unavailable,
 		MutationVersion: state.MutationVersion,
 		ArchivePolicy:   state.ArchivePolicy,
+		CollectableSkip: state.CollectableSkip,
 		DiskVersion:     contentStorageVersion,
 		Storage:         state.storage.Header,
 	}
@@ -147,7 +149,7 @@ func decodeContentIdentity(data []byte) *contentIdentityState {
 		Version: wire.Version, DomainID: wire.DomainID, StateToken: wire.StateToken,
 		SummaryDigest: wire.SummaryDigest, Skip: wire.Skip, Count: wire.Count, Unavailable: wire.Unavailable,
 		MutationVersion: wire.MutationVersion, storage: &contentStorageState{Header: wire.Storage},
-		ArchivePolicy: wire.ArchivePolicy,
+		ArchivePolicy: wire.ArchivePolicy, CollectableSkip: wire.CollectableSkip,
 	}
 	if !validContentStorageHeader(state, wire.Storage.Key) {
 		return opaqueContentIdentity(data)
@@ -350,6 +352,7 @@ func contentMetaForCache(meta SessionMeta) SessionMeta {
 		Unavailable:     state.Unavailable,
 		MutationVersion: state.MutationVersion,
 		ArchivePolicy:   state.ArchivePolicy,
+		CollectableSkip: state.CollectableSkip,
 		storage:         &contentStorageState{Header: cloneContentStorage(state.storage).Header},
 	}
 	meta.ContentIdentity.restoreContentCapsules()

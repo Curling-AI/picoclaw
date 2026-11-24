@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -35,7 +36,10 @@ func LegacyArchiveDeadline(dir, key string, deadline time.Time) (map[string]stri
 	if filepath.Base(key) != key {
 		return nil, fmt.Errorf("fixture key must be a single filename")
 	}
-	path := filepath.Join(dir, key+".meta.json")
+	// Files carry the sanitized name, as the store writes them; the witness keeps
+	// the stored key, colon included.
+	name := strings.ReplaceAll(key, ":", "_")
+	path := filepath.Join(dir, name+".meta.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -124,7 +128,7 @@ func LegacyArchiveDeadline(dir, key string, deadline time.Time) (map[string]stri
 		Key     string          `json:"key"`
 		Domain  json.RawMessage `json:"domain"`
 	}{1, key, identity["domain"]})
-	if err = os.WriteFile(filepath.Join(dir, key+".jsonl.content-domain"), witness, 0o600); err != nil {
+	if err = os.WriteFile(filepath.Join(dir, name+".jsonl.content-domain"), witness, 0o600); err != nil {
 		return nil, err
 	}
 	manifest["inlineMetaSHA256"] = fmt.Sprintf("%x", sha256.Sum256(data))

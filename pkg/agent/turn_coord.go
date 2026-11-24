@@ -341,6 +341,7 @@ func (al *AgentLoop) runTurn(
 					logEmptyAutomationAnswer(ts)
 				} else {
 					finalContent = ts.opts.DefaultResponse
+					exec.fallbackKind = protocoltypes.FallbackEmptyResponse
 				}
 			}
 			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
@@ -411,10 +412,12 @@ func (al *AgentLoop) runTurn(
 		if ts.atIterationCap(ts.currentIteration()) {
 			// The tool-limit fallback stays in history on purpose: next turn
 			// the model should know the previous turn ran out of iterations.
-			finalContent = toolLimitResponse
+			finalContent = al.toolLimitText()
+			exec.fallbackKind = protocoltypes.FallbackToolLimit
 		} else {
 			finalContent = ts.opts.DefaultResponse
 			exec.finalIsFallback = true
+			exec.fallbackKind = protocoltypes.FallbackEmptyResponse
 		}
 	}
 

@@ -585,13 +585,20 @@ const (
 	clusterPromptPatternSummaryRunes = 200
 )
 
+// senderTagLabelPrefix starts the heuristic label of a summary that began
+// with the server's [SENDER id="…"] tag, as summaries did before
+// buildRecordSummary dropped it.
+const senderTagLabelPrefix = "sender-id-"
+
 // recentPatternsForPrompt returns the workspace's labeled patterns, at most
 // clusterPromptPatternLimit of them, most recently touched kept, in their
 // original order.
 func recentPatternsForPrompt(workspace string, existing []LearningRecord) []LearningRecord {
 	patterns := make([]LearningRecord, 0, len(existing))
 	for _, pattern := range existing {
-		if pattern.WorkspaceID != workspace || strings.TrimSpace(pattern.Label) == "" {
+		label := strings.TrimSpace(pattern.Label)
+		// A label made of a [SENDER] tag grouped one owner's unrelated asks: offering it would keep that pattern growing.
+		if pattern.WorkspaceID != workspace || label == "" || strings.HasPrefix(label, senderTagLabelPrefix) {
 			continue
 		}
 		patterns = append(patterns, pattern)

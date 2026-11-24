@@ -388,7 +388,10 @@ func (al *AgentLoop) steeringForLiveTurn(turnCtx context.Context, sessionKey str
 	return al.dequeueSteeringMessagesForScope(sessionKey)
 }
 
-func continuationOptions(sessionKey, channel, chatID string, scope *session.SessionScope) processOptions {
+func (al *AgentLoop) continuationOptions(
+	sessionKey, channel, chatID string,
+	scope *session.SessionScope,
+) processOptions {
 	dispatch := DispatchRequest{
 		SessionKey:   sessionKey,
 		SessionScope: session.CloneScope(scope),
@@ -402,7 +405,7 @@ func continuationOptions(sessionKey, channel, chatID string, scope *session.Sess
 	}
 	return processOptions{
 		Dispatch:                dispatch,
-		DefaultResponse:         defaultResponse,
+		DefaultResponse:         al.emptyResponseText(),
 		EnableSummary:           true,
 		SendResponse:            false,
 		SkipInitialSteeringPoll: true,

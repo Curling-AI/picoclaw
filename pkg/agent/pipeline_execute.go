@@ -464,7 +464,8 @@ toolLoop:
 				}
 				// The coordinator finalizes with this text like any reply, so the
 				// user gets it on every channel and the next turn sees it.
-				exec.finalContent = repeatStopSummary(displayToolName(ts.agent.Tools, toolName))
+				exec.finalContent = al.repeatStopText(displayToolName(ts.agent.Tools, toolName))
+				exec.fallbackKind = protocoltypes.FallbackRepeatStop
 				p.beginSynthesizedFinalStream(turnCtx, ts, exec)
 				return ToolControlBreak
 			}

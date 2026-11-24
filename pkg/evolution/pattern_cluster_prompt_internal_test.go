@@ -94,3 +94,26 @@ func TestBuildPatternClusterPromptKeepsShortContentWhole(t *testing.T) {
 		t.Errorf("excerpt is not cut at %d runes", clusterPromptExcerptRunes)
 	}
 }
+
+// A pattern labeled from a summary that began with the [SENDER] tag grouped
+// one owner's unrelated asks; the model is not offered its label to reuse.
+func TestBuildPatternClusterPromptLeavesOutSenderTagLabels(t *testing.T) {
+	tagged := LearningRecord{
+		Summary: `[SENDER id="user_test_owner_01" name="Pessoa Teste" channel="web" role="owner"]` + "\nresuma os emails",
+	}
+	tagLabel := heuristicClusterLabel(tagged)
+	if !strings.HasPrefix(tagLabel, senderTagLabelPrefix) {
+		t.Fatalf("tag label = %q, want the prefix %q", tagLabel, senderTagLabelPrefix)
+	}
+	existing := []LearningRecord{
+		{ID: "pattern-tag", Kind: RecordKindPattern, WorkspaceID: "ws", Label: tagLabel},
+		{ID: "pattern-ok", Kind: RecordKindPattern, WorkspaceID: "ws", Label: "weekly-sales-report"},
+	}
+	tasks := []LearningRecord{
+		{ID: "task-1", Kind: RecordKindTask, WorkspaceID: "ws", Summary: "resuma os emails de hoje"},
+	}
+	prompt := buildPatternClusterPrompt("ws", tasks, existing)
+	if strings.Contains(prompt, tagLabel) || !strings.Contains(prompt, "weekly-sales-report") {
+		t.Fatalf("prompt = %s, want only the label not made of the tag", prompt)
+	}
+}

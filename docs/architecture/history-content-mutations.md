@@ -35,7 +35,12 @@ deduplication beyond the gateway's existing retention horizon.
 
 One source-wide Pending slot holds either compaction or a typed mutation.
 Ordinary appends and session Save remain available while it awaits application,
-including after the confirmation deadline. A dependent rewrite is blocked.
+including after the confirmation deadline. A dependent rewrite is blocked while
+the slot holds a compaction within its deadline; an overdue compaction is
+released by the rewrite that meets it. A typed rewrite keeps a prefix that is
+not collectable, the rows of a compaction released without confirmation, in
+front of its new rows, so the ACK that retires its preimage removes no row the
+archive never held.
 Exact retries of Pending replay its immutable transition; another Pending takes
 priority over Last replay. With no Pending, exact Last returns `applied` and its
 retained `AppliedAck` without opening old payload files.

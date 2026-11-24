@@ -172,7 +172,7 @@ func (al *AgentLoop) mirrorDeliveryFrom(d tools.ExternalDelivery, external bool)
 	// Sem origem não dá para saber se a entrega é do próprio chat: é o caso da
 	// mensagem que o pod recebe direto (polling, Socket Mode), que chega sem
 	// chave de sessão.
-	if al == nil || origin == "" || text == "" || synthesizedResponse(text) {
+	if al == nil || origin == "" || text == "" || al.synthesizedResponse(text) {
 		return
 	}
 	al.mirror.mu.Lock()
@@ -617,9 +617,9 @@ func appendToSession(store session.SessionStore, sessionKey string, msg provider
 // histórico (sessões alternando vazias, ver finalIsFallback), e os outros só
 // fazem sentido na sessão que os produziu; copiá-los para a conversa do chat
 // traria o problema de volta.
-func synthesizedResponse(text string) bool {
+func (al *AgentLoop) synthesizedResponse(text string) bool {
 	switch text {
-	case defaultResponse, toolLimitResponse, handledToolResponseSummary:
+	case defaultResponse, toolLimitResponse, handledToolResponseSummary, al.emptyResponseText(), al.toolLimitText():
 		return true
 	}
 	return false

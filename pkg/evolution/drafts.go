@@ -376,10 +376,10 @@ func (g *DefaultDraftGenerator) buildNewSkillBody(
 		g.learnedPatternLine(rule),
 		"",
 		"## Procedure",
-		g.procedureLine(rule, evidence),
+		g.procedureLine(rule),
 		"",
 		"## Expected Result",
-		g.expectedResultLine(evidence),
+		fallbackExpectedResult,
 		"",
 		"## Source Skills",
 		synthesizedComponentBreakdown(matches),
@@ -399,8 +399,8 @@ func (g *DefaultDraftGenerator) buildAppendBody(
 		"## Learned Evolution",
 		fmt.Sprintf("- Summary: %s", strings.TrimSpace(rule.Summary)),
 		fmt.Sprintf("- Learned pattern: %s", g.learnedPatternLine(rule)),
-		fmt.Sprintf("- Procedure: %s", g.procedureLine(rule, evidence)),
-		fmt.Sprintf("- Expected result: %s", g.expectedResultLine(evidence)),
+		fmt.Sprintf("- Procedure: %s", g.procedureLine(rule)),
+		fmt.Sprintf("- Expected result: %s", fallbackExpectedResult),
 		fmt.Sprintf("- Evidence: %s", g.evidenceLine(rule, evidence)),
 		"",
 		"### Source Skills",
@@ -459,15 +459,12 @@ func (g *DefaultDraftGenerator) learnedPatternLine(rule LearningRecord) string {
 	return fmt.Sprintf("Prefer the pattern summarized as `%s`.", strings.TrimSpace(rule.Summary))
 }
 
-func (g *DefaultDraftGenerator) procedureLine(rule LearningRecord, evidence DraftEvidence) string {
+func (g *DefaultDraftGenerator) procedureLine(rule LearningRecord) string {
 	if len(rule.WinningPath) > 0 {
 		return fmt.Sprintf(
 			"Follow `%s`, applying the concrete operation from each source skill, then return the final result directly.",
 			strings.Join(rule.WinningPath, " -> "),
 		)
-	}
-	if excerpt := firstFinalOutputExcerpt(evidence, 260); excerpt != "" {
-		return "Use the same operation demonstrated by the source task result: " + excerpt
 	}
 	return fmt.Sprintf(
 		"Solve tasks matching `%s` using the learned successful workflow, then return the final result directly.",
@@ -475,12 +472,8 @@ func (g *DefaultDraftGenerator) procedureLine(rule LearningRecord, evidence Draf
 	)
 }
 
-func (g *DefaultDraftGenerator) expectedResultLine(evidence DraftEvidence) string {
-	if excerpt := firstFinalOutputExcerpt(evidence, 320); excerpt != "" {
-		return excerpt
-	}
-	return "Return the completed result for the matched task without restating unrelated discovery steps."
-}
+// A past answer is not a procedure: copied into a skill it replays stale data and personal content in later turns.
+const fallbackExpectedResult = "Return the completed result for the matched task without restating unrelated discovery steps."
 
 func (g *DefaultDraftGenerator) evidenceLine(rule LearningRecord, evidence DraftEvidence) string {
 	if len(evidence.TaskRecords) > 0 {
@@ -494,15 +487,6 @@ func (g *DefaultDraftGenerator) evidenceLine(rule LearningRecord, evidence Draft
 		return fmt.Sprintf("Learned from task records: %s", strings.Join(rule.TaskRecordIDs, ", "))
 	}
 	return "Learned from the pattern record."
-}
-
-func firstFinalOutputExcerpt(evidence DraftEvidence, maxLen int) string {
-	for _, task := range evidence.TaskRecords {
-		if excerpt := summarizeText(task.FinalOutput, maxLen); excerpt != "" {
-			return excerpt
-		}
-	}
-	return ""
 }
 
 func triggerSuffix(trigger string) string {

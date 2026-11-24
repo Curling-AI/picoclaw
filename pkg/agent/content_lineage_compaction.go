@@ -66,6 +66,10 @@ func readContentCompactionView(ctx context.Context, agent *AgentInstance, key st
 		}
 	}
 	pending, err := api.ReadPendingHistoryCompaction(ctx, canonical)
+	// An overdue archive no longer holds the slot: the commit below replaces it.
+	if errors.Is(err, memory.ErrContentLineageExpired) {
+		pending, err = memory.ContentTransition{}, nil
+	}
 	if err != nil {
 		return contentCompactionView{}, err
 	}
