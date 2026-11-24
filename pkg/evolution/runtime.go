@@ -192,7 +192,8 @@ func buildTaskRecordID(input TurnCaseInput, createdAt time.Time) string {
 }
 
 func buildRecordSummary(input TurnCaseInput) string {
-	if goal := summarizeText(input.UserMessage, 160); goal != "" {
+	// The server-injected [SENDER] tag carries the owner's id and name: it must not become a pattern, skill name or cluster key.
+	if goal := summarizeText(withoutSenderTag(input.UserMessage), 160); goal != "" {
 		return goal
 	}
 	return fmt.Sprintf("turn %s finished with status=%s", input.TurnID, input.Status)
