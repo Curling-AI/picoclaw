@@ -100,6 +100,8 @@ func TestIsSizeRefusal(t *testing.T) {
 		{"within the measured window the message decides", errVercelLastUpstreamNotFound, false, false},
 		{"past it a gateway 404 is the size", errVercelLastUpstreamNotFound, true, true},
 		{"past it a 400 says what it is", status(400), true, false},
+		{"a stopped call was not refused", context.Canceled, true, false},
+		{"a call past its deadline was not refused", fmt.Errorf("call: %w", context.DeadlineExceeded), true, false},
 		{"an auth refusal stays an auth refusal", status(401), true, false},
 		{"a billing refusal stays a billing refusal", status(402), true, false},
 	}

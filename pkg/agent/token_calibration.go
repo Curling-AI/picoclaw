@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -138,9 +140,10 @@ func expectedTurnModel(ts *turnState) string {
 // refused for its size, whatever the error says: a gateway that tried several
 // upstreams reports the last one's (Vercel's last Anthropic upstream answers
 // 404). An auth, billing or format refusal (a 400, an image past the
-// provider's size) says what it is, and compacting history would not fix it.
+// provider's size) says what it is, and compacting history would not fix it;
+// a canceled call was stopped, not refused.
 func isSizeRefusal(err error, pastMeasuredWindow bool) bool {
-	if !pastMeasuredWindow {
+	if !pastMeasuredWindow || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	if failErr := providers.ClassifyError(err, "", ""); failErr != nil {
