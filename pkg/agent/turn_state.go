@@ -212,6 +212,7 @@ type turnExecution struct {
 	// Per-iteration state set by Pipeline.PreLLM
 	activeCandidates  []providers.FallbackCandidate
 	activeModel       string
+	servedModel       string // the candidate that answered the last call; empty when unknown
 	activeModelConfig *config.ModelConfig
 	activeProvider    providers.LLMProvider
 	usedLight         bool

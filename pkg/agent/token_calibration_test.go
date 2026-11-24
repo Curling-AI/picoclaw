@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -17,20 +18,41 @@ func TestCalibratedWindow(t *testing.T) {
 	const window = 1_000_000
 	msgs := []providers.Message{{Role: "user", Content: strings.Repeat("a", 2_500)}}
 	estimated := estimateCallTokens(msgs, nil, 0)
-	cases := []struct {
-		name     string
+	callWindow := estimated * 2 // the call takes half of it: large enough to calibrate
+	type record struct {
+		msgs     []providers.Message
+		window   int
 		measured int
-		want     int
+	}
+	heavier := record{msgs, callWindow, estimated * 5 / 4}
+	withMedia := []providers.Message{{Role: "user", Content: msgs[0].Content, Media: []string{"media://1"}}}
+	cases := []struct {
+		name    string
+		records []record
+		want    int
 	}{
-		{"heavier tokenizer shrinks the window", estimated * 5 / 4, window * 4 / 5},
-		{"lighter tokenizer keeps the window", estimated / 2, window},
-		{"ratio is capped", estimated * 10, int(window / maxPromptTokenRatio)},
-		{"no usage keeps the window", 0, window},
+		{"heavier tokenizer shrinks the window", []record{heavier}, window * 4 / 5},
+		{"lighter tokenizer keeps the window", []record{{msgs, callWindow, estimated / 2}}, window},
+		{"ratio is capped", []record{{msgs, callWindow, estimated * 10}}, int(window / maxPromptTokenRatio)},
+		{"no usage keeps the window", []record{{msgs, callWindow, 0}}, window},
+		{
+			"a lighter call afterwards keeps the heavier ratio",
+			[]record{heavier, {msgs, callWindow, estimated}},
+			window * 4 / 5,
+		},
+		{"a small call does not calibrate", []record{{msgs, estimated * 5, estimated * 2}}, window},
+		{
+			"a call with media does not calibrate",
+			[]record{{withMedia, callWindow, estimated * 2}},
+			window,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a := &AgentInstance{promptTokenRatios: &sync.Map{}}
-			a.recordPromptTokens("m", msgs, nil, c.measured)
+			for _, r := range c.records {
+				a.recordPromptTokens("m", r.window, r.msgs, nil, r.measured)
+			}
 			if got := a.calibratedWindow("m", window); got != c.want {
 				t.Fatalf("calibratedWindow = %d, want %d", got, c.want)
 			}
@@ -40,9 +62,53 @@ func TestCalibratedWindow(t *testing.T) {
 		})
 	}
 	var bare *AgentInstance
-	bare.recordPromptTokens("m", msgs, nil, 1)
+	bare.recordPromptTokens("m", callWindow, msgs, nil, 1)
 	if got := bare.calibratedWindow("m", window); got != window {
 		t.Fatalf("nil agent window = %d, want %d", got, window)
+	}
+}
+
+func TestIsSizeRefusal(t *testing.T) {
+	status := func(code int) error {
+		return fmt.Errorf("API request failed:\n  Status: %d\n  Body:   {}", code)
+	}
+	cases := []struct {
+		name string
+		err  error
+		past bool
+		want bool
+	}{
+		{"within the measured window the message decides", errVercelLastUpstreamNotFound, false, false},
+		{"past it a gateway 404 is the size", errVercelLastUpstreamNotFound, true, true},
+		{"past it a 400 is the size", status(400), true, true},
+		{"an auth refusal stays an auth refusal", status(401), true, false},
+		{"a billing refusal stays a billing refusal", status(402), true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isSizeRefusal(c.err, c.past); got != c.want {
+				t.Fatalf("isSizeRefusal = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// waitForSummaries waits for the post-turn summaries of session, which go on
+// writing the workspace and calling the provider after the turn returns.
+func waitForSummaries(t *testing.T, al *AgentLoop, session string) {
+	t.Helper()
+	lcm, ok := al.contextManager.(*legacyContextManager)
+	if !ok {
+		return
+	}
+	key := al.registry.GetDefaultAgent().ID + ":" + session
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, busy := lcm.summarizing.Load(key); !busy {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the summary never finished")
+		}
 	}
 }
 
@@ -106,6 +172,7 @@ func TestHeavierTokenizerCompactsBeforeTheUpstreamRefuses(t *testing.T) {
 	if _, err := al.ProcessDirectWithChannel(ctx, "ping", session, "test", session); err != nil {
 		t.Fatalf("first turn: %v", err)
 	}
+	waitForSummaries(t, al, session)
 	// Between 80% of the window and the window minus the output reserve the
 	// estimate says a call fits and the upstream refuses it: 16K estimated
 	// tokens a turn cannot step over that band.
@@ -121,6 +188,7 @@ func TestHeavierTokenizerCompactsBeforeTheUpstreamRefuses(t *testing.T) {
 		if err != nil || resp != "done" {
 			t.Fatalf("turn %d: response=%q err=%v", turn, resp, err)
 		}
+		waitForSummaries(t, al, session)
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
@@ -144,6 +212,7 @@ func TestRefusalPastTheMeasuredWindowRetriesAsContextError(t *testing.T) {
 	if _, err := al.ProcessDirectWithChannel(ctx, "ping", session, "test", session); err != nil {
 		t.Fatalf("first turn: %v", err)
 	}
+	waitForSummaries(t, al, session)
 	// Each result is 80K estimated, 100K measured: the turn's third call carries
 	// two of them and is past the window.
 	window := provider.base*5/4 + 150_000
@@ -156,6 +225,7 @@ func TestRefusalPastTheMeasuredWindowRetriesAsContextError(t *testing.T) {
 	if err != nil || resp != "done" {
 		t.Fatalf("response=%q err=%v", resp, err)
 	}
+	waitForSummaries(t, al, session)
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 	if provider.rejected == 0 {

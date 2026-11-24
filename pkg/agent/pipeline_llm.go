@@ -433,6 +433,7 @@ func (p *Pipeline) CallLLM(
 
 		al.activeRequestsInc()
 		defer al.activeRequestsDec()
+		exec.servedModel = exec.activeModel
 
 		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
 			providerCtx,
@@ -530,10 +531,12 @@ func (p *Pipeline) CallLLM(
 					map[string]any{"agent_id": ts.agent.ID, "iteration": iteration},
 				)
 			}
+			exec.servedModel = ""
 			for _, candidate := range exec.activeCandidates {
 				if candidate.StableKey() != fbResult.IdentityKey {
 					continue
 				}
+				exec.servedModel = candidate.Model
 				exec.llmModelName = resolvedCandidateModelName(
 					[]providers.FallbackCandidate{candidate},
 					exec.llmModelName,
@@ -656,13 +659,10 @@ func (p *Pipeline) CallLLM(
 
 		errMsg := strings.ToLower(err.Error())
 		retryReason, isTransientError := transientLLMRetryReason(err)
-		// A call past the window measured for its model is refused for its size,
-		// whatever the error says: a gateway that tried several upstreams reports
-		// the last one's, and Vercel's last Anthropic upstream answers 404.
-		// (seucaranguejo fork)
+		// See isSizeRefusal. (seucaranguejo fork)
 		pastMeasuredWindow := estimateCallTokens(exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens) >
 			ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec))
-		isContextError := !isTransientError && (pastMeasuredWindow ||
+		isContextError := !isTransientError && (isSizeRefusal(err, pastMeasuredWindow) ||
 			strings.Contains(errMsg, "context_length_exceeded") ||
 			strings.Contains(errMsg, "context window") ||
 			strings.Contains(errMsg, "context_window") ||
@@ -1067,7 +1067,8 @@ func (p *Pipeline) CallLLM(
 		llmResponseFields["completion_tokens"] = exec.response.Usage.CompletionTokens
 		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
 		ts.agent.recordPromptTokens(
-			exec.activeModel,
+			exec.servedModel,
+			turnContextWindow(ts, exec),
 			exec.callMessages,
 			exec.providerToolDefs,
 			exec.response.Usage.PromptTokens,
