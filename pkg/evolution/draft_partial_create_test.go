@@ -78,3 +78,77 @@ func TestRuntime_PartialDraftForAMissingSkillDoesNotCopyTheSourceAnswer(t *testi
 		t.Fatalf("new skill lost its evidence id:\n%s", drafts[0].BodyOrPatch)
 	}
 }
+
+// A shortcut over several skills whose combined skill already exists becomes
+// an append onto it; the update must not carry the source task's answer.
+func TestRuntime_CombinedShortcutAppendDoesNotCopyTheSourceAnswer(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	writeSkillForCombinedShortcutTest(t, root, "three-one-theorem", "Add 31 to the input before continuing.")
+	writeSkillForCombinedShortcutTest(t, root, "four-two-theorem", "Add 42 to the intermediate result.")
+	writeSkillForCombinedShortcutTest(t, root, "calculate-100-via-theorems", "Run both theorems in order.")
+	answer := "Resultado final: 173, conferido com a planilha do cliente."
+	success := true
+	if err := store.SaveTaskRecords([]evolution.LearningRecord{{
+		ID:          "task-calc",
+		Kind:        evolution.RecordKindTask,
+		WorkspaceID: root,
+		CreatedAt:   time.Unix(1700000000, 0).UTC(),
+		Summary:     "calculate 100",
+		FinalOutput: answer,
+		Status:      evolution.RecordStatus("clustered"),
+		Success:     &success,
+	}}); err != nil {
+		t.Fatalf("SaveTaskRecords: %v", err)
+	}
+	if err := store.SavePatternRecords([]evolution.LearningRecord{{
+		ID:            "pattern-calc",
+		Kind:          evolution.RecordKindPattern,
+		WorkspaceID:   root,
+		CreatedAt:     time.Unix(1700000001, 0).UTC(),
+		Summary:       "calculate 100",
+		Status:        evolution.RecordStatus("ready"),
+		TaskRecordIDs: []string{"task-calc"},
+		WinningPath:   []string{"three-one-theorem", "four-two-theorem"},
+	}}); err != nil {
+		t.Fatalf("SavePatternRecords: %v", err)
+	}
+
+	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
+		Config: config.EvolutionConfig{Enabled: true, Mode: "draft"},
+		Now:    func() time.Time { return time.Unix(1700001000, 0).UTC() },
+		Store:  store,
+		DraftGenerator: stubDraftGenerator{draft: evolution.SkillDraft{
+			ID:              "draft-calc",
+			WorkspaceID:     root,
+			SourceRecordID:  "pattern-calc",
+			TargetSkillName: "four-two-theorem",
+			DraftType:       evolution.DraftTypeShortcut,
+			ChangeKind:      evolution.ChangeKindAppend,
+			HumanSummary:    "calculate 100 through both theorems",
+			BodyOrPatch:     "- Apply both theorems in one pass.",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+		t.Fatalf("RunColdPathOnce: %v", runErr)
+	}
+
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].ChangeKind != evolution.ChangeKindAppend ||
+		drafts[0].TargetSkillName != "calculate-100-via-theorems" ||
+		!strings.Contains(drafts[0].BodyOrPatch, "## Learned Shortcut Update") {
+		t.Fatalf("drafts = %+v, want one append onto the existing combined skill", drafts)
+	}
+	if body := drafts[0].BodyOrPatch; strings.Contains(body, "173") || strings.Contains(body, "planilha do cliente") {
+		t.Fatalf("combined update copied the source answer:\n%s", drafts[0].BodyOrPatch)
+	}
+	if !strings.Contains(drafts[0].BodyOrPatch, "task-calc") {
+		t.Fatalf("combined update lost its evidence id:\n%s", drafts[0].BodyOrPatch)
+	}
+}
