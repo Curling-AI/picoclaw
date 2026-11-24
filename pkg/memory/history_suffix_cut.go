@@ -2,7 +2,11 @@ package memory
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
+	"slices"
+
+	"github.com/google/uuid"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -69,6 +73,9 @@ func (s *JSONLStore) commitHistorySuffixCut(key string, old, retained []provider
 			return err
 		}
 	}
+	if err = s.prepareContentSuffixCut(key, &meta, raw[:offset], count); err != nil {
+		return err
+	}
 	return s.commitHistoryRewriteData(
 		key,
 		retained,
@@ -76,6 +83,39 @@ func (s *JSONLStore) commitHistorySuffixCut(key string, old, retained []provider
 		false,
 		&historyRawRewrite{data: raw[:offset], removed: removed},
 	)
+}
+
+// The cut keeps every retained row at its line and bytes, so their refs
+// survive under a new state token. Any locator that no longer matches the
+// retained bytes leaves the identity unprepared, and the rewrite then marks it
+// unavailable as before. An empty image stays the explicit clear that retires
+// the domain.
+func (s *JSONLStore) prepareContentSuffixCut(key string, meta *SessionMeta, data []byte, lines int) error {
+	original := meta.ContentIdentity
+	if original == nil || original.Unavailable || original.Pending != nil || len(data) == 0 {
+		return nil
+	}
+	meta.ContentIdentity = cloneContentState(original)
+	if err := s.hydrateContentStorage(context.Background(), key, meta, true, true); err != nil {
+		meta.ContentIdentity = original
+		if onlyContentIdentityUnavailable(err) {
+			return nil
+		}
+		return err
+	}
+	state := meta.ContentIdentity
+	kept := 0
+	for kept < len(state.Rows) && state.Rows[kept].Line <= lines {
+		kept++
+	}
+	rows, err := contentLocatorsAfterSkip(data, state.DomainID, meta.Skip, refsForLocators(state.Rows[:kept]))
+	if err != nil || !slices.Equal(rows, state.Rows[:kept]) {
+		meta.ContentIdentity = original
+		return nil
+	}
+	state.Rows = rows
+	state.StateToken = uuid.NewString()
+	return nil
 }
 
 func (s *JSONLStore) preparePublicSuffixCut(
