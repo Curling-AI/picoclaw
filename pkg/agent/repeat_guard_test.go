@@ -9,6 +9,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -184,6 +185,10 @@ func TestRepeatedSideEffectCallStopsAndEndsTheTurn(t *testing.T) {
 	}
 	if last := run.history[len(run.history)-1]; last.Role != "assistant" || last.Content != run.resp {
 		t.Errorf("last history message = %s %q, want the stop summary as the turn's reply", last.Role, last.Content)
+	}
+	if last := run.history[len(run.history)-1]; last.Fallback != protocoltypes.FallbackRepeatStop || last.Notice {
+		t.Errorf("stop summary fallback = %q (notice %v), want %q and still read by the model",
+			last.Fallback, last.Notice, protocoltypes.FallbackRepeatStop)
 	}
 }
 
