@@ -15,43 +15,41 @@ import (
 // left the person waiting on work it only announced. It judges the final
 // sentence on its own, because a reply that delivers something first can still
 // end on a step it never took, and it names each common way a reply promises
-// or legitimately ends. (seucaranguejo fork)
-//
-//nolint:misspell // Portuguese examples: "momento" and "progresso" are not typos
+// or legitimately ends. The examples are in English except the scheduling pair:
+// without it, a Portuguese "vou agendar" not yet done passed. (seucaranguejo fork)
 const promiseQuestion = "Judge the final sentence of the assistant's last message, even when the rest of the message already " +
 	"delivers something. The turn has ended: the assistant does nothing more until the person writes " +
 	"again, unless the message says it set up a reminder, an automation or a scheduled task in this turn. " +
 	"Answer yes when that final sentence announces or implies work the assistant has not done, leaving " +
 	"the person waiting on it: (1) an action it was about to take right then, such as searching, opening, " +
 	"reading, running, creating, writing, fixing, redoing, correcting, preparing, sending or publishing " +
-	"something (\"Now I'll publish the page.\", \"Let me check the reminder.\", \"Deixa eu abrir o artigo.\", " +
-	"\"Deixa eu ver aqui.\"), also after a partial delivery (\"The sales chart is updated. Now I'll redo the " +
-	"margin chart.\", \"Vou classificar esse gasto como aluguel.\"); (2) a confirmation followed by a " +
-	"promise or by taking the task on (\"Perfeito! Vou fazer isso agora.\", \"Great, I'll book it right " +
-	"now.\", \"Pode deixar que eu resolvo.\", \"Deixa comigo.\", \"Leave it with me.\"); (3) a request to wait, " +
-	"or a status line with nothing after it (\"Um momento, já estou gerando o PDF.\", \"Aguarde enquanto eu " +
-	"verifico.\", \"Analisando os dados…\", \"Searching for the information...\"); (4) coming back later with " +
-	"nothing set up to bring it back (\"Te aviso quando ficar pronto.\", \"Já volto com o resultado.\", \"Em " +
-	"alguns minutos te mando.\", \"I'll get back to you with the comparison.\"); (5) long work announced as " +
-	"continuing (\"Vou fazendo e te reportando o progresso.\", \"I'll keep going and report my progress.\"), " +
-	"an action in parallel (\"Enquanto você reinicia, vou preparar um teste.\"), or a self-correction (\"I " +
-	"need to fix that in my notes, fixing it now.\"); (6) a plan of steps it says it will follow, not yet " +
-	"run (\"Vou seguir estes passos: 1. ler o extrato 2. cruzar com o ERP\", \"Here's how I'll do it: 1. " +
-	"export the contacts 2. import them\"); (7) a reminder, automation or scheduled task announced but not " +
-	"set up yet (\"I'll schedule the reminder for tomorrow.\"); (8) something introduced with a colon and " +
-	"nothing after it (a report, a list, the next step). Answer no when the final sentence: reports what " +
-	"was done or delivers the answer, a file or a link, even if it then offers more (\"if you want, I can " +
-	"turn it into minutes\") or gives tips; says a reminder, automation or scheduled task was set up in " +
-	"this turn, or when the assistant itself will act at a set time (\"Agendei: amanhã às 9h te lembro.\", " +
-	"\"I'll remind you tomorrow at 9.\"); asks the person a question, for a choice, for confirmation or for " +
-	"approval, including a plan that ends asking to start (\"Posso começar?\", \"Shall I start?\"); waits on " +
-	"the person or someone else, such as connecting an app, choosing an option, sending a file, filling " +
-	"in a form or tapping a button or connection card shown with the message; gives the person " +
-	"instructions to follow, or delivers a plan the person asked for; explains that the assistant cannot " +
-	"do something; promises a way of behaving (\"I won't store your ID\", \"Não vou guardar o seu CPF.\"); or " +
-	"is a courtesy closing (\"Qualquer coisa, estou por aqui!\", \"Let me know if you need anything else.\"). " +
-	"Words like \"I'll check\" inside a text the assistant wrote for the person to use (a draft, a script, " +
-	"a caption, a quoted phrase) are not the assistant announcing anything."
+	"something (\"Now I'll publish the page.\", \"Let me check the reminder.\", \"Let me open the article.\", " +
+	"\"Let me take a look.\"), also after a partial delivery (\"The sales chart is updated. Now I'll redo " +
+	"the margin chart.\", \"I'll classify this expense as rent.\"); (2) a confirmation followed by a promise " +
+	"or by taking the task on (\"Perfect! I'll do it now.\", \"Great, I'll book it right now.\", \"Leave it " +
+	"with me.\"); (3) a request to wait, or a status line with nothing after it (\"One moment, I'm " +
+	"generating the PDF.\", \"Please wait while I check.\", \"Analyzing the data…\", \"Searching for the " +
+	"information...\"); (4) coming back later with nothing set up to bring it back (\"I'll let you know " +
+	"when it's ready.\", \"I'll be right back with the result.\", \"I'll send it in a few minutes.\", \"I'll " +
+	"get back to you with the comparison.\"); (5) long work announced as continuing (\"I'll keep going and " +
+	"report my progress.\"), an action in parallel (\"While you restart it, I'll prepare a test.\"), or a " +
+	"self-correction (\"I need to fix that in my notes, fixing it now.\"); (6) a plan of steps it says it " +
+	"will follow, not yet run (\"I'll follow these steps: 1. read the statement 2. match it with the ERP\", " +
+	"\"Here's how I'll do it: 1. export the contacts 2. import them\"); (7) a reminder, automation or " +
+	"scheduled task announced but not set up yet (\"I'll schedule the reminder for tomorrow.\", \"Vou " +
+	"agendar o envio para segunda.\"); (8) something introduced with a colon and nothing after it (a " +
+	"report, a list, the next step). Answer no when the final sentence: reports what was done or delivers " +
+	"the answer, a file or a link, even if it then offers more (\"if you want, I can turn it into " +
+	"minutes\") or gives tips; says a reminder, automation or scheduled task was set up in this turn, or " +
+	"when the assistant itself will act at a set time (\"Agendei: amanhã às 9h te lembro.\", \"I'll remind " +
+	"you tomorrow at 9.\"); asks the person a question, for a choice, for confirmation or for approval, " +
+	"including a plan that ends asking to start (\"Shall I start?\"); waits on the person or someone else, " +
+	"such as connecting an app, choosing an option, sending a file, filling in a form or tapping a button " +
+	"or connection card shown with the message; gives the person instructions to follow, or delivers a " +
+	"plan the person asked for; explains that the assistant cannot do something; promises a way of " +
+	"behaving (\"I won't store your ID\"); or is a courtesy closing (\"Let me know if you need anything " +
+	"else.\"). Words like \"I'll check\" inside a text the assistant wrote for the person to use (a draft, a " +
+	"script, a caption, a quoted phrase) are not the assistant announcing anything."
 
 const promiseQuestionName = "stopped_on_promise"
 
