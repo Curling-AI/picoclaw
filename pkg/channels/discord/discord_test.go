@@ -334,3 +334,13 @@ func TestSend_NonToolFeedbackFinalizerStillStartsTTS(t *testing.T) {
 		t.Fatal("expected TTS to start for finalized tracked tool feedback reply")
 	}
 }
+
+// The agent resolver tags a CAD drawing as a file, so the placeholder must say
+// file too, or the next image's path lands in the drawing's slot.
+func TestAttachmentMediaTag_DrawingIsAFile(t *testing.T) {
+	for contentType, want := range map[string]string{"image/vnd.dwg": "file", "image/png": "image"} {
+		if got := attachmentMediaTag("x", contentType); got != want {
+			t.Errorf("attachmentMediaTag(%q) = %q, want %q", contentType, got, want)
+		}
+	}
+}

@@ -7106,6 +7106,28 @@ func TestResolveMediaRefs_DrawingIsAFileNotAnImage(t *testing.T) {
 	}
 }
 
+// Channels label a drawing [file: ...] like the resolver does, so each path
+// replaces its own placeholder, in order.
+func TestResolveMediaRefs_DrawingThenPhotoKeepTheirPlaceholders(t *testing.T) {
+	dir := t.TempDir()
+	dwgPath := filepath.Join(dir, "planta.dwg")
+	pngPath := filepath.Join(dir, "foto.png")
+	if err := os.WriteFile(dwgPath, []byte("AC1032\x00\x00\x00\x00\x00\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pngPath, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	messages := []providers.Message{{
+		Role: "user", Content: "[file: planta.dwg] [image: foto.png]", Media: []string{dwgPath, pngPath},
+	}}
+	result := resolveMediaRefs(messages, media.NewFileMediaStore(), config.DefaultMaxMediaSize, 0)
+
+	if want := "[file:" + dwgPath + "] [image:" + pngPath + "]"; result[0].Content != want {
+		t.Fatalf("content = %q, want %q", result[0].Content, want)
+	}
+}
+
 func TestResolveMediaRefs_PassesThroughNonMediaRefs(t *testing.T) {
 	messages := []providers.Message{
 		{Role: "user", Content: "hi", Media: []string{"https://example.com/img.png"}},
