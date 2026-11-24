@@ -12,10 +12,11 @@ import (
 
 // scriptedDecider is the gateway's Decisions API: one answer per ask, in order.
 type scriptedDecider struct {
-	answers []decision
-	asked   []string
-	models  []string
-	names   []string
+	answers      []decision
+	asked        []string
+	models       []string
+	names        []string
+	instructions []string
 }
 
 type decision struct {
@@ -32,6 +33,7 @@ func (d *scriptedDecider) Decide(
 	d.asked = append(d.asked, input)
 	d.models = append(d.models, model)
 	d.names = append(d.names, questions[0].Name)
+	d.instructions = append(d.instructions, questions[0].Instructions)
 	a := d.answers[len(d.asked)-1]
 	switch {
 	case a.err != nil:
@@ -50,6 +52,37 @@ func completedRecord() evolution.LearningRecord {
 		Summary:     "relatório de vendas",
 		FinalOutput: "Relatório pronto: outubro fechou em R$ 42 mil, 12% acima de setembro.",
 		Success:     &ok,
+	}
+}
+
+// A production task record: no goal, the person's message (with the channel's
+// sender tag) as summary, and a card as the delivered result.
+func TestDecisionTaskSuccessJudge_ReadsTheAskFromTheSummaryAndCardsAsDelivered(t *testing.T) {
+	ok := true
+	record := evolution.LearningRecord{
+		ID:          "task-2",
+		Summary:     `[SENDER id="u-1" name="Ana" channel="web" role="owner"] separe meus gastos do mês por categoria`,
+		FinalOutput: "```openui-lang\nroot = Card([header, tabela])\nheader = CardHeader(\"Gastos por categoria\", \"novembro\")\n```",
+		Success:     &ok,
+	}
+	decider := &scriptedDecider{answers: []decision{{p: 0.9}}}
+	judge := evolution.NewDecisionTaskSuccessJudge(
+		decider,
+		"typesafe-ai/jev-1.14.0",
+		&evolution.HeuristicSuccessJudge{},
+	)
+
+	if _, err := judge.JudgeTaskRecord(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(decider.asked[0], "The person asked: separe meus gastos do mês por categoria") {
+		t.Errorf("input = %q, want the person's message without the sender tag as what they asked", decider.asked[0])
+	}
+	if strings.Contains(decider.asked[0], "SENDER") {
+		t.Errorf("input = %q, want no sender tag", decider.asked[0])
+	}
+	if !strings.Contains(decider.instructions[0], "openui-lang") {
+		t.Errorf("question = %q, want a card or interface markup counted as delivered", decider.instructions[0])
 	}
 }
 

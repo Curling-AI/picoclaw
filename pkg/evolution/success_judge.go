@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
 
 type TaskSuccessDecision struct {
@@ -151,9 +152,10 @@ func buildTaskSuccessJudgePrompt(record LearningRecord) string {
 // yes/no read of the record, in any language, with no JSON to parse.
 // (seucaranguejo fork)
 const taskSuccessQuestion = "Did this assistant task truly achieve what the person asked for? Answer yes when " +
-	"the final output gives the person a concrete result, a finished piece of work or a completed procedure. " +
-	"Answer no when it only plans, describes or promises future steps, stops partway, reports a failure, or " +
-	"does not deliver the requested outcome."
+	"the final output gives the person a concrete result, a finished piece of work, a completed procedure or a " +
+	"direct answer to their question. A result shown as a card, table or interface markup (such as an " +
+	"openui-lang block), an image or an attached file counts as delivered. Answer no when it only plans, " +
+	"describes or promises future steps, stops partway, reports a failure, or does not deliver the requested outcome."
 
 const taskSuccessQuestionName = "task_succeeded"
 
@@ -211,12 +213,13 @@ func (j *DecisionTaskSuccessJudge) JudgeTaskRecord(
 	return TaskSuccessDecision{Success: p >= taskSuccessYes, Reason: fmt.Sprintf("decision p=%.2f", p)}, nil
 }
 
-// buildTaskSuccessDecisionInput is what the decision model reads: the same
-// record fields the LLM judge reads, plus the person's goal.
+// buildTaskSuccessDecisionInput is what the decision model reads: what the
+// person asked, the final output and the skills used.
 func buildTaskSuccessDecisionInput(record LearningRecord) string {
+	// A task record's summary is the person's message, clipped; turns record no goal.
+	asked := fallbackString(record.UserGoal, messageutil.StripSenderTag(record.Summary))
 	return strings.Join([]string{
-		"The person asked: " + fallbackString(record.UserGoal, "not recorded"),
-		"Summary: " + fallbackString(record.Summary, "none"),
+		"The person asked: " + fallbackString(asked, "not recorded"),
 		"Final output: " + fallbackString(record.FinalOutput, "none"),
 		"Used skills: " + joinOrFallback(record.UsedSkillNames, "none"),
 	}, "\n")
