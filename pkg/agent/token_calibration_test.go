@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
+	"github.com/sipeed/picoclaw/pkg/routing"
 )
 
 func TestCalibratedWindow(t *testing.T) {
@@ -53,17 +54,35 @@ func TestCalibratedWindow(t *testing.T) {
 			for _, r := range c.records {
 				a.recordPromptTokens("m", r.window, r.msgs, nil, r.measured)
 			}
-			if got := a.calibratedWindow("m", window); got != c.want {
+			if got := a.calibratedWindow("m", window, 0); got != c.want {
 				t.Fatalf("calibratedWindow = %d, want %d", got, c.want)
 			}
-			if got := a.calibratedWindow("other", window); got != window {
+			if got := a.calibratedWindow("other", window, 0); got != window {
 				t.Fatalf("another model's window = %d, want the nominal %d", got, window)
 			}
 		})
 	}
+	t.Run("only the prompt's share of the window scales", func(t *testing.T) {
+		a := &AgentInstance{promptTokenRatios: &sync.Map{}}
+		a.recordPromptTokens("m", heavier.window, heavier.msgs, nil, heavier.measured)
+		const reserve = 200_000
+		if got, want := a.calibratedWindow("m", window, reserve), (window-reserve)*4/5+reserve; got != want {
+			t.Fatalf("calibratedWindow = %d, want %d", got, want)
+		}
+		promptShare := float64(window - reserve)
+		if got, want := a.refusalWindow(
+			"unmeasured",
+			window,
+			reserve,
+		), int(
+			promptShare/unmeasuredRefusalRatio,
+		)+reserve; got != want {
+			t.Fatalf("refusalWindow of an unmeasured model = %d, want %d", got, want)
+		}
+	})
 	var bare *AgentInstance
 	bare.recordPromptTokens("m", callWindow, msgs, nil, 1)
-	if got := bare.calibratedWindow("m", window); got != window {
+	if got := bare.calibratedWindow("m", window, 0); got != window {
 		t.Fatalf("nil agent window = %d, want %d", got, window)
 	}
 }
@@ -80,7 +99,7 @@ func TestIsSizeRefusal(t *testing.T) {
 	}{
 		{"within the measured window the message decides", errVercelLastUpstreamNotFound, false, false},
 		{"past it a gateway 404 is the size", errVercelLastUpstreamNotFound, true, true},
-		{"past it a 400 is the size", status(400), true, true},
+		{"past it a 400 says what it is", status(400), true, false},
 		{"an auth refusal stays an auth refusal", status(401), true, false},
 		{"a billing refusal stays a billing refusal", status(402), true, false},
 	}
@@ -126,6 +145,7 @@ type heavyTokenizerProvider struct {
 	base       int // estimated tokens of the first call
 	rejected   int
 	toolRounds int // asks for big_output this many times a turn, then answers
+	last       int // estimated tokens of the last call
 }
 
 func (p *heavyTokenizerProvider) Chat(
@@ -138,6 +158,7 @@ func (p *heavyTokenizerProvider) Chat(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	estimated := estimateCallTokens(messages, toolDefs, 0)
+	p.last = estimated
 	if p.base == 0 {
 		p.base = estimated
 	}
@@ -230,5 +251,88 @@ func TestRefusalPastTheMeasuredWindowRetriesAsContextError(t *testing.T) {
 	defer provider.mu.Unlock()
 	if provider.rejected == 0 {
 		t.Fatal("no call went past the window: the test no longer exercises the refusal")
+	}
+}
+
+// After a restart nothing is measured yet, and a session already past the
+// window fails every call: its first refusal is taken for the size it is, and
+// the context retry compacts instead of failing every turn from then on.
+func TestUnmeasuredSessionPastTheWindowRecoversAfterRestart(t *testing.T) {
+	cfg := windowedConfig(t)
+	provider := &heavyTokenizerProvider{}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	agent := al.registry.GetDefaultAgent()
+	const session = "sk_v1_heavy_tokenizer_restart"
+	ctx := context.Background()
+	if _, err := al.ProcessDirectWithChannel(ctx, "ping", session, "test", session); err != nil {
+		t.Fatalf("first turn: %v", err)
+	}
+	waitForSummaries(t, al, session)
+	window := provider.base*5/4 + 100_000
+	turnMessage := strings.Repeat("lorem ipsum dolor sit amet, ", 40_000/28)
+	// The session grows on a window too big to compact until the upstream
+	// would count it past the real one.
+	agent.ContextWindow = window * 4
+	for turn := 1; provider.last*5/4 <= window; turn++ {
+		if _, err := al.ProcessDirectWithChannel(
+			ctx,
+			fmt.Sprintf("%d %s", turn, turnMessage),
+			session,
+			"test",
+			session,
+		); err != nil {
+			t.Fatalf("growing turn %d: %v", turn, err)
+		}
+		waitForSummaries(t, al, session)
+	}
+	provider.mu.Lock()
+	provider.window = window
+	provider.mu.Unlock()
+	agent.ContextWindow = window
+	agent.promptTokenRatios = &sync.Map{} // the restart
+
+	resp, err := al.ProcessDirectWithChannel(ctx, "still there?", session, "test", session)
+	if err != nil || resp != "done" {
+		t.Fatalf("response=%q err=%v", resp, err)
+	}
+	waitForSummaries(t, al, session)
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.rejected == 0 {
+		t.Fatal("no call went past the window: the test no longer exercises the refusal")
+	}
+}
+
+func TestExpectedTurnModel(t *testing.T) {
+	candidates := func(model string) []providers.FallbackCandidate {
+		return []providers.FallbackCandidate{{Model: model}}
+	}
+	agent := &AgentInstance{
+		Model:          "main",
+		Candidates:     candidates("main"),
+		CronCandidates: candidates("cron"),
+		TierCandidates: map[string][]providers.FallbackCandidate{"pro": candidates("pro")},
+	}
+	cases := []struct {
+		name, session, tier, want string
+	}{
+		{"main model", "sk_v1_chat", "", "main"},
+		{"user tier", "sk_v1_chat", "pro", "pro"},
+		{"unknown tier stays on main", "sk_v1_chat", "gone", "main"},
+		{"cron model, whatever the tier", CronModelSessionPrefix + "job", "pro", "cron"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ts := &turnState{agent: agent, sessionKey: c.session, modelTier: c.tier}
+			if got := expectedTurnModel(ts); got != c.want {
+				t.Fatalf("expectedTurnModel = %q, want %q", got, c.want)
+			}
+		})
+	}
+	routed := *agent
+	routed.Router = &routing.Router{}
+	routed.LightCandidates = candidates("light")
+	if got := expectedTurnModel(&turnState{agent: &routed, sessionKey: "sk_v1_chat"}); got != "" {
+		t.Fatalf("with the light-model router expectedTurnModel = %q, want none", got)
 	}
 }

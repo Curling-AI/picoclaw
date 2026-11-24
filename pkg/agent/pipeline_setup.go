@@ -78,7 +78,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	// the session through more prompt builds.
 	if !ts.opts.NoHistory && ctx.Err() == nil {
 		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
-		window := ts.agent.calibratedWindow(expectedTurnModel(ts), ts.agent.ContextWindow)
+		window := ts.agent.calibratedWindow(expectedTurnModel(ts), ts.agent.ContextWindow, ts.agent.MaxTokens)
 		if isOverContextBudget(window, messages, toolDefs, ts.agent.MaxTokens) {
 			rebuild := func(trimmedHistory []providers.Message) []providers.Message {
 				rebuildPromptReq := promptBuildRequestForTurn(

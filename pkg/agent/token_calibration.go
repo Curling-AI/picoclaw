@@ -10,6 +10,9 @@ const (
 	// maxPromptTokenRatio bounds how much one measured call can shrink the
 	// window: halving it already compacts early.
 	maxPromptTokenRatio = 2.0
+	// unmeasuredRefusalRatio is the ratio refusalWindow assumes for a model
+	// not measured yet: in prod Anthropic counted at least 1.17 times our estimate.
+	unmeasuredRefusalRatio = 1.5
 	// minCalibrationWindowShare is the share of the window a call must take to
 	// calibrate it: a small call is mostly tool schemas, and the system prompt
 	// does not predict how the tokenizer counts a long conversation.
@@ -62,23 +65,49 @@ func hasMedia(messages []providers.Message) bool {
 	return false
 }
 
-// calibratedWindow is window in our estimate's units for model: when its
-// tokenizer counted calls heavier than we estimated, the window an estimate
-// must fit shrinks by the same ratio. It never grows past window, so a lighter
-// tokenizer keeps the nominal budget.
-func (a *AgentInstance) calibratedWindow(model string, window int) int {
-	if a == nil || a.promptTokenRatios == nil || window <= 0 {
-		return window
+func (a *AgentInstance) promptTokenRatio(model string) (float64, bool) {
+	if a == nil || a.promptTokenRatios == nil {
+		return 0, false
 	}
 	v, ok := a.promptTokenRatios.Load(model)
 	if !ok {
-		return window
+		return 0, false
 	}
 	ratio, ok := v.(float64)
-	if !ok || ratio <= 1 {
+	return ratio, ok
+}
+
+// scaleWindow is window in our estimate's units when the upstream counts the
+// prompt ratio times heavier. The output reserve is already in real tokens, so
+// only the prompt's share scales.
+func scaleWindow(window, reserve int, ratio float64) int {
+	if ratio <= 1 || window <= reserve {
 		return window
 	}
-	return int(float64(window) / ratio)
+	return int(float64(window-reserve)/ratio) + reserve
+}
+
+// calibratedWindow is window in our estimate's units for model: when its
+// tokenizer counted calls heavier than we estimated, the prompt's share of the
+// window shrinks by the same ratio. It never grows past window, so a lighter
+// tokenizer or an unmeasured model keeps the nominal budget. reserve is the
+// output reserve the caller counts against the window (zero for history-only
+// thresholds).
+func (a *AgentInstance) calibratedWindow(model string, window, reserve int) int {
+	ratio, _ := a.promptTokenRatio(model)
+	return scaleWindow(window, reserve, ratio)
+}
+
+// refusalWindow is the window past which a failed call is taken as refused for
+// its size (see isSizeRefusal). A model with no measured call yet, after a
+// restart, is assumed unmeasuredRefusalRatio heavier: a session already past
+// the window fails every call and would never measure one.
+func (a *AgentInstance) refusalWindow(model string, window, reserve int) int {
+	ratio, ok := a.promptTokenRatio(model)
+	if !ok {
+		ratio = unmeasuredRefusalRatio
+	}
+	return scaleWindow(window, reserve, ratio)
 }
 
 // expectedTurnModel is the model a turn's calls go to, before routing runs:
@@ -86,6 +115,11 @@ func (a *AgentInstance) calibratedWindow(model string, window int) int {
 // move a call, and a model with no measured call keeps the nominal window.
 func expectedTurnModel(ts *turnState) string {
 	if ts == nil || ts.agent == nil {
+		return ""
+	}
+	if ts.agent.Router != nil && len(ts.agent.LightCandidates) > 0 {
+		// The router picks main or light after this check; either one's ratio
+		// could cut history the other model had room for.
 		return ""
 	}
 	if strings.HasPrefix(ts.sessionKey, CronModelSessionPrefix) {
@@ -103,15 +137,15 @@ func expectedTurnModel(ts *turnState) string {
 // isSizeRefusal says a failed call past the window measured for its model was
 // refused for its size, whatever the error says: a gateway that tried several
 // upstreams reports the last one's (Vercel's last Anthropic upstream answers
-// 404). An auth or billing refusal says what it is, and compacting history
-// would not fix it.
+// 404). An auth, billing or format refusal (a 400, an image past the
+// provider's size) says what it is, and compacting history would not fix it.
 func isSizeRefusal(err error, pastMeasuredWindow bool) bool {
 	if !pastMeasuredWindow {
 		return false
 	}
 	if failErr := providers.ClassifyError(err, "", ""); failErr != nil {
 		switch failErr.Reason {
-		case providers.FailoverAuth, providers.FailoverBilling:
+		case providers.FailoverAuth, providers.FailoverBilling, providers.FailoverFormat:
 			return false
 		}
 	}

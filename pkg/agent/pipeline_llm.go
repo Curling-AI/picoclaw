@@ -661,7 +661,7 @@ func (p *Pipeline) CallLLM(
 		retryReason, isTransientError := transientLLMRetryReason(err)
 		// See isSizeRefusal. (seucaranguejo fork)
 		pastMeasuredWindow := estimateCallTokens(exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens) >
-			ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec))
+			ts.agent.refusalWindow(exec.activeModel, turnContextWindow(ts, exec), ts.agent.MaxTokens)
 		isContextError := !isTransientError && (isSizeRefusal(err, pastMeasuredWindow) ||
 			strings.Contains(errMsg, "context_length_exceeded") ||
 			strings.Contains(errMsg, "context window") ||
@@ -744,7 +744,7 @@ func (p *Pipeline) CallLLM(
 			// Compact/trim to the model actually serving this turn: a media turn
 			// routed to the small-context vision model needs its (128K) budget, not
 			// the main model's 1M, or the retry never trims enough and 400s again.
-			effectiveCW := ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec))
+			effectiveCW := ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec), ts.agent.MaxTokens)
 			if learned := exec.learnedContextWindow(); learned > 0 {
 				effectiveCW = min(effectiveCW, learned)
 			}

@@ -922,7 +922,7 @@ toolLoop:
 			al.contextManager.Compact(turnCtx, &CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonSummarize,
-				Budget:     ts.agent.calibratedWindow(expectedTurnModel(ts), ts.agent.ContextWindow),
+				Budget:     ts.agent.calibratedWindow(expectedTurnModel(ts), ts.agent.ContextWindow, 0),
 			})
 		}
 		ts.setPhase(TurnPhaseCompleted)
