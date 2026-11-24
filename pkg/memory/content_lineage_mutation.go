@@ -146,11 +146,6 @@ func (s *JSONLStore) prepareContentAppend(
 
 func (s *JSONLStore) contentSummaryChanged(meta *SessionMeta) {
 	if state := meta.ContentIdentity; state != nil && !state.Unavailable {
-		// An explicit truncation drops its rows by intent, as it always did;
-		// it cannot close the gap a released compaction left.
-		if state.CollectableSkip == state.Skip {
-			state.CollectableSkip = meta.Skip
-		}
 		state.StateToken = uuid.NewString()
 		state.SummaryDigest = contentDigest([]byte(meta.Summary))
 		state.Skip = meta.Skip

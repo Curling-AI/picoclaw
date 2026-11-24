@@ -66,10 +66,10 @@ type contentIdentityState struct {
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
 	ArchivePolicy   string               `json:"archivePolicy,omitempty"`
 	// CollectableSkip counts the leading physical rows that physical GC and
-	// typed rewrites may drop: confirmed by an archive ACK, or dropped by an
-	// explicit truncation, contiguously from the start of the file. A released
-	// compaction never advances it, so its unarchived rows stay on disk.
-	// Metadata written before this field reads as zero and keeps its prefix.
+	// typed rewrites may drop: those whose archive was confirmed, contiguously
+	// from the start of the file. A released compaction or a truncation never
+	// advances it, so their rows stay on disk. Metadata written before this
+	// field reads as zero and keeps its prefix.
 	CollectableSkip int `json:"collectableSkip,omitempty"`
 	storage         *contentStorageState
 	opaque          json.RawMessage

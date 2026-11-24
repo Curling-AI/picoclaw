@@ -125,11 +125,11 @@ retains its rows, and destructive replacement/pruning fail explicitly. After
 qualified confirmation, physical GC preserves the retained refs and later appends.
 
 Physical GC drops only the collectable prefix. `CollectableSkip` counts the
-leading physical rows whose archive was confirmed, or that an explicit
-truncation dropped, contiguously from the start of the file. A confirmation
-extends it only when its cut begins where the prefix ends. A released compaction
-never extends it, so its rows, including private rows no display shows, remain
-the only copy. `Save`, explicit `Compact`, divergent history rewrites and typed
+leading physical rows whose archive was confirmed, contiguously from the start
+of the file. A confirmation extends it only when its cut begins where the prefix
+ends. A released compaction never extends it, so its rows, including private rows
+no display shows, remain the only copy. A truncation does not extend it either:
+the rows it drops from the context stay on disk. `Save`, explicit `Compact`, divergent history rewrites and typed
 edits keep that prefix in the physical file. Metadata written before the field
 reads it as zero, so a prefix older than the field is kept as well. A prefix
 that predates the identity's initialization keeps the GC it had before. It also retains the
