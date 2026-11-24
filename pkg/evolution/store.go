@@ -10,12 +10,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
@@ -153,13 +153,35 @@ func (s *Store) loadRecordsFromPath(path string) ([]LearningRecord, error) {
 			return err
 		}
 		// Records written before the summary dropped the [SENDER] tag would still cluster by sender.
-		record.Summary = messageutil.StripSenderTag(record.Summary)
+		record.Summary = withoutLegacySenderTag(record.Summary)
 		records = append(records, record)
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 	return records, nil
+}
+
+// legacySenderTag is the tag the server prepends to a message,
+// [SENDER id="…" name="…" …] with Go-quoted values that may hold "]", as the
+// summaries written before buildRecordSummary dropped it start with. Only that
+// shape: a person's own "[SENDER] …" text is not one.
+var legacySenderTag = regexp.MustCompile(`^\s*\[SENDER(?:\s+[a-z_]+="(?:[^"\\]|\\.)*")+\]\s*`)
+
+// legacyCutSenderTag is such a tag the old 160-rune cut ended inside: no "]",
+// no line break before the person's text, and the cut's "...".
+var legacyCutSenderTag = regexp.MustCompile(`^\s*\[SENDER id="[^\n]*\.\.\.$`)
+
+// withoutLegacySenderTag is summary without the server's tag; a summary the
+// cut left with nothing but the tag is empty, which keeps it out of clustering.
+func withoutLegacySenderTag(summary string) string {
+	if loc := legacySenderTag.FindStringIndex(summary); loc != nil {
+		return summary[loc[1]:]
+	}
+	if legacyCutSenderTag.MatchString(summary) {
+		return ""
+	}
+	return summary
 }
 
 func (s *Store) loadLegacyTaskRecords() ([]LearningRecord, error) {
