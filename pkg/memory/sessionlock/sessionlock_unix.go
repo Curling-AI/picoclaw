@@ -101,13 +101,16 @@ func acquire(dir, name string, create bool, deadline time.Time) (*Lock, error) {
 			return nil, errors.Join(&os.PathError{Op: "flock", Path: path, Err: err}, closeErr)
 		}
 		// A deleter unlinks the path while holding it; a waiter that got the
-		// old inode reopens the path.
+		// old inode reopens the path, before its deadline only.
 		same, err := samePath(f, path)
 		if err == nil && same {
 			return &Lock{file: f, path: path}, nil
 		}
 		if closeErr := f.Close(); err != nil {
 			return nil, errors.Join(err, closeErr)
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("%w: %s", ErrBusy, name)
 		}
 	}
 }

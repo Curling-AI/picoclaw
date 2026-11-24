@@ -329,13 +329,47 @@ func TestSamePathRevalidatesTheFolderBeforeTheLookup(t *testing.T) {
 
 func TestAcquireReturnsAFolderRevalidationError(t *testing.T) {
 	dir := t.TempDir()
-	stubRevalidateDir(t, func() error { return unix.EIO })
+	dirs := stubRevalidateDir(t, func() error { return unix.EIO })
 	if lock, err := Acquire(dir, "s", 0); !errors.Is(err, unix.EIO) {
 		if err == nil {
 			release(t, lock)
 		}
 		t.Fatalf("Acquire with a failing folder revalidation = %v, want EIO", err)
 	}
+	if len(*dirs) != 1 {
+		t.Fatalf("revalidated %d times, want one: the error returns instead of a retry", len(*dirs))
+	}
+}
+
+// A deleter can replace the lock file between a waiter's flock and its lookup;
+// the waiter reopens the path, but only before its deadline. Past it the
+// replacement is ErrBusy, as a held lock is; with time left it takes the lock.
+func TestReplacedLockFileRetriesOnlyBeforeTheDeadline(t *testing.T) {
+	dir := t.TempDir()
+	path := Path(dir, "s")
+	release(t, mustAcquire(t, dir, "s"))
+	replaced := 0
+	stubRevalidateDir(t, func() error {
+		if replaced == 3 {
+			return nil
+		}
+		replaced++
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.WriteFile(path, nil, 0o600)
+	})
+	if lock, err := TryAcquire(dir, "s"); !errors.Is(err, ErrBusy) || replaced != 1 {
+		if err == nil {
+			release(t, lock)
+		}
+		t.Fatalf("TryAcquire with the file replaced = %v after %d replacements, want ErrBusy after 1", err, replaced)
+	}
+	lock, err := Acquire(dir, "s", testWait)
+	if err != nil || replaced != 3 {
+		t.Fatalf("Acquire with time left = %v after %d replacements, want the lock after 3", err, replaced)
+	}
+	release(t, lock)
 }
 
 // The open without O_CREAT goes through the same cache: revalidating first
