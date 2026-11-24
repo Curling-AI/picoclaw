@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
@@ -151,6 +152,8 @@ func (s *Store) loadRecordsFromPath(path string) ([]LearningRecord, error) {
 		if err := json.Unmarshal(line, &record); err != nil {
 			return err
 		}
+		// Records written before the summary dropped the [SENDER] tag would still cluster by sender.
+		record.Summary = messageutil.StripSenderTag(record.Summary)
 		records = append(records, record)
 		return nil
 	}); err != nil {
