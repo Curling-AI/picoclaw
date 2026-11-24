@@ -119,6 +119,15 @@ func TestIsSizeRefusal(t *testing.T) {
 			false,
 		},
 		{"a 404 without one is the size", &common.HTTPError{StatusCode: 404}, true, true},
+		{
+			"a 404 naming a missing model with a numeric code names its cause",
+			&common.HTTPError{
+				StatusCode:  404,
+				BodyPreview: `{"error":{"code":404,"message":"Model Not Known","type":"not_found"}}`,
+			},
+			true,
+			false,
+		},
 		{"a billing refusal stays a billing refusal", status(402), true, false},
 	}
 	for _, c := range cases {

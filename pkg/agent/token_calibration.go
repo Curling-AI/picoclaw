@@ -125,19 +125,30 @@ func expectedTurnModel(ts *turnState) string {
 	return resolvedCandidateModel(ts.agent.Candidates, ts.agent.Model)
 }
 
+// missingModelMessages name a model the upstream does not serve, for envelopes
+// whose code is numeric and so never reaches HTTPError.ErrorCode.
+var missingModelMessages = []string{"model not known", "model not found", "model_not_found", "unknown model"}
+
 // isSizeRefusal says a failed call past the window measured for its model was
 // refused for its size, whatever the error says: a gateway that tried several
 // upstreams reports the last one's (Vercel's last Anthropic upstream answers
 // 404). An auth, billing or format refusal (a 400, an image past the
 // provider's size) says what it is, and compacting history would not fix it;
-// a canceled call was stopped, not refused; an error code in the envelope
-// (model_not_found) names its cause, and only the opaque one is inferred.
+// a canceled call was stopped, not refused; an error code in the envelope or a
+// missing model in the message names its cause, and only the opaque one is
+// inferred.
 func isSizeRefusal(err error, pastMeasuredWindow bool) bool {
 	if !pastMeasuredWindow || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	if httpErr, ok := errors.AsType[*common.HTTPError](err); ok && httpErr.ErrorCode != "" {
 		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, missing := range missingModelMessages {
+		if strings.Contains(msg, missing) {
+			return false
+		}
 	}
 	if failErr := providers.ClassifyError(err, "", ""); failErr != nil {
 		switch failErr.Reason {
