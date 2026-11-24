@@ -81,12 +81,26 @@ func (p *stuckWithoutToolProvider) Chat(
 
 func (p *stuckWithoutToolProvider) GetDefaultModel() string { return "mock-model" }
 
+// Decide is the decision model reading the stuck reply as the promise it is,
+// and the answer built on the tool as no promise.
+func (p *stuckWithoutToolProvider) Decide(
+	_ context.Context,
+	_, input string,
+	questions []providers.DecisionQuestion,
+) (map[string]float64, error) {
+	if p.stuckReply != "" && strings.Contains(input, p.stuckReply) {
+		return map[string]float64{questions[0].Name: judgedYes.p}, nil
+	}
+	return map[string]float64{questions[0].Name: judgedNo.p}, nil
+}
+
 // newSessionWithExpiredDiscovery reproduces the stuck session: a tool_search
 // listed the tool long ago, it was never called, and its promotion expired.
 func newSessionWithExpiredDiscovery(t *testing.T, provider providers.LLMProvider, tool *countingTool) *AgentLoop {
 	t.Helper()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.DecisionModel = testDecisionModel
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 	agent := al.registry.GetDefaultAgent()
 	agent.Tools.RegisterHidden(tool)

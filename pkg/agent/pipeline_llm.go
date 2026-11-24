@@ -129,58 +129,10 @@ const truncatedToolCallNudge = "[System] Your last reply reached us as the tail 
 	"Re-issue that call using the tool-calling API. Do not describe the call, do not write the markup out, and do " +
 	"not paste the arguments into your reply."
 
-// maxUndeliveredAnnouncementRetries caps same-turn retries after the model
-// promised an action in prose and emitted no call. One retry, like its two
-// siblings above: a model that promises twice is not going to get there on a
-// third roll, and the user is already waiting.
-const maxUndeliveredAnnouncementRetries = 1
-
-// undeliveredAnnouncementNudge names what the model actually did. "You said you
-// would and then did not" is the part it can act on; a generic "use your tools"
-// reads as a standing lecture and produces another polite promise.
-const undeliveredAnnouncementNudge = "[System] Your last reply announced an action (\"deixa eu buscar…\", \"vou abrir…\") " +
-	"but carried no tool call, so nothing ran and the user is still waiting. Perform the action now by emitting the " +
-	"tool call itself. Do not restate what you are about to do, and do not answer from memory what the tool was for."
-
 // maxInterruptedStreamRetries caps retries IN A ROW after a stream was cut
 // before it finished; a real call resets it, as with
 // maxTruncatedToolCallRetries.
 const maxInterruptedStreamRetries = 1
-
-// maxDanglingColonRetries caps retries IN A ROW after a reply that ended on a
-// colon, or on a promise of the next step, once tools had run. Like
-// maxTruncatedToolCallRetries, the count starts over when the model emits a
-// real call: a long spec run can stop this way again dozens of iterations
-// later, and that occurrence deserves its own retry.
-const maxDanglingColonRetries = 1
-
-// danglingColonNudge quotes the tail it discarded. The model never sees that
-// reply again, and a bare "carry on" leaves it re-reading the whole turn to
-// guess which step it was about to take.
-func danglingColonNudge(reply string) string {
-	if !endsOnDanglingColon(reply) {
-		return undeliveredPromiseNudge(reply)
-	}
-	return "[System] Your last reply ended on a colon and nothing followed it: «" + replyTail(reply) + "». " +
-		"It carried no tool call, so the step it introduced never ran and the user is still waiting. " +
-		"Carry on with the task now by emitting the tool call for that step. If the work is finished, write the " +
-		"final answer in full instead of introducing it. If what the colon introduced was already delivered by a " +
-		"tool in this turn (a file, a card, buttons), do not send it again: close with one short sentence."
-}
-
-// undeliveredPromiseNudge is danglingColonNudge for a reply that closed on
-// "vou refazer…" instead of a colon. It allows for a step that did run, and
-// for a person who asked only for the plan: the detector reads prose, and
-// running a publish or a send twice, or against what was asked, is worse than
-// one more call.
-func undeliveredPromiseNudge(reply string) string {
-	all := sentences(strings.TrimRight(reply, trailingEmphasis))
-	return "[System] Your last reply ended by promising the next step: «" + all[len(all)-1] + "». " +
-		"It carried no tool call, so that step never ran and the user is still waiting. " +
-		"Carry on with the task now by emitting the tool call for that step. If a tool in this turn already did " +
-		"it, do not run it again: write the final answer, saying what was done. If the user asked you only to " +
-		"describe or plan the step, not to do it, write that answer again in full."
-}
 
 // maxDegenerateResponseRetries caps same-turn retries after the model looped on
 // one block. Same one-shot budget as its siblings: the reroll either breaks the
@@ -199,25 +151,6 @@ const degenerateResponseNudge = "[System] Your last reply got stuck repeating th
 const reasoningCapNudge = "[System] Your last reply spent your whole output limit on internal reasoning and " +
 	"never got to the answer, so nothing reached the user. Keep your reasoning short this time: do not enumerate " +
 	"or brainstorm long lists in it, and write the answer to the user."
-
-// announcesUndeliveredCall is the condition of the guard that keeps a promise
-// of a tool call out of the answer: only before the first tool of the turn,
-// with tools offered and no interruption. (seucaranguejo fork)
-func announcesUndeliveredCall(exec *turnExecution, content string) bool {
-	return !exec.gracefulTerminal && !exec.toolRanThisTurn &&
-		len(exec.providerToolDefs) > 0 &&
-		looksLikeUndeliveredAnnouncement(content)
-}
-
-// deliversUndeliveredPromise reports whether content, about to go out as the
-// final answer, still reads as a promise of a step: by the check of the guard
-// that covers this point of the turn. (seucaranguejo fork)
-func deliversUndeliveredPromise(exec *turnExecution, content string) bool {
-	if exec.toolRanThisTurn {
-		return endsOnUnfinishedStep(content)
-	}
-	return looksLikeUndeliveredAnnouncement(content)
-}
 
 // keepWatchedReply puts a direct reply the person already watched being
 // streamed into the turn's context and the session history, before the message
@@ -1187,11 +1120,12 @@ func (p *Pipeline) CallLLM(
 		responseContent := exec.response.Content
 		if steerMsgs := al.steeringForLiveTurn(turnCtx, ts.sessionKey); len(steerMsgs) > 0 {
 			// What the guards below keep out of the session stays out of it,
-			// watched or not.
+			// watched or not: a cut reply and a call written as markup. A reply
+			// that only announced a step stays: the person read it, and the
+			// turn goes on with what they sent. (seucaranguejo fork)
 			kept := exec.streamingPublishedContent && responseContent != "" &&
 				!exec.response.StreamInterrupted &&
-				!protocoltypes.LooksLikeTruncatedToolCall(responseContent) &&
-				!announcesUndeliveredCall(exec, responseContent)
+				!protocoltypes.LooksLikeTruncatedToolCall(responseContent)
 			if kept {
 				// Flush, not just cancel, as the tool-call path does below: the
 				// throttled stream may not have pushed the tail being read.
@@ -1368,108 +1302,56 @@ func (p *Pipeline) CallLLM(
 			responseContent = ""
 		}
 
-		// The other half of the same failure. Above, the model wrote the call
-		// out and left markup behind for the guard to find; here it writes the
-		// INTENT in clean prose — "deixa eu abrir o artigo." — and stops. No
-		// markup, so nothing catches it: the promise ships as the answer and,
-		// persisted, becomes the example that teaches the next turn to promise
-		// again. Measured on greenhouse (2026-09-07): ~0.5% of web turns, but it
-		// clusters, and one session repeated it six times.
+		// A reply that ends the turn on a step it only announced — "deixa eu
+		// abrir o artigo.", "Vou refazer com uma ideia visual melhor…", a report
+		// introduced with a colon and nothing after it — leaves the person
+		// waiting for work that never ran. The decision model reads it, in any
+		// language, before or after the turn's tools ran; a regex of verbs and
+		// exceptions kept retrying complete answers and dropping them. A reply
+		// judged a promise goes back to the model once with a nudge; out of
+		// retries, judged otherwise, or with no judge at all, it goes out as
+		// it is. (seucaranguejo fork)
 		//
-		// Narrow on purpose. Only before the first tool of the turn runs — after
-		// that the same words are narration, not a promise. Tools must have been
-		// offered, or there was nothing to call.
-		//
-		// gracefulTerminal is left alone: the user interrupted, the tool defs
-		// are already out of the request and the model was told to wrap up, so a
-		// closing "deixa eu ver" is not this bug.
-		if announcesUndeliveredCall(exec, responseContent) {
-			if exec.undeliveredAnnouncementRetries < maxUndeliveredAnnouncementRetries {
-				exec.undeliveredAnnouncementRetries++
+		// gracefulTerminal is left alone: the user interrupted and the model was
+		// told to wrap up. So are the tool-budget wrap-up, which told the model
+		// to deliver, and the last iteration, where a retry would end the loop
+		// with no content.
+		if !exec.gracefulTerminal && len(exec.providerToolDefs) > 0 && strings.TrimSpace(responseContent) != "" {
+			verdict := p.judgePromise(turnCtx, ts, exec, responseContent)
+			fields := verdict.fields(map[string]any{
+				"agent_id":           ts.agent.ID,
+				"iteration":          iteration,
+				"content_chars":      len(responseContent),
+				"tool_ran_this_turn": exec.toolRanThisTurn,
+			})
+			switch {
+			case verdict.err != nil:
+				logger.WarnCF("agent", "Promise judge unavailable; delivering the reply", fields)
+			case verdict.promised && exec.promiseRetries < maxPromiseRetries &&
+				!exec.wrapUpNudged && !ts.atIterationCap(iteration):
+				exec.promiseRetries++
 				cancelConfiguredStreamingLLM(turnCtx, exec)
 				p.reviveDiscoveredTools(ts, exec, iteration)
+				exec.promiseNudge = promiseNudge(responseContent)
 				exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
 					Role:    "user",
-					Content: undeliveredAnnouncementNudge,
+					Content: exec.promiseNudge,
 				})
-				logger.WarnCF("agent", "LLM announced a tool call in prose and stopped; retrying",
-					map[string]any{
-						"agent_id":      ts.agent.ID,
-						"iteration":     iteration,
-						"retry":         exec.undeliveredAnnouncementRetries,
-						"content_chars": len(responseContent),
-					})
+				fields["retry"] = exec.promiseRetries
+				message := "LLM announced a tool call in prose and stopped; retrying"
+				if exec.toolRanThisTurn {
+					message = "LLM ended a reply on an unfinished step without a tool call; retrying"
+				}
+				logger.WarnCF("agent", message, fields)
 				return ControlContinue, nil
+			case verdict.promised:
+				// One line per delivery, so the stops the guard gives up on can be
+				// counted; the text stays out of the log.
+				fields["retried"] = exec.promiseRetries > 0
+				fields["model"] = exec.llmModelName
+				fields["request_id"] = exec.response.ProviderRequestID
+				logger.WarnCF("agent", "Final reply still promises a step that never ran; delivering it", fields)
 			}
-			// Out of retries: drop it, exactly as the truncated sibling does.
-			// DefaultResponse is marked as fallback and stays out of session
-			// history — and a promise that never lands is worse than an honest
-			// failure, because it looks like progress and the user waits on it.
-			logger.WarnCF("agent", "LLM kept announcing without emitting a tool call; dropping the promise",
-				map[string]any{
-					"agent_id":      ts.agent.ID,
-					"iteration":     iteration,
-					"content_chars": len(responseContent),
-				})
-			responseContent = ""
-		}
-
-		// The same failure after the first tool, where the guard above stands
-		// down: the model narrates its next step, ends on a colon and stops.
-		// Prod, 2026-10-16: 32 iterations into a spec run, "Continuando a task 4
-		// — agora as edições cirúrgicas: … no Balcão:" came back with stop and
-		// no call, and the user had to type "Segue". Narration that travels with
-		// a call is fine; without one it is the whole answer, and an answer does
-		// not end on an introduction.
-		//
-		// Out of retries the reply goes through. Unlike the guard above, this
-		// turn already did real work, and swapping its last words for the
-		// empty-response fallback would read as if nothing had happened. It
-		// also stands down once the tool-budget wrap-up went out, which told
-		// the model to deliver instead of starting the next step.
-		//
-		// The same stop in plain prose, without the colon, is the common one:
-		// "Vou refazer com uma ideia visual melhor: mostrar que…" came back with
-		// stop after five tools and ended the turn. It shares the colon's
-		// budget: either way it is one stop, and it gets one retry.
-		if !exec.gracefulTerminal && exec.toolRanThisTurn && !exec.wrapUpNudged &&
-			!ts.atIterationCap(iteration) &&
-			len(exec.providerToolDefs) > 0 &&
-			exec.danglingColonRetries < maxDanglingColonRetries &&
-			endsOnUnfinishedStep(responseContent) {
-			exec.danglingColonRetries++
-			cancelConfiguredStreamingLLM(turnCtx, exec)
-			p.reviveDiscoveredTools(ts, exec, iteration)
-			exec.danglingColonNudge = danglingColonNudge(responseContent)
-			exec.transientTurnMessages = append(exec.transientTurnMessages, providers.Message{
-				Role:    "user",
-				Content: exec.danglingColonNudge,
-			})
-			logger.WarnCF("agent", "LLM ended a reply on an unfinished step without a tool call; retrying",
-				map[string]any{
-					"agent_id":      ts.agent.ID,
-					"iteration":     iteration,
-					"retry":         exec.danglingColonRetries,
-					"content_chars": len(responseContent),
-					"colon":         endsOnDanglingColon(responseContent),
-				})
-			return ControlContinue, nil
-		}
-
-		// What still reads as a promise goes out from here, out of retries or
-		// where no guard applies. One line per delivery, so the stops the guards
-		// miss or give up on can be counted; the text stays out of the log.
-		if !exec.gracefulTerminal && deliversUndeliveredPromise(exec, responseContent) {
-			logger.WarnCF("agent", "Final reply still promises a step that never ran; delivering it",
-				map[string]any{
-					"agent_id":           ts.agent.ID,
-					"iteration":          iteration,
-					"content_chars":      len(responseContent),
-					"tool_ran_this_turn": exec.toolRanThisTurn,
-					"retried":            exec.danglingColonRetries > 0,
-					"model":              exec.llmModelName,
-					"request_id":         exec.response.ProviderRequestID,
-				})
 		}
 
 		exec.finalContent = responseContent
@@ -1525,16 +1407,13 @@ func (p *Pipeline) CallLLM(
 	}
 	exec.interruptedStreamRetries = 0
 	exec.emptyResponseRetries = 0
-	if exec.danglingColonRetries > 0 {
-		exec.danglingColonRetries = 0
-		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, exec.danglingColonNudge)
-		exec.danglingColonNudge = ""
-	}
-	// The announcement nudge asked for the call that just arrived. Left in
-	// place, it tells every later request of the turn to "perform the action
-	// now", the final answer included.
-	if exec.undeliveredAnnouncementRetries > 0 {
-		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, undeliveredAnnouncementNudge)
+	// The promise nudge asked for the call that just arrived. Left in place, it
+	// tells every later request of the turn to take the step now, the final
+	// answer included.
+	if exec.promiseRetries > 0 {
+		exec.promiseRetries = 0
+		exec.transientTurnMessages = withoutTransientMessage(exec.transientTurnMessages, exec.promiseNudge)
+		exec.promiseNudge = ""
 	}
 	logger.InfoCF("agent", "LLM requested tool calls",
 		map[string]any{

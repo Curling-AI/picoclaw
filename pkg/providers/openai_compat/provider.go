@@ -1154,3 +1154,61 @@ func isControlPlaneLLMProxyEndpoint(apiBase string) bool {
 func supportsPromptCacheKey(apiBase string) bool {
 	return isNativeOpenAIOrAzureEndpoint(apiBase) || isControlPlaneLLMProxyEndpoint(apiBase)
 }
+
+// Decide asks a decision model yes/no questions about input through the
+// gateway's Decisions API, with the same credentials and headers as Chat. Each
+// answer is the probability of yes; a question the model refused has none.
+// (seucaranguejo fork)
+func (p *Provider) Decide(
+	ctx context.Context,
+	model, input string,
+	questions []protocoltypes.DecisionQuestion,
+) (map[string]float64, error) {
+	asked := make([]map[string]string, 0, len(questions))
+	for _, q := range questions {
+		asked = append(asked, map[string]string{"type": "predicate", "name": q.Name, "instructions": q.Instructions})
+	}
+	jsonData, err := json.Marshal(map[string]any{"model": model, "input": input, "questions": asked})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal decision request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", p.apiBase+"/decisions", bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decision request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if p.userAgent != "" {
+		req.Header.Set("User-Agent", p.userAgent)
+	}
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	p.applyCustomHeaders(req)
+	p.applyTaskIDHeader(req)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send decision request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, common.HandleErrorResponse(resp, p.apiBase)
+	}
+	var answer struct {
+		Answers []struct {
+			Type        string   `json:"type"`
+			Name        string   `json:"name"`
+			Probability *float64 `json:"probability"`
+		} `json:"answers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&answer); err != nil {
+		return nil, fmt.Errorf("failed to decode decision response: %w", err)
+	}
+	probabilities := make(map[string]float64, len(answer.Answers))
+	for _, a := range answer.Answers {
+		if a.Type == "predicate" && a.Probability != nil {
+			probabilities[a.Name] = *a.Probability
+		}
+	}
+	return probabilities, nil
+}

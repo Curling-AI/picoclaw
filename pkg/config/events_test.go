@@ -101,3 +101,21 @@ func TestLoadConfigEventLoggingEnvOverrides(t *testing.T) {
 		t.Fatal("env include_payload = false, want true")
 	}
 }
+
+// The decision model goes to the pod by env: the previous pin refuses an
+// unknown field in config.json. (seucaranguejo fork)
+func TestLoadConfigDecisionModelFromEnv(t *testing.T) {
+	t.Setenv("PICOCLAW_AGENTS_DEFAULTS_DECISION_MODEL", "typesafe-ai/jev-1.14.0")
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"version": 3}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Agents.Defaults.DecisionModel != "typesafe-ai/jev-1.14.0" {
+		t.Errorf("DecisionModel = %q, want the env value", cfg.Agents.Defaults.DecisionModel)
+	}
+}

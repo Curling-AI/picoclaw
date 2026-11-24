@@ -439,6 +439,10 @@ type AgentDefaults struct {
 	ModelFallbacks            []string `json:"model_fallbacks,omitempty"`
 	ImageModel                string   `json:"image_model,omitempty"           env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
 	ImageModelFallbacks       []string `json:"image_model_fallbacks,omitempty"`
+	// DecisionModel answers the turn's yes/no checks through the gateway's
+	// Decisions API, such as whether a reply stopped on a step it only promised.
+	// Empty turns those checks off. (seucaranguejo fork)
+	DecisionModel string `json:"decision_model,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_DECISION_MODEL"`
 	// ImageContextWindow is the context window of the image/vision model, which is
 	// usually far smaller than the main model's (glm-4.6v 128K vs glm-5.2 1M). When
 	// a media turn routes to the image model, compaction targets this budget so a

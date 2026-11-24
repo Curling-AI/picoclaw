@@ -20,8 +20,6 @@ const danglingColonReply = "Continuando a task 4 — agora as edições cirúrgi
 
 const secondDanglingColonReply = "Agora removo o hook temporário e publico:"
 
-const danglingColonNudgeMarker = "ended on a colon"
-
 // scriptedProvider answers each call with the next scripted response and
 // records the messages every call carried.
 type scriptedProvider struct {
@@ -113,8 +111,8 @@ func newScriptedLoopWithCap(
 	return NewAgentLoop(cfg, bus.NewMessageBus(), provider), provider
 }
 
-func TestDanglingColonAfterAToolIsRetriedAndEachOccurrenceGetsItsOwnRetry(t *testing.T) {
-	al, provider := newScriptedLoop(t,
+func TestPromiseAfterAToolIsRetriedAndEachOccurrenceGetsItsOwnRetry(t *testing.T) {
+	al, provider := newJudgedLoop(t, []judgeAnswer{judgedYes, judgedYes, judgedNo},
 		readFileCall("call_1"),
 		providers.LLMResponse{Content: danglingColonReply},
 		readFileCall("call_2"),
@@ -130,18 +128,21 @@ func TestDanglingColonAfterAToolIsRetriedAndEachOccurrenceGetsItsOwnRetry(t *tes
 		t.Errorf("response = %q, want the answer after both retries", resp)
 	}
 	if got := provider.calls(); got != 5 {
-		t.Fatalf("provider calls = %d, want 5 (call, colon, retry with a call, colon, retry)", got)
+		t.Fatalf("provider calls = %d, want 5 (call, stop, retry with a call, stop, retry)", got)
 	}
 	// The nudge quotes what was discarded: the model never sees that reply
 	// again, and the quote is how it knows which step it was on.
-	if !provider.callCarried(3, danglingColonNudgeMarker, "no Balcão:") {
+	if !provider.callCarried(3, promiseNudgeMarker, "no Balcão:") {
 		t.Error("the first retry went out without the nudge quoting the discarded reply")
 	}
-	if provider.callCarried(4, danglingColonNudgeMarker) {
+	if provider.callCarried(4, promiseNudgeMarker) {
 		t.Error("the nudge kept riding along after the call it asked for went through")
 	}
-	if !provider.callCarried(5, danglingColonNudgeMarker, "publico:") {
+	if !provider.callCarried(5, promiseNudgeMarker, "publico:") {
 		t.Error("the second occurrence was not retried with its own nudge")
+	}
+	if calls := provider.judgeCalls(); len(calls) == 0 || !strings.Contains(calls[0].input, "yes, some tools ran") {
+		t.Error("the judge was not told that a tool had run")
 	}
 
 	history := directSessionHistory(t, al)
@@ -149,84 +150,19 @@ func TestDanglingColonAfterAToolIsRetriedAndEachOccurrenceGetsItsOwnRetry(t *tes
 		t.Fatal("session history is empty — the loop below would be vacuous")
 	}
 	for _, m := range history {
-		if strings.Contains(m.Content, danglingColonNudgeMarker) {
+		if strings.Contains(m.Content, promiseNudgeMarker) {
 			t.Errorf("the corrective nudge was persisted: %q", m.Content)
 		}
 		if strings.Contains(m.Content, "no Balcão:") || strings.Contains(m.Content, "publico:") {
-			t.Errorf("a discarded dangling reply was persisted: %q", m.Content)
+			t.Errorf("a discarded reply was persisted: %q", m.Content)
 		}
-	}
-}
-
-// The turn already did real work: when the retry also stops on a colon, the
-// reply is delivered instead of being swapped for the empty-response fallback.
-func TestDanglingColonOutOfRetriesDeliversTheReply(t *testing.T) {
-	al, provider := newScriptedLoop(t,
-		readFileCall("call_1"),
-		providers.LLMResponse{Content: danglingColonReply},
-		providers.LLMResponse{Content: secondDanglingColonReply},
-	)
-
-	resp, err := al.ProcessDirect(context.Background(), "segue com a task 4", "dangling-colon-cap-session")
-	if err != nil {
-		t.Fatalf("ProcessDirect: %v", err)
-	}
-	if resp != secondDanglingColonReply {
-		t.Errorf("response = %q, want the retried reply delivered as is", resp)
-	}
-	if got := provider.calls(); got != 2+maxDanglingColonRetries {
-		t.Errorf("provider calls = %d, want %d (call + original + capped retries)", got, 2+maxDanglingColonRetries)
-	}
-}
-
-// Before any tool ran, a colon with no action verb is left alone: that stretch
-// belongs to looksLikeUndeliveredAnnouncement, which wants the verb.
-func TestDanglingColonBeforeAnyToolIsNotRetried(t *testing.T) {
-	al, provider := newScriptedLoop(t,
-		providers.LLMResponse{Content: "Os números batem com o dashboard:"},
-	)
-
-	resp, err := al.ProcessDirect(context.Background(), "os números batem?", "dangling-colon-no-tool-session")
-	if err != nil {
-		t.Fatalf("ProcessDirect: %v", err)
-	}
-	if resp != "Os números batem com o dashboard:" {
-		t.Errorf("response = %q, want the reply untouched", resp)
-	}
-	if got := provider.calls(); got != 1 {
-		t.Errorf("provider calls = %d, want 1 (no retry before a tool ran)", got)
-	}
-}
-
-func TestAnnouncementNudgeIsDroppedOnceTheCallArrives(t *testing.T) {
-	al, provider := newScriptedLoop(t,
-		providers.LLMResponse{Content: announcedToolCall},
-		readFileCall("call_1"),
-		providers.LLMResponse{Content: "o Fenix 9 traz mapas offline e ECG"},
-	)
-
-	if _, err := al.ProcessDirect(
-		context.Background(),
-		"resuma esse artigo pra mim",
-		"announce-drop-nudge-session",
-	); err != nil {
-		t.Fatalf("ProcessDirect: %v", err)
-	}
-	if got := provider.calls(); got != 3 {
-		t.Fatalf("provider calls = %d, want 3 (promise, retry with a call, answer)", got)
-	}
-	if !provider.callCarried(2, "announced an action") {
-		t.Error("the retry went out without the announcement nudge")
-	}
-	if provider.callCarried(3, "announced an action") {
-		t.Error("the announcement nudge kept telling the final call to perform an action that already ran")
 	}
 }
 
 // A retry from the last allowed iteration would end the loop with no content,
 // and the tool-limit fallback would replace the reply.
-func TestDanglingColonAtTheIterationCapDeliversTheReply(t *testing.T) {
-	al, provider := newScriptedLoopWithCap(t, 2,
+func TestPromiseAtTheIterationCapIsDelivered(t *testing.T) {
+	al, provider := newJudgedLoopWithCap(t, 2, []judgeAnswer{judgedYes},
 		readFileCall("call_1"),
 		providers.LLMResponse{Content: danglingColonReply},
 	)
@@ -245,13 +181,13 @@ func TestDanglingColonAtTheIterationCapDeliversTheReply(t *testing.T) {
 
 // After the 85% wrap-up warning the model was told to deliver; a nudge to carry
 // on with the next step would contradict it.
-func TestDanglingColonStandsDownAfterTheWrapUpWarning(t *testing.T) {
+func TestPromiseAfterTheWrapUpWarningIsDelivered(t *testing.T) {
 	script := make([]providers.LLMResponse, 0, 9)
 	for i := range 8 {
 		script = append(script, readFileCallAt(fmt.Sprintf("call_%d", i), fmt.Sprintf("notes-%d.md", i)))
 	}
 	script = append(script, providers.LLMResponse{Content: "Entregue o que deu. Falta:"})
-	al, provider := newScriptedLoopWithCap(t, 10, script...)
+	al, provider := newJudgedLoopWithCap(t, 10, []judgeAnswer{judgedYes}, script...)
 
 	resp, err := al.ProcessDirect(context.Background(), "segue com a task 4", "dangling-colon-wrap-up-session")
 	if err != nil {
