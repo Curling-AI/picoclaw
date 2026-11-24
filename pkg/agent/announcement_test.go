@@ -107,6 +107,25 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 		},
 		{"promise naming files in quotes", `Salvei "a.md". Agora vou verificar o "b.md".`, true},
 		{
+			"answer ending on a command it quotes after a colon",
+			`Para conferir, execute no terminal: "npm test"`,
+			false,
+		},
+		{
+			"answer closing on a long quoted draft, after a promise for later",
+			"Vou verificar o tom com você depois. Segue o comunicado:\n\n" +
+				"“Olá, equipe! Nesta sexta teremos a confraternização de fim de ano no salão do prédio, a partir " +
+				"das 18h. Tragam a família, haverá comida, música e sorteio de brindes. Confirmem a presença com a " +
+				"Júlia até quarta-feira para organizarmos as mesas. Contamos com vocês!”",
+			false,
+		},
+		{
+			"inch mark before a promise naming a quoted file",
+			`A tela tem 6" e cabe tudo. Agora vou abrir o "manual.pdf" para conferir.`,
+			true,
+		},
+		{"quote with escaped quotes inside", `{"resposta": "Use \"vou verificar\" para responder"}`, false},
+		{
 			"plain answer",
 			"A capital do Brasil é Brasília.",
 			false,
