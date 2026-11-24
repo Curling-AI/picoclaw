@@ -208,3 +208,66 @@ func TestPublicHistoryReplacementAcceptsNilContext(t *testing.T) {
 		t.Fatal("nil replacement lost intended content", history, err)
 	}
 }
+
+// Intact row locators do not stand in for lost or stale continuity proof: the
+// rollback settles with identity unavailable and ordinary appends keep working.
+func TestPublicHistoryExactRollbackWithoutContentProofStaysUnavailable(t *testing.T) {
+	for _, mode := range []string{"missing witness", "older witness"} {
+		t.Run(mode, func(t *testing.T) {
+			s, err := NewJSONLStore(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, run := "sk_v1_review_abort_proof", uuid.NewString()
+			for _, m := range []providers.Message{{Role: "user", Content: "A"}, {Role: "assistant", Content: "answer A"}} {
+				if err = s.AddFullMessage(providers.WithHistoryRun(t.Context(), run), key, m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			initializedContent(t, s, key)
+			restore, err := s.GetHistory(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range restore {
+				restore[i].HistoryID = ""
+			}
+			older, err := os.ReadFile(s.contentDomainPath(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.AppendHistoryContent(
+				providers.WithHistoryRun(t.Context(), uuid.NewString()),
+				key,
+				providers.Message{Role: "user", Content: "aborted B"},
+			); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "missing witness" {
+				err = os.Remove(s.contentDomainPath(key))
+			} else {
+				err = os.WriteFile(s.contentDomainPath(key), older, 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s, err = NewJSONLStore(s.dir); err != nil {
+				t.Fatal(err)
+			}
+			if err = s.SetHistory(t.Context(), key, restore); err != nil {
+				t.Fatal("rollback did not settle", err)
+			}
+			frame, err := s.ReadHistoryContentFrame(t.Context(), key)
+			if err != nil || frame.IdentityStatus != ContentIdentityUnavailable {
+				t.Fatal("rollback reattested refs without content proof", frame, err)
+			}
+			if err = s.AddMessage(t.Context(), key, "user", "after rollback"); err != nil {
+				t.Fatal("append blocked after rollback", err)
+			}
+			history, err := s.GetHistory(t.Context(), key)
+			if err != nil || len(history) != 3 {
+				t.Fatal("rollback or append lost rows", history, err)
+			}
+		})
+	}
+}

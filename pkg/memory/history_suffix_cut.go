@@ -3,6 +3,7 @@ package memory
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 
@@ -22,6 +23,7 @@ type historyRawRewrite struct {
 }
 
 func (s *JSONLStore) commitHistorySuffixCut(key string, old, retained []providers.Message, meta SessionMeta) error {
+	before := meta
 	raw, _, err := s.readRawJSONL(key)
 	if err != nil {
 		return err
@@ -73,7 +75,7 @@ func (s *JSONLStore) commitHistorySuffixCut(key string, old, retained []provider
 			return err
 		}
 	}
-	if err = s.prepareContentSuffixCut(key, &meta, raw[:offset], count); err != nil {
+	if err = s.prepareContentSuffixCut(key, before, &meta, raw[:offset]); err != nil {
 		return err
 	}
 	return s.commitHistoryRewriteData(
@@ -86,35 +88,49 @@ func (s *JSONLStore) commitHistorySuffixCut(key string, old, retained []provider
 }
 
 // The cut keeps every retained row at its line and bytes, so their refs
-// survive under a new state token. Any locator that no longer matches the
-// retained bytes leaves the identity unprepared, and the rewrite then marks it
-// unavailable as before. An empty image stays the explicit clear that retires
-// the domain.
-func (s *JSONLStore) prepareContentSuffixCut(key string, meta *SessionMeta, data []byte, lines int) error {
-	original := meta.ContentIdentity
+// survive under a new state token. Missing or stale continuity proof, or any
+// locator that no longer matches the retained bytes, leaves the identity
+// unprepared, and the rewrite then marks it unavailable as before. An empty
+// image stays the explicit clear that retires the domain.
+func (s *JSONLStore) prepareContentSuffixCut(key string, before SessionMeta, next *SessionMeta, data []byte) error {
+	original := next.ContentIdentity
 	if original == nil || original.Unavailable || original.Pending != nil || len(data) == 0 {
 		return nil
 	}
-	meta.ContentIdentity = cloneContentState(original)
-	if err := s.hydrateContentStorage(context.Background(), key, meta, true, true); err != nil {
-		meta.ContentIdentity = original
+	// Matching rows never replace the separate content-domain witness.
+	witness, present, err := s.readContentDomain(key)
+	if isContentIdentityLoss(err) || (err == nil && (!present || !contentWitnessMatches(witness, before))) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	hydrated := *next
+	hydrated.ContentIdentity = cloneContentState(original)
+	if err = s.hydrateContentStorage(context.Background(), key, &hydrated, true, true); err != nil {
 		if onlyContentIdentityUnavailable(err) {
 			return nil
 		}
 		return err
 	}
-	state := meta.ContentIdentity
+	state := hydrated.ContentIdentity
 	kept := 0
-	for kept < len(state.Rows) && state.Rows[kept].Line <= lines {
+	for kept < len(state.Rows) && state.Rows[kept].Line <= next.Count {
 		kept++
 	}
-	rows, err := contentLocatorsAfterSkip(data, state.DomainID, meta.Skip, refsForLocators(state.Rows[:kept]))
-	if err != nil || !slices.Equal(rows, state.Rows[:kept]) {
-		meta.ContentIdentity = original
+	rows, err := contentLocatorsAfterSkip(data, state.DomainID, next.Skip, refsForLocators(state.Rows[:kept]))
+	if errors.Is(err, ErrContentStateChanged) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(rows, state.Rows[:kept]) {
 		return nil
 	}
 	state.Rows = rows
 	state.StateToken = uuid.NewString()
+	next.ContentIdentity = state
 	return nil
 }
 
