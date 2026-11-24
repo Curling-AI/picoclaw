@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,11 @@ var (
 	errVisionInvalidArgument = errors.New(
 		"API request failed:\n  Status: 400\n  Body:   {\"error\":{\"message\":\"Request contains an invalid argument.\"}}",
 	)
+	// What prod's vision and main models answered for a file every model refuses.
+	errVisionUnsupportedFormat = errors.New("API request failed:\n  Status: 400\n  Body:   {\"error\":" +
+		"{\"message\":\"The provided file uses a format or codec that is not supported.\"}}")
+	errInvalidBase64Image = errors.New("API request failed:\n  Status: 400\n  Body:   {\"error\":" +
+		"{\"code\":\"InvalidParameter\",\"message\":\"Invalid base64 image_url Request id: 0217\"}}")
 )
 
 type scriptedCall struct {
@@ -47,6 +53,8 @@ type scriptedTierProvider struct {
 	tierContextErrs int
 	visionCallErr   error // returned by every full (non-delegation) call to the vision model
 	window          int   // when set, text-tier rejects calls estimated above it
+	imageErr        error // returned by every turn call that carries an image
+	toolRounds      int   // turn calls answered with a tool call before the answer
 	calls           []scriptedCall
 }
 
@@ -83,6 +91,13 @@ func (p *scriptedTierProvider) Chat(
 		return &providers.LLMResponse{Content: p.visionResp}, nil
 	case model == "vision-model" && p.visionCallErr != nil:
 		return nil, p.visionCallErr
+	case p.imageErr != nil && call.media:
+		return nil, p.imageErr
+	case p.toolRounds > 0:
+		p.toolRounds--
+		return &providers.LLMResponse{ToolCalls: []providers.ToolCall{{
+			ID: fmt.Sprintf("call-%d", len(p.calls)), Name: "read_file", Arguments: map[string]any{"path": "chart.png"},
+		}}}, nil
 	case model == "text-tier" && call.media:
 		return nil, errors.New("API request failed: Status: 400 Body: text-tier does not support image input")
 	case model == "text-tier" && p.window > 0 && call.tokens > p.window:
@@ -455,5 +470,74 @@ func TestTieredImageTurn_ContextRetryMakesRoomForTheDescription(t *testing.T) {
 	if last.tokens > window || !strings.Contains(last.content, "a dense chart") {
 		t.Fatalf("answering call: %d tokens for a %d window, description kept = %v",
 			last.tokens, window, strings.Contains(last.content, "a dense chart"))
+	}
+}
+
+// prod (MST-1058): a DWG upload sniffed as an image went to the vision model
+// and to the main model in every call of a long turn, and both refused it every
+// time. The main model's refusal says the image itself is bad, so it is settled
+// once: no call of the turn after that carries it, and the vision model is not
+// asked again either.
+func TestImageTurn_InvalidImageIsRefusedOncePerTurn(t *testing.T) {
+	provider := &scriptedTierProvider{
+		visionErrs: []error{errVisionUnsupportedFormat, errVisionUnsupportedFormat, errVisionUnsupportedFormat},
+		imageErr:   errInvalidBase64Image,
+		toolRounds: 2,
+	}
+	resp, err := runTextTierTurn(t, provider, tierTurn{noTier: true})
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if resp != "answered by main-model" {
+		t.Fatalf("response = %q, want the main model to answer", resp)
+	}
+	if n := provider.delegationCalls(); n != 1 {
+		t.Fatalf("vision sub-calls = %d, want 1: the refused image was sent to the vision model again", n)
+	}
+	calls := provider.turnCalls()
+	withImage := 0
+	for _, c := range calls {
+		if c.media {
+			withImage++
+		}
+	}
+	if withImage != 1 {
+		t.Fatalf("turn calls carrying the image = %d of %d, want 1", withImage, len(calls))
+	}
+	if last := calls[len(calls)-1]; !strings.Contains(last.content, unreadableImageNote) {
+		t.Fatal("the answering call lost the note that stands in for the image")
+	}
+}
+
+// An inline image from an earlier turn never reaches delegation. Refused as
+// invalid, it is left out of every later call of the turn all the same.
+func TestImageTurn_InvalidOlderInlineImageIsRefusedOncePerTurn(t *testing.T) {
+	provider := &scriptedTierProvider{imageErr: errInvalidBase64Image, toolRounds: 2}
+	resp, err := runTextTierTurn(t, provider, tierTurn{
+		textOnly: true,
+		noTier:   true,
+		history: []providers.Message{
+			{Role: "user", Content: "look at this", Media: []string{testImageDataURL}},
+			{Role: "assistant", Content: "a slide"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("processMessage: %v", err)
+	}
+	if resp != "answered by main-model" {
+		t.Fatalf("response = %q, want the main model to answer", resp)
+	}
+	calls := provider.turnCalls()
+	withImage := 0
+	for _, c := range calls {
+		if c.media {
+			withImage++
+		}
+	}
+	if withImage != 1 {
+		t.Fatalf("turn calls carrying the older image = %d, want 1", withImage)
+	}
+	if last := calls[len(calls)-1]; !strings.Contains(last.content, unreadableImageNote) {
+		t.Fatal("the answering call lost the note that stands in for the older image")
 	}
 }

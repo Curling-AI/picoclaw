@@ -87,11 +87,42 @@ func isImageRefusal(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	return isInvalidImageError(err) ||
+		strings.Contains(msg, "status: 413") ||
+		strings.Contains(msg, "request entity too large")
+}
+
+// isInvalidImageError reports whether a provider refused an image as one it
+// cannot decode: the image is bad, not the eyes of the model, so no model will
+// read it. Unlike a 413, it says so on any call, not only on a vision
+// sub-call that carries nothing but the image. (prod: Byteplus 400 "Invalid
+// base64 image_url" on a drawing sniffed as an image)
+func isInvalidImageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "provided image is not valid") ||
 		strings.Contains(msg, "malformed or corrupted") ||
 		strings.Contains(msg, "could not be decoded") ||
-		strings.Contains(msg, "status: 413") ||
-		strings.Contains(msg, "request entity too large")
+		strings.Contains(msg, "invalid base64 image")
+}
+
+// markImagesUnreadable settles every raw image of messages as unreadable for
+// the rest of the turn and leaves unreadableImageNote in its place. It reports
+// whether there was any.
+// shortcut: the provider does not say which image it refused, so every raw
+// image of the call goes; send them one per call if a bad one ever hides good ones.
+func markImagesUnreadable(exec *turnExecution, messages []providers.Message) ([]providers.Message, bool) {
+	if exec.unreadableImages == nil {
+		exec.unreadableImages = map[string]struct{}{}
+	}
+	for _, msg := range messages {
+		if images := dataImages(msg.Media); len(images) > 0 {
+			exec.unreadableImages[hashImages(images)] = struct{}{}
+		}
+	}
+	return stripImages(messages, unreadableImageNote)
 }
 
 // delegateMediaTurn implements auto-delegation. Every image it can settle

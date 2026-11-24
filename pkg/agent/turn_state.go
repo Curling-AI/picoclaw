@@ -229,7 +229,7 @@ type turnExecution struct {
 	// (seucaranguejo fork)
 	mediaAnalysisCache map[string]string
 	// unreadableImages holds, by the same hash, the images the vision model
-	// refused this turn. They become unreadableImageNote in every later call
+	// refused this turn, or any model refused as invalid. They become unreadableImageNote in every later call
 	// instead of going back to any model. (seucaranguejo fork)
 	unreadableImages map[string]struct{}
 

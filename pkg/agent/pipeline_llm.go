@@ -573,6 +573,9 @@ func (p *Pipeline) CallLLM(
 		}
 		return messages
 	}
+	// Delegation only reaches the current turn's images: an image the turn
+	// already settled stays settled wherever it sits, once the model is picked.
+	exec.callMessages = p.withKnownImageText(ts, exec, exec.callMessages)
 	// contextRefusals counts this call's context-window refusals; retry also
 	// counts the transient ones (429, 5xx) before them.
 	contextRefusals := 0
@@ -612,6 +615,34 @@ func (p *Pipeline) CallLLM(
 			}
 			if changed {
 				modelReplaced = true
+				retry--
+				continue
+			}
+		}
+
+		if isInvalidImageError(err) {
+			// A bad image, not a model without eyes: delegation reads the memo,
+			// so the rest of the turn sends the note instead, to any model.
+			// Outside the retry budget, like the case below. (seucaranguejo fork)
+			if withNote, marked := markImagesUnreadable(exec, exec.callMessages); marked {
+				al.emitEvent(
+					runtimeevents.KindAgentLLMRetry,
+					ts.eventMeta("runTurn", "turn.llm.retry"),
+					LLMRetryPayload{
+						Attempt:    retry + 1,
+						MaxRetries: maxRetries,
+						Reason:     "invalid_image",
+						Error:      err.Error(),
+						RequestID:  nextRequestID,
+					},
+				)
+				logger.WarnCF("agent", "Provider refused an image as invalid; leaving it out for the rest of the turn",
+					map[string]any{
+						"agent_id":   ts.agent.ID,
+						"model_name": exec.llmModelName,
+						"error":      err.Error(),
+					})
+				exec.callMessages = withNote
 				retry--
 				continue
 			}

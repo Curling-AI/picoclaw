@@ -130,7 +130,7 @@ func (t *LoadImageTool) Execute(ctx context.Context, args map[string]any) *ToolR
 
 	// Detect MIME type — reuse the helper already in send_file.go
 	mediaType := detectMediaType(resolved)
-	if !strings.HasPrefix(mediaType, "image/") {
+	if !media.IsViewableImage(mediaType) {
 		return ErrorResult(fmt.Sprintf(
 			"file does not appear to be an image (detected type: %s)", mediaType,
 		))

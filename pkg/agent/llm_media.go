@@ -35,8 +35,8 @@ func stripMessageMedia(messages []providers.Message) []providers.Message {
 	return stripped
 }
 
-// unreadableImageNote stands in for an image the vision model refused, so
-// the model answers knowing there was one.
+// unreadableImageNote stands in for an image the vision model refused, or any
+// model refused as invalid, so the model answers knowing there was one.
 const unreadableImageNote = "[An image was attached here, but it could not be read.]"
 
 // imageNotSeenNote stands in for an image the model of the call cannot see.
