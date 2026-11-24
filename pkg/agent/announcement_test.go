@@ -113,6 +113,12 @@ func TestLooksLikeUndeliveredAnnouncement(t *testing.T) {
 		{"scheduled", "Vou enviar o resumo toda segunda às 8h.", false},
 		{"verb too far from the marker", "Vou estar por aqui se precisar ajustar algo.", false},
 		{"bold verb", "Vou **buscar** o artigo do DCRainmaker sobre o Fenix 9.", true},
+		{
+			"how-to naming a verb",
+			"Vou explicar como criar uma pasta. No terminal, use mkdir seguido do nome da pasta.",
+			false,
+		},
+		{"clitic and adverb before the verb", "Certo, vou te rapidamente mandar o arquivo.", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -219,6 +225,9 @@ func TestEndsOnUndeliveredPromise(t *testing.T) {
 		{"waits on the person", "Rascunho pronto. Vou publicar assim que você aprovar.", false},
 		{"waits on someone named", "Rascunho pronto. Vou publicar assim que a Ana aprovar.", false},
 		{"waits on someone's material", "Página montada. Vou publicar assim que o Pedro mandar as fotos.", false},
+		{"waits on someone's green light", "Rascunho salvo. Vou publicar quando a Ana der o sinal verde.", false},
+		{"schedules with programar", "Fuso conferido. Vou programar o lembrete para amanhã.", true},
+		{"schedules in English", "Timezone checked. I'll schedule the reminder for tomorrow.", true},
 		{"waits on an approval", "Deixei o post no rascunho; vou publicar depois da aprovação do cliente.", false},
 		{"schedules now what happens tomorrow", "Entendi. Vou agendar agora o lembrete para amanhã.", true},
 		{"schedules a send for later", "Combinado, vou agendar o envio para segunda às 8h.", true},
