@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"time"
 
@@ -132,12 +133,10 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	if plan.DomainID != frame.DomainID || plan.BeforeState != frame.StateToken {
 		return ContentTransition{}, ErrContentStateChanged
 	}
-	if state.Pending != nil {
-		if time.Now().After(state.Pending.Transition.ExpiresAt) {
-			return ContentTransition{}, ErrContentLineageExpired
-		}
+	if state.Pending != nil && !overdueCompaction(state.Pending) {
 		return ContentTransition{}, ErrContentLineagePending
 	}
+	released := state.Pending
 	if uuid.Validate(plan.MutationID) != nil || len(plan.Retained) > len(state.Rows) {
 		return ContentTransition{}, ErrContentStateChanged
 	}
@@ -203,6 +202,9 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	}
 	if err = s.commitContentMetadata(ctx, key, image, next); err != nil {
 		return ContentTransition{}, err
+	}
+	if released != nil {
+		logReleasedCompaction(ctx, released)
 	}
 	if next.ContentIdentity.ArchivePolicy == nativePublicArchivePolicy {
 		if err := s.prepareNativeHistoryArchiveLocked(ctx, key); err != nil {
@@ -412,6 +414,11 @@ func (s *JSONLStore) commitContentArchiveAck(ctx context.Context, key string, im
 		AckDigest:  digest,
 	}
 	next.ContentIdentity.Pending = nil
+	// The archive now holds the cut's rows. They join the collectable prefix only
+	// when every row before them is already in it: a released cut leaves a gap.
+	if state.CollectableSkip == state.Pending.Before.Skip {
+		next.ContentIdentity.CollectableSkip = state.Pending.After.Skip
+	}
 	// ACK changes retention only. Its own atomic metadata commit does not mint a
 	// content revision, receipt, read watermark or substitute the current tail.
 	if err := s.commitContentMetadata(ctx, key, image, next); err != nil {
@@ -421,6 +428,59 @@ func (s *JSONLStore) commitContentArchiveAck(ctx context.Context, key string, im
 		s.retireAppliedContentImages(ctx, key, state.Last.Mutation.Retired)
 	}
 	return nil
+}
+
+// overdueCompaction reports a compaction whose archive confirmation is past its
+// deadline. Releasing it gives up only the archive copy: CollectableSkip never
+// passes its cut, so its rows stay on disk.
+func overdueCompaction(pending *contentPending) bool {
+	return pending != nil && pending.Mutation == nil && time.Now().After(pending.Transition.ExpiresAt)
+}
+
+func logReleasedCompaction(ctx context.Context, pending *contentPending) {
+	slog.WarnContext(ctx, "overdue history compaction released",
+		"mutation_id", pending.Transition.MutationID,
+		"expired_at", pending.Transition.ExpiresAt)
+}
+
+// releaseOverdueCompaction clears an overdue compaction so the operation that
+// met it proceeds instead of failing. The caller holds the session lock and
+// rereads its metadata when this reports a release.
+func (s *JSONLStore) releaseOverdueCompaction(ctx context.Context, key string, meta SessionMeta) (bool, error) {
+	if meta.ContentIdentity == nil || len(meta.ContentIdentity.opaque) != 0 ||
+		!overdueCompaction(meta.ContentIdentity.Pending) {
+		return false, nil
+	}
+	image, _, err := s.contentMutationImage(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	pending := image.Meta.ContentIdentity.Pending
+	if !overdueCompaction(pending) {
+		return false, nil
+	}
+	next := copyMeta(image.Meta)
+	next.ContentIdentity.Pending = nil
+	if err = s.commitContentMetadata(ctx, key, image, next); err != nil {
+		return false, err
+	}
+	logReleasedCompaction(ctx, pending)
+	return true, nil
+}
+
+// metaAfterOverdueCompaction releases the overdue compaction an operation met
+// and rereads the metadata with that operation's own reader.
+func (s *JSONLStore) metaAfterOverdueCompaction(
+	ctx context.Context,
+	key string,
+	meta SessionMeta,
+	reread func(string) (SessionMeta, error),
+) (SessionMeta, error) {
+	released, err := s.releaseOverdueCompaction(ctx, key, meta)
+	if err != nil || !released {
+		return meta, err
+	}
+	return reread(key)
 }
 
 func (s *JSONLStore) contentPendingGuard(meta SessionMeta) error {

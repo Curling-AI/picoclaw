@@ -3,11 +3,8 @@ package agent
 import (
 	"context"
 	"strings"
-	"sync/atomic"
 	"testing"
 
-	"github.com/sipeed/picoclaw/pkg/bus"
-	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -19,122 +16,99 @@ import (
 const announcedToolCall = "Vou buscar o artigo do DCRainmaker sobre o Fenix 9 e resumir, depois procurar " +
 	"relação com o seu relógio 970.\n\nPrimeiro, deixa eu abrir o artigo."
 
-type announceThenAnswerProvider struct {
-	calls    atomic.Int32
-	sawNudge atomic.Bool
-}
+const promiseNudgeMarker = "announcing a step it did not take"
 
-func (p *announceThenAnswerProvider) Chat(
-	ctx context.Context,
-	messages []providers.Message,
-	tools []providers.ToolDefinition,
-	model string,
-	options map[string]any,
-) (*providers.LLMResponse, error) {
-	if p.calls.Add(1) == 1 {
-		return &providers.LLMResponse{Content: announcedToolCall}, nil
-	}
-	for _, m := range messages {
-		if strings.Contains(m.Content, "announced an action") {
-			p.sawNudge.Store(true)
-		}
-	}
-	return &providers.LLMResponse{Content: "o Fenix 9 traz mapas offline e ECG"}, nil
-}
-
-func (p *announceThenAnswerProvider) GetDefaultModel() string { return "mock-model" }
-
-type alwaysAnnouncingProvider struct {
-	calls atomic.Int32
-}
-
-func (p *alwaysAnnouncingProvider) Chat(
-	ctx context.Context,
-	messages []providers.Message,
-	tools []providers.ToolDefinition,
-	model string,
-	options map[string]any,
-) (*providers.LLMResponse, error) {
-	p.calls.Add(1)
-	return &providers.LLMResponse{Content: announcedToolCall}, nil
-}
-
-func (p *alwaysAnnouncingProvider) GetDefaultModel() string { return "mock-model" }
-
-func TestAnnouncedToolCallIsRetriedWithANudge(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = t.TempDir()
-	provider := &announceThenAnswerProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+func TestPromiseBeforeAnyToolIsRetriedWithANudge(t *testing.T) {
+	al, provider := newJudgedLoop(t, []judgeAnswer{judgedYes, judgedNo},
+		providers.LLMResponse{Content: announcedToolCall},
+		readFileCall("call_1"),
+		providers.LLMResponse{Content: "o Fenix 9 traz mapas offline e ECG"},
+	)
 
 	resp, err := al.ProcessDirect(context.Background(), "resuma esse artigo pra mim", "announce-retry-session")
 	if err != nil {
 		t.Fatalf("ProcessDirect: %v", err)
 	}
-	if resp == announcedToolCall {
-		t.Error("the promise was delivered as the answer instead of being retried")
+	if resp != "o Fenix 9 traz mapas offline e ECG" {
+		t.Errorf("response = %q, want the answer after the retry", resp)
 	}
-	if got := provider.calls.Load(); got != 2 {
-		t.Errorf("provider calls = %d, want 2 (original + one retry)", got)
+	if got := provider.calls(); got != 3 {
+		t.Fatalf("provider calls = %d, want 3 (promise, retry with a call, answer)", got)
 	}
-	if !provider.sawNudge.Load() {
-		t.Error("the retry went out without the corrective nudge")
+	if !provider.callCarried(2, promiseNudgeMarker, "deixa eu abrir o artigo") {
+		t.Error("the retry went out without the nudge quoting the discarded promise")
 	}
-}
-
-func TestAnnouncementRetryIsCappedAndTheNudgeIsNeverPersisted(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = t.TempDir()
-	provider := &alwaysAnnouncingProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
-
-	if _, err := al.ProcessDirect(
-		context.Background(),
-		"resuma esse artigo pra mim",
-		"announce-cap-session",
-	); err != nil {
-		t.Fatalf("ProcessDirect: %v", err)
+	if provider.callCarried(3, promiseNudgeMarker) {
+		t.Error("the nudge kept telling the final call to take a step that already ran")
 	}
-	if got := provider.calls.Load(); got != 1+maxUndeliveredAnnouncementRetries {
-		t.Errorf("provider calls = %d, want %d (original + capped retries)", got, 1+maxUndeliveredAnnouncementRetries)
+	if calls := provider.judgeCalls(); len(calls) == 0 || !strings.Contains(calls[0].input, "used in this turn: none") {
+		t.Error("the judge was not told that no tool had run yet")
 	}
-
-	// The correction is about THIS emission. Persisted, it reads as a standing
-	// instruction in every later turn of the session.
-	history := directSessionHistory(t, al)
-	if len(history) == 0 {
-		t.Fatal("session history is empty — the loop below would be vacuous")
-	}
-	for _, m := range history {
-		if strings.Contains(m.Content, "announced an action") {
-			t.Errorf("the corrective nudge was persisted: %q", m.Content)
+	for _, m := range directSessionHistory(t, al) {
+		if strings.Contains(m.Content, promiseNudgeMarker) || strings.Contains(m.Content, "deixa eu abrir") {
+			t.Errorf("the nudge or the discarded promise was persisted: %q", m.Content)
 		}
 	}
 }
 
-// The promise is what teaches the next turn to promise again, so running out of
-// retries must not leave it in the session either.
-func TestExhaustedAnnouncementIsNeitherDeliveredNorPersisted(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = t.TempDir()
-	provider := &alwaysAnnouncingProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+// Out of retries, the reply goes out and stays in the session. Dropped, as it
+// was, the person got the empty-response fallback, or nothing, in place of an
+// answer the guard had taken for a promise.
+func TestPromiseBeforeAnyToolOutOfRetriesIsDelivered(t *testing.T) {
+	const again = "Vou abrir o artigo agora mesmo."
+	readLog := captureAgentLog(t)
+	al, provider := newJudgedLoop(t, []judgeAnswer{judgedYes, judgedYes},
+		providers.LLMResponse{Content: announcedToolCall},
+		providers.LLMResponse{Content: again},
+	)
 
-	resp, err := al.ProcessDirect(context.Background(), "resuma esse artigo pra mim", "announce-drop-session")
+	resp, err := al.ProcessDirect(context.Background(), "resuma esse artigo pra mim", "announce-cap-session")
 	if err != nil {
 		t.Fatalf("ProcessDirect: %v", err)
 	}
-	if strings.Contains(resp, "deixa eu abrir o artigo") {
-		t.Errorf("the undelivered promise was handed to the user: %q", resp)
+	if resp != again {
+		t.Errorf("response = %q, want the retried reply delivered", resp)
 	}
-
-	history := directSessionHistory(t, al)
-	if len(history) == 0 {
-		t.Fatal("session history is empty — the loop below would be vacuous")
+	if got := provider.calls(); got != 1+maxPromiseRetries {
+		t.Errorf("provider calls = %d, want %d (original + capped retries)", got, 1+maxPromiseRetries)
 	}
-	for _, m := range history {
-		if strings.Contains(m.Content, "deixa eu abrir o artigo") {
-			t.Errorf("the undelivered promise was persisted: %q", m.Content)
+	if strings.Count(readLog(), deliveredPromiseLine) != 1 {
+		t.Error("the delivered promise was not logged once")
+	}
+	kept := false
+	for _, m := range directSessionHistory(t, al) {
+		kept = kept || m.Role == "assistant" && m.Content == again
+		if strings.Contains(m.Content, promiseNudgeMarker) {
+			t.Errorf("the corrective nudge was persisted: %q", m.Content)
 		}
+	}
+	if !kept {
+		t.Error("the delivered reply is not in the session: a reload would lose it")
+	}
+}
+
+// A complete answer that quotes a line for the person to use ("vou verificar
+// agora") is not a promise: the judge says so and it goes out on the first
+// call. The regex guard retried it and, when the model repeated it, dropped it.
+func TestCompleteAnswerQuotingAPromiseGoesOutOnTheFirstCall(t *testing.T) {
+	const answer = "1. \"Isso não é comigo.\" Motivo: empurra o problema.\n\n" +
+		"Em vez de “não sei”, diga “boa pergunta, vou verificar agora e já te retorno”."
+	al, provider := newJudgedLoop(t, []judgeAnswer{judgedNo},
+		providers.LLMResponse{Content: answer},
+	)
+
+	resp, err := al.ProcessDirect(
+		context.Background(),
+		"frases que o atendente não deve dizer",
+		"quoted-promise-session",
+	)
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != answer {
+		t.Errorf("response = %q, want the answer untouched", resp)
+	}
+	if got := provider.calls(); got != 1 {
+		t.Errorf("provider calls = %d, want 1 (no retry)", got)
 	}
 }

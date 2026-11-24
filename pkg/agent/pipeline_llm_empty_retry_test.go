@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 )
@@ -145,33 +146,53 @@ func directSessionKey(al *AgentLoop) string {
 	return alloc.SessionKey
 }
 
-// A synthesized empty-response fallback must never enter session history:
-// the model reads its own prior replies, and a persisted fallback teaches it
-// to keep answering with nothing (observed in prod as sessions degrading to
-// ~50% empty turns until wiped).
-func TestEmptyFallbackNotPersistedToHistory(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.Workspace = t.TempDir()
-	provider := &alwaysEmptyProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+// A synthesized empty-response fallback must never reach the model: it reads
+// its own prior replies, and a fallback read back as one teaches it to keep
+// answering with nothing (observed in prod as sessions degrading to ~50% empty
+// turns until wiped). The person saw it, though, and a reload must show it
+// again, so it stays in the history as a notice the model's history skips.
+func TestEmptyFallbackIsKeptAsANoticeTheModelNeverReads(t *testing.T) {
+	al, provider := newScriptedLoop(t,
+		providers.LLMResponse{},
+		providers.LLMResponse{},
+		providers.LLMResponse{Content: "Oi! Agora foi."},
+	)
 
-	resp, err := al.ProcessDirect(context.Background(), "hello", "empty-no-persist-session")
+	resp, err := al.ProcessDirect(context.Background(), "hello", "empty-notice-session")
 	if err != nil {
 		t.Fatalf("ProcessDirect: %v", err)
 	}
-	if resp == "" {
-		t.Fatal("expected the fallback text as the user-visible response")
+	if resp != defaultResponse {
+		t.Fatalf("response = %q, want the fallback text", resp)
 	}
+	assertFallbackKeptAsNotice(t, directSessionHistory(t, al), resp)
 
-	history := directSessionHistory(t, al)
-	if len(history) != 1 {
-		t.Fatalf("history len = %d, want 1 (user message only)", len(history))
+	if _, err := al.ProcessDirect(context.Background(), "tenta de novo", "empty-notice-session"); err != nil {
+		t.Fatalf("second ProcessDirect: %v", err)
 	}
-	assertRoles(t, history, "user")
-	for _, msg := range history {
-		if msg.Content == resp {
-			t.Fatalf("fallback text %q was persisted to history", resp)
-		}
+	if got := provider.calls(); got != 3 {
+		t.Fatalf("provider calls = %d, want 3 (empty, retry, next turn)", got)
+	}
+	if provider.callCarried(3, resp) {
+		t.Fatal("the next turn sent the notice to the model")
+	}
+	if !provider.callCarried(3, "hello") {
+		t.Fatal("the next turn lost the question before the notice — the check above would be vacuous")
+	}
+}
+
+// assertFallbackKeptAsNotice checks the history holds the question and the
+// fallback as a notice, without what the empty call thought.
+func assertFallbackKeptAsNotice(t *testing.T, history []providers.Message, fallback string) {
+	t.Helper()
+	assertRoles(t, history, "user", "assistant")
+	if n := history[1]; !n.Notice || n.Content != fallback || n.ReasoningContent != "" {
+		t.Fatalf("last message = %+v, want the fallback kept as a notice without reasoning", n)
+	}
+	// A reader of the history (the eval harness) tells the notice by its kind,
+	// whatever language the configured text is in.
+	if n := history[1]; n.Fallback != protocoltypes.FallbackEmptyResponse {
+		t.Fatalf("notice fallback kind = %q, want %q", n.Fallback, protocoltypes.FallbackEmptyResponse)
 	}
 }
 
@@ -249,11 +270,7 @@ func TestReasoningAtOutputCapIsRetriedWithNudgeAndNeverSalvaged(t *testing.T) {
 	if !provider.callCarried(2, reasoningCapNudgeMarker) {
 		t.Error("the retry must carry the output-cap nudge")
 	}
-	history := directSessionHistory(t, al)
-	if len(history) != 1 {
-		t.Fatalf("history len = %d, want 1 (user message only)", len(history))
-	}
-	assertRoles(t, history, "user")
+	assertFallbackKeptAsNotice(t, directSessionHistory(t, al), resp)
 }
 
 // finish_reason is not always reported; completion tokens at or past
@@ -519,7 +536,7 @@ func TestFilteredReasoningIsRetriedAndNeverSalvaged(t *testing.T) {
 	if got := provider.calls(); got != 1+maxEmptyResponseRetries {
 		t.Errorf("provider calls = %d, want %d", got, 1+maxEmptyResponseRetries)
 	}
-	assertRoles(t, directSessionHistory(t, al), "user")
+	assertFallbackKeptAsNotice(t, directSessionHistory(t, al), resp)
 }
 
 // On a long research turn the filter fired at iteration 6 and again at 11. A

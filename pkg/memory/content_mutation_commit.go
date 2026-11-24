@@ -77,6 +77,9 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 	if err != nil {
 		return ContentMutationResult{}, err
 	}
+	if meta, err = s.metaAfterOverdueCompaction(ctx, key, meta, s.readContentMutationMeta); err != nil {
+		return ContentMutationResult{}, err
+	}
 	if result, found, replayErr := replayContentMutationPlan(meta, plan, digest); found || replayErr != nil {
 		return result, replayErr
 	}
@@ -109,13 +112,25 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 		return ContentMutationResult{}, err
 	}
 	prepared = s.projectPublicCommits(prepared, &next)
-	// Build new physical locators BEFORE any durable publication. The rewrite
-	// helper will recompute the same locators from these exact prepared rows.
-	data, err := marshalHistoryJSONL(prepared, next)
+	previous, existed, err := s.readRawJSONL(key)
 	if err != nil {
 		return ContentMutationResult{}, err
 	}
-	rows, err := contentLocatorsForData(data, next.ContentIdentity.DomainID, 0,
+	if !existed || !contentPreimageMatchesImage(key, image, previous) {
+		return ContentMutationResult{}, ErrContentStateChanged
+	}
+	kept, ok := physicalRowsPrefix(previous, next.Skip)
+	if !ok {
+		return ContentMutationResult{}, ErrContentStateChanged
+	}
+	// Build new physical locators BEFORE any durable publication. The rewrite
+	// helper will recompute the same locators from these exact prepared rows.
+	active, err := marshalHistoryJSONL(prepared, next)
+	if err != nil {
+		return ContentMutationResult{}, err
+	}
+	data := append(append([]byte(nil), kept...), active...)
+	rows, err := contentLocatorsAfterSkip(data, next.ContentIdentity.DomainID, next.Skip,
 		refsForLocators(next.ContentIdentity.Rows))
 	if err != nil {
 		return ContentMutationResult{}, err
@@ -137,13 +152,6 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 		Before: refsForLocators(image.Meta.ContentIdentity.Rows), After: refsForLocators(rows),
 		ExpiresAt: time.Now().UTC().Add(contentArchiveDeadline),
 	}
-	previous, existed, err := s.readRawJSONL(key)
-	if err != nil {
-		return ContentMutationResult{}, err
-	}
-	if !existed || !contentPreimageMatchesImage(key, image, previous) {
-		return ContentMutationResult{}, ErrContentStateChanged
-	}
 	preimage := &contentPreimage{
 		Version: 1, Key: key, DomainID: frame.DomainID, MutationID: plan.MutationID, ID: uuid.NewString(),
 		Bytes: int64(len(previous)), Digest: contentDigest(previous),
@@ -155,7 +163,7 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 			Rows: append([]contentLocator(nil), image.Meta.ContentIdentity.Rows...), Image: preimage,
 		},
 		After: contentSnapshot{
-			StateToken: transition.AfterState, Summary: next.Summary,
+			StateToken: transition.AfterState, Summary: next.Summary, Skip: next.Skip,
 			Rows: append([]contentLocator(nil), rows...),
 		},
 	}
@@ -331,7 +339,14 @@ func (s *JSONLStore) prepareTypedContentMutation(
 	meta.HistoryRetainedUntil = meta.HistoryPrefix + int64(min(common, physicalPrefix, max(0, meta.Count-meta.Skip)))
 	meta.HistoryMutationRunID = providers.HistoryRun(ctx)
 	resetHistoryGeneration(&meta)
-	meta.Skip, meta.Count = 0, len(prepared)
+	// Rows of a compaction released without confirmation have no other copy:
+	// they stay in front of the new rows, as a retained-prefix rewrite keeps them.
+	kept := 0
+	if !image.Meta.ContentIdentity.collectablePrefix() {
+		kept = image.Meta.Skip
+		meta.HistoryPrefix = image.Meta.HistoryPrefix
+	}
+	meta.Skip, meta.Count = kept, kept+len(prepared)
 	meta.UpdatedAt = time.Now()
 	meta.HistoryDigest, err = historyDigest(prepared)
 	if err != nil {
@@ -345,6 +360,6 @@ func (s *JSONLStore) prepareTypedContentMutation(
 	meta.ContentIdentity.MutationVersion = contentMutationVersion
 	meta.ContentIdentity.StateToken = uuid.NewString()
 	meta.ContentIdentity.SummaryDigest = contentDigest([]byte(meta.Summary))
-	meta.ContentIdentity.Skip, meta.ContentIdentity.Count = 0, meta.Count
+	meta.ContentIdentity.Skip, meta.ContentIdentity.Count = kept, meta.Count
 	return meta, prepared, nil
 }

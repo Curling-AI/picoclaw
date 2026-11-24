@@ -85,15 +85,20 @@ budget, separate from its summary/content payload. The existing ordinary decoder
 and bounded-page limits remain unchanged. The adapter must preserve its existing
 1000-message/8 MiB window, per-message budget and production transport envelope.
 
-The archive deadline is 45 seconds. Expiration returns observable backpressure
-through `ReadPendingHistoryCompaction` and preserves the original physical rows.
-Automatic `Compact`/session `Save` remain successful no-ops while any transition
-is pending, including after expiration, so a durable assistant reply still
-reaches its caller. Summary and forced-compression preflight reject that pending
-transition before provider work. The deadline does not authorize GC or block
-ordinary appends. A qualified recovery may replay and confirm the retained
-operation after the deadline; no loop silently waits for an ACK while deleting
-its only durable source.
+The archive deadline is 45 seconds. Within it, `ReadPendingHistoryCompaction`
+reports the transition, automatic `Compact`/session `Save` remain successful
+no-ops that keep its rows, and summary and forced-compression preflight reject it
+before provider work. Ordinary appends never wait for it.
+
+Past the deadline the compaction is overdue. The next compaction, typed edit or
+prefix retention, truncation, history rewrite or retention prune that meets it
+releases it under the source lock, logs `overdue history compaction released`
+with its mutation ID and deadline, and proceeds. An external public-history
+import releases it only under the native archive policy, the only policy whose
+imports it holds; other imports leave it in place. Until an operation releases
+it, the consumer can still confirm it late. After the release, that confirmation
+returns `ErrContentArchiveAck`. A release never authorizes GC: the cut's rows
+stay on disk, as described under qualified confirmation.
 
 If independent content proof is unavailable, `JSONLBackend.Save` uses the
 optional `CompactForSessionSave` primitive to retain the physical rows without
@@ -115,9 +120,19 @@ receipt callback or notification is insufficient. A response lost after that
 commit can be replayed idempotently. Confirmation changes retention only; it
 never clears the independent order fence or grants a read receipt.
 
-While a transition is pending, automatic physical compaction retains its rows,
-and destructive replacement/pruning fail explicitly. After qualified confirmation,
-physical GC preserves the retained refs and later appends. It also retains the
+While a transition is pending within its deadline, automatic physical compaction
+retains its rows, and destructive replacement/pruning fail explicitly. After
+qualified confirmation, physical GC preserves the retained refs and later appends.
+
+Physical GC drops only the collectable prefix. `CollectableSkip` counts the
+leading physical rows whose archive was confirmed, contiguously from the start
+of the file. A confirmation extends it only when its cut begins where the prefix
+ends. A released compaction never extends it, so its rows, including private rows
+no display shows, remain the only copy. A truncation does not extend it either:
+the rows it drops from the context stay on disk. `Save`, explicit `Compact`, divergent history rewrites and typed
+edits keep that prefix in the physical file. Metadata written before the field
+reads it as zero, so a prefix older than the field is kept as well. A prefix
+that predates the identity's initialization keeps the GC it had before. It also retains the
 confirmed domain and ACK digest when its active
 image is empty, so a lost response can still replay after GC and restart.
 The existing explicit

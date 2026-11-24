@@ -15,6 +15,20 @@ type toolSchemaStreamingProvider struct {
 	*toolSchemaTransformProvider
 }
 
+// The deciding variants carry the delegate's Decisions API, and only a delegate
+// that has one gets them: callers pick the decision or the chat path by asking
+// for Decider, so a wrapper that always answered yes sent chat-only providers
+// down a path that always fails. (seucaranguejo fork)
+type toolSchemaDecidingProvider struct {
+	*toolSchemaTransformProvider
+	Decider
+}
+
+type toolSchemaStreamingDecidingProvider struct {
+	*toolSchemaStreamingProvider
+	Decider
+}
+
 func wrapProviderWithToolSchemaTransform(delegate LLMProvider, transform string) (LLMProvider, error) {
 	transform, err := common.NormalizeToolSchemaTransform(transform)
 	if err != nil {
@@ -27,8 +41,16 @@ func wrapProviderWithToolSchemaTransform(delegate LLMProvider, transform string)
 		delegate:  delegate,
 		transform: transform,
 	}
+	decider, decides := delegate.(Decider)
 	if _, ok := delegate.(StreamingProvider); ok {
-		return &toolSchemaStreamingProvider{toolSchemaTransformProvider: base}, nil
+		streaming := &toolSchemaStreamingProvider{toolSchemaTransformProvider: base}
+		if decides {
+			return &toolSchemaStreamingDecidingProvider{toolSchemaStreamingProvider: streaming, Decider: decider}, nil
+		}
+		return streaming, nil
+	}
+	if decides {
+		return &toolSchemaDecidingProvider{toolSchemaTransformProvider: base, Decider: decider}, nil
 	}
 	return base, nil
 }

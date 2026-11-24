@@ -108,8 +108,10 @@ func (s *JSONLStore) replaceHistory(
 	if !meta.publicHistoryClear && common == len(prepared) && len(prepared) < len(old) {
 		return s.commitHistorySuffixCut(key, old, prepared, meta)
 	}
-	retainPrefix := false
-	if original.Skip > 0 && original.PublicHistoryVersion == PublicHistoryVersion &&
+	// Rows of a compaction released without confirmation have no other copy.
+	retainPrefix := original.Skip > 0 && original.ContentIdentity != nil &&
+		!original.ContentIdentity.collectablePrefix()
+	if !retainPrefix && original.Skip > 0 && original.PublicHistoryVersion == PublicHistoryVersion &&
 		original.PublicHistoryPreparation == nil && !original.publicHistoryClear {
 		if prefixErr := s.verifyPublicPrefix(ctx, key, original); prefixErr != nil {
 			if !publicProofUnavailable(prefixErr) {

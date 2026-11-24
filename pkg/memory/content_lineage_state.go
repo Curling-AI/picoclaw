@@ -65,8 +65,20 @@ type contentIdentityState struct {
 	Last            *contentAcknowledged `json:"last,omitempty"`
 	MutationVersion uint8                `json:"mutationVersion,omitempty"`
 	ArchivePolicy   string               `json:"archivePolicy,omitempty"`
+	// CollectableSkip counts the leading physical rows that physical GC and
+	// typed rewrites may drop: those whose archive was confirmed, contiguously
+	// from the start of the file. A released compaction or a truncation never
+	// advances it, so their rows stay on disk. Metadata written before this
+	// field reads as zero and keeps its prefix.
+	CollectableSkip int `json:"collectableSkip,omitempty"`
 	storage         *contentStorageState
 	opaque          json.RawMessage
+}
+
+// collectablePrefix reports whether every row before Skip may leave the
+// physical source without losing a row the archive never confirmed.
+func (state *contentIdentityState) collectablePrefix() bool {
+	return state.CollectableSkip == state.Skip
 }
 
 type contentDomainWitness struct {
@@ -683,6 +695,9 @@ func (s *JSONLStore) initializeContentIdentityLocked(
 		Skip:          next.Skip,
 		Count:         next.Count,
 		Rows:          make([]contentLocator, 0, len(frame.Entries)),
+		// A prefix older than the identity was never in its archive: it keeps
+		// the physical GC it had before initialization.
+		CollectableSkip: next.Skip,
 	}
 	for _, row := range image.activeRows() {
 		state.Rows = append(
