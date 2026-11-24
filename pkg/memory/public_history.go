@@ -80,6 +80,7 @@ func publicHistoryMessage(message providers.Message) (providers.Message, bool) {
 		Role: message.Role, Content: message.Content, ModelName: message.ModelName,
 		CreatedAt: message.CreatedAt, Media: message.Media, Attachments: message.Attachments,
 		ToolCalls: publicToolCalls(message.ToolCalls), ToolCallID: message.ToolCallID, Delivery: message.Delivery,
+		Fallback: message.Fallback,
 	}, true
 }
 

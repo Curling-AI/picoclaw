@@ -202,6 +202,9 @@ type turnExecution struct {
 	// any text: nothing to persist, nothing to deliver. (seucaranguejo fork —
 	// MST-795)
 	finalIsFallback bool
+	// fallbackKind is the protocoltypes.Fallback* kind of a fixed text that
+	// stands in for the reply; the persisted message carries it.
+	fallbackKind string
 
 	// Iteration tracking
 	iteration int
