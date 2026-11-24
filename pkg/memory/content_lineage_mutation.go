@@ -49,6 +49,35 @@ func contentLocatorsForData(data []byte, domain string, start int, refs []Conten
 	return rows, nil
 }
 
+// physicalRowsPrefix returns the bytes of the first n nonempty rows of a whole
+// physical image, and false when it holds fewer complete rows.
+func physicalRowsPrefix(data []byte, n int) ([]byte, bool) {
+	offset, count := 0, 0
+	for _, row := range bytes.SplitAfter(data, []byte{'\n'}) {
+		if count == n {
+			break
+		}
+		if len(row) == 0 || row[len(row)-1] != '\n' {
+			return nil, false
+		}
+		offset += len(row)
+		if len(bytes.TrimRight(row, "\r\n")) != 0 {
+			count++
+		}
+	}
+	return data[:offset], count == n
+}
+
+// contentLocatorsAfterSkip locates the rows of a whole physical image past its
+// first skip rows, which a retained prefix keeps without refs.
+func contentLocatorsAfterSkip(data []byte, domain string, skip int, refs []ContentRef) ([]contentLocator, error) {
+	prefix, ok := physicalRowsPrefix(data, skip)
+	if !ok {
+		return nil, ErrContentStateChanged
+	}
+	return contentLocatorsForData(data[len(prefix):], domain, skip, refs)
+}
+
 func (s *JSONLStore) prepareContentAppend(
 	key string,
 	original SessionMeta,
@@ -117,6 +146,11 @@ func (s *JSONLStore) prepareContentAppend(
 
 func (s *JSONLStore) contentSummaryChanged(meta *SessionMeta) {
 	if state := meta.ContentIdentity; state != nil && !state.Unavailable {
+		// An explicit truncation drops its rows by intent, as it always did;
+		// it cannot close the gap a released compaction left.
+		if state.CollectableSkip == state.Skip {
+			state.CollectableSkip = meta.Skip
+		}
 		state.StateToken = uuid.NewString()
 		state.SummaryDigest = contentDigest([]byte(meta.Summary))
 		state.Skip = meta.Skip
@@ -165,13 +199,14 @@ func (s *JSONLStore) prepareContentRewrite(key string, original SessionMeta, nex
 		return nil
 	}
 	refs := refsForLocators(next.ContentIdentity.Rows)
-	rows, err := contentLocatorsForData(data, next.ContentIdentity.DomainID, 0, refs)
+	rows, err := contentLocatorsAfterSkip(data, next.ContentIdentity.DomainID, next.Skip, refs)
 	if err != nil {
 		return err
 	}
 	next.ContentIdentity.Rows = rows
 	next.ContentIdentity.Count = next.Count
 	next.ContentIdentity.Skip = next.Skip
+	next.ContentIdentity.CollectableSkip = min(next.ContentIdentity.CollectableSkip, next.Skip)
 	next.ContentIdentity.SummaryDigest = contentDigest([]byte(next.Summary))
 	return nil
 }

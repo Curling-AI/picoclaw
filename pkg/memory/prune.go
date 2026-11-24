@@ -208,7 +208,7 @@ func (s *JSONLStore) removeSessionFilesLocked(sanitized string, purpose ...strin
 	if err != nil {
 		return err
 	}
-	if meta, err = s.metaAfterOverdueCompaction(context.Background(), sanitized, meta); err != nil {
+	if meta, err = s.metaAfterOverdueCompaction(context.Background(), meta.Key, meta, s.readMeta); err != nil {
 		return err
 	}
 	if operationErr := s.contentPendingGuard(meta); operationErr != nil {

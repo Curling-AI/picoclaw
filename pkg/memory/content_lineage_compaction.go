@@ -412,6 +412,11 @@ func (s *JSONLStore) commitContentArchiveAck(ctx context.Context, key string, im
 		AckDigest:  digest,
 	}
 	next.ContentIdentity.Pending = nil
+	// The archive now holds the cut's rows. They join the collectable prefix only
+	// when every row before them is already in it: a released cut leaves a gap.
+	if state.CollectableSkip == state.Pending.Before.Skip {
+		next.ContentIdentity.CollectableSkip = state.Pending.After.Skip
+	}
 	// ACK changes retention only. Its own atomic metadata commit does not mint a
 	// content revision, receipt, read watermark or substitute the current tail.
 	if err := s.commitContentMetadata(ctx, key, image, next); err != nil {
@@ -424,8 +429,8 @@ func (s *JSONLStore) commitContentArchiveAck(ctx context.Context, key string, im
 }
 
 // overdueCompaction reports a compaction whose archive confirmation is past its
-// deadline. Content sessions never compact physically, so releasing it keeps
-// every row on disk and only gives up the archive copy.
+// deadline. Releasing it gives up only the archive copy: CollectableSkip never
+// passes its cut, so its rows stay on disk.
 func overdueCompaction(pending *contentPending) bool {
 	return pending != nil && pending.Mutation == nil && time.Now().After(pending.Transition.ExpiresAt)
 }
@@ -461,17 +466,19 @@ func (s *JSONLStore) releaseOverdueCompaction(ctx context.Context, key string, m
 	return true, nil
 }
 
-// metaAfterOverdueCompaction is releaseOverdueCompaction for readMeta callers.
+// metaAfterOverdueCompaction releases the overdue compaction an operation met
+// and rereads the metadata with that operation's own reader.
 func (s *JSONLStore) metaAfterOverdueCompaction(
 	ctx context.Context,
 	key string,
 	meta SessionMeta,
+	reread func(string) (SessionMeta, error),
 ) (SessionMeta, error) {
 	released, err := s.releaseOverdueCompaction(ctx, key, meta)
 	if err != nil || !released {
 		return meta, err
 	}
-	return s.readMeta(key)
+	return reread(key)
 }
 
 func (s *JSONLStore) contentPendingGuard(meta SessionMeta) error {

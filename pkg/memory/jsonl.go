@@ -991,7 +991,7 @@ func (s *JSONLStore) TruncateHistory(
 	if err != nil {
 		return err
 	}
-	if meta, err = s.metaAfterOverdueCompaction(ctx, sessionKey, meta); err != nil {
+	if meta, err = s.metaAfterOverdueCompaction(ctx, sessionKey, meta, s.readMeta); err != nil {
 		return err
 	}
 	before := copyMeta(meta)
@@ -1070,7 +1070,7 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 	if err != nil {
 		return err
 	}
-	if meta, err = s.metaAfterOverdueCompaction(ctx, sessionKey, meta); err != nil {
+	if meta, err = s.metaAfterOverdueCompaction(ctx, sessionKey, meta, s.readMeta); err != nil {
 		return err
 	}
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
@@ -1135,15 +1135,13 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	if operationErr := s.prepareHistoryMutation(sessionKey, &meta); operationErr != nil {
 		return operationErr
 	}
-	if meta.ContentIdentity != nil && proofOptional {
-		// Save never compacts a content session physically: its compaction archive
-		// may be released unacknowledged, and the rows are its history of record.
-		return s.checkRetainedContentSource(ctx, sessionKey)
-	}
-	if meta.ContentIdentity != nil && meta.ContentIdentity.Pending != nil {
-		// An explicit Compact retains the prefix while its archive is pending.
-		// shortcut: after a release it collects unarchived rows, upgrade if
-		// anything but tests calls Compact on a content session.
+	// A pending archive, or a prefix holding rows of a compaction released
+	// without confirmation, is still the only copy of those rows: keep them.
+	if state := meta.ContentIdentity; state != nil &&
+		(state.Pending != nil || (!state.Unavailable && !state.collectablePrefix())) {
+		if proofOptional {
+			return s.checkRetainedContentSource(ctx, sessionKey)
+		}
 		return nil
 	}
 	if meta.Skip == 0 {
