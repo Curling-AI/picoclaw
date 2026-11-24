@@ -2,7 +2,6 @@ package providers
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -142,11 +141,13 @@ func TestToolSchemaTransformKeepsTheDecisionsAPI(t *testing.T) {
 		t.Fatalf("Decide() = %v, %v; want the gateway's 0.93", answers, err)
 	}
 
+	// A provider without a Decisions API stays without one behind the transform,
+	// so its callers take the chat path instead of a decision that always fails.
 	wrapped, err := wrapProviderWithToolSchemaTransform(&toolCaptureProvider{}, "simple")
 	if err != nil {
 		t.Fatalf("wrapProviderWithToolSchemaTransform() error = %v", err)
 	}
-	if _, err := wrapped.(Decider).Decide(t.Context(), "m", "in", nil); !errors.Is(err, errNoDecisions) {
-		t.Errorf("Decide() over a provider without decisions = %v, want errNoDecisions", err)
+	if _, ok := wrapped.(Decider); ok {
+		t.Errorf("%T over a provider without decisions claims to decide", wrapped)
 	}
 }

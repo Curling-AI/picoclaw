@@ -2,15 +2,9 @@ package providers
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
 )
-
-// errNoDecisions is what Decide answers when the wrapped provider has no
-// Decisions API.
-var errNoDecisions = errors.New("provider cannot answer decisions")
 
 type toolSchemaTransformProvider struct {
 	delegate  LLMProvider
@@ -19,6 +13,20 @@ type toolSchemaTransformProvider struct {
 
 type toolSchemaStreamingProvider struct {
 	*toolSchemaTransformProvider
+}
+
+// The deciding variants carry the delegate's Decisions API, and only a delegate
+// that has one gets them: callers pick the decision or the chat path by asking
+// for Decider, so a wrapper that always answered yes sent chat-only providers
+// down a path that always fails. (seucaranguejo fork)
+type toolSchemaDecidingProvider struct {
+	*toolSchemaTransformProvider
+	Decider
+}
+
+type toolSchemaStreamingDecidingProvider struct {
+	*toolSchemaStreamingProvider
+	Decider
 }
 
 func wrapProviderWithToolSchemaTransform(delegate LLMProvider, transform string) (LLMProvider, error) {
@@ -33,8 +41,16 @@ func wrapProviderWithToolSchemaTransform(delegate LLMProvider, transform string)
 		delegate:  delegate,
 		transform: transform,
 	}
+	decider, decides := delegate.(Decider)
 	if _, ok := delegate.(StreamingProvider); ok {
-		return &toolSchemaStreamingProvider{toolSchemaTransformProvider: base}, nil
+		streaming := &toolSchemaStreamingProvider{toolSchemaTransformProvider: base}
+		if decides {
+			return &toolSchemaStreamingDecidingProvider{toolSchemaStreamingProvider: streaming, Decider: decider}, nil
+		}
+		return streaming, nil
+	}
+	if decides {
+		return &toolSchemaDecidingProvider{toolSchemaTransformProvider: base, Decider: decider}, nil
 	}
 	return base, nil
 }
@@ -104,21 +120,6 @@ func (p *toolSchemaTransformProvider) SupportsThinking() bool {
 func (p *toolSchemaTransformProvider) SupportsNativeSearch() bool {
 	ns, ok := p.delegate.(NativeSearchCapable)
 	return ok && ns.SupportsNativeSearch()
-}
-
-// Decide forwards to the wrapped provider: without it the transform hid the
-// gateway's Decisions API, and every guard that asks the decision model went
-// off with no error. (seucaranguejo fork)
-func (p *toolSchemaTransformProvider) Decide(
-	ctx context.Context,
-	model, input string,
-	questions []DecisionQuestion,
-) (map[string]float64, error) {
-	decider, ok := p.delegate.(Decider)
-	if !ok {
-		return nil, fmt.Errorf("%T: %w", p.delegate, errNoDecisions)
-	}
-	return decider.Decide(ctx, model, input, questions)
 }
 
 func (p *toolSchemaTransformProvider) Close() {
