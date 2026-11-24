@@ -24,6 +24,7 @@ import (
 // session manager, context builder, and tool registry.
 type AgentInstance struct {
 	modelMu                   *sync.RWMutex
+	promptTokenRatios         *sync.Map // model -> measured/estimated prompt tokens, see recordPromptTokens
 	ID                        string
 	Name                      string
 	Model                     string
@@ -443,6 +444,7 @@ func newAgentInstance(
 
 	return &AgentInstance{
 		modelMu:                   &sync.RWMutex{},
+		promptTokenRatios:         &sync.Map{},
 		ID:                        agentID,
 		Name:                      agentName,
 		Model:                     model,

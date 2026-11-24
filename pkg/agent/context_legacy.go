@@ -96,7 +96,7 @@ func (m *legacyContextManager) Compact(ctx context.Context, req *CompactRequest)
 			)
 		}
 	case ContextCompressReasonSummarize:
-		m.maybeSummarize(ctx, req.SessionKey)
+		m.maybeSummarize(ctx, req.SessionKey, req.Budget)
 	}
 	return nil
 }
@@ -127,16 +127,20 @@ func (m *legacyContextManager) Clear(ctx context.Context, sessionKey string) err
 }
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
-// It runs asynchronously in a goroutine.
-func (m *legacyContextManager) maybeSummarize(ctx context.Context, sessionKey string) {
+// It runs asynchronously in a goroutine. budget is the window the turn's model
+// measured (see calibratedWindow); zero means the agent's nominal window.
+func (m *legacyContextManager) maybeSummarize(ctx context.Context, sessionKey string, budget int) {
 	agent := m.al.registry.GetDefaultAgent()
 	if agent == nil {
 		return
 	}
+	if budget <= 0 {
+		budget = agent.ContextWindow
+	}
 
 	newHistory := agent.Sessions.GetHistory(sessionKey)
 	tokenEstimate := m.estimateTokens(newHistory)
-	threshold := agent.ContextWindow * agent.SummarizeTokenPercent / 100
+	threshold := budget * agent.SummarizeTokenPercent / 100
 
 	// A zero message threshold disables the message-count trigger; the token
 	// threshold still guards against context overflow.
