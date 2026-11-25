@@ -71,6 +71,10 @@ const (
 	// real tool call resets it, so a long run that stops this way again later
 	// gets its own retry.
 	maxPromiseRetries = 1
+	// maxPromiseRetriesPerTurn caps them over the whole turn: a model that
+	// answers every retry with one call and the same promise would otherwise
+	// loop up to the iteration cap.
+	maxPromiseRetriesPerTurn = 3
 )
 
 // promiseVerdict is the judge's answer about one reply. Without a decision

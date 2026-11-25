@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -49,6 +50,38 @@ func TestPromiseAfterAToolOutOfRetriesIsDeliveredAndLogged(t *testing.T) {
 	}
 	if strings.Contains(log, "cardápio") || strings.Contains(log, "Vou refazer") {
 		t.Error("the reply text reached the log")
+	}
+}
+
+// A model that answers each retry with one call and then the same promise
+// would retry up to the iteration cap: past the turn's cap, the promise goes
+// out as it is.
+func TestPromiseRetriesStopAtTheTurnCap(t *testing.T) {
+	readLog := captureAgentLog(t)
+	answers := make([]judgeAnswer, 0, maxPromiseRetriesPerTurn+1)
+	script := make([]providers.LLMResponse, 0, 2*(maxPromiseRetriesPerTurn+1))
+	for i := range maxPromiseRetriesPerTurn + 1 {
+		answers = append(answers, judgedYes)
+		script = append(script,
+			readFileCallAt(fmt.Sprintf("call_%d", i), fmt.Sprintf("notes-%d.md", i)),
+			providers.LLMResponse{Content: promiseAfterTools},
+		)
+	}
+	al, provider := newJudgedLoop(t, answers, script...)
+
+	resp, err := al.ProcessDirect(context.Background(), "o visual ficou fraco", "promise-turn-cap-session")
+	if err != nil {
+		t.Fatalf("ProcessDirect: %v", err)
+	}
+	if resp != promiseAfterTools {
+		t.Errorf("response = %q, want the promise delivered once the turn ran out of retries", resp)
+	}
+	if got, want := provider.calls(), len(script); got != want {
+		t.Errorf("provider calls = %d, want %d (no retry past the turn's cap)", got, want)
+	}
+	log := readLog()
+	if strings.Count(log, deliveredPromiseLine) != 1 || !strings.Contains(log, `"turn_retries":3`) {
+		t.Errorf("want one %q line with turn_retries 3, log:\n%s", deliveredPromiseLine, log)
 	}
 }
 
