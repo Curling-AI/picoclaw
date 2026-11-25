@@ -259,18 +259,20 @@ func TestTieredImageTurn_TransientVisionFailureFallsBackToVision(t *testing.T) {
 // The vision model refused the image: it becomes a note for the turn, and the
 // picked tier answers without ever getting the raw image.
 func TestTieredImageTurn_RefusedImageReachesTheTierAsANote(t *testing.T) {
-	provider := &scriptedTierProvider{visionErrs: []error{errVisionRefusedImage}}
-	resp, err := runTextTierTurn(t, provider, tierTurn{})
-	if err != nil {
-		t.Fatalf("processMessage: %v", err)
-	}
-	if resp != "answered by text-tier" {
-		t.Fatalf("response = %q, want the picked tier to answer", resp)
-	}
-	for i, c := range provider.turnCalls() {
-		if c.media || !strings.Contains(c.content, unreadableImageNote) {
-			t.Fatalf("call %d on %q: media=%v note=%v, want the note and no image",
-				i, c.model, c.media, strings.Contains(c.content, unreadableImageNote))
+	for _, visionErr := range []error{errVisionRefusedImage, errUnsupportedImageData} {
+		provider := &scriptedTierProvider{visionErrs: []error{visionErr}}
+		resp, err := runTextTierTurn(t, provider, tierTurn{})
+		if err != nil {
+			t.Fatalf("%v: processMessage: %v", visionErr, err)
+		}
+		if resp != "answered by text-tier" {
+			t.Fatalf("%v: response = %q, want the picked tier to answer", visionErr, resp)
+		}
+		for i, c := range provider.turnCalls() {
+			if c.media || !strings.Contains(c.content, unreadableImageNote) {
+				t.Fatalf("%v: call %d on %q: media=%v note=%v, want the note and no image",
+					visionErr, i, c.model, c.media, strings.Contains(c.content, unreadableImageNote))
+			}
 		}
 	}
 }
