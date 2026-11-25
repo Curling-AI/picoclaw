@@ -1059,7 +1059,8 @@ func TestMCPAccountSignal(t *testing.T) {
 }
 
 // Shapes a real MCP server sent: Anthropic rejected the request over the null
-// description and OpenAI over the array without items.
+// description and OpenAI over the array without items. Literal values, property
+// names and tuples stay as declared.
 func TestMCPTool_Parameters_NormalizesProviderRejectedShapes(t *testing.T) {
 	var schema map[string]any
 	raw := `{"type":"object","required":[],"properties":{
@@ -1067,7 +1068,10 @@ func TestMCPTool_Parameters_NormalizesProviderRejectedShapes(t *testing.T) {
 		"distributions":{"type":"array","description":"List of {funnel_tag_id, count}."},
 		"tags":{"type":["array","null"]},
 		"ids":{"type":"array","items":{"type":"string","description":null}},
-		"note":{"type":"string","default":null}
+		"note":{"type":"string","default":null},
+		"default":{"type":"string","description":null},
+		"mode":{"enum":[{"kind":"a","extra":null}],"const":{"items":null}},
+		"pair":{"type":"array","prefixItems":[{"type":"string"}],"unevaluatedItems":false}
 	}}`
 	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
 		t.Fatal(err)
@@ -1077,10 +1081,12 @@ func TestMCPTool_Parameters_NormalizesProviderRejectedShapes(t *testing.T) {
 	params := NewMCPTool(&MockMCPManager{}, "copy-hub", &mcp.Tool{Name: "t", InputSchema: schema}).Parameters()
 
 	got, _ := json.Marshal(params)
-	want := `{"properties":{"bu_id":{"type":"string"},` +
+	want := `{"properties":{"bu_id":{"type":"string"},"default":{"type":"string"},` +
 		`"distributions":{"description":"List of {funnel_tag_id, count}.","items":{},"type":"array"},` +
 		`"ids":{"items":{"type":"string"},"type":"array"},` +
+		`"mode":{"const":{"items":null},"enum":[{"extra":null,"kind":"a"}]},` +
 		`"note":{"default":null,"type":"string"},` +
+		`"pair":{"prefixItems":[{"type":"string"}],"type":"array","unevaluatedItems":false},` +
 		`"tags":{"items":{},"type":["array","null"]}},"required":[],"type":"object"}`
 	if string(got) != want {
 		t.Fatalf("normalized schema:\n got %s\nwant %s", got, want)

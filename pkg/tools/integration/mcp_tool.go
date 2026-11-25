@@ -248,12 +248,20 @@ func normalizeProviderSchema(node any) any {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for key, value := range v {
-			if value == nil && key != "default" && key != "const" {
+			switch {
+			case value == nil && key != "default" && key != "const":
 				continue
+			case schemaLiteralKeywords[key]:
+				out[key] = value
+			case schemaNameMapKeywords[key]:
+				out[key] = normalizeNamedSchemas(value)
+			default:
+				out[key] = normalizeProviderSchema(value)
 			}
-			out[key] = normalizeProviderSchema(value)
 		}
-		if _, hasItems := out["items"]; !hasItems && isArraySchemaType(out["type"]) {
+		_, hasItems := out["items"]
+		_, hasPrefixItems := out["prefixItems"]
+		if !hasItems && !hasPrefixItems && isArraySchemaType(out["type"]) {
 			out["items"] = map[string]any{}
 		}
 		return out
@@ -266,6 +274,28 @@ func normalizeProviderSchema(node any) any {
 	default:
 		return node
 	}
+}
+
+// schemaLiteralKeywords hold argument values, not schemas, so they stay as declared.
+var schemaLiteralKeywords = map[string]bool{"const": true, "enum": true, "default": true, "examples": true}
+
+// schemaNameMapKeywords map user-chosen names to schemas; the names are not keywords.
+var schemaNameMapKeywords = map[string]bool{
+	"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true,
+}
+
+func normalizeNamedSchemas(node any) any {
+	named, ok := node.(map[string]any)
+	if !ok {
+		return normalizeProviderSchema(node)
+	}
+	out := make(map[string]any, len(named))
+	for name, schema := range named {
+		if schema != nil {
+			out[name] = normalizeProviderSchema(schema)
+		}
+	}
+	return out
 }
 
 func isArraySchemaType(schemaType any) bool {
