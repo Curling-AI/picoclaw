@@ -243,6 +243,36 @@ func TestReplyWithoutAClearYesIsDeliveredWithoutRetry(t *testing.T) {
 
 // The judge reads the reply's last sentence apart: after a delivery, the step
 // announced at the very end is what leaves the person waiting.
+// The nudge's quote reaches back to the sentence before the final one: after a
+// long closing line about the person's part, the step to take is there.
+func TestPromiseNudgeQuotesTheStepBeforeAClosingLine(t *testing.T) {
+	closing := "Enquanto isso, você confere o cadastro dos produtos: " +
+		strings.Repeat("nome, preço, estoque e foto de cada item; ", 6) + "e a categoria."
+	for name, tc := range map[string]struct{ reply, want string }{
+		"step before a long closing line": {
+			"Pedido aprovado. Começo agora pela integração de pedidos e te aviso quando ficar pronta.\n\n" + closing,
+			"Começo agora pela integração de pedidos",
+		},
+		"a line break ends the step": {"Vou montar a planilha agora\n" + closing, "Vou montar a planilha agora"},
+		"short reply whole":          {"Deixa eu abrir o artigo.", "Deixa eu abrir o artigo."},
+	} {
+		got := promiseNudgeQuote(tc.reply)
+		if !strings.Contains(got, tc.want) || !strings.HasSuffix(tc.reply, got) {
+			t.Errorf("%s: quote = %q, want it to hold %q and end the reply", name, got, tc.want)
+		}
+		if strings.Contains(got, "Pedido aprovado") {
+			t.Errorf("%s: quote reached past the sentence before the final one: %q", name, got)
+		}
+	}
+	if got := []rune(promiseNudgeQuote(strings.Repeat("palavra ", 60) + "fim.")); len(got) > promiseNudgeTail {
+		t.Errorf("a one-sentence reply quoted %d runes, want at most %d", len(got), promiseNudgeTail)
+	}
+	longStep := strings.Repeat("passo ", 200) + "fim. " + closing
+	if got := []rune(promiseNudgeQuote(longStep)); len(got) > promiseNudgeTailMax {
+		t.Errorf("a long step quoted %d runes, want at most %d", len(got), promiseNudgeTailMax)
+	}
+}
+
 func TestFinalSentenceIsTheReplysLastSentence(t *testing.T) {
 	for name, tc := range map[string]struct{ reply, want string }{
 		"after a delivery": {

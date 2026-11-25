@@ -1342,8 +1342,10 @@ func (p *Pipeline) CallLLM(
 			case verdict.err != nil:
 				logger.WarnCF("agent", "Promise judge unavailable; delivering the reply", fields)
 			case verdict.promised && exec.promiseRetries < maxPromiseRetries &&
+				exec.promiseRetriesThisTurn < maxPromiseRetriesPerTurn &&
 				!exec.wrapUpNudged && !ts.atIterationCap(iteration):
 				exec.promiseRetries++
+				exec.promiseRetriesThisTurn++
 				cancelConfiguredStreamingLLM(turnCtx, exec)
 				p.reviveDiscoveredTools(ts, exec, iteration)
 				exec.promiseNudge = promiseNudge(responseContent)
@@ -1352,6 +1354,7 @@ func (p *Pipeline) CallLLM(
 					Content: exec.promiseNudge,
 				})
 				fields["retry"] = exec.promiseRetries
+				fields["turn_retries"] = exec.promiseRetriesThisTurn
 				message := "LLM announced a tool call in prose and stopped; retrying"
 				if exec.toolRanThisTurn {
 					message = "LLM ended a reply on an unfinished step without a tool call; retrying"
@@ -1362,6 +1365,7 @@ func (p *Pipeline) CallLLM(
 				// One line per delivery, so the stops the guard gives up on can be
 				// counted; the text stays out of the log.
 				fields["retried"] = exec.promiseRetries > 0
+				fields["turn_retries"] = exec.promiseRetriesThisTurn
 				fields["model"] = exec.llmModelName
 				fields["request_id"] = exec.response.ProviderRequestID
 				logger.WarnCF("agent", "Final reply still promises a step that never ran; delivering it", fields)

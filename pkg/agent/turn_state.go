@@ -147,6 +147,9 @@ type turnExecution struct {
 	// transientTurnMessages.
 	promiseRetries int
 	promiseNudge   string
+	// promiseRetriesThisTurn counts every promise retry of the turn; no tool
+	// call resets it.
+	promiseRetriesThisTurn int
 
 	// wrapUpNudged records that the 85% tool-budget warning went out. From
 	// there the model was told to deliver what it has, and a nudge to carry on
