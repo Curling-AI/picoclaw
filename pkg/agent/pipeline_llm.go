@@ -433,6 +433,7 @@ func (p *Pipeline) CallLLM(
 
 		al.activeRequestsInc()
 		defer al.activeRequestsDec()
+		exec.servedModel = exec.activeModel
 
 		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
 			providerCtx,
@@ -530,10 +531,12 @@ func (p *Pipeline) CallLLM(
 					map[string]any{"agent_id": ts.agent.ID, "iteration": iteration},
 				)
 			}
+			exec.servedModel = ""
 			for _, candidate := range exec.activeCandidates {
 				if candidate.StableKey() != fbResult.IdentityKey {
 					continue
 				}
+				exec.servedModel = candidate.Model
 				exec.llmModelName = resolvedCandidateModelName(
 					[]providers.FallbackCandidate{candidate},
 					exec.llmModelName,
@@ -570,6 +573,9 @@ func (p *Pipeline) CallLLM(
 		}
 		return messages
 	}
+	// Delegation only reaches the current turn's images: an image the turn
+	// already settled stays settled wherever it sits, once the model is picked.
+	exec.callMessages = p.withKnownImageText(ts, exec, exec.callMessages)
 	// contextRefusals counts this call's context-window refusals; retry also
 	// counts the transient ones (429, 5xx) before them.
 	contextRefusals := 0
@@ -578,6 +584,27 @@ func (p *Pipeline) CallLLM(
 	// failure picks the id of the attempt after it, which the retry event names.
 	nextRequestID := ""
 	modelReplaced := false
+	emitRetry := func(attempt int, reason string, backoff time.Duration) {
+		al.emitEvent(runtimeevents.KindAgentLLMRetry, ts.eventMeta("runTurn", "turn.llm.retry"), LLMRetryPayload{
+			Attempt:    attempt,
+			MaxRetries: maxRetries,
+			Reason:     reason,
+			Error:      err.Error(),
+			Backoff:    backoff,
+			RequestID:  nextRequestID,
+		})
+	}
+	// The image retries resend the call with other messages, outside the retry
+	// budget. (seucaranguejo fork)
+	resendWith := func(attempt int, reason, warning string, messages []providers.Message) {
+		emitRetry(attempt, reason, 0)
+		logger.WarnCF("agent", warning, map[string]any{
+			"agent_id":   ts.agent.ID,
+			"model_name": exec.llmModelName,
+			"error":      err.Error(),
+		})
+		exec.callMessages = messages
+	}
 	for retry := 0; retry <= maxRetries; retry++ {
 		if nextRequestID != "" {
 			exec.llmOpts, exec.llmRequestID = optsWithRequestID(exec.llmOpts, nextRequestID), nextRequestID
@@ -614,6 +641,18 @@ func (p *Pipeline) CallLLM(
 			}
 		}
 
+		if isInvalidImageError(err) {
+			// A bad image, not a model without eyes: delegation reads the memo,
+			// so the rest of the turn sends the note instead, to any model.
+			// Outside the retry budget, like the case below. (seucaranguejo fork)
+			if withNote, marked := markImagesUnreadable(exec, exec.callMessages); marked {
+				resendWith(retry+1, "invalid_image",
+					"Provider refused an image as invalid; leaving it out for the rest of the turn", withNote)
+				retry--
+				continue
+			}
+		}
+
 		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {
 			onImageModel := len(ts.agent.ImageCandidates) > 0 &&
 				sameCandidateSet(exec.activeCandidates, ts.agent.ImageCandidates)
@@ -626,23 +665,8 @@ func (p *Pipeline) CallLLM(
 			// which belongs to the provider errors below. (seucaranguejo fork)
 			withoutImages, stripped := stripImages(exec.callMessages, imageNotSeenNote)
 			if stripped && !imagesUnreadable && len(ts.agent.ImageCandidates) > 0 && !onImageModel {
-				al.emitEvent(
-					runtimeevents.KindAgentLLMRetry,
-					ts.eventMeta("runTurn", "turn.llm.retry"),
-					LLMRetryPayload{
-						Attempt:    retry + 1,
-						MaxRetries: maxRetries,
-						Reason:     "vision_unsupported",
-						Error:      err.Error(),
-						RequestID:  nextRequestID,
-					},
-				)
-				logger.WarnCF("agent", "Model cannot read images; retrying the call without them", map[string]any{
-					"agent_id":   ts.agent.ID,
-					"model_name": exec.llmModelName,
-					"error":      err.Error(),
-				})
-				exec.callMessages = withoutImages
+				resendWith(retry+1, "vision_unsupported",
+					"Model cannot read images; retrying the call without them", withoutImages)
 				imagesUnreadable = true
 				retry--
 				continue
@@ -656,7 +680,11 @@ func (p *Pipeline) CallLLM(
 
 		errMsg := strings.ToLower(err.Error())
 		retryReason, isTransientError := transientLLMRetryReason(err)
-		isContextError := !isTransientError && (strings.Contains(errMsg, "context_length_exceeded") ||
+		// See isSizeRefusal. (seucaranguejo fork)
+		pastMeasuredWindow := estimateCallTokens(exec.callMessages, exec.providerToolDefs, ts.agent.MaxTokens) >
+			ts.agent.refusalWindow(exec.activeModel, turnContextWindow(ts, exec), ts.agent.MaxTokens)
+		isContextError := !isTransientError && (isSizeRefusal(err, pastMeasuredWindow) ||
+			strings.Contains(errMsg, "context_length_exceeded") ||
 			strings.Contains(errMsg, "context window") ||
 			strings.Contains(errMsg, "context_window") ||
 			strings.Contains(errMsg, "maximum context length") ||
@@ -674,18 +702,7 @@ func (p *Pipeline) CallLLM(
 
 		if isTransientError && retry < maxRetries {
 			backoff := time.Duration(retry+1) * time.Duration(backoffSecs) * time.Second
-			al.emitEvent(
-				runtimeevents.KindAgentLLMRetry,
-				ts.eventMeta("runTurn", "turn.llm.retry"),
-				LLMRetryPayload{
-					Attempt:    retry + 1,
-					MaxRetries: maxRetries,
-					Reason:     retryReason,
-					Error:      err.Error(),
-					Backoff:    backoff,
-					RequestID:  nextRequestID,
-				},
-			)
+			emitRetry(retry+1, retryReason, backoff)
 			logger.WarnCF("agent", "Transient LLM error, retrying after backoff", map[string]any{
 				"error":   err.Error(),
 				"reason":  retryReason,
@@ -704,17 +721,7 @@ func (p *Pipeline) CallLLM(
 		}
 
 		if isContextError && retry < maxRetries && !ts.opts.NoHistory {
-			al.emitEvent(
-				runtimeevents.KindAgentLLMRetry,
-				ts.eventMeta("runTurn", "turn.llm.retry"),
-				LLMRetryPayload{
-					Attempt:    retry + 1,
-					MaxRetries: maxRetries,
-					Reason:     "context_limit",
-					Error:      err.Error(),
-					RequestID:  nextRequestID,
-				},
-			)
+			emitRetry(retry+1, "context_limit", 0)
 			logger.WarnCF(
 				"agent",
 				"Context window error detected, attempting compression",
@@ -737,7 +744,7 @@ func (p *Pipeline) CallLLM(
 			// Compact/trim to the model actually serving this turn: a media turn
 			// routed to the small-context vision model needs its (128K) budget, not
 			// the main model's 1M, or the retry never trims enough and 400s again.
-			effectiveCW := turnContextWindow(ts, exec)
+			effectiveCW := ts.agent.calibratedWindow(exec.activeModel, turnContextWindow(ts, exec), ts.agent.MaxTokens)
 			if learned := exec.learnedContextWindow(); learned > 0 {
 				effectiveCW = min(effectiveCW, learned)
 			}
@@ -1059,6 +1066,13 @@ func (p *Pipeline) CallLLM(
 		llmResponseFields["prompt_tokens"] = exec.response.Usage.PromptTokens
 		llmResponseFields["completion_tokens"] = exec.response.Usage.CompletionTokens
 		llmResponseFields["total_tokens"] = exec.response.Usage.TotalTokens
+		ts.agent.recordPromptTokens(
+			exec.servedModel,
+			turnContextWindow(ts, exec),
+			exec.callMessages,
+			exec.providerToolDefs,
+			exec.response.Usage.PromptTokens,
+		)
 	}
 	logger.DebugCF("agent", "LLM response", llmResponseFields)
 
@@ -1257,6 +1271,21 @@ func (p *Pipeline) CallLLM(
 			}
 		}
 
+		// A provider that parsed a call can leave its closing tags after a
+		// complete answer (`</parameter></invoke>`, DeepSeek's DSML closers): the
+		// person would see them, the judge would read them, and the session would
+		// keep them. The answer before them is the reply. (seucaranguejo fork)
+		if stripped := protocoltypes.StripDanglingCallClosers(responseContent); stripped != responseContent {
+			logger.WarnCF("agent", "LLM reply ended in tool-call closing tags it never opened; stripped them",
+				map[string]any{
+					"agent_id":       ts.agent.ID,
+					"iteration":      iteration,
+					"content_chars":  len(responseContent),
+					"stripped_chars": len(responseContent) - len(stripped),
+				})
+			responseContent = stripped
+		}
+
 		// A reply that ENDS in pseudo-XML tool-call markup is a tool call the
 		// model failed to emit structurally — the gateway's own parser matched
 		// the opening `<tool_call><function=NAME>`, gave up, and forwarded the
@@ -1328,8 +1357,10 @@ func (p *Pipeline) CallLLM(
 			case verdict.err != nil:
 				logger.WarnCF("agent", "Promise judge unavailable; delivering the reply", fields)
 			case verdict.promised && exec.promiseRetries < maxPromiseRetries &&
+				exec.promiseRetriesThisTurn < maxPromiseRetriesPerTurn &&
 				!exec.wrapUpNudged && !ts.atIterationCap(iteration):
 				exec.promiseRetries++
+				exec.promiseRetriesThisTurn++
 				cancelConfiguredStreamingLLM(turnCtx, exec)
 				p.reviveDiscoveredTools(ts, exec, iteration)
 				exec.promiseNudge = promiseNudge(responseContent)
@@ -1338,6 +1369,7 @@ func (p *Pipeline) CallLLM(
 					Content: exec.promiseNudge,
 				})
 				fields["retry"] = exec.promiseRetries
+				fields["turn_retries"] = exec.promiseRetriesThisTurn
 				message := "LLM announced a tool call in prose and stopped; retrying"
 				if exec.toolRanThisTurn {
 					message = "LLM ended a reply on an unfinished step without a tool call; retrying"
@@ -1348,9 +1380,14 @@ func (p *Pipeline) CallLLM(
 				// One line per delivery, so the stops the guard gives up on can be
 				// counted; the text stays out of the log.
 				fields["retried"] = exec.promiseRetries > 0
+				fields["turn_retries"] = exec.promiseRetriesThisTurn
 				fields["model"] = exec.llmModelName
 				fields["request_id"] = exec.response.ProviderRequestID
 				logger.WarnCF("agent", "Final reply still promises a step that never ran; delivering it", fields)
+			case verdict.model != "":
+				// One line per reply the judge let through, with its probability, so a
+				// missed promise can be told from a doubtful one; the text stays out.
+				logger.InfoCF("agent", judgeLetThroughLine, fields)
 			}
 		}
 

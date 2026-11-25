@@ -234,8 +234,85 @@ func (t *MCPTool) PromptMetadata() toolshared.PromptMetadata {
 	}
 }
 
-// Parameters returns the tool parameters schema
+// Parameters returns the tool parameters schema, normalized so providers accept it.
 func (t *MCPTool) Parameters() map[string]any {
+	params, _ := normalizeProviderSchema(t.rawParameters()).(map[string]any)
+	return params
+}
+
+// normalizeProviderSchema returns a copy of an MCP server's schema without the
+// shapes Anthropic and OpenAI reject for the whole request: null-valued
+// keywords (`"description": null`) and arrays without `items`.
+func normalizeProviderSchema(node any) any {
+	switch v := node.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, value := range v {
+			switch {
+			case value == nil && key != "default" && key != "const":
+				continue
+			case schemaLiteralKeywords[key]:
+				out[key] = value
+			case schemaNameMapKeywords[key]:
+				out[key] = normalizeNamedSchemas(value)
+			default:
+				out[key] = normalizeProviderSchema(value)
+			}
+		}
+		_, hasItems := out["items"]
+		_, hasPrefixItems := out["prefixItems"]
+		if !hasItems && !hasPrefixItems && isArraySchemaType(out["type"]) {
+			out["items"] = map[string]any{}
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, value := range v {
+			out[i] = normalizeProviderSchema(value)
+		}
+		return out
+	default:
+		return node
+	}
+}
+
+// schemaLiteralKeywords hold argument values, not schemas, so they stay as declared.
+var schemaLiteralKeywords = map[string]bool{"const": true, "enum": true, "default": true, "examples": true}
+
+// schemaNameMapKeywords map user-chosen names to schemas; the names are not keywords.
+var schemaNameMapKeywords = map[string]bool{
+	"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true,
+}
+
+func normalizeNamedSchemas(node any) any {
+	named, ok := node.(map[string]any)
+	if !ok {
+		return normalizeProviderSchema(node)
+	}
+	out := make(map[string]any, len(named))
+	for name, schema := range named {
+		if schema != nil {
+			out[name] = normalizeProviderSchema(schema)
+		}
+	}
+	return out
+}
+
+func isArraySchemaType(schemaType any) bool {
+	switch v := schemaType.(type) {
+	case string:
+		return v == "array"
+	case []any:
+		for _, item := range v {
+			if item == "array" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (t *MCPTool) rawParameters() map[string]any {
 	// The InputSchema is already a JSON Schema object
 	schema := t.tool.InputSchema
 

@@ -747,7 +747,7 @@ func (c *DiscordChannel) downloadAttachment(url, filename string) string {
 func attachmentMediaTag(filename, contentType string) string {
 	ct := strings.ToLower(contentType)
 	switch {
-	case strings.HasPrefix(ct, "image/"):
+	case media.IsViewableImage(ct):
 		return "image"
 	case strings.HasPrefix(ct, "audio/"), ct == "application/ogg", ct == "application/x-ogg":
 		return "audio"

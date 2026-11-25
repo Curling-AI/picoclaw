@@ -147,6 +147,9 @@ type turnExecution struct {
 	// transientTurnMessages.
 	promiseRetries int
 	promiseNudge   string
+	// promiseRetriesThisTurn counts every promise retry of the turn; no tool
+	// call resets it.
+	promiseRetriesThisTurn int
 
 	// wrapUpNudged records that the 85% tool-budget warning went out. From
 	// there the model was told to deliver what it has, and a nudge to carry on
@@ -212,6 +215,7 @@ type turnExecution struct {
 	// Per-iteration state set by Pipeline.PreLLM
 	activeCandidates  []providers.FallbackCandidate
 	activeModel       string
+	servedModel       string // the candidate that answered the last call; empty when unknown
 	activeModelConfig *config.ModelConfig
 	activeProvider    providers.LLMProvider
 	usedLight         bool
@@ -228,7 +232,7 @@ type turnExecution struct {
 	// (seucaranguejo fork)
 	mediaAnalysisCache map[string]string
 	// unreadableImages holds, by the same hash, the images the vision model
-	// refused this turn. They become unreadableImageNote in every later call
+	// refused this turn, or any model refused as invalid. They become unreadableImageNote in every later call
 	// instead of going back to any model. (seucaranguejo fork)
 	unreadableImages map[string]struct{}
 

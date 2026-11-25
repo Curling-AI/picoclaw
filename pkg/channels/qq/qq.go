@@ -871,7 +871,7 @@ func qqAttachmentKind(attachment *dto.MessageAttachment) string {
 	filename := strings.ToLower(attachment.FileName)
 
 	switch {
-	case strings.HasPrefix(contentType, "image/"):
+	case media.IsViewableImage(contentType):
 		return "image"
 	case strings.HasPrefix(contentType, "video/"):
 		return "video"
