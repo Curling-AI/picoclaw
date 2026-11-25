@@ -20,7 +20,9 @@ import (
 // (seucaranguejo fork)
 const promiseQuestion = "Judge the final sentence of the assistant's last message, even when the rest of the message already " +
 	"delivers something; when that sentence only says what the person does meanwhile or what is left, judge it " +
-	"together with the sentence before it. The turn has ended: the assistant does nothing more until the person writes " +
+	"together with the sentence before it, and when it only says how the assistant would carry out what it just " +
+	"asked the person to approve, judge it together with that question. The turn has ended: the assistant " +
+	"does nothing more until the person writes " +
 	"again, unless the message says it set up a reminder, an automation or a scheduled task in this turn. " +
 	"Answer yes when that final sentence announces or implies work the assistant has not done, leaving " +
 	"the person waiting on it: (1) an action it was about to take right then, such as searching, opening, " +
@@ -42,7 +44,8 @@ const promiseQuestion = "Judge the final sentence of the assistant's last messag
 	"\"Here's how I'll do it: 1. export the contacts 2. import them\"); (7) a reminder, automation or " +
 	"scheduled task announced but not set up yet (\"I'll schedule the reminder for tomorrow.\", \"Vou " +
 	"agendar o envio para segunda.\"); (8) something introduced with a colon and nothing after it (a " +
-	"report, a list, the next step); (9) a closing line that only says what the person does meanwhile or " +
+	"report, a list, the next step), or a message that breaks off in the middle of a sentence or a list; " +
+	"(9) a closing line that only says what the person does meanwhile or " +
 	"what is left, right after the assistant announced its own next step (\"Começo pela integração e te " +
 	"aviso quando ficar pronta. Você confere os produtos em paralelo.\", \"My next step, without " +
 	"waiting for your answers: the pricing table. Your part: the answers above.\", \"I'll re-read those " +
@@ -53,7 +56,9 @@ const promiseQuestion = "Judge the final sentence of the assistant's last messag
 	"minutes\") or gives tips; says a reminder, automation or scheduled task was set up in this turn, or " +
 	"when the assistant itself will act at a set time (\"Agendei: amanhã às 9h te lembro.\", \"I'll remind " +
 	"you tomorrow at 9.\"); asks the person a question, for a choice, for confirmation or for approval, " +
-	"including a plan that ends asking to start (\"Shall I start?\"); waits on the person or someone else, " +
+	"including a plan that ends asking to start, or that asks to start and then says how it would go about it " +
+	"(\"Shall I start?\", \"Can I apply the three? I'll start with the database ones and show you before " +
+	"publishing.\"); waits on the person or someone else, " +
 	"such as connecting an app, choosing an option, sending a file, filling in a form or tapping a button " +
 	"or connection card shown with the message, or another of the person's assistants replying, also when " +
 	"it says what it will do once that arrives (\"As " +

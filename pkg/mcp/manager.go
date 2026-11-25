@@ -555,6 +555,18 @@ func (m *Manager) CallTool(
 			if err == nil {
 				return result, nil
 			}
+		} else if errors.Is(err, mcp.ErrConnectionClosed) {
+			// One HTTP error (a 403) closes the streamable client for good, so every later
+			// call would fail too. No replay: a server reply coded -32003/-32004 maps to the
+			// same error, and then the tool may have run.
+			if _, reconnectErr := m.reconnectServer(ctx, serverName, conn); reconnectErr != nil {
+				return nil, fmt.Errorf(
+					"failed to call tool: %w (reopening the MCP connection failed: %v)",
+					err,
+					reconnectErr,
+				)
+			}
+			return nil, fmt.Errorf("failed to call tool (the closed MCP connection was reopened): %w", err)
 		}
 
 		return nil, fmt.Errorf("failed to call tool: %w", err)

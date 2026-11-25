@@ -110,6 +110,9 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 	}, nil
 }
 
+// finalOutputMaxRunes caps the final output a task record keeps.
+const finalOutputMaxRunes = 1200
+
 func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error {
 	if rt == nil || !rt.cfg.Enabled || input.Workspace == "" || shouldSkipLearningRecord(input) {
 		return nil
@@ -134,7 +137,7 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 		CreatedAt:      createdAt,
 		SessionKey:     input.SessionKey,
 		Summary:        buildRecordSummary(input),
-		FinalOutput:    summarizeText(input.FinalContent, 1200),
+		FinalOutput:    summarizeText(input.FinalContent, finalOutputMaxRunes),
 		Status:         RecordStatus("new"),
 		Success:        &success,
 		UsedSkillNames: append([]string(nil), usedSkillNames...),
@@ -652,20 +655,15 @@ func (rt *Runtime) recordsForColdPathInputs(
 		// run. Already-judged records reuse their persisted Success verdict
 		// below. (seucaranguejo fork)
 		if record.Success != nil && *record.Success && judge != nil && !record.SuccessJudged {
+			started := time.Now()
 			decision, err := judge.JudgeTaskRecord(ctx, record)
 			if err != nil {
 				return stop(err)
 			}
+			logSuccessVerdict(record, decision, time.Since(started))
 			judgedSuccess := decision.Success
 			evidenceRecord.Success = &judgedSuccess
 			judgedDecisions[record.ID] = judgedSuccess
-			if !decision.Success {
-				logger.DebugCF("evolution", "Rejected task record by success judge", map[string]any{
-					"workspace": workspace,
-					"record_id": record.ID,
-					"reason":    strings.TrimSpace(decision.Reason),
-				})
-			}
 		}
 		evidence = append(evidence, evidenceRecord)
 		if evidenceRecord.Success == nil || !*evidenceRecord.Success {
