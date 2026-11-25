@@ -96,7 +96,8 @@ func isImageRefusal(err error) bool {
 // cannot decode: the image is bad, not the eyes of the model, so no model will
 // read it. Unlike a 413, it says so on any call, not only on a vision
 // sub-call that carries nothing but the image. (prod: Byteplus 400 "Invalid
-// base64 image_url" on a drawing sniffed as an image)
+// base64 image_url" on a drawing sniffed as an image, and "Unsupported image
+// format or invalid image data", which otherwise reads as a context error)
 func isInvalidImageError(err error) bool {
 	if err == nil {
 		return false
@@ -105,7 +106,8 @@ func isInvalidImageError(err error) bool {
 	return strings.Contains(msg, "provided image is not valid") ||
 		strings.Contains(msg, "malformed or corrupted") ||
 		strings.Contains(msg, "could not be decoded") ||
-		strings.Contains(msg, "invalid base64 image")
+		strings.Contains(msg, "invalid base64 image") ||
+		strings.Contains(msg, "invalid image data")
 }
 
 // markImagesUnreadable settles every raw image of messages as unreadable for
