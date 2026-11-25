@@ -15,7 +15,10 @@
 //   - Under the lock the disk decides: the session's cache is dropped and an
 //     orphan journal is recovered before anything is written. Never trust a
 //     cache another process may change without rereading it under the lock.
-//   - A lost lock (ErrSessionLockLost) stops the writer and undoes nothing.
+//   - The lock is advisory and an NFS lease can be lost: every writer proves
+//     it (Lock.Check) right before the rename or removal that makes its write
+//     visible. A lost lock (ErrSessionLockLost) stops the writer there and
+//     undoes nothing.
 //   - The cache serves plain reads only.
 //
 // The two-store regression tests pin the rule, so CI enforces it: see

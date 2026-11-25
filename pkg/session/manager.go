@@ -243,10 +243,16 @@ func (sm *SessionManager) Save(key string) error {
 	}
 	defer func() { _ = lock.Release() }()
 
-	return writeFileAtomic(sm.storage, filepath.Join(sm.storage, filename+".json"), data)
+	// The rename goes only after a Check: after a lost NFS lease another
+	// process may hold the lock and have saved since.
+	// shortcut: a Check proves the lock only at its instant; a stall between it and the rename can still land the save after the lease ends, the window the store's checkSessionLock leaves too.
+	return writeFileAtomic(sm.storage, filepath.Join(sm.storage, filename+".json"), data, lock.Check)
 }
 
-func writeFileAtomic(dir, sessionPath string, data []byte) error {
+// writeFileAtomic writes sessionPath through a temp file in dir, running
+// beforeRename right before the rename; its error leaves sessionPath as it
+// was and removes the temp file.
+func writeFileAtomic(dir, sessionPath string, data []byte, beforeRename func() error) error {
 	tmpFile, err := os.CreateTemp(dir, "session-*.tmp")
 	if err != nil {
 		return err
@@ -273,6 +279,9 @@ func writeFileAtomic(dir, sessionPath string, data []byte) error {
 		return err
 	}
 	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := beforeRename(); err != nil {
 		return err
 	}
 

@@ -59,21 +59,27 @@ func realPath(path string) string {
 // withSessionWriteLock runs write under the session lock when path is a
 // session file of workspace/sessions, so a tool write never interleaves with
 // the session store's. The .locks folder belongs to the store: it is refused.
-// Paths elsewhere take no session lock.
-func withSessionWriteLock(workspace, path string, write func() error) error {
+// Paths elsewhere take no session lock, and write gets no check (nil).
+//
+// Under the lock, write gets the check its WriteFile runs right before it
+// publishes: the lock is advisory, and after a lost NFS lease another process
+// may hold it and have written the file since the tool read it. A failed Check
+// stops the write with the file as it was and fails with sessionlock.ErrLost.
+// shortcut: a Check proves the lock only at its instant; a stall between it and the rename can still land the write after the lease ends, the window the store's checkSessionLock leaves too.
+func withSessionWriteLock(workspace, path string, write func(beforePublish func() error) error) error {
 	if workspace == "" {
-		return write()
+		return write(nil)
 	}
 	absWorkspace, errWorkspace := filepath.Abs(workspace)
 	absPath, errPath := filepath.Abs(path)
 	if errWorkspace != nil || errPath != nil {
-		return write() // outside sessions/: no lock
+		return write(nil) // outside sessions/: no lock
 	}
 	sessions := realPath(filepath.Join(absWorkspace, "sessions"))
 	target := filepath.Join(realPath(filepath.Dir(absPath)), filepath.Base(absPath))
 	rel, err := filepath.Rel(sessions, target)
 	if err != nil || !filepath.IsLocal(rel) {
-		return write()
+		return write(nil)
 	}
 	first, _, nested := strings.Cut(filepath.ToSlash(rel), "/")
 	if isStoreInternalName(first) {
@@ -81,7 +87,7 @@ func withSessionWriteLock(workspace, path string, write func() error) error {
 	}
 	name, ok := memory.SessionFileName(rel)
 	if nested || !ok {
-		return write()
+		return write(nil)
 	}
 	lock, err := sessionlock.Acquire(sessions, name, sessionLockWait)
 	if err != nil {
@@ -91,5 +97,10 @@ func withSessionWriteLock(workspace, path string, write func() error) error {
 		return err
 	}
 	defer func() { _ = lock.Release() }()
-	return write()
+	return write(func() error {
+		if err := lock.Check(); err != nil {
+			return fmt.Errorf("session %s: nothing was written: %w", name, err)
+		}
+		return nil
+	})
 }

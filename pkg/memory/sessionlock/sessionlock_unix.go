@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/sipeed/picoclaw/pkg/memory/internal/locktest"
+	"github.com/sipeed/picoclaw/pkg/internal/locktest"
 )
 
 const (

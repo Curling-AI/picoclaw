@@ -138,7 +138,7 @@ func (t *AppendFileTool) Execute(ctx context.Context, args map[string]any) *Tool
 // It uses a fileSystem interface, allowing the same logic for both restricted and unrestricted modes.
 func editFile(sysFs fileSystem, path, oldText, newText string) ([]byte, []byte, error) {
 	var before, after []byte
-	err := sysFs.withWriteLock(path, func() error {
+	err := sysFs.withWriteLock(path, func(beforePublish func() error) error {
 		content, err := sysFs.ReadFile(path)
 		if err != nil {
 			return err
@@ -149,7 +149,7 @@ func editFile(sysFs fileSystem, path, oldText, newText string) ([]byte, []byte, 
 			return err
 		}
 
-		if err := sysFs.WriteFile(path, newContent); err != nil {
+		if err := sysFs.WriteFile(path, newContent, beforePublish); err != nil {
 			return err
 		}
 		before, after = content, newContent
@@ -160,14 +160,14 @@ func editFile(sysFs fileSystem, path, oldText, newText string) ([]byte, []byte, 
 
 // appendFile reads the existing content (if any) via sysFs, appends new content, and writes back.
 func appendFile(sysFs fileSystem, path, appendContent string) error {
-	return sysFs.withWriteLock(path, func() error {
+	return sysFs.withWriteLock(path, func(beforePublish func() error) error {
 		content, err := sysFs.ReadFile(path)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 
 		newContent := append(content, []byte(appendContent)...)
-		return sysFs.WriteFile(path, newContent)
+		return sysFs.WriteFile(path, newContent, beforePublish)
 	})
 }
 

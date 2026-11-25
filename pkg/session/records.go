@@ -57,6 +57,10 @@ func (sm *SessionManager) DeleteSession(key string) error {
 		return err
 	}
 	defer func() { _ = lock.Release() }()
+	// The removal goes only after a Check, as Save's rename does.
+	if err := lock.Check(); err != nil {
+		return err
+	}
 
 	path := filepath.Join(storage, name+".json")
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

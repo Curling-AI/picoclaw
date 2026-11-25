@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
-	"github.com/sipeed/picoclaw/pkg/memory/internal/locktest"
+	"github.com/sipeed/picoclaw/pkg/internal/locktest"
 	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 )
 

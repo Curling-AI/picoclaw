@@ -661,7 +661,7 @@ func TestHostRW_Write_ParentDirMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, "a", "b", "c", "file.txt")
 
-	err := (&hostFs{}).WriteFile(target, []byte("hello"))
+	err := (&hostFs{}).WriteFile(target, []byte("hello"), nil)
 	assert.NoError(t, err)
 
 	data, err := os.ReadFile(target)
@@ -675,7 +675,7 @@ func TestRootRW_Write_ParentDirMissing(t *testing.T) {
 	workspace := t.TempDir()
 
 	relPath := "x/y/z/file.txt"
-	err := (&sandboxFs{workspace: workspace}).WriteFile(relPath, []byte("nested"))
+	err := (&sandboxFs{workspace: workspace}).WriteFile(relPath, []byte("nested"), nil)
 	assert.NoError(t, err)
 
 	data, err := os.ReadFile(filepath.Join(workspace, relPath))
@@ -689,7 +689,7 @@ func TestHostRW_Write(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "atomic_test.txt")
 	testData := []byte("atomic test content")
 
-	err := (&hostFs{}).WriteFile(testFile, testData)
+	err := (&hostFs{}).WriteFile(testFile, testData, nil)
 	assert.NoError(t, err)
 
 	content, err := os.ReadFile(testFile)
@@ -698,7 +698,7 @@ func TestHostRW_Write(t *testing.T) {
 
 	// Verify it overwrites correctly
 	newData := []byte("new atomic content")
-	err = (&hostFs{}).WriteFile(testFile, newData)
+	err = (&hostFs{}).WriteFile(testFile, newData, nil)
 	assert.NoError(t, err)
 
 	content, err = os.ReadFile(testFile)
@@ -714,7 +714,7 @@ func TestRootRW_Write(t *testing.T) {
 	testData := []byte("atomic root test content")
 
 	erw := &sandboxFs{workspace: tmpDir}
-	err := erw.WriteFile(relPath, testData)
+	err := erw.WriteFile(relPath, testData, nil)
 	assert.NoError(t, err)
 
 	root, err := os.OpenRoot(tmpDir)
@@ -731,7 +731,7 @@ func TestRootRW_Write(t *testing.T) {
 
 	// Verify it overwrites correctly
 	newData := []byte("new root atomic content")
-	err = erw.WriteFile(relPath, newData)
+	err = erw.WriteFile(relPath, newData, nil)
 	assert.NoError(t, err)
 
 	f2, err := root.Open(relPath)
