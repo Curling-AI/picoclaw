@@ -20,10 +20,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-// F1, boot: B's constructor sweep skips A's live journal; A's write completes.
-func TestTwoStoreF1ConstructorSweepSkipsLiveWrite(t *testing.T) {
+// Boot: B's constructor sweep skips A's live journal; A's write completes.
+func TestTwoStoreConstructorSweepSkipsLiveWrite(t *testing.T) {
 	dir := t.TempDir()
-	key := "agent:main:direct:f1-boot"
+	key := "agent:main:direct:boot-sweep"
 	a := openTwoStore(t, dir)
 	addTwoStore(t, a, key, "one", "two")
 	before := readTwoStoreState(t, dir, key)
@@ -76,11 +76,11 @@ func TestTwoStoreF1ConstructorSweepSkipsLiveWrite(t *testing.T) {
 	}
 }
 
-// F1, hot reload/projector: B already open runs the same sweep while A is
+// Hot reload or projector: B, already open, runs the same sweep while A is
 // mid-write and skips A's live journal.
-func TestTwoStoreF1ReloadSweepSkipsLiveJournal(t *testing.T) {
+func TestTwoStoreReloadSweepSkipsLiveJournal(t *testing.T) {
 	dir := t.TempDir()
-	key := "agent:main:direct:f1-reload"
+	key := "agent:main:direct:reload-sweep"
 	a := openTwoStore(t, dir)
 	addTwoStore(t, a, key, "one", "two")
 	b := openTwoStore(t, dir)
@@ -125,11 +125,11 @@ func TestTwoStoreF1ReloadSweepSkipsLiveJournal(t *testing.T) {
 	}
 }
 
-// F1, earlier window: B sweeps after A's journal but before A's bytes. The
+// Earlier window: B sweeps after A's journal but before A's bytes. The
 // journal stays, so a failure of A's meta publish still rolls A's own row back.
-func TestTwoStoreF1SweepBeforeAppendKeepsAJournal(t *testing.T) {
+func TestTwoStoreSweepBeforeAppendKeepsAJournal(t *testing.T) {
 	dir := t.TempDir()
-	key := "agent:main:direct:f1-early"
+	key := "agent:main:direct:early-sweep"
 	a := openTwoStore(t, dir)
 	addTwoStore(t, a, key, "one", "two")
 	before := readTwoStoreState(t, dir, key)
@@ -172,11 +172,11 @@ func TestTwoStoreF1SweepBeforeAppendKeepsAJournal(t *testing.T) {
 	}
 }
 
-// F1 early-window control: without B's sweep, the same failing meta publish
+// Earlier-window control: without B's sweep, the same failing meta publish
 // rolls A's own row back through its journal and the session stays proven.
-func TestTwoStoreF1ControlFailedPublishRollsBackWithJournal(t *testing.T) {
+func TestTwoStoreControlFailedPublishRollsBackWithJournal(t *testing.T) {
 	dir := t.TempDir()
-	key := "agent:main:direct:f1-early-control"
+	key := "agent:main:direct:early-sweep-control"
 	a := openTwoStore(t, dir)
 	addTwoStore(t, a, key, "one", "two")
 	sentinel := errors.New("injected meta publish failure")
@@ -201,11 +201,11 @@ func TestTwoStoreF1ControlFailedPublishRollsBackWithJournal(t *testing.T) {
 	}
 }
 
-// F2: A dies after its journal and a partial append. B, already open, recovers
+// A dies after its journal and a partial append. B, already open, recovers
 // that orphan under the session lock before it writes its own journal.
-func TestTwoStoreF2OpenStoreRecoversOrphanBeforeWriting(t *testing.T) {
+func TestTwoStoreOpenStoreRecoversOrphanBeforeWriting(t *testing.T) {
 	dir := t.TempDir()
-	key := "agent:main:direct:f2"
+	key := "agent:main:direct:open-store-orphan"
 	a := openTwoStore(t, dir)
 	addTwoStore(t, a, key, "one", "two")
 	b := openTwoStore(t, dir) // B's sweep runs now, before the orphan exists
@@ -249,11 +249,11 @@ func TestTwoStoreF2OpenStoreRecoversOrphanBeforeWriting(t *testing.T) {
 	}
 }
 
-// F2 control: the same orphan seen by a store opened after A's death is
+// Orphan control: the same orphan seen by a store opened after A's death is
 // recovered OLD (A's unpublished rows removed) and the session stays proven.
-func TestTwoStoreF2ControlSweepRecoversOrphanOld(t *testing.T) {
+func TestTwoStoreControlSweepRecoversOrphanOld(t *testing.T) {
 	dir := t.TempDir()
-	key := "agent:main:direct:f2-control"
+	key := "agent:main:direct:orphan-control"
 	a := openTwoStore(t, dir)
 	addTwoStore(t, a, key, "one", "two")
 	pause := armTwoStorePause(a, a.metaPath(key), false)
@@ -274,10 +274,10 @@ func TestTwoStoreF2ControlSweepRecoversOrphanOld(t *testing.T) {
 	}
 }
 
-// F3 without a content witness: B's append from its stale warm meta rereads
+// Stale cache without a content witness: B's append from its stale warm meta rereads
 // the disk under the lock, so nothing latches and no row is lost.
-func TestTwoStoreF3StaleCacheAppendRereadsDisk(t *testing.T) {
-	r := twoStoreF3(t, false, false)
+func TestTwoStoreStaleCacheAppendRereadsDisk(t *testing.T) {
+	r := twoStoreStaleCache(t, false, false)
 	requireTwoStoreStale(t, r)
 	if r.appendErr != nil || r.afterAppend.Marker || r.afterAppend.MetaRecovery || r.pageErr != nil ||
 		len(r.page.Entries) != 4 {
@@ -288,11 +288,11 @@ func TestTwoStoreF3StaleCacheAppendRereadsDisk(t *testing.T) {
 	}
 }
 
-// F3 with a content witness: contentAppendMetadata rereads disk and adopts
+// Stale cache with a content witness: contentAppendMetadata rereads disk and adopts
 // A's meta, so B's append alone neither latches nor loses rows. This test
 // asserts the SAFE outcome: the append defect is absent on this path.
-func TestTwoStoreF3StaleMetaAppendRebasedWithWitness(t *testing.T) {
-	r := twoStoreF3(t, true, false)
+func TestTwoStoreStaleMetaAppendRebasedWithWitness(t *testing.T) {
+	r := twoStoreStaleCache(t, true, false)
 	requireTwoStoreStale(t, r)
 	if r.appendErr != nil || r.afterAppend.Marker || r.afterAppend.MetaRecovery || r.pageErr != nil ||
 		!r.page.Complete || len(r.page.Entries) != 4 ||
@@ -301,12 +301,12 @@ func TestTwoStoreF3StaleMetaAppendRebasedWithWitness(t *testing.T) {
 	}
 }
 
-// F3, read only: a page read by B from its stale cache rereads the disk and
+// Stale cache, read only: a page read by B from its stale cache rereads the disk and
 // writes no latch, with or without a content witness.
-func TestTwoStoreF3StaleCachePageReadRereadsDisk(t *testing.T) {
+func TestTwoStoreStaleCachePageReadRereadsDisk(t *testing.T) {
 	for _, witness := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no-witness", true: "witness"}[witness], func(t *testing.T) {
-			r := twoStoreF3(t, witness, true)
+			r := twoStoreStaleCache(t, witness, true)
 			requireTwoStoreStale(t, r)
 			if r.readErr != nil || r.afterRead.Marker || len(r.pageRead.Entries) != 3 ||
 				strings.Join(r.afterRead.Lines, ",") != "one,two,three-A" {
@@ -324,12 +324,12 @@ func TestTwoStoreF3StaleCachePageReadRereadsDisk(t *testing.T) {
 	}
 }
 
-// F3, receipt path (delivery mirror, history context): AppendHistoryReceipt
+// Stale cache, receipt path (delivery mirror, history context): AppendHistoryReceipt
 // rereads the disk under the lock instead of probing B's stale cached meta.
-func TestTwoStoreF3StaleCacheReceiptRereadsDisk(t *testing.T) {
+func TestTwoStoreStaleCacheReceiptRereadsDisk(t *testing.T) {
 	for _, witness := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no-witness", true: "witness"}[witness], func(t *testing.T) {
-			r := twoStoreF3With(t, witness, false, true)
+			r := twoStoreStaleCacheWith(t, witness, false, true)
 			requireTwoStoreStale(t, r)
 			if r.appendErr != nil || r.afterAppend.Marker || r.pageErr != nil ||
 				!twoStoreHas(r.afterAppend.Lines, "four-B") {

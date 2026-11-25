@@ -18,9 +18,10 @@ import (
 // adoptSessionLock runs right after the session's file lock is held, before
 // the caller reads anything, in this order:
 //   - sessions/ is revalidated before any read under the lock. An NFS client
-//     keeps a name it found absent for up to acdirmax (60 s), and taking the
-//     lock does not refresh it (K5): a meta, marker, witness or journal another
-//     pod created would read as absent, and a latch set from that has no reset;
+//     may keep a name it found absent for up to acdirmax (60 s by default),
+//     and taking the lock does not refresh it: a meta, marker, witness or
+//     journal another pod created would read as absent, and a latch set from
+//     that has no reset;
 //   - the session's cache goes, so every read under the lock starts from the
 //     disk (the cache rule, session_cache.go);
 //   - a journal or decision on disk is resolved before the meta is read.
@@ -37,7 +38,7 @@ func (s *JSONLStore) adoptSessionLock(key string) error {
 // revalidateSessionsDir opens and closes sessions/. Opening a directory makes an
 // NFS client fetch its attributes from the server, which drops the names it
 // cached as absent once another client changed the folder, so a lookup after it
-// sees what the other pod created (K5f). sessionlock does the same for .locks/.
+// sees what the other pod created. sessionlock does the same for .locks/.
 func (s *JSONLStore) revalidateSessionsDir() error {
 	dir, err := os.Open(s.dir)
 	if err != nil {

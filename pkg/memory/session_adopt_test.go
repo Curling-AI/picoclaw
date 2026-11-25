@@ -80,10 +80,10 @@ func TestOrphanRecoveryFailureFailsTheWrite(t *testing.T) {
 	}
 }
 
-// hideUntilRevalidated stands in for the NFS client's cache of absent names
-// (K5): each path, present or not, becomes a symlink to itself, so a stat or a
-// read of it fails with ELOOP, until s revalidates sessions/, which puts every
-// path back as it was. It returns the count of revalidations.
+// hideUntilRevalidated stands in for the NFS client's cache of absent names:
+// each path, present or not, becomes a symlink to itself, so a stat or a read
+// of it fails with ELOOP, until s revalidates sessions/, which puts every path
+// back as it was. It returns the count of revalidations.
 func hideUntilRevalidated(t *testing.T, s *JSONLStore, paths ...string) *int {
 	t.Helper()
 	aside := t.TempDir()

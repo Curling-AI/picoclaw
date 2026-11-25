@@ -421,7 +421,9 @@ func (s *JSONLStore) requireSessionNameLock(name string) error {
 //     unlinks themselves;
 //   - Release, between its Check and the lock path's unlink.
 //
-// K6 measures these windows.
+// Each window lasts as long as its step: a holder that stalls inside one for
+// longer than its lease can still land that step after another process took
+// the lock.
 func (s *JSONLStore) checkSessionLock(key string) error {
 	name := sessionLockName(key)
 	if err := s.requireSessionNameLock(name); err != nil {

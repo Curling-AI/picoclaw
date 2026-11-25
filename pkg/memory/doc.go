@@ -5,10 +5,11 @@
 // During a rollout two processes (the old and the new pod) share one
 // sessions/ folder on a network filesystem. The rule:
 //
-//   - Every write and every recovery of a session file goes through JSONLStore
-//     (or sessionlock, for writers outside the package). It holds the
-//     session's flock in sessions/.locks/<name>.lock for the whole commit.
-//     Never write a session file outside the store.
+//   - Never write a session file without its session lock: the session's
+//     flock in sessions/.locks/<name>.lock, held for the whole commit. The
+//     store (JSONLStore), the fallback SessionManager (pkg/session) and the
+//     agent's file tools (pkg/tools/fs) take it; a writer outside this package
+//     takes it through sessionlock. Recovery runs only in the store, under it.
 //   - Lock order: the shard mutex first, then the flock; two sessions in
 //     ascending name order. A directory sweep never waits for a lock.
 //   - Under the lock the disk decides: the session's cache is dropped and an
@@ -39,5 +40,16 @@
 //   - A negative lookup cache on NFS could hide a file another pod created.
 //     Each acquisition and each turn's reread (RefreshSessionMeta) revalidate
 //     sessions/ (revalidateSessionsDir); not yet confirmed on EFS.
+//   - The first rollout from an image without the lock is not covered: the old
+//     pod takes no lock, so the new pod's lock excludes nothing until the old
+//     pod is gone.
+//   - A lost node keeps its sessions locked until its NFS lease ends (about 90
+//     to 103 s on a Linux nfsd; not measured on EFS). Until then, writes to
+//     them fail once their wait for the lock runs out.
+//   - A write waiting for another process's lock holds its shard mutex: other
+//     sessions of the same shard wait with it, their plain reads and listings
+//     included.
+//   - The launcher's session deletion (web/backend/api/session.go) removes the
+//     legacy <name>.json without the lock.
 //   - Off unix there is no inter-process lock (sessionlock_other.go).
 package memory

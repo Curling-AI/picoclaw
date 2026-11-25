@@ -238,7 +238,7 @@ func recordJournalOverwrite(s *JSONLStore, key string) *[]byte {
 	return &overwritten
 }
 
-type twoStoreF3Result struct {
+type twoStoreStaleCacheResult struct {
 	stale, disk SessionMeta
 	afterRead   twoStoreState
 	readErr     error
@@ -249,16 +249,16 @@ type twoStoreF3Result struct {
 	pageErr     error
 }
 
-// twoStoreF3: A writes X, B warms its cache (WarmSessionListing), A appends
+// twoStoreStaleCache: A writes X, B warms its cache (WarmSessionListing), A appends
 // three-A, then B optionally reads a page and appends four-B from its cache.
-func twoStoreF3(t *testing.T, witness, readFirst bool) twoStoreF3Result {
-	return twoStoreF3With(t, witness, readFirst, false)
+func twoStoreStaleCache(t *testing.T, witness, readFirst bool) twoStoreStaleCacheResult {
+	return twoStoreStaleCacheWith(t, witness, readFirst, false)
 }
 
-func twoStoreF3With(t *testing.T, witness, readFirst, receipt bool) twoStoreF3Result {
+func twoStoreStaleCacheWith(t *testing.T, witness, readFirst, receipt bool) twoStoreStaleCacheResult {
 	t.Helper()
 	dir := t.TempDir()
-	key := "agent:main:direct:f3"
+	key := "agent:main:direct:stale-cache"
 	a := openTwoStore(t, dir)
 	if witness {
 		if err := a.InitializeNewHistoryContentIdentity(t.Context(), key); err != nil {
@@ -272,7 +272,7 @@ func twoStoreF3With(t *testing.T, witness, readFirst, receipt bool) twoStoreF3Re
 	b := openTwoStore(t, dir)
 	b.ListSessionMetas() // WarmSessionListing at B's boot, A still serving
 	addTwoStore(t, a, key, "three-A")
-	var r twoStoreF3Result
+	var r twoStoreStaleCacheResult
 	r.stale, _ = b.cachedMeta(sanitizeKey(key))
 	var err error
 	if r.disk, err = b.readRecoveryMeta(key); err != nil {
@@ -315,7 +315,7 @@ func twoStoreF3With(t *testing.T, witness, readFirst, receipt bool) twoStoreF3Re
 	return r
 }
 
-func requireTwoStoreStale(t *testing.T, r twoStoreF3Result) {
+func requireTwoStoreStale(t *testing.T, r twoStoreStaleCacheResult) {
 	t.Helper()
 	if r.stale.Count != 2 || r.disk.Count != 3 {
 		t.Fatal("precondition: B's cache must be stale", r.stale.Count, r.disk.Count)

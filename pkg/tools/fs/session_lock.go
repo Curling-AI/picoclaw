@@ -21,7 +21,7 @@ const sessionLocksFolder = ".locks"
 // store, not to a session: content artifacts, writes in flight and the
 // checkpoint staging file. With the .locks folder (and anything in it) they
 // are refused to the agent's file tools. The ethos SetFile/DeleteFile list
-// (D4) mirrors this one.
+// mirrors this one.
 var storeInternalPrefixes = []string{".pc-history-", ".tmp-", ".content-checkpoint-new."}
 
 // isStoreInternalName reports whether first, the first path element under

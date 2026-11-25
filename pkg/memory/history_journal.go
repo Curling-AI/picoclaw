@@ -3,9 +3,9 @@ package memory
 // The history journal is created exclusively. Under the session's lock its
 // name should be free, since adoptSessionLock resolved what was there. A journal
 // at that name anyway is another writer's that this process could not see (an
-// NFS client's cache of absent names, K5) and is never replaced: link(2) and
-// O_CREAT|O_EXCL go to the server and fail with EEXIST whatever the cache says,
-// where a rename would overwrite it.
+// NFS client may keep a name it found absent for up to acdirmax) and is never
+// replaced: link(2) and O_CREAT|O_EXCL go to the server and fail with EEXIST
+// whatever the cache says, where a rename would overwrite it.
 
 import (
 	"errors"
@@ -87,7 +87,8 @@ func (s *JSONLStore) abortHistoryJournal(key string, published bool, err error) 
 //
 // shortcut: without link(2) a crash in the middle of the write can leave a
 // torn journal, which recovery fails to decode: the session fails closed until
-// it is repaired by hand. EFS support for link(2) is confirmed in Task 18.
+// it is repaired by hand. EFS support for link(2) is not verified: where EFS
+// refuses it, every journal takes the O_EXCL fallback and this gap applies.
 func (s *JSONLStore) createHistoryJournal(path string, data []byte) (published bool, err error) {
 	if err = s.requireSessionFileLock(path); err != nil {
 		return false, err
