@@ -538,7 +538,7 @@ func (m *Manager) CallTool(
 	result, err := conn.Session.CallTool(ctx, params)
 	if err != nil {
 		if shouldReconnectCallError(err) {
-			logger.WarnCF("mcp", "MCP server session was lost or closed during tool call, reconnecting",
+			logger.WarnCF("mcp", "MCP server session was lost during tool call, reconnecting",
 				map[string]any{
 					"server": serverName,
 					"tool":   toolName,
@@ -547,7 +547,7 @@ func (m *Manager) CallTool(
 
 			reconnectedConn, reconnectErr := m.reconnectServer(ctx, serverName, conn)
 			if reconnectErr != nil {
-				// The server had no session for the call, or the closed client never sent it, so the tool didn't run.
+				// The server had no session for the call, so the tool didn't run.
 				return nil, NotSent(fmt.Errorf("failed to recover lost MCP session: %w", reconnectErr))
 			}
 
@@ -555,6 +555,18 @@ func (m *Manager) CallTool(
 			if err == nil {
 				return result, nil
 			}
+		} else if errors.Is(err, mcp.ErrConnectionClosed) {
+			// One HTTP error (a 403) closes the streamable client for good, so every later
+			// call would fail too. No replay: a server reply coded -32003/-32004 maps to the
+			// same error, and then the tool may have run.
+			if _, reconnectErr := m.reconnectServer(ctx, serverName, conn); reconnectErr != nil {
+				return nil, fmt.Errorf(
+					"failed to call tool: %w (reopening the MCP connection failed: %v)",
+					err,
+					reconnectErr,
+				)
+			}
+			return nil, fmt.Errorf("failed to call tool (the closed MCP connection was reopened): %w", err)
 		}
 
 		return nil, fmt.Errorf("failed to call tool: %w", err)
@@ -604,9 +616,7 @@ func shouldReconnectCallError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// A closed client refuses every later call before sending it, so only a
-	// fresh session recovers it (one HTTP 403 closes the streamable client).
-	if errors.Is(err, mcp.ErrSessionMissing) || errors.Is(err, mcp.ErrConnectionClosed) {
+	if errors.Is(err, mcp.ErrSessionMissing) {
 		return true
 	}
 	return strings.Contains(strings.ToLower(err.Error()), mcp.ErrSessionMissing.Error())
