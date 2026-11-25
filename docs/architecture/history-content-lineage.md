@@ -60,6 +60,11 @@ and pruning preserve the source while its archive state is unknown.
 Only the owning OLD/NEW journal can finish its own interrupted witness write.
 An older writer that discards identity fields cannot preserve continuity merely
 by returning the same text, timestamp or array layout.
+The one exception is an exact suffix cut, such as the rollback of an aborted
+turn: the retained rows keep their lines and bytes, so `SetHistory` keeps their
+refs under a new state token when every retained locator still matches its row.
+Any mismatch leaves the identity unavailable, and a cut that empties the source
+remains the explicit clear that retires the domain.
 
 ## Atomic compaction and replay
 

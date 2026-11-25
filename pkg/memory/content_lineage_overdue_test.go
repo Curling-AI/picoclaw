@@ -359,3 +359,26 @@ func TestImportDoesNotReleaseAnArchiveItIsNotHeldBy(t *testing.T) {
 		t.Fatal("the import gave up the late ACK of an archive it is not held by", err)
 	}
 }
+
+// A turn stopped after its prompt was saved rolls back over an overdue archive;
+// the restored conversation must still compact afterwards.
+func TestAbortedTurnOverAnOverdueArchiveStillCompacts(t *testing.T) {
+	key := "sk_v1_overdue_abort"
+	s, _ := overdueContent(t, key)
+	restore, err := s.GetHistory(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range restore {
+		restore[i].HistoryID = "" // the session backend hands the turn its snapshot without ids
+	}
+	if err = s.AddMessage(t.Context(), key, "user", "aborted prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetHistory(t.Context(), key, restore); err != nil {
+		t.Fatal("rollback over the overdue archive failed", err)
+	}
+	if _, err = compactActiveWindow(t, s, key); err != nil {
+		t.Fatal("compaction after the rollback was refused", err)
+	}
+}
