@@ -37,7 +37,7 @@
 //   - The recovery latch can stay set when the tail has no owner and at least
 //     one complete line lies beyond HistoryBytes; it is never cleared.
 //   - A negative lookup cache on NFS could hide a file another pod created.
-//     Each acquisition revalidates sessions/ (revalidateSessionsDir); not yet
-//     confirmed on EFS.
+//     Each acquisition and each turn's reread (RefreshSessionMeta) revalidate
+//     sessions/ (revalidateSessionsDir); not yet confirmed on EFS.
 //   - Off unix there is no inter-process lock (sessionlock_other.go).
 package memory

@@ -28,14 +28,20 @@ func (s *JSONLStore) forgetSessionCache(name string) {
 
 // RefreshSessionMeta reads the session's meta from disk again, in place of the
 // one this process cached. The agent calls it once when a turn starts, so the
-// turn's GetHistory and GetSummary see what another process wrote. It costs one
-// meta read: the marker and order witness state stay cached, since a plain read
-// proves nothing, and a witness that no longer matches the meta read makes the
-// read redo under the session's lock, which drops the whole cache first
-// (adoptSessionLock). Like any plain read it takes that lock only when it must
-// write first (recover a journal of this process, latch a recovery), and then
-// waits for it up to sessionLockWait, as a write does.
+// turn's GetHistory and GetSummary see what another process wrote. It first
+// revalidates sessions/ (revalidateSessionsDir): an NFS client may keep a name
+// it found absent for up to acdirmax, so a session another process created
+// moments before would read as empty. It then costs one meta read: the marker
+// and order witness state stay cached, since a plain read proves nothing, and a
+// witness that no longer matches the meta read makes the read redo under the
+// session's lock, which drops the whole cache first (adoptSessionLock). Like
+// any plain read it takes that lock only when it must write first (recover a
+// journal of this process, latch a recovery), and then waits for it up to
+// sessionLockWait, as a write does.
 func (s *JSONLStore) RefreshSessionMeta(_ context.Context, sessionKey string) error {
+	if err := s.revalidateSessionsDir(); err != nil {
+		return err
+	}
 	_, err := readSessionLocked(s, sessionKey, func() (SessionMeta, error) {
 		s.metaMu.Lock()
 		delete(s.metaCache, sanitizeKey(sessionKey))

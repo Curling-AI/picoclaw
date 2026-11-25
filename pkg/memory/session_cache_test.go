@@ -9,6 +9,7 @@ package memory
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -92,6 +93,42 @@ func TestRefreshSessionMetaRereadsTheDisk(t *testing.T) {
 	history, err := b.GetHistory(t.Context(), key)
 	if err != nil || len(history) != 1 || history[0].Content != "two" {
 		t.Fatalf("GetHistory after the reread = %v, %v; want A's truncation", history, err)
+	}
+}
+
+// The turn's reread revalidates sessions/ before it reads the meta. An NFS
+// client may keep a name it found absent for up to acdirmax: without the
+// revalidation, the first turn on a process would read a session another
+// process created moments before as empty.
+func TestRefreshSessionMetaRevalidatesSessionsBeforeTheRead(t *testing.T) {
+	dir := t.TempDir()
+	key := "agent:main:direct:turn-revalidate"
+	a, b := openTwoStore(t, dir), openTwoStore(t, dir)
+	addTwoStore(t, a, key, "one", "two")
+	revalidations := hideUntilRevalidated(t, b, b.metaPath(key), b.jsonlPath(key))
+
+	if err := b.RefreshSessionMeta(t.Context(), key); err != nil {
+		t.Fatalf("RefreshSessionMeta = %v; want the meta read after the revalidation", err)
+	}
+	history, err := b.GetHistory(t.Context(), key)
+	if *revalidations != 1 || err != nil || len(history) != 2 || history[1].Content != "two" {
+		t.Fatalf("revalidations = %d, GetHistory = %v, %v; want one revalidation and A's two rows",
+			*revalidations, history, err)
+	}
+}
+
+// A failed revalidation fails the turn's reread, as a failed read of the meta
+// does.
+func TestRefreshSessionMetaFailsWhenTheRevalidationFails(t *testing.T) {
+	dir := t.TempDir()
+	key := "agent:main:direct:turn-revalidate-fails"
+	s := openTwoStore(t, dir)
+	addTwoStore(t, s, key, "one")
+	failure := errors.New("revalidation failed")
+	s.sessionsRevalidatedForTest = func() error { return failure }
+
+	if err := s.RefreshSessionMeta(t.Context(), key); !errors.Is(err, failure) {
+		t.Fatalf("RefreshSessionMeta = %v; want the revalidation failure", err)
 	}
 }
 
