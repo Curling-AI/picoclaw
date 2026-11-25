@@ -33,6 +33,10 @@ var (
 		"{\"message\":\"The provided file uses a format or codec that is not supported.\"}}")
 	errInvalidBase64Image = errors.New("API request failed:\n  Status: 400\n  Body:   {\"error\":" +
 		"{\"code\":\"InvalidParameter\",\"message\":\"Invalid base64 image_url Request id: 0217\"}}")
+	// The same provider's other wording: it reads as InvalidParameter, a context error.
+	errUnsupportedImageData = errors.New("API request failed:\n  Status: 400\n  Body:   {\"error\":" +
+		"{\"code\":\"InvalidParameter\",\"message\":\"image data 1 failed: " +
+		"Unsupported image format or invalid image data. Please upload a valid image\"}}")
 )
 
 type scriptedCall struct {
@@ -255,18 +259,20 @@ func TestTieredImageTurn_TransientVisionFailureFallsBackToVision(t *testing.T) {
 // The vision model refused the image: it becomes a note for the turn, and the
 // picked tier answers without ever getting the raw image.
 func TestTieredImageTurn_RefusedImageReachesTheTierAsANote(t *testing.T) {
-	provider := &scriptedTierProvider{visionErrs: []error{errVisionRefusedImage}}
-	resp, err := runTextTierTurn(t, provider, tierTurn{})
-	if err != nil {
-		t.Fatalf("processMessage: %v", err)
-	}
-	if resp != "answered by text-tier" {
-		t.Fatalf("response = %q, want the picked tier to answer", resp)
-	}
-	for i, c := range provider.turnCalls() {
-		if c.media || !strings.Contains(c.content, unreadableImageNote) {
-			t.Fatalf("call %d on %q: media=%v note=%v, want the note and no image",
-				i, c.model, c.media, strings.Contains(c.content, unreadableImageNote))
+	for _, visionErr := range []error{errVisionRefusedImage, errUnsupportedImageData} {
+		provider := &scriptedTierProvider{visionErrs: []error{visionErr}}
+		resp, err := runTextTierTurn(t, provider, tierTurn{})
+		if err != nil {
+			t.Fatalf("%v: processMessage: %v", visionErr, err)
+		}
+		if resp != "answered by text-tier" {
+			t.Fatalf("%v: response = %q, want the picked tier to answer", visionErr, resp)
+		}
+		for i, c := range provider.turnCalls() {
+			if c.media || !strings.Contains(c.content, unreadableImageNote) {
+				t.Fatalf("%v: call %d on %q: media=%v note=%v, want the note and no image",
+					visionErr, i, c.model, c.media, strings.Contains(c.content, unreadableImageNote))
+			}
 		}
 	}
 }
@@ -479,33 +485,36 @@ func TestTieredImageTurn_ContextRetryMakesRoomForTheDescription(t *testing.T) {
 // once: no call of the turn after that carries it, and the vision model is not
 // asked again either.
 func TestImageTurn_InvalidImageIsRefusedOncePerTurn(t *testing.T) {
-	provider := &scriptedTierProvider{
-		visionErrs: []error{errVisionUnsupportedFormat, errVisionUnsupportedFormat, errVisionUnsupportedFormat},
-		imageErr:   errInvalidBase64Image,
-		toolRounds: 2,
-	}
-	resp, err := runTextTierTurn(t, provider, tierTurn{noTier: true})
-	if err != nil {
-		t.Fatalf("processMessage: %v", err)
-	}
-	if resp != "answered by main-model" {
-		t.Fatalf("response = %q, want the main model to answer", resp)
-	}
-	if n := provider.delegationCalls(); n != 1 {
-		t.Fatalf("vision sub-calls = %d, want 1: the refused image was sent to the vision model again", n)
-	}
-	calls := provider.turnCalls()
-	withImage := 0
-	for _, c := range calls {
-		if c.media {
-			withImage++
+	for _, imageErr := range []error{errInvalidBase64Image, errUnsupportedImageData} {
+		provider := &scriptedTierProvider{
+			visionErrs: []error{errVisionUnsupportedFormat, errVisionUnsupportedFormat, errVisionUnsupportedFormat},
+			imageErr:   imageErr,
+			toolRounds: 2,
 		}
-	}
-	if withImage != 1 {
-		t.Fatalf("turn calls carrying the image = %d of %d, want 1", withImage, len(calls))
-	}
-	if last := calls[len(calls)-1]; !strings.Contains(last.content, unreadableImageNote) {
-		t.Fatal("the answering call lost the note that stands in for the image")
+		resp, err := runTextTierTurn(t, provider, tierTurn{noTier: true})
+		if err != nil {
+			t.Fatalf("%v: processMessage: %v", imageErr, err)
+		}
+		if resp != "answered by main-model" {
+			t.Fatalf("%v: response = %q, want the main model to answer", imageErr, resp)
+		}
+		if n := provider.delegationCalls(); n != 1 {
+			t.Fatalf("%v: vision sub-calls = %d, want 1: the refused image was sent to the vision model again",
+				imageErr, n)
+		}
+		calls := provider.turnCalls()
+		withImage := 0
+		for _, c := range calls {
+			if c.media {
+				withImage++
+			}
+		}
+		if withImage != 1 {
+			t.Fatalf("%v: turn calls carrying the image = %d of %d, want 1", imageErr, withImage, len(calls))
+		}
+		if last := calls[len(calls)-1]; !strings.Contains(last.content, unreadableImageNote) {
+			t.Fatalf("%v: the answering call lost the note that stands in for the image", imageErr)
+		}
 	}
 }
 
