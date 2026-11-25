@@ -15,10 +15,12 @@ import (
 // left the person waiting on work it only announced. It judges the final
 // sentence on its own, because a reply that delivers something first can still
 // end on a step it never took, and it names each common way a reply promises
-// or legitimately ends. The examples are in English except the scheduling pair:
-// without it, a Portuguese "vou agendar" not yet done passed. (seucaranguejo fork)
+// or legitimately ends. The examples are in English except the scheduling pair
+// and the closing-line one: in English, the Portuguese forms of both passed.
+// (seucaranguejo fork)
 const promiseQuestion = "Judge the final sentence of the assistant's last message, even when the rest of the message already " +
-	"delivers something. The turn has ended: the assistant does nothing more until the person writes " +
+	"delivers something; when that sentence only says what the person does meanwhile or what is left, judge it " +
+	"together with the sentence before it. The turn has ended: the assistant does nothing more until the person writes " +
 	"again, unless the message says it set up a reminder, an automation or a scheduled task in this turn. " +
 	"Answer yes when that final sentence announces or implies work the assistant has not done, leaving " +
 	"the person waiting on it: (1) an action it was about to take right then, such as searching, opening, " +
@@ -38,14 +40,23 @@ const promiseQuestion = "Judge the final sentence of the assistant's last messag
 	"\"Here's how I'll do it: 1. export the contacts 2. import them\"); (7) a reminder, automation or " +
 	"scheduled task announced but not set up yet (\"I'll schedule the reminder for tomorrow.\", \"Vou " +
 	"agendar o envio para segunda.\"); (8) something introduced with a colon and nothing after it (a " +
-	"report, a list, the next step). Answer no when the final sentence: reports what was done or delivers " +
+	"report, a list, the next step); (9) a closing line that only says what the person does meanwhile or " +
+	"what is left, right after the assistant announced its own next step (\"Começo pela integração e te " +
+	"aviso quando ficar pronta. Você confere os produtos em paralelo.\", \"My next step, without " +
+	"waiting for your answers: the pricing table. Your part: the answers above.\", \"I'll re-read those " +
+	"twelve by hand. After April, May and June are left.\"); (10) a tool call written out as text instead " +
+	"of being made: JSON arguments or call markup standing where the action the person asked for should " +
+	"have happened. Answer no when the final sentence: reports what was done or delivers " +
 	"the answer, a file or a link, even if it then offers more (\"if you want, I can turn it into " +
 	"minutes\") or gives tips; says a reminder, automation or scheduled task was set up in this turn, or " +
 	"when the assistant itself will act at a set time (\"Agendei: amanhã às 9h te lembro.\", \"I'll remind " +
 	"you tomorrow at 9.\"); asks the person a question, for a choice, for confirmation or for approval, " +
 	"including a plan that ends asking to start (\"Shall I start?\"); waits on the person or someone else, " +
 	"such as connecting an app, choosing an option, sending a file, filling in a form or tapping a button " +
-	"or connection card shown with the message; gives the person instructions to follow, or delivers a " +
+	"or connection card shown with the message, also when it says what it will do once that arrives (\"As " +
+	"soon as you send the contract, I'll review it.\", \"When the finance assistant replies, I'll update " +
+	"the sheet.\"), or names the next item of a series the person sends one at a time (\"Next: chapter " +
+	"4.\"); gives the person instructions to follow, or delivers a " +
 	"plan the person asked for; explains that the assistant cannot do something; promises a way of " +
 	"behaving (\"I won't store your ID\"); or is a courtesy closing (\"Let me know if you need anything " +
 	"else.\"). Words like \"I'll check\" inside a text the assistant wrote for the person to use (a draft, a " +
