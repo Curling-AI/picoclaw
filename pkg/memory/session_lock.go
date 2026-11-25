@@ -476,13 +476,27 @@ func (s *JSONLStore) removeSessionLockFile(key string) {
 // session manager's <name>.json. The other files there belong to no session:
 // content artifacts (.pc-history-*), writes in flight (.tmp-*, session-*.tmp,
 // .content-checkpoint-new.*) and the .locks folder. The files of the empty key
-// (.jsonl, .meta.json) are refused too: only the store locks that session.
+// (.jsonl, .meta.json) are refused too, since "" names no lock: a writer
+// locks them through SessionLockName.
 func SessionFileName(base string) (string, bool) {
 	name, ok := sessionFileName(base)
 	if !ok || name == "" || name == "." || name == ".." {
 		return "", false
 	}
 	return name, true
+}
+
+// SessionLockName returns the lock that a writer of base, a file name in a
+// sessions folder, takes: the one the store takes for the session the file
+// belongs to. It is SessionFileName's name, and for the empty key's files
+// (.jsonl, .meta.json and the rest) the reserved name the store locks that
+// session under. Files of no session have none.
+func SessionLockName(base string) (string, bool) {
+	name, ok := sessionFileName(base)
+	if !ok || name == "." || name == ".." {
+		return "", false
+	}
+	return lockNameOf(name), true
 }
 
 // emptyKeyLockName is the lock of the session whose key is empty. It holds a

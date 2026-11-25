@@ -450,6 +450,25 @@ func TestSessionFileNameNamesEverySessionFile(t *testing.T) {
 	}
 }
 
+// SessionLockName names, for every file of a session, the lock the store takes
+// for that session's key, the empty key's included; files of no session have
+// none.
+func TestSessionLockNameIsTheStoresLockOfTheFile(t *testing.T) {
+	for _, key := range []string{"agent:main:direct:x", "", "a.jsonl.b"} {
+		for _, suffix := range []string{".meta.json", ".jsonl", ".jsonl.commit.json", ".jsonl.public.index", ".json"} {
+			base := sanitizeKey(key) + suffix
+			if got, ok := SessionLockName(base); !ok || got != sessionLockName(key) {
+				t.Errorf("SessionLockName(%q) = %q, %v; want %q", base, got, ok, sessionLockName(key))
+			}
+		}
+	}
+	for _, base := range []string{".tmp-12-34", "notes.txt", "..json", "..meta.json", "...json", "sub/.jsonl", sessionlock.Dir} {
+		if got, ok := SessionLockName(base); ok {
+			t.Errorf("SessionLockName(%q) = %q, true; want no session's", base, got)
+		}
+	}
+}
+
 // The prune does not wait for a run another store holds: it skips it, leaves
 // its files, and returns at once.
 func TestPruneSkipsARunAnotherStoreHolds(t *testing.T) {

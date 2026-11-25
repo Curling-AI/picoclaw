@@ -85,7 +85,8 @@ func withSessionWriteLock(workspace, path string, write func(beforePublish func(
 	if isStoreInternalName(first) {
 		return errors.New("sessions/.locks and the store's internal files are managed by the session store")
 	}
-	name, ok := memory.SessionFileName(rel)
+	// The store's lock of the file's session, the empty key's included.
+	name, ok := memory.SessionLockName(rel)
 	if nested || !ok {
 		return write(nil)
 	}

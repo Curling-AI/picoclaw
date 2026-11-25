@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 )
 
@@ -72,6 +73,69 @@ func TestWriteFileWaitsForTheSessionLock(t *testing.T) {
 		}
 		if res := runFileTool(workspace, restricted, "write", path); res.IsError {
 			t.Fatalf("restricted=%v: write after release failed: %s", restricted, res.ForLLM)
+		}
+	}
+}
+
+// emptyKeyLock writes the session of the empty key through the store and
+// returns the one lock file name the store made for it.
+func emptyKeyLock(t *testing.T, sessions string) string {
+	t.Helper()
+	store, err := memory.NewJSONLStore(sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.AddMessage(context.Background(), "", "user", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	locks, err := os.ReadDir(filepath.Join(sessions, sessionlock.Dir))
+	if err != nil || len(locks) != 1 {
+		t.Fatalf("lock files of the empty key's session = %v, %v; want one", locks, err)
+	}
+	return strings.TrimSuffix(locks[0].Name(), ".lock")
+}
+
+// The store keeps the session of the empty key in .jsonl and .meta.json and
+// locks it under a name of its own: while the store holds that lock the file
+// tools wait for it and fail busy, and with it free they write.
+func TestAppendFileOnTheEmptyKeysFilesWaitsForTheStoresLock(t *testing.T) {
+	shortenSessionLockWait(t)
+	for _, restricted := range []bool{false, true} {
+		workspace, sessions := sessionsFixture(t)
+		lock, err := sessionlock.Acquire(sessions, emptyKeyLock(t, sessions), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{".jsonl", ".meta.json"} {
+			path := filepath.Join(sessions, name)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := runFileTool(workspace, restricted, "append", path)
+			if !res.IsError || !strings.Contains(res.ForLLM, "being written by the assistant") {
+				t.Fatalf("restricted=%v: append to %s under the store's lock = %+v", restricted, name, res)
+			}
+			if after, _ := os.ReadFile(path); string(after) != string(before) {
+				t.Fatalf("restricted=%v: %s changed under the store's lock", restricted, name)
+			}
+		}
+		// A file of no session there takes no lock, the empty key's neither.
+		if res := runFileTool(workspace, restricted, "append", filepath.Join(sessions, "notes.txt")); res.IsError {
+			t.Fatalf("restricted=%v: append to notes.txt under the store's lock: %s", restricted, res.ForLLM)
+		}
+		if err := lock.Release(); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(sessions, ".jsonl")
+		if res := runFileTool(workspace, restricted, "append", path); res.IsError {
+			t.Fatalf("restricted=%v: append with the lock free: %s", restricted, res.ForLLM)
+		}
+		if got, _ := os.ReadFile(path); !strings.HasSuffix(string(got), " changed") {
+			t.Fatalf("restricted=%v: .jsonl = %q, want the append", restricted, got)
 		}
 	}
 }
