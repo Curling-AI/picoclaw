@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -612,6 +613,89 @@ func TestCallTool_ReconnectsWhenHTTPServerLosesSession(t *testing.T) {
 	}
 }
 
+// One HTTP 403 closes the go-sdk streamable client for good; the manager must
+// replace it so later calls work, instead of failing them all with "connection closed".
+func TestCallTool_ReplacesClosedClientForLaterCalls(t *testing.T) {
+	mgr, staleTransport, freshTransport := newReplacingManager(t, 0)
+	if err := mgr.servers["flaky"].Session.Close(); err != nil {
+		t.Fatalf("closing stale session: %v", err)
+	}
+
+	if _, err := mgr.CallTool(
+		context.Background(),
+		"flaky",
+		"echo",
+		map[string]any{},
+	); !errors.Is(
+		err,
+		sdkmcp.ErrConnectionClosed,
+	) {
+		t.Fatalf("first CallTool() error = %v, want ErrConnectionClosed", err)
+	}
+	result, err := mgr.CallTool(context.Background(), "flaky", "echo", map[string]any{})
+	if err != nil {
+		t.Fatalf("second CallTool() error = %v", err)
+	}
+	if text, ok := result.Content[0].(*sdkmcp.TextContent); !ok || text.Text != "reconnected" {
+		t.Fatalf("second CallTool() content = %#v, want the fresh session's result", result.Content)
+	}
+	if staleTransport.toolCallCalls != 0 || freshTransport.toolCallCalls != 1 {
+		t.Fatalf("toolCallCalls stale=%d fresh=%d, want 0 and 1",
+			staleTransport.toolCallCalls, freshTransport.toolCallCalls)
+	}
+}
+
+// A server reply coded -32003 maps to ErrConnectionClosed too, but the tool may
+// have run: the call must not be sent again.
+func TestCallTool_DoesNotReplayServerClosingReply(t *testing.T) {
+	mgr, staleTransport, freshTransport := newReplacingManager(t, -32003)
+
+	if _, err := mgr.CallTool(
+		context.Background(),
+		"flaky",
+		"echo",
+		map[string]any{},
+	); !errors.Is(
+		err,
+		sdkmcp.ErrConnectionClosed,
+	) {
+		t.Fatalf("CallTool() error = %v, want ErrConnectionClosed", err)
+	}
+	if staleTransport.toolCallCalls != 1 || freshTransport.toolCallCalls != 0 {
+		t.Fatalf("toolCallCalls stale=%d fresh=%d, want 1 and 0",
+			staleTransport.toolCallCalls, freshTransport.toolCallCalls)
+	}
+}
+
+// newReplacingManager serves "flaky" from a stale session (answering tools/call
+// with staleReplyCode when set) and reconnects it to a fresh one that succeeds.
+func newReplacingManager(t *testing.T, staleReplyCode int64) (*Manager, *scriptedTransport, *scriptedTransport) {
+	t.Helper()
+	originalConnectServerFunc := connectServerFunc
+	t.Cleanup(func() { connectServerFunc = originalConnectServerFunc })
+
+	staleConn, staleTransport, err := newScriptedServerConnection("session-1", nil, nil)
+	if err != nil {
+		t.Fatalf("newScriptedServerConnection(stale) error = %v", err)
+	}
+	staleTransport.toolCallReplyCode = staleReplyCode
+	freshConn, freshTransport, err := newScriptedServerConnection(
+		"session-2",
+		&sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "reconnected"}}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newScriptedServerConnection(fresh) error = %v", err)
+	}
+	connectServerFunc = func(context.Context, string, config.MCPServerConfig) (*ServerConnection, error) {
+		return freshConn, nil
+	}
+
+	mgr := NewManager()
+	mgr.servers["flaky"] = staleConn
+	return mgr, staleTransport, freshTransport
+}
+
 func TestClose_IdempotentOnEmptyManager(t *testing.T) {
 	mgr := NewManager()
 
@@ -659,9 +743,10 @@ func newScriptedServerConnection(
 }
 
 type scriptedTransport struct {
-	sessionID      string
-	toolCallResult *sdkmcp.CallToolResult
-	toolCallErr    error
+	sessionID         string
+	toolCallResult    *sdkmcp.CallToolResult
+	toolCallErr       error
+	toolCallReplyCode int64 // when set, tools/call gets this JSON-RPC error code back
 
 	mu            sync.Mutex
 	toolCallCalls int
@@ -726,6 +811,11 @@ func (t *scriptedTransport) Write(ctx context.Context, msg jsonrpc.Message) erro
 
 		if t.toolCallErr != nil {
 			return t.toolCallErr
+		}
+		if t.toolCallReplyCode != 0 {
+			reply := &jsonrpc.Error{Code: t.toolCallReplyCode, Message: "client is closing"}
+			t.incoming <- &jsonrpc.Response{ID: req.ID, Error: reply}
+			return nil
 		}
 
 		payload, err := json.Marshal(t.toolCallResult)
