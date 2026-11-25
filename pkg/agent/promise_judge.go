@@ -207,19 +207,57 @@ func clipMiddle(text string, limit int) string {
 	return string(runes[:head]) + "\n[…]\n" + string(runes[len(runes)-(limit-head):])
 }
 
-// promiseNudgeTail is how much of the discarded reply the nudge quotes.
-const promiseNudgeTail = 220
+// promiseNudgeTail and promiseNudgeTailMax bound how much of the discarded
+// reply the nudge quotes.
+const (
+	promiseNudgeTail    = 220
+	promiseNudgeTailMax = 600
+)
 
 // promiseNudge quotes the end of the reply it discarded: the model never sees
 // that reply again, and the quote is how it knows which step it was on.
 func promiseNudge(reply string) string {
-	tail := []rune(strings.TrimSpace(reply))
-	if len(tail) > promiseNudgeTail {
-		tail = tail[len(tail)-promiseNudgeTail:]
-	}
-	return "[System] Your last reply ended by announcing a step it did not take: «" + string(tail) + "». " +
+	return "[System] Your last reply ended by announcing a step it did not take: «" + promiseNudgeQuote(reply) + "». " +
 		"It carried no tool call, so that step never ran and the user is still waiting. " +
 		"Take the step now by emitting its tool call. If a tool in this turn already did it, do not run it " +
 		"again: write the final answer, saying what was done. If the user asked you only to describe or plan " +
 		"the step, not to do it, write that answer again in full."
+}
+
+// promiseNudgeQuote is the end of the reply from the sentence before its final
+// one: after a closing line about the person's part, the announced step is
+// there, and a long closing line would push it out of a fixed tail.
+func promiseNudgeQuote(reply string) string {
+	runes := []rune(strings.TrimSpace(reply))
+	start := max(0, len(runes)-promiseNudgeTail)
+	if before := penultimateSentenceStart(runes); before < start {
+		start = max(before, len(runes)-promiseNudgeTailMax)
+	}
+	return strings.TrimSpace(string(runes[start:]))
+}
+
+// penultimateSentenceStart is where the sentence before the final one starts,
+// len(runes) when the reply is one sentence; a sentence ends at ".!?…" before
+// a space, or at a line break.
+func penultimateSentenceStart(runes []rune) int {
+	isEnd := func(i int) bool {
+		return runes[i] == '\n' || strings.ContainsRune(".!?…", runes[i]) && unicode.IsSpace(runes[i+1])
+	}
+	seen := 0
+	for i := len(runes) - 2; i >= 0; i-- {
+		if !isEnd(i) {
+			continue
+		}
+		if seen++; seen == 2 {
+			return i + 1
+		}
+		// "pronta.\n\n" is one sentence end, not three.
+		for i > 0 && (unicode.IsSpace(runes[i-1]) || strings.ContainsRune(".!?…", runes[i-1])) {
+			i--
+		}
+	}
+	if seen == 1 {
+		return 0
+	}
+	return len(runes)
 }
