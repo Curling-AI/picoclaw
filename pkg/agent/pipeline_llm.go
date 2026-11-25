@@ -1271,6 +1271,21 @@ func (p *Pipeline) CallLLM(
 			}
 		}
 
+		// A provider that parsed a call can leave its closing tags after a
+		// complete answer (`</parameter></invoke>`, DeepSeek's DSML closers): the
+		// person would see them, the judge would read them, and the session would
+		// keep them. The answer before them is the reply. (seucaranguejo fork)
+		if stripped := protocoltypes.StripDanglingCallClosers(responseContent); stripped != responseContent {
+			logger.WarnCF("agent", "LLM reply ended in tool-call closing tags it never opened; stripped them",
+				map[string]any{
+					"agent_id":       ts.agent.ID,
+					"iteration":      iteration,
+					"content_chars":  len(responseContent),
+					"stripped_chars": len(responseContent) - len(stripped),
+				})
+			responseContent = stripped
+		}
+
 		// A reply that ENDS in pseudo-XML tool-call markup is a tool call the
 		// model failed to emit structurally — the gateway's own parser matched
 		// the opening `<tool_call><function=NAME>`, gave up, and forwarded the
