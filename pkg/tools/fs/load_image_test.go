@@ -53,6 +53,22 @@ func TestLoadImage_NonImageFile(t *testing.T) {
 	}
 }
 
+// filetype calls an AutoCAD drawing image/vnd.dwg, but no model reads it.
+func TestLoadImage_DrawingIsNotAnImage(t *testing.T) {
+	dir := t.TempDir()
+	dwgFile := filepath.Join(dir, "planta.dwg")
+	if err := os.WriteFile(dwgFile, []byte("AC1032\x00\x00\x00\x00\x00\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewLoadImageTool(dir, false, 0, media.NewFileMediaStore())
+	ctx := WithToolContext(context.Background(), "test", "chat1")
+	result := tool.Execute(ctx, map[string]any{"path": dwgFile})
+	if !result.IsError || !strings.Contains(result.ForLLM, "image/vnd.dwg") {
+		t.Fatalf("expected the drawing refused as not an image, got: %s", result.ForLLM)
+	}
+}
+
 func TestLoadImage_DefaultMaxSize(t *testing.T) {
 	tool := NewLoadImageTool("/tmp", false, 0, nil)
 	if tool.maxFileSize != config.DefaultMaxMediaSize {
