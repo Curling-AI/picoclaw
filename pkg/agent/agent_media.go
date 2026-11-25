@@ -136,7 +136,7 @@ func resolveMediaRefs(
 			mime := detectMIME(localPath, meta)
 			pathTags = append(pathTags, buildPathTag(mime, localPath))
 
-			if idx < currentTurnStart || !strings.HasPrefix(mime, "image/") {
+			if idx < currentTurnStart || !media.IsViewableImage(mime) {
 				continue // history and non-images stay path-tagged only
 			}
 			dataURL := encodeImageToDataURL(localPath, mime, info, maxSize)
@@ -289,7 +289,7 @@ func detectMIME(localPath string, meta media.MediaMeta) string {
 // Tag type is derived from MIME: [image:/path], [audio:/path], [video:/path], or [file:/path].
 func buildPathTag(mime, localPath string) string {
 	switch {
-	case strings.HasPrefix(mime, "image/"):
+	case media.IsViewableImage(mime):
 		return "[image:" + localPath + "]"
 	case strings.HasPrefix(mime, "audio/"):
 		return "[audio:" + localPath + "]"

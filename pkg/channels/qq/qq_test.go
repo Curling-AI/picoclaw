@@ -745,3 +745,14 @@ func writeWAVFile(t *testing.T, dir, name string, duration time.Duration) string
 
 	return writeTempFile(t, dir, name, buf.Bytes())
 }
+
+// The agent resolver tags a CAD drawing as a file, so the placeholder must say
+// file too, or the next image's path lands in the drawing's slot.
+func TestQQAttachmentKind_DrawingIsAFile(t *testing.T) {
+	for contentType, want := range map[string]string{"image/vnd.dwg": "file", "image/png": "image"} {
+		got := qqAttachmentKind(&dto.MessageAttachment{FileName: "x", ContentType: contentType})
+		if got != want {
+			t.Errorf("qqAttachmentKind(%q) = %q, want %q", contentType, got, want)
+		}
+	}
+}
