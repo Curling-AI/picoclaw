@@ -227,9 +227,14 @@ func TestPublicLifecycleEmptyRollbackPreservesAcknowledgedDisplayAndLast(t *test
 	}
 	oldLast, _ := json.Marshal(before.ContentIdentity.Last)
 	newLast, _ := json.Marshal(after.ContentIdentity.Last)
+	// The rows index window shrinks with the cut; its file and the ACK slot stay.
+	oldStorage, newStorage := before.ContentIdentity.storage.Header, after.ContentIdentity.storage.Header
 	if !bytes.Equal(oldLast, newLast) || after.Skip != before.Skip || after.Summary != before.Summary ||
-		!reflect.DeepEqual(after.ContentIdentity.storage, before.ContentIdentity.storage) {
+		!reflect.DeepEqual(newStorage.Last, oldStorage.Last) || newStorage.Index.File != oldStorage.Index.File {
 		t.Fatal("cut changed ACK authority or summary")
+	}
+	if after.ContentIdentity.Unavailable {
+		t.Fatal("exact empty rollback lost content identity")
 	}
 }
 
