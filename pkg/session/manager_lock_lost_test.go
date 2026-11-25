@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -14,11 +15,25 @@ import (
 )
 
 // failLockChecks makes every session lock's Check fail as after a lost NFS
-// lease, through the fsync seam the store's lost-lease tests use.
-func failLockChecks(t *testing.T) {
+// lease, through the fsync seam the store's lost-lease tests use. It returns
+// what the sessions folder held at each Check: the contents of Save's temp
+// files.
+func failLockChecks(t *testing.T) *[][]string {
 	t.Helper()
-	locktest.Sync = func(*os.File) error { return syscall.EIO }
+	var checks [][]string
+	locktest.Sync = func(lockFile *os.File) error {
+		dir := filepath.Dir(filepath.Dir(lockFile.Name()))
+		temps, _ := filepath.Glob(filepath.Join(dir, "session-*.tmp"))
+		contents := make([]string, len(temps))
+		for i, temp := range temps {
+			got, _ := os.ReadFile(temp)
+			contents[i] = string(got)
+		}
+		checks = append(checks, contents)
+		return syscall.EIO
+	}
 	t.Cleanup(func() { locktest.Sync = nil })
+	return &checks
 }
 
 // savedManager saves key's session once, with the real Check, and returns its
@@ -55,16 +70,20 @@ func requireOnlyTheSession(t *testing.T, path string) {
 }
 
 // After a lost lease another process may hold the session's lock: Save checks
-// the lock right before its rename, and on a lost lock leaves the file as it
-// was, removes its temp file and fails with the lost lock.
+// the lock right before its rename, once its temp file holds the new session,
+// and on a lost lock leaves the file as it was, removes its temp file and
+// fails with the lost lock.
 func TestSessionManagerSaveWithALostLockLeavesTheFile(t *testing.T) {
 	key := "agent:main:direct:lost-save"
 	sm, path, saved := savedManager(t, key)
 	sm.AddMessage(key, "assistant", "two")
-	failLockChecks(t)
+	checks := failLockChecks(t)
 
 	if err := sm.Save(key); !errors.Is(err, sessionlock.ErrLost) {
 		t.Fatalf("Save with a lost lock = %v, want ErrLost", err)
+	}
+	if len(*checks) != 1 || len((*checks)[0]) != 1 || !strings.Contains((*checks)[0][0], `"two"`) {
+		t.Fatalf("temp files at each Check = %q, want one Check with one temp holding the new message", *checks)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(saved) {
 		t.Fatalf("session file after the lost Save = %q, %v; want the saved one", got, err)

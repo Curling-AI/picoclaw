@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -67,4 +68,44 @@ func TestWriteFileAtomicCheckedRefusedLeavesThePath(t *testing.T) {
 		t.Fatalf("WriteFileAtomicChecked = %v after %d checks; want the check's error after 1", err, calls)
 	}
 	requireOnlyFile(t, path, "old")
+}
+
+// When the temp file cannot be made (a folder that takes no new file, as an S3
+// mount refuses the rename), the fallback writes path in place: the check runs
+// right before that direct write too, and a refusal leaves path as it was.
+func TestWriteFileAtomicCheckedChecksBeforeTheDirectWrite(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder that refuses new files to its user")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	lost := errors.New("lock lost")
+	calls := 0
+	err := WriteFileAtomicChecked(path, []byte("new"), 0o600, func() error {
+		calls++
+		return lost
+	})
+	if got, _ := os.ReadFile(path); !errors.Is(err, lost) || calls != 1 || string(got) != "old" {
+		t.Fatalf("refused fallback: err=%v calls=%d content=%q; want the check's error after 1, old", err, calls, got)
+	}
+
+	calls = 0
+	err = WriteFileAtomicChecked(path, []byte("new"), 0o600, func() error {
+		calls++
+		if got, _ := os.ReadFile(path); string(got) != "old" {
+			t.Errorf("at the check, path = %q; want the old content", got)
+		}
+		return nil
+	})
+	if got, _ := os.ReadFile(path); err != nil || calls != 1 || string(got) != "new" {
+		t.Fatalf("fallback: err=%v calls=%d content=%q; want nil after 1 check, new", err, calls, got)
+	}
 }
