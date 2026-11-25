@@ -31,9 +31,11 @@ const promiseQuestion = "Judge the final sentence of the assistant's last messag
 	"or by taking the task on (\"Perfect! I'll do it now.\", \"Great, I'll book it right now.\", \"Leave it " +
 	"with me.\"); (3) a request to wait, or a status line with nothing after it (\"One moment, I'm " +
 	"generating the PDF.\", \"Please wait while I check.\", \"Analyzing the data…\", \"Searching for the " +
-	"information...\"); (4) coming back later with nothing set up to bring it back (\"I'll let you know " +
+	"information...\"); (4) coming back later with nothing set up to bring it back, including after work it " +
+	"left running in the background itself (\"I'll let you know " +
 	"when it's ready.\", \"I'll be right back with the result.\", \"I'll send it in a few minutes.\", \"I'll " +
-	"get back to you with the comparison.\"); (5) long work announced as continuing (\"I'll keep going and " +
+	"get back to you with the comparison.\", \"When the background task I started finishes, I'll review it " +
+	"and send you my recommendation.\"); (5) long work announced as continuing (\"I'll keep going and " +
 	"report my progress.\"), an action in parallel (\"While you restart it, I'll prepare a test.\"), or a " +
 	"self-correction (\"I need to fix that in my notes, fixing it now.\"); (6) a plan of steps it says it " +
 	"will follow, not yet run (\"I'll follow these steps: 1. read the statement 2. match it with the ERP\", " +
@@ -53,7 +55,8 @@ const promiseQuestion = "Judge the final sentence of the assistant's last messag
 	"you tomorrow at 9.\"); asks the person a question, for a choice, for confirmation or for approval, " +
 	"including a plan that ends asking to start (\"Shall I start?\"); waits on the person or someone else, " +
 	"such as connecting an app, choosing an option, sending a file, filling in a form or tapping a button " +
-	"or connection card shown with the message, also when it says what it will do once that arrives (\"As " +
+	"or connection card shown with the message, or another of the person's assistants replying, also when " +
+	"it says what it will do once that arrives (\"As " +
 	"soon as you send the contract, I'll review it.\", \"When the finance assistant replies, I'll update " +
 	"the sheet.\"), or names the next item of a series the person sends one at a time (\"Next: chapter " +
 	"4.\"); gives the person instructions to follow, or delivers a " +
