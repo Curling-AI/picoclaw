@@ -612,6 +612,49 @@ func TestCallTool_ReconnectsWhenHTTPServerLosesSession(t *testing.T) {
 	}
 }
 
+// One HTTP 403 closes the go-sdk streamable client for good; the manager must
+// replace it instead of failing every later call with "connection closed".
+func TestCallTool_ReconnectsWhenClientConnectionClosed(t *testing.T) {
+	originalConnectServerFunc := connectServerFunc
+	t.Cleanup(func() {
+		connectServerFunc = originalConnectServerFunc
+	})
+
+	staleConn, staleTransport, err := newScriptedServerConnection("session-1", nil, nil)
+	if err != nil {
+		t.Fatalf("newScriptedServerConnection(stale) error = %v", err)
+	}
+	if err = staleConn.Session.Close(); err != nil {
+		t.Fatalf("closing stale session: %v", err)
+	}
+	freshConn, freshTransport, err := newScriptedServerConnection(
+		"session-2",
+		&sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "reconnected"}}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newScriptedServerConnection(fresh) error = %v", err)
+	}
+	connectServerFunc = func(context.Context, string, config.MCPServerConfig) (*ServerConnection, error) {
+		return freshConn, nil
+	}
+
+	mgr := NewManager()
+	mgr.servers["flaky"] = staleConn
+
+	result, err := mgr.CallTool(context.Background(), "flaky", "echo", map[string]any{})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if text, ok := result.Content[0].(*sdkmcp.TextContent); !ok || text.Text != "reconnected" {
+		t.Fatalf("CallTool() content = %#v, want the fresh session's result", result.Content)
+	}
+	if staleTransport.toolCallCalls != 0 || freshTransport.toolCallCalls != 1 {
+		t.Fatalf("toolCallCalls stale=%d fresh=%d, want 0 and 1",
+			staleTransport.toolCallCalls, freshTransport.toolCallCalls)
+	}
+}
+
 func TestClose_IdempotentOnEmptyManager(t *testing.T) {
 	mgr := NewManager()
 

@@ -538,7 +538,7 @@ func (m *Manager) CallTool(
 	result, err := conn.Session.CallTool(ctx, params)
 	if err != nil {
 		if shouldReconnectCallError(err) {
-			logger.WarnCF("mcp", "MCP server session was lost during tool call, reconnecting",
+			logger.WarnCF("mcp", "MCP server session was lost or closed during tool call, reconnecting",
 				map[string]any{
 					"server": serverName,
 					"tool":   toolName,
@@ -547,7 +547,7 @@ func (m *Manager) CallTool(
 
 			reconnectedConn, reconnectErr := m.reconnectServer(ctx, serverName, conn)
 			if reconnectErr != nil {
-				// The server had no session for the call, so the tool didn't run.
+				// The server had no session for the call, or the closed client never sent it, so the tool didn't run.
 				return nil, NotSent(fmt.Errorf("failed to recover lost MCP session: %w", reconnectErr))
 			}
 
@@ -604,7 +604,9 @@ func shouldReconnectCallError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, mcp.ErrSessionMissing) {
+	// A closed client refuses every later call before sending it, so only a
+	// fresh session recovers it (one HTTP 403 closes the streamable client).
+	if errors.Is(err, mcp.ErrSessionMissing) || errors.Is(err, mcp.ErrConnectionClosed) {
 		return true
 	}
 	return strings.Contains(strings.ToLower(err.Error()), mcp.ErrSessionMissing.Error())
