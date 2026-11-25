@@ -2,6 +2,7 @@ package integrationtools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -1054,5 +1055,37 @@ func TestMCPAccountSignal(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// Shapes a real MCP server sent: Anthropic rejected the request over the null
+// description and OpenAI over the array without items.
+func TestMCPTool_Parameters_NormalizesProviderRejectedShapes(t *testing.T) {
+	var schema map[string]any
+	raw := `{"type":"object","required":[],"properties":{
+		"bu_id":{"type":"string","description":null},
+		"distributions":{"type":"array","description":"List of {funnel_tag_id, count}."},
+		"tags":{"type":["array","null"]},
+		"ids":{"type":"array","items":{"type":"string","description":null}},
+		"note":{"type":"string","default":null}
+	}}`
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := json.Marshal(schema)
+
+	params := NewMCPTool(&MockMCPManager{}, "copy-hub", &mcp.Tool{Name: "t", InputSchema: schema}).Parameters()
+
+	got, _ := json.Marshal(params)
+	want := `{"properties":{"bu_id":{"type":"string"},` +
+		`"distributions":{"description":"List of {funnel_tag_id, count}.","items":{},"type":"array"},` +
+		`"ids":{"items":{"type":"string"},"type":"array"},` +
+		`"note":{"default":null,"type":"string"},` +
+		`"tags":{"items":{},"type":["array","null"]}},"required":[],"type":"object"}`
+	if string(got) != want {
+		t.Fatalf("normalized schema:\n got %s\nwant %s", got, want)
+	}
+	if after, _ := json.Marshal(schema); string(after) != string(original) {
+		t.Fatalf("server schema was mutated: %s", after)
 	}
 }

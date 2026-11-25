@@ -234,8 +234,55 @@ func (t *MCPTool) PromptMetadata() toolshared.PromptMetadata {
 	}
 }
 
-// Parameters returns the tool parameters schema
+// Parameters returns the tool parameters schema, normalized so providers accept it.
 func (t *MCPTool) Parameters() map[string]any {
+	params, _ := normalizeProviderSchema(t.rawParameters()).(map[string]any)
+	return params
+}
+
+// normalizeProviderSchema returns a copy of an MCP server's schema without the
+// shapes Anthropic and OpenAI reject for the whole request: null-valued
+// keywords (`"description": null`) and arrays without `items`.
+func normalizeProviderSchema(node any) any {
+	switch v := node.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, value := range v {
+			if value == nil && key != "default" && key != "const" {
+				continue
+			}
+			out[key] = normalizeProviderSchema(value)
+		}
+		if _, hasItems := out["items"]; !hasItems && isArraySchemaType(out["type"]) {
+			out["items"] = map[string]any{}
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, value := range v {
+			out[i] = normalizeProviderSchema(value)
+		}
+		return out
+	default:
+		return node
+	}
+}
+
+func isArraySchemaType(schemaType any) bool {
+	switch v := schemaType.(type) {
+	case string:
+		return v == "array"
+	case []any:
+		for _, item := range v {
+			if item == "array" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (t *MCPTool) rawParameters() map[string]any {
 	// The InputSchema is already a JSON Schema object
 	schema := t.tool.InputSchema
 
