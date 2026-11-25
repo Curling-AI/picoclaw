@@ -168,11 +168,19 @@ func buildTaskSuccessJudgePrompt(record LearningRecord) string {
 // taskSuccessQuestion is the success judge's question to a decision model: a
 // yes/no read of the record, in any language, with no JSON to parse.
 // (seucaranguejo fork)
-const taskSuccessQuestion = "Did this assistant task truly achieve what the person asked for? Answer yes when " +
-	"the final output gives the person a concrete result, a finished piece of work, a completed procedure or a " +
-	"direct answer to their question. A result shown as a card, table or interface markup (such as an " +
-	"openui-lang block), an image or an attached file counts as delivered. Answer no when it only plans, " +
-	"describes or promises future steps, stops partway, reports a failure, or does not deliver the requested outcome."
+const taskSuccessQuestion = "Did this assistant task truly achieve what the person asked for? Answer yes when the final output gives " +
+	"the person a concrete result, a finished piece of work, a completed procedure or a direct answer to " +
+	"their question, even when it then offers more help or asks a follow-up question about that result. A " +
+	"result shown as a card, table or interface markup (such as an openui-lang block), an image or an " +
+	"attached file counts as delivered. When the request is an automated event (a webhook, payload or message " +
+	"notification) with handling rules, applying those rules counts as achieved: replying, logging it, " +
+	"ignoring it as the rules say, or reporting that no action was needed; only logging or ignoring an event " +
+	"the rules say to act on does not. When the person asked to be asked questions, asking them counts as " +
+	"achieved. Answer no when it only plans, describes or promises future steps, stops partway or delivers " +
+	"only part of what was asked, reports a failure, waits for something the person still has to send, asks " +
+	"for information before doing the task, or does not deliver the requested outcome, even when it ends " +
+	"offering to try again or another way. Answer no as well when there was no task, such as a thanks, an " +
+	"okay, a goodbye or a greeting, however friendly the reply."
 
 const taskSuccessQuestionName = "task_succeeded"
 
