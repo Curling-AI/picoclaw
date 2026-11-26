@@ -932,6 +932,12 @@ func TestRestartIgnoresBadSavedCatalog(t *testing.T) {
 			data, _ := json.Marshal(catalog)
 			return data
 		},
+		// A catalog saved before the listings were kept says nothing of them.
+		"without the root listings": func(_ []byte, catalog skillCatalog) []byte {
+			catalog.SkillEntries = nil
+			data, _ := json.Marshal(catalog)
+			return data
+		},
 	}
 	for name, corrupt := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -974,5 +980,97 @@ func TestStopSavesSkillCatalog(t *testing.T) {
 	al.Stop()
 	if _, err := os.Stat(catalogPath); err != nil {
 		t.Errorf("stopping the loop should save the skill catalog: %v", err)
+	}
+}
+
+// On the pods' network volume a skill root's mtime, as the client reports it,
+// keeps its old value after a skill is added or removed, while the root's
+// listing changes at once: the next turn's prompt must follow the listing.
+func TestSkillAddedOrRemovedWhileTheRootMtimeStays(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/old/SKILL.md": "---\nname: old\ndescription: old-skill\n---\n# Old",
+	})
+	defer os.RemoveAll(tmpDir)
+	root := filepath.Join(tmpDir, "skills")
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepRootMtime := func() {
+		if err := os.Chtimes(root, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cb := NewContextBuilder(tmpDir)
+	if sp := cb.BuildSystemPromptWithCache(); !strings.Contains(sp, "old-skill") || strings.Contains(sp, "new-skill") {
+		t.Fatal("expected the initial prompt to list only the old skill")
+	}
+
+	newPath := filepath.Join(root, "new", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("---\nname: new\ndescription: new-skill\n---\n# New"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keepRootMtime()
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
+		t.Error("a skill added while the root's mtime stayed should be in the next turn's prompt")
+	}
+
+	if err := os.RemoveAll(filepath.Dir(newPath)); err != nil {
+		t.Fatal(err)
+	}
+	keepRootMtime()
+	if strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
+		t.Error("a skill removed while the root's mtime stayed should be out of the next turn's prompt")
+	}
+}
+
+// A restart takes the saved catalog only while the skill roots list what they
+// listed when it was saved: on the network volume a skill added or removed
+// while the process was stopped can leave the root's mtime as it was.
+func TestRestartSeesSkillsAddedOrRemovedWhileTheRootMtimeStayed(t *testing.T) {
+	cases := map[string]struct {
+		change      func(t *testing.T, skillsDir string)
+		want, avoid string
+	}{
+		"added": {func(t *testing.T, skillsDir string) {
+			path := filepath.Join(skillsDir, "added", "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			content := []byte("---\nname: added\ndescription: added-skill\n---\n# Added")
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "added-skill", ""},
+		"removed": {func(t *testing.T, skillsDir string) {
+			if err := os.RemoveAll(filepath.Join(skillsDir, "kept")); err != nil {
+				t.Fatal(err)
+			}
+		}, "", "kept-v1"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpDir, _ := savedCatalogWorkspace(t)
+			skillsDir := filepath.Join(tmpDir, "skills")
+			info, err := os.Stat(skillsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(t, skillsDir)
+			if err := os.Chtimes(skillsDir, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			prompt := NewContextBuilder(tmpDir).BuildSystemPromptWithCache()
+			if tc.want != "" && !strings.Contains(prompt, tc.want) {
+				t.Errorf("the first turn after a restart should list the skill %s while stopped", name)
+			}
+			if tc.avoid != "" && strings.Contains(prompt, tc.avoid) {
+				t.Errorf("the first turn after a restart should not list the skill %s while stopped", name)
+			}
+		})
 	}
 }
