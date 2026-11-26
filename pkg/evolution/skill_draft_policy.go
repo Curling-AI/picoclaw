@@ -18,7 +18,8 @@ func skillDraftPromptInstructions() []string {
 		"Keep operational instructions separable from audit/provenance notes because the final deployed SKILL.md will be rendered without learning traces.",
 		"Write the procedure from the tool_steps that worked in the source tasks: the same tools, commands, file layouts and column names, in their order, generalized only where the tasks differ (a file name, a month). A step that failed before one that worked is something to avoid, not a step to repeat.",
 		"Keep the skill to what the tasks delivered: no output format, chart, card, extra column or extra step that their final outputs do not show.",
-		"Write the name, the description and the body in the language the person used in the tasks; the name stays lowercase and hyphenated, without accents.",
+		"Write the name, the description and the body in the language of the person's requests in the source tasks, even though these instructions are in English; the name stays lowercase and hyphenated, without accents.",
+		"In the description, say what result the skill produces (for example, which value it sums or counts), so that a request for something else about the same files does not match it.",
 	}
 }
 

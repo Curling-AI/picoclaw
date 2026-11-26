@@ -406,7 +406,8 @@ func TestLLMDraftGenerator_BuildPromptShowsTheTaskSteps(t *testing.T) {
 		"3. exec: python3 ranking.py artifacts/vendas-agosto.csv -> ok",
 		"Write the procedure from the tool_steps that worked",
 		"no output format, chart, card, extra column or extra step",
-		"in the language the person used in the tasks",
+		"in the language of the person's requests in the source tasks",
+		"say what result the skill produces",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
