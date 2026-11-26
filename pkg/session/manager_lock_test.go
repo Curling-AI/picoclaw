@@ -102,6 +102,44 @@ func TestSessionManagerRefusedDeleteKeepsTheSession(t *testing.T) {
 	requireSavedMessages(t, path, "one", "two")
 }
 
+// A Save whose snapshot predates a delete that took the lock first does not
+// bring the deleted file back.
+// The same holds when a new message starts the session again before the Save
+// takes the lock: that session's own Save writes it.
+func TestSessionManagerSaveBehindADeleteDoesNotBringTheFileBack(t *testing.T) {
+	for name, startAgain := range map[string]bool{"deleted": false, "started again": true} {
+		t.Run(name, func(t *testing.T) {
+			key := "agent:main:direct:save-behind-delete"
+			dir := t.TempDir()
+			sm := NewSessionManager(dir)
+			sm.AddMessage(key, "user", "one")
+			if err := sm.Save(key); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, sanitizeFilename(key)+".json")
+
+			var deleteErr error
+			saveSnapshotTaken = func() {
+				deleteErr = sm.DeleteSession(key)
+				if startAgain {
+					sm.AddMessage(key, "user", "two")
+				}
+			}
+			t.Cleanup(func() { saveSnapshotTaken = func() {} })
+
+			if err := sm.Save(key); err != nil {
+				t.Fatalf("Save behind the delete = %v, want nil", err)
+			}
+			if deleteErr != nil {
+				t.Fatalf("DeleteSession in the gap = %v", deleteErr)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("the Save brought the deleted file back: %v", err)
+			}
+		})
+	}
+}
+
 // Without a file, the delete still forgets the session: with no storage, and
 // with storage but nothing saved yet. With no storage it touches no disk.
 func TestSessionManagerDeleteWithoutAFileForgetsTheSession(t *testing.T) {

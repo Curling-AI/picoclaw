@@ -25,6 +25,10 @@ type Session struct {
 // session's file lock before failing with sessionlock.ErrBusy.
 var sessionManagerLockWait = 10 * time.Second
 
+// saveSnapshotTaken runs in Save between the snapshot and the lock. Tests use
+// it to delete the session in that gap.
+var saveSnapshotTaken = func() {}
+
 type SessionManager struct {
 	sessions map[string]*Session
 	mu       sync.RWMutex
@@ -229,6 +233,7 @@ func (sm *SessionManager) Save(key string) error {
 		snapshot.Messages = []providers.Message{}
 	}
 	sm.mu.RUnlock()
+	saveSnapshotTaken()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -242,6 +247,16 @@ func (sm *SessionManager) Save(key string) error {
 		return err
 	}
 	defer func() { _ = lock.Release() }()
+
+	// A delete that took the lock first removed the file and forgot the
+	// session, which a new message may have started again: this snapshot
+	// must not bring the old file back.
+	sm.mu.RLock()
+	current := sm.sessions[key]
+	sm.mu.RUnlock()
+	if current != stored {
+		return nil
+	}
 
 	// The rename goes only after a Check: after a lost NFS lease another
 	// process may hold the lock and have saved since.
