@@ -41,12 +41,12 @@ func (sm *SessionManager) ListSessionRecords() []SessionRecord {
 // DeleteSession removes a session from memory and deletes its persisted file.
 // Returns nil if the session does not exist.
 func (sm *SessionManager) DeleteSession(key string) error {
-	sm.mu.Lock()
-	delete(sm.sessions, key)
+	sm.mu.RLock()
 	storage := sm.storage
-	sm.mu.Unlock()
+	sm.mu.RUnlock()
 
 	if storage == "" {
+		sm.forget(key)
 		return nil
 	}
 	name := sanitizeFilename(key)
@@ -66,5 +66,15 @@ func (sm *SessionManager) DeleteSession(key string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	// The session leaves memory only with its file, still under the lock: a
+	// refused delete keeps it, or the next Save would write a new, empty
+	// session over the history the file still holds.
+	sm.forget(key)
 	return nil
+}
+
+func (sm *SessionManager) forget(key string) {
+	sm.mu.Lock()
+	delete(sm.sessions, key)
+	sm.mu.Unlock()
 }

@@ -104,3 +104,45 @@ func TestSessionManagerDeleteWithALostLockLeavesTheFile(t *testing.T) {
 		t.Fatalf("session file after the lost delete = %q, %v; want it there", got, err)
 	}
 }
+
+// A removal that fails keeps the session in memory too: the file is still the
+// session's, and the next Save adds to it.
+func TestSessionManagerFailedRemovalKeepsTheSession(t *testing.T) {
+	key := "agent:main:direct:delete-remove-fails"
+	sm, path, _ := savedManager(t, key)
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if err := sm.DeleteSession(key); err == nil {
+		t.Fatal("DeleteSession in a read-only folder = nil, want the removal's error")
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sm.AddMessage(key, "assistant", "two")
+	if err := sm.Save(key); err != nil {
+		t.Fatalf("Save after the failed removal: %v", err)
+	}
+	requireSavedMessages(t, path, "one", "two")
+}
+
+// A delete refused by a lost lock keeps the session in memory, as a busy one
+// does: the next Save, with the lock back, adds to the history.
+func TestSessionManagerDeleteWithALostLockKeepsTheSession(t *testing.T) {
+	key := "agent:main:direct:lost-delete-keeps"
+	sm, path, _ := savedManager(t, key)
+	failLockChecks(t)
+
+	if err := sm.DeleteSession(key); !errors.Is(err, sessionlock.ErrLost) {
+		t.Fatalf("DeleteSession with a lost lock = %v, want ErrLost", err)
+	}
+	locktest.Sync = nil
+	sm.AddMessage(key, "assistant", "two")
+	if err := sm.Save(key); err != nil {
+		t.Fatalf("Save after the lost delete: %v", err)
+	}
+	requireSavedMessages(t, path, "one", "two")
+}
