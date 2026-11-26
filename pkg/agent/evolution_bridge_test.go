@@ -78,11 +78,23 @@ func TestEvolutionBridge_ObserveWritesCaseRecord(t *testing.T) {
 		t.Fatalf("status = %v, want %q", got, "new")
 	}
 
-	for _, field := range []string{"tool_kinds", "tool_executions", "initial_skill_names", "active_skill_names", "attempt_trail", "source"} {
+	for _, field := range []string{"tool_kinds", "initial_skill_names", "active_skill_names", "attempt_trail", "source"} {
 		if _, exists := record[field]; exists {
 			t.Fatalf("%s should not be persisted in slim task record: %#v", field, record[field])
 		}
 	}
+	// The turn's tool steps are kept: how the task got done, which a draft follows.
+	steps, _ := record["tool_executions"].([]any)
+	if step, _ := firstOrNil(steps).(map[string]any); step["name"] != "echo_text" || step["success"] != true {
+		t.Fatalf("tool_executions = %#v, want the turn's echo_text step", record["tool_executions"])
+	}
+}
+
+func firstOrNil(items []any) any {
+	if len(items) == 0 {
+		return nil
+	}
+	return items[0]
 }
 
 func TestEvolutionBridge_TurnEndBypassesHookObserverBackpressure(t *testing.T) {

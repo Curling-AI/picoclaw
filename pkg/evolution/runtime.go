@@ -113,6 +113,26 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 // finalOutputMaxRunes caps the final output a task record keeps.
 const finalOutputMaxRunes = 1200
 
+// maxRecordedSteps bounds the tool steps a task record keeps: the last ones,
+// which hold the way the task got done.
+const maxRecordedSteps = 24
+
+// recordedSteps is what a task record keeps of the turn's tool steps: the
+// last maxRecordedSteps, redacted.
+func recordedSteps(steps []ToolExecutionRecord) []ToolExecutionRecord {
+	if len(steps) == 0 {
+		return nil
+	}
+	steps = steps[max(0, len(steps)-maxRecordedSteps):]
+	out := make([]ToolExecutionRecord, 0, len(steps))
+	for _, step := range steps {
+		step.Argument, step.ErrorSummary = redactSensitive(step.Argument), redactSensitive(step.ErrorSummary)
+		step.SkillNames = append([]string(nil), step.SkillNames...)
+		out = append(out, step)
+	}
+	return out
+}
+
 func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error {
 	if rt == nil || !rt.cfg.Enabled || input.Workspace == "" || shouldSkipLearningRecord(input) {
 		return nil
@@ -141,6 +161,7 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 		Status:         RecordStatus("new"),
 		Success:        &success,
 		UsedSkillNames: append([]string(nil), usedSkillNames...),
+		ToolExecutions: recordedSteps(input.ToolExecutions),
 	}
 
 	paths := NewPaths(input.Workspace, rt.cfg.StateDir)

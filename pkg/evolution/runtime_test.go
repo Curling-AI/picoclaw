@@ -3,6 +3,7 @@ package evolution_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,8 +173,13 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 	if len(first.UsedSkillNames) != 0 {
 		t.Fatalf("first UsedSkillNames = %v, want empty", first.UsedSkillNames)
 	}
-	if len(first.ToolKinds) != 0 || len(first.ToolExecutions) != 0 || first.Source != nil || first.AttemptTrail != nil {
+	if len(first.ToolKinds) != 0 || first.Source != nil || first.AttemptTrail != nil {
 		t.Fatalf("first record should be slimmed: %+v", first)
+	}
+	// The tool steps stay: they are how the task got done, which a draft follows.
+	if len(first.ToolExecutions) != 2 || first.ToolExecutions[0].Name != "web" ||
+		first.ToolExecutions[1].Name != "read_file" {
+		t.Fatalf("first record should keep the turn's tool steps: %+v", first.ToolExecutions)
 	}
 	if first.TaskHash != "" || len(first.Signals) != 0 {
 		t.Fatalf("first record should not persist task_hash/signals: %+v", first)
@@ -195,8 +201,13 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 	if second.Success == nil || *second.Success {
 		t.Fatalf("second Success = %v, want false", second.Success)
 	}
-	if len(second.ToolExecutions) != 0 || second.Source != nil || second.AttemptTrail != nil {
+	if second.Source != nil || second.AttemptTrail != nil {
 		t.Fatalf("second record should be slimmed: %+v", second)
+	}
+	// A failed step stays too, with its error: what not to repeat.
+	if len(second.ToolExecutions) != 1 || second.ToolExecutions[0].Success ||
+		second.ToolExecutions[0].ErrorSummary != "exit status 1" {
+		t.Fatalf("second record should keep its failed step: %+v", second.ToolExecutions)
 	}
 	if second.TaskHash != "" || len(second.Signals) != 0 {
 		t.Fatalf("second record should not persist task_hash/signals: %+v", second)
@@ -668,5 +679,61 @@ func assertFinalizeTurnReactivatesSkill(
 	}
 	if profile.Status != evolution.SkillStatusActive {
 		t.Fatalf("Status = %q, want %q", profile.Status, evolution.SkillStatusActive)
+	}
+}
+
+// A task record keeps the way the task got done: the turn's last tool steps,
+// in order, each with what it did, and without the secret or the person's
+// data a command carried.
+func TestRuntime_FinalizeTurnKeepsTheLastStepsRedacted(t *testing.T) {
+	workspace := t.TempDir()
+	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe"},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	steps := make([]evolution.ToolExecutionRecord, 0, 30)
+	for i := range 28 {
+		steps = append(
+			steps,
+			evolution.ToolExecutionRecord{Name: "list_dir", Argument: fmt.Sprintf("artifacts/%d", i), Success: true},
+		)
+	}
+	steps = append(
+		steps,
+		evolution.ToolExecutionRecord{
+			Name:         "exec",
+			Argument:     "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuv' https://api.loja.com",
+			Success:      false,
+			ErrorSummary: "401 for ana@lojadaana.com.br",
+		},
+		evolution.ToolExecutionRecord{Name: "exec", Argument: "python3 ranking.py artifacts/vendas.csv", Success: true},
+	)
+	if finalizeErr := rt.FinalizeTurn(context.Background(), evolution.TurnCaseInput{
+		Workspace: workspace, TurnID: "turn-1", SessionKey: "sk_v1_x", Status: "completed",
+		UserMessage: "faz o ranking de vendas por categoria", FinalContent: "Ranking pronto.", ToolExecutions: steps,
+	}); finalizeErr != nil {
+		t.Fatalf("FinalizeTurn: %v", finalizeErr)
+	}
+	records, err := evolution.NewStore(evolution.NewPaths(workspace, "")).LoadTaskRecords()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("LoadTaskRecords: %d records, %v", len(records), err)
+	}
+	kept := records[0].ToolExecutions
+	if len(kept) != 24 || kept[0].Argument != "artifacts/6" ||
+		kept[23].Argument != "python3 ranking.py artifacts/vendas.csv" {
+		t.Fatalf(
+			"kept %d steps from %q to %q, want the last 24",
+			len(kept),
+			kept[0].Argument,
+			kept[len(kept)-1].Argument,
+		)
+	}
+	if failed := kept[22]; strings.Contains(failed.Argument, "abcdefghijklmnop") ||
+		strings.Contains(failed.ErrorSummary, "ana@") ||
+		!strings.Contains(failed.Argument, "[redacted]") ||
+		failed.Success {
+		t.Errorf("the failed step was kept as %+v, want its token and e-mail redacted", failed)
 	}
 }

@@ -91,6 +91,24 @@ var draftScanPatterns = []draftScanPattern{
 // exampleEmailDomains não são PII — são o que a documentação usa.
 var exampleEmailDomains = regexp.MustCompile(`(?i)@(example\.(com|org|net)|test\.com|localhost|acme\.com|foo\.bar)\b`)
 
+// redactedMark takes the place of what redactSensitive removes.
+const redactedMark = "[redacted]"
+
+// redactSensitive replaces what the draft scan flags: a tool step's argument
+// reaches the task record and the draft prompt without the secret or the
+// person's data it carried, and so cannot put the draft in quarantine.
+func redactSensitive(text string) string {
+	for _, pattern := range draftScanPatterns {
+		text = pattern.re.ReplaceAllStringFunc(text, func(match string) string {
+			if exampleEmailDomains.MatchString(match) {
+				return match
+			}
+			return redactedMark
+		})
+	}
+	return text
+}
+
 func scanDraftContent(draft SkillDraft) []string {
 	body := draft.BodyOrPatch
 	findings := make([]string, 0, len(draftScanPatterns))

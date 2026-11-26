@@ -40,6 +40,9 @@ type ToolExecutionRecord struct {
 	Success      bool     `json:"success"`
 	ErrorSummary string   `json:"error_summary,omitempty"`
 	SkillNames   []string `json:"skill_names,omitempty"`
+	// Argument is what the step did (the command run, the file read, the
+	// query), see toolStepArgument; empty for the other tools.
+	Argument string `json:"argument,omitempty"`
 }
 
 // TurnEndPayload describes the completion of a turn.

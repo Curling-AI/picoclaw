@@ -538,7 +538,35 @@ func toEvolutionToolExecutions(input []ToolExecutionRecord) []evolution.ToolExec
 			Success:      record.Success,
 			ErrorSummary: record.ErrorSummary,
 			SkillNames:   append([]string(nil), record.SkillNames...),
+			Argument:     record.Argument,
 		})
 	}
 	return out
+}
+
+// toolStepKeys names, per tool, the argument that says what a step did: the
+// command run, the file read or written, the query. What a step wrote or sent
+// stays out: the evolution learns the way the task was done, not the
+// person's content. (seucaranguejo fork)
+var toolStepKeys = map[string]string{
+	"exec": "command", "read_file": "path", "write_file": "path", "edit_file": "path",
+	"append_file": "path", "list_dir": "path", "web_search": "query", "web_fetch": "url",
+}
+
+// toolStepMaxRunes bounds a step's argument, enough for a one-line command.
+const toolStepMaxRunes = 400
+
+// toolStepArgument is the argument toolStepKeys names for the tool, clipped;
+// empty for any other tool.
+func toolStepArgument(toolName string, args map[string]any) string {
+	key, ok := toolStepKeys[toolName]
+	if !ok {
+		return ""
+	}
+	value, _ := args[key].(string)
+	value = strings.TrimSpace(value)
+	if runes := []rune(value); len(runes) > toolStepMaxRunes {
+		value = string(runes[:toolStepMaxRunes]) + "…"
+	}
+	return value
 }

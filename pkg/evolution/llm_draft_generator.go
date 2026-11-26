@@ -162,10 +162,41 @@ func summarizeDraftTaskEvidence(evidence DraftEvidence) string {
 			"  summary: " + fallbackString(task.Summary, "none"),
 			"  final_output_excerpt: " + fallbackString(summarizeText(task.FinalOutput, 700), "none"),
 			"  used_skill_names: " + joinOrFallback(task.UsedSkillNames, "none"),
+			"  tool_steps:" + summarizeTaskSteps(task.ToolExecutions),
 		}
 		lines = append(lines, strings.Join(parts, "\n"))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// draftStepsPerTask bounds the tool steps the draft prompt shows per task.
+const draftStepsPerTask = 16
+
+// summarizeTaskSteps lists a task's tool steps in order, each with what it
+// did and whether it worked: the way the task got done, which the skill's
+// procedure follows.
+func summarizeTaskSteps(steps []ToolExecutionRecord) string {
+	if len(steps) == 0 {
+		return " none"
+	}
+	steps = steps[max(0, len(steps)-draftStepsPerTask):]
+	lines := make([]string, 0, len(steps))
+	for i, step := range steps {
+		line := fmt.Sprintf("    %d. %s", i+1, step.Name)
+		if step.Argument != "" {
+			line += ": " + step.Argument
+		}
+		if step.Success {
+			line += " -> ok"
+		} else {
+			line += " -> failed"
+			if step.ErrorSummary != "" {
+				line += ": " + summarizeText(step.ErrorSummary, 160)
+			}
+		}
+		lines = append(lines, line)
+	}
+	return "\n" + strings.Join(lines, "\n")
 }
 
 func combinedSkillGuidance(rule LearningRecord) string {

@@ -67,6 +67,9 @@ type ToolExecutionRecord struct {
 	Success      bool     `json:"success"`
 	ErrorSummary string   `json:"error_summary,omitempty"`
 	SkillNames   []string `json:"skill_names,omitempty"`
+	// Argument is what the step did (the command run, the file read, the
+	// query), with what looks like a secret or personal data redacted.
+	Argument string `json:"argument,omitempty"`
 }
 
 type LearningRecord struct {

@@ -16,6 +16,9 @@ func skillDraftPromptInstructions() []string {
 		"Extract only the necessary operations from source skills and evidence, such as formulas, ordered transformations, commands, inputs, outputs, and boundary conditions.",
 		"The operational part of the generated skill must be directly usable by a future agent without reading the original task records or source skills.",
 		"Keep operational instructions separable from audit/provenance notes because the final deployed SKILL.md will be rendered without learning traces.",
+		"Write the procedure from the tool_steps that worked in the source tasks: the same tools, commands, file layouts and column names, in their order, generalized only where the tasks differ (a file name, a month). A step that failed before one that worked is something to avoid, not a step to repeat.",
+		"Keep the skill to what the tasks delivered: no output format, chart, card, extra column or extra step that their final outputs do not show.",
+		"Write the name, the description and the body in the language the person used in the tasks; the name stays lowercase and hyphenated, without accents.",
 	}
 }
 

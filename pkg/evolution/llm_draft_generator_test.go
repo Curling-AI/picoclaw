@@ -365,3 +365,51 @@ func TestLLMDraftGenerator_GenerateDraft_FallsBackOnNumericOnlyTargetSkillName(t
 		t.Fatalf("TargetSkillName = %q, want learned-100", draft.TargetSkillName)
 	}
 }
+
+// The draft sees how each task got done: its tool steps in order, what each
+// did, the failure before the step that worked, and the instruction to write
+// the procedure from them, in the person's language, without extras.
+func TestLLMDraftGenerator_BuildPromptShowsTheTaskSteps(t *testing.T) {
+	provider := &llmDraftTestProvider{
+		defaultModel: "test-model",
+		response: &providers.LLMResponse{
+			Content: `{"target_skill_name":"ranking-vendas-categoria","draft_type":"workflow","change_kind":"create","human_summary":"Ranking","body_or_patch":"---\nname: ranking-vendas-categoria\ndescription: Ranking.\n---\n# Ranking\n\n## Passos\n1. Ler o CSV."}`,
+		},
+	}
+	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	_, err := generator.GenerateDraftWithEvidence(context.Background(), evolution.LearningRecord{
+		ID: "rule-1", Label: "ranking-vendas-categoria", Summary: "ranking de vendas por categoria",
+	}, nil, evolution.DraftEvidence{
+		TaskRecords: []evolution.LearningRecord{{
+			ID:      "main-turn-3",
+			Summary: "faz o ranking de vendas por categoria de agosto",
+			ToolExecutions: []evolution.ToolExecutionRecord{
+				{Name: "read_file", Argument: "artifacts/vendas-agosto.csv", Success: true},
+				{
+					Name:         "exec",
+					Argument:     "python3 -c 'import pandas'",
+					Success:      false,
+					ErrorSummary: "No module named pandas",
+				},
+				{Name: "exec", Argument: "python3 ranking.py artifacts/vendas-agosto.csv", Success: true},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("GenerateDraftWithEvidence: %v", err)
+	}
+	prompt := provider.lastMessages[1].Content
+	for _, want := range []string{
+		"tool_steps:",
+		"1. read_file: artifacts/vendas-agosto.csv -> ok",
+		"2. exec: python3 -c 'import pandas' -> failed: No module named pandas",
+		"3. exec: python3 ranking.py artifacts/vendas-agosto.csv -> ok",
+		"Write the procedure from the tool_steps that worked",
+		"no output format, chart, card, extra column or extra step",
+		"in the language the person used in the tasks",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
