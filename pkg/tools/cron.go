@@ -924,19 +924,22 @@ func (t *CronTool) ExecuteJobWithResult(ctx context.Context, execution cron.Exec
 	//     NO_REPLY, which AutomationDelivery takes out. The note keeps its first
 	//     and last words: ethos's privacy export finds it by them.
 	//     (seucaranguejo fork — MST-795)
+	// The items start with "- ", not "•": the model copied the "•" into its
+	// replies, and the web chat only renders "- " lines as a list.
+	// (seucaranguejo fork — MST-1116)
 	message := fmt.Sprintf("[Scheduled run of cron job %q]\n%s\n\n"+
 		"(System note: this is a routine scheduled run.\n"+
-		"• Reproducibility: in your FIRST tool call, execute `bash scripts/%s/run.sh` directly — do "+
+		"- Reproducibility: in your FIRST tool call, execute `bash scripts/%s/run.sh` directly — do "+
 		"NOT test for it, read it, or list directories first. If it runs, report only what changed "+
 		"since last time. Only if it fails with \"No such file\" is this the setup run: build a "+
 		"reproducible script there that captures this task end-to-end (except sending chat "+
 		"messages: the script prints them and you send them with the message tool), then run it. Keep "+
 		"state/watermarks (last-seen ids, offsets) in files under scripts/%s/ or state/.\n"+
-		"• Delivery: your final answer is delivered to the user as this run's result. If this run has "+
+		"- Delivery: your final answer is delivered to the user as this run's result. If this run has "+
 		"nothing the user should receive (nothing new, nothing changed, nothing to report), your final "+
 		"answer must be exactly "+noReplyToken+" and nothing else; do not write that there is nothing "+
 		"new. Otherwise answer with the result itself and never mention "+noReplyToken+".\n"+
-		"• Notes: do NOT record routine runs in the daily notes. Only write a note when the run "+
+		"- Notes: do NOT record routine runs in the daily notes. Only write a note when the run "+
 		"produced a genuinely new fact the user would care about; never use the daily notes as a "+
 		"state store.)",
 		job.Name, job.Payload.Message, job.ID, job.ID)
