@@ -114,9 +114,11 @@ func (s *JSONLStore) preparingMediaScope(
 // A completed delivery may outlive an older projection gap. Only its exact
 // native scope is admitted; preparation still owns publishing the missing rows.
 func (s *JSONLStore) recordPreparingPublicMedia(ctx context.Context, key, run, content string) error {
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return err
 	}

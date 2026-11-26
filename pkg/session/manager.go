@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
@@ -19,6 +20,14 @@ type Session struct {
 	Created  time.Time           `json:"created"`
 	Updated  time.Time           `json:"updated"`
 }
+
+// sessionManagerLockWait is how long a write waits for another holder of the
+// session's file lock before failing with sessionlock.ErrBusy.
+var sessionManagerLockWait = 10 * time.Second
+
+// saveSnapshotTaken runs in Save between the snapshot and the lock. Tests use
+// it to delete the session in that gap.
+var saveSnapshotTaken = func() {}
 
 type SessionManager struct {
 	sessions map[string]*Session
@@ -224,14 +233,42 @@ func (sm *SessionManager) Save(key string) error {
 		snapshot.Messages = []providers.Message{}
 	}
 	sm.mu.RUnlock()
+	saveSnapshotTaken()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	sessionPath := filepath.Join(sm.storage, filename+".json")
-	tmpFile, err := os.CreateTemp(sm.storage, "session-*.tmp")
+	// The file is never written without the session's lock: another process
+	// may share this folder (two pods of one assistant during a rollout).
+	lock, err := sessionlock.Acquire(sm.storage, filename, sessionManagerLockWait)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Release() }()
+
+	// A delete that took the lock first removed the file and forgot the
+	// session, which a new message may have started again: this snapshot
+	// must not bring the old file back.
+	sm.mu.RLock()
+	current := sm.sessions[key]
+	sm.mu.RUnlock()
+	if current != stored {
+		return nil
+	}
+
+	// The rename goes only after a Check: after a lost NFS lease another
+	// process may hold the lock and have saved since.
+	// shortcut: a Check proves the lock only at its instant; a stall between it and the rename can still land the save after the lease ends, the window the store's checkSessionLock leaves too.
+	return writeFileAtomic(sm.storage, filepath.Join(sm.storage, filename+".json"), data, lock.Check)
+}
+
+// writeFileAtomic writes sessionPath through a temp file in dir, running
+// beforeRename right before the rename; its error leaves sessionPath as it
+// was and removes the temp file.
+func writeFileAtomic(dir, sessionPath string, data []byte, beforeRename func() error) error {
+	tmpFile, err := os.CreateTemp(dir, "session-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -257,6 +294,9 @@ func (sm *SessionManager) Save(key string) error {
 		return err
 	}
 	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := beforeRename(); err != nil {
 		return err
 	}
 

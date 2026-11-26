@@ -34,6 +34,10 @@ type sessionDeletingStore interface {
 	DeleteSession(ctx context.Context, sessionKey string) error
 }
 
+type sessionRefreshingStore interface {
+	RefreshSessionMeta(ctx context.Context, sessionKey string) error
+}
+
 type emptySessionPruningStore interface {
 	PruneEmptySessions(
 		minIdle time.Duration,
@@ -185,6 +189,16 @@ func (b *JSONLBackend) GetHistory(key string) []providers.Message {
 		msgs[index].HistorySequence = 0
 	}
 	return msgs
+}
+
+// RefreshSession rereads the session's meta from disk (SessionRefresher): the
+// store's plain reads serve a cache that another process may have written past.
+func (b *JSONLBackend) RefreshSession(key string) error {
+	refresher, ok := b.store.(sessionRefreshingStore)
+	if !ok {
+		return nil
+	}
+	return refresher.RefreshSessionMeta(context.Background(), b.resolveSessionKey(key))
 }
 
 func (b *JSONLBackend) GetSummary(key string) string {

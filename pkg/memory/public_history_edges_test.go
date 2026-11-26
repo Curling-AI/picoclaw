@@ -41,7 +41,7 @@ func TestPublicHistoryPreparationPreservesActiveContentRefs(t *testing.T) {
 	m.PublicHistoryDigest = ""
 	m.PublicHistoryComplete = false
 	m.PublicHistoryPreparation = nil
-	if e = s.writeMeta(k, m); e != nil {
+	if e = writeMetaLocked(t, s, k, m); e != nil {
 		t.Fatal(e)
 	}
 	if e = os.Remove(s.publicHistoryPath(k)); e != nil {

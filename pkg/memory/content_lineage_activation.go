@@ -36,14 +36,13 @@ func (s *JSONLStore) HistoryContentIdentityActive(ctx context.Context, key strin
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	legacy, err := s.ownedContentNeverInitialized(ctx, key)
-	if err != nil || legacy {
-		return false, err
-	}
-	return s.contentIdentityActiveLocked(ctx, key)
+	return readSessionLocked(s, key, func() (bool, error) {
+		legacy, err := s.ownedContentNeverInitialized(ctx, key)
+		if err != nil || legacy {
+			return false, err
+		}
+		return s.contentIdentityActiveLocked(ctx, key)
+	})
 }
 
 // This is only a negative activation probe for an already resolved physical

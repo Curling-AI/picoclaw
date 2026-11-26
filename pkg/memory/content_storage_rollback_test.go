@@ -64,7 +64,11 @@ func TestContentStorageInlineRollbackPreservesAllSemanticState(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// A lost order witness is latched by the first read under the
+				// session's lock, so the direct read takes it.
+				unlock := holdSessionLockForTest(t, s, key)
 				meta, err := s.readMeta(key)
+				unlock()
 				if err != nil {
 					t.Fatal(err)
 				}

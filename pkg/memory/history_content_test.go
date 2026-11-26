@@ -150,7 +150,7 @@ func TestCheckedContentDistinguishesReadFailuresFromEmptyHistory(t *testing.T) {
 					t.Fatal(err)
 				}
 				meta.Count, meta.HistoryBytes = 0, nil
-				if err := store.writeMeta(key, meta); err != nil {
+				if err := writeMetaLocked(t, store, key, meta); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.Remove(store.jsonlPath(key)); err != nil {
@@ -196,7 +196,7 @@ func TestCheckedContentDistinguishesReadFailuresFromEmptyHistory(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "wrong owner":
-				if err := store.writeMeta(key, SessionMeta{Key: "different_owner", Count: 1}); err != nil {
+				if err := writeMetaLocked(t, store, key, SessionMeta{Key: "different_owner", Count: 1}); err != nil {
 					t.Fatal(err)
 				}
 			case "ambiguous alias":

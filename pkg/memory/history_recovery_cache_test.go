@@ -79,7 +79,7 @@ func TestHistoryPendingRollbackSurvivesListingAndAppend(t *testing.T) {
 			if committed {
 				// The metadata commit can have landed even when the writer reported
 				// an error. Recovery must then publish NEW, replacing any stale cache.
-				if writeErr := s.writeMeta(key, recovery.Next); writeErr != nil {
+				if writeErr := writeMetaLocked(t, s, key, recovery.Next); writeErr != nil {
 					t.Fatal(writeErr)
 				}
 				s.storeCachedMeta(sanitizeKey(key), before)

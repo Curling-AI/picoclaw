@@ -168,7 +168,7 @@ type writeRacingFs struct {
 	afterUnlock func()
 }
 
-func (r writeRacingFs) withWriteLock(path string, write func() error) error {
+func (r writeRacingFs) withWriteLock(path string, write func(beforePublish func() error) error) error {
 	err := r.fileSystem.withWriteLock(path, write)
 	r.afterUnlock()
 	return err

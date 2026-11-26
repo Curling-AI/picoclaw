@@ -12,6 +12,9 @@ import (
 // and unqualified history replacements retain their stricter retention guards.
 // The caller holds the source lock, including the pair lock used for aliases.
 func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, ownedAlias ...bool) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	if err := s.requireNoReadRecovery(key); err != nil {
 		return err
 	}
@@ -41,10 +44,14 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 		}
 	}
 	if absent {
+		if err := s.checkSessionLock(key); err != nil {
+			return err
+		}
 		if err := s.deletePublicHistoryArtifacts(key); err != nil {
 			return err
 		}
 		s.forgetDeletedHistory(key, false)
+		s.removeSessionLockFile(key)
 		return nil
 	}
 	legacy, err := s.ownedContentNeverInitialized(ctx, key)
@@ -92,6 +99,10 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 		}
 		return s.recoverHistoryWrite(key)
 	}
+	// One proof of the lock before the removals start, not one per file.
+	if err = s.checkSessionLock(key); err != nil {
+		return err
+	}
 	s.markHistoryPending(key)
 	// Keep every exact ownership descriptor until all payload unlinks and
 	// directory durability steps succeed. A failed attempt remains retryable
@@ -121,6 +132,7 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 			return syncErr
 		}
 	}
+	s.removeSessionLockFile(key)
 	sanitized := sanitizeKey(key)
 	s.metaMu.Lock()
 	delete(s.metaCache, sanitized)
@@ -133,18 +145,24 @@ func (s *JSONLStore) deleteSessionFilesLocked(ctx context.Context, key string, o
 
 // CheckHistoryDeletion resolves this key's pending write before owner-requested
 // deletion. Missing capture proof does not override an explicit deletion intent.
-// The caller must still exclude concurrent writers; this is not a transaction
-// across processes.
+// It takes the session's file lock, which excludes the store's writers in any
+// process, so the caller must not hold that lock.
 func CheckHistoryDeletion(dir, key string) error {
 	s := &JSONLStore{
 		dir: dir, metaCache: make(map[string]SessionMeta), historyPending: make(map[string]bool),
 	}
+	unlock, err := s.lockSession(key)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return s.recoverHistoryWrite(key)
 }
 
 // DeleteJSONLSession lets an owner-facing file gateway reuse the complete
 // source lifecycle without scanning or recovering other sessions. As with
-// CheckHistoryDeletion, its caller must exclude another source writer.
+// CheckHistoryDeletion, it takes the session's file lock itself, so the caller
+// must not hold it.
 func DeleteJSONLSession(ctx context.Context, dir, key string) error {
 	s := &JSONLStore{
 		dir: dir, metaCache: make(map[string]SessionMeta), historyPending: make(map[string]bool),

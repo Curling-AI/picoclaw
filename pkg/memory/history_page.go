@@ -80,12 +80,14 @@ type historyPageCursor struct {
 // long file never rescans an earlier prefix; retries seek to their own batch.
 // It shares the writer's lock, so metadata and the committed JSONL agree.
 func (s *JSONLStore) ReadHistoryPage(ctx context.Context, request HistoryPageRequest) (HistoryPage, error) {
-	lock := s.sessionLock(request.Key)
-	lock.Lock()
-	defer lock.Unlock()
 	if request.Key == "" {
 		return HistoryPage{}, ErrHistoryCursor
 	}
+	unlock, lockErr := s.lockSession(request.Key)
+	if lockErr != nil {
+		return HistoryPage{}, lockErr
+	}
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return HistoryPage{}, err
 	}

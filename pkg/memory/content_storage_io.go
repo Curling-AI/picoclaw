@@ -64,6 +64,9 @@ func newContentArtifact(key, domain, generation, kind string) contentArtifactDes
 }
 
 func (s *JSONLStore) writeContentArtifact(file contentArtifactDescriptor, data []byte) error {
+	if err := s.requireSessionLock(file.Key); err != nil {
+		return err
+	}
 	if err := s.failContentStorage(file.name(), "create"); err != nil {
 		return err
 	}

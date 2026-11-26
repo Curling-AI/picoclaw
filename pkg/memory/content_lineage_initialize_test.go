@@ -33,9 +33,9 @@ func TestNativeContentInitializationRequiresAnUnwrittenSource(t *testing.T) {
 			}
 			if suffix != "" {
 				after, err := os.ReadFile(path)
-				files, listErr := os.ReadDir(store.dir)
-				if err != nil || listErr != nil || !bytes.Equal(before, after) || len(files) != 1 {
-					t.Fatal("native initialization repaired or adopted an existing source", err, listErr)
+				files := sessionDirEntries(t, store.dir)
+				if err != nil || !bytes.Equal(before, after) || len(files) != 1 {
+					t.Fatal("native initialization repaired or adopted an existing source", err, files)
 				}
 				return
 			}

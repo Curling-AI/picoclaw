@@ -63,9 +63,11 @@ func (s *JSONLStore) CommitHistoryContentMutation(
 	if !validContentMutationPlan(plan) {
 		return ContentMutationResult{}, ErrContentStateChanged
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return ContentMutationResult{}, lockErr
+	}
+	defer unlock()
 	// A writer may settle its own interrupted commit. Metadata replay below
 	// does not reopen an old preimage or rebuild a plan against the current tail.
 	if err = s.contentMutationWriterPreflight(ctx, key); err != nil {

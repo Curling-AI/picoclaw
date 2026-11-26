@@ -31,7 +31,7 @@ func TestPublicMediaRecoversADisabledOwnedSourceOnlyIntoPreparation(t *testing.T
 				meta.PublicHistoryBytes, meta.PublicHistoryCount, meta.PublicHistoryRevision = 0, 0, 0
 				meta.PublicHistoryGeneration, meta.PublicHistoryDigest = "", ""
 			}
-			if err = store.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, store, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			run := uuid.NewString()
@@ -65,7 +65,7 @@ func TestPublicMediaDoesNotAdoptACorruptDisabledSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	meta.PublicHistoryVersion = -1
-	if err = store.writeMeta(key, meta); err != nil {
+	if err = writeMetaLocked(t, store, key, meta); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.WriteFile(store.publicHistoryPath(key), []byte("unowned sidecar bytes"), 0o600); err != nil {
@@ -142,7 +142,7 @@ func TestPublicMediaDisabledOwnedGapRechecksOldProofWithoutDuplicatingItsNativeR
 						t.Fatal(err)
 					}
 					*meta.HistoryBytes = int64(len(raw))
-					if err = store.writeMeta(key, meta); err != nil {
+					if err = writeMetaLocked(t, store, key, meta); err != nil {
 						t.Fatal(err)
 					}
 					projector.unavailable = true

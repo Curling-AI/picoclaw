@@ -233,6 +233,9 @@ func (s *JSONLStore) appendContentIndex(delta *contentIndexAppend) error {
 	if delta == nil {
 		return nil
 	}
+	if err := s.requireSessionLock(delta.Before.File.Key); err != nil {
+		return err
+	}
 	fd, dir, err := openContentArtifactWritable(s.dir, delta.Before.File.name())
 	if err != nil {
 		return err
@@ -270,6 +273,9 @@ func (s *JSONLStore) appendContentIndex(delta *contentIndexAppend) error {
 func (s *JSONLStore) recoverContentIndexOld(delta *contentIndexAppend) error {
 	if delta == nil {
 		return nil
+	}
+	if err := s.requireSessionLock(delta.Before.File.Key); err != nil {
+		return err
 	}
 	fd, dir, err := openContentArtifactWritable(s.dir, delta.Before.File.name())
 	if err != nil {
@@ -451,6 +457,9 @@ func (s *JSONLStore) retireContentStorageWrite(
 }
 
 func (s *JSONLStore) retireContentArtifacts(ctx context.Context, key string, files []contentArtifactDescriptor) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return err

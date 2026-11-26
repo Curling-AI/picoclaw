@@ -50,6 +50,9 @@ func (s *JSONLStore) createContentPreimage(
 	image contentPreimage,
 	data []byte,
 ) error {
+	if err := s.requireSessionLock(image.Key); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -121,6 +124,9 @@ func (s *JSONLStore) retireContentPreimage(ctx context.Context, key string, imag
 	if image == nil {
 		return nil
 	}
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	if err := s.checkContentJournalSettled(key); err != nil {
 		return err
 	}
@@ -191,6 +197,9 @@ func (s *JSONLStore) contentImagesForDeletion(
 }
 
 func (s *JSONLStore) deleteContentImages(key string, images []*contentPreimage) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	for _, image := range images {
 		if err := s.removeOwnedContentArtifact(contentPreimageName(key, image.ID)); err != nil &&
 			!errors.Is(err, os.ErrNotExist) {

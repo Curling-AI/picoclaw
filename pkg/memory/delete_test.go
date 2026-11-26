@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 )
 
 func fileExists(path string) bool {
@@ -123,9 +125,12 @@ func TestDeleteSession_UnknownKeyIsANoop(t *testing.T) {
 		t.Fatalf("DeleteSession: %v", err)
 	}
 
-	entries, err := os.ReadDir(store.dir)
-	if err != nil || len(entries) != 0 {
-		t.Errorf("directory = %v, %v; want it left empty", entries, err)
+	if entries := sessionDirEntries(t, store.dir); len(entries) != 0 {
+		t.Errorf("directory = %v; want it left empty", entries)
+	}
+	locks, err := os.ReadDir(filepath.Join(store.dir, sessionlock.Dir))
+	if err != nil || len(locks) != 0 {
+		t.Errorf("lock folder = %v, %v; want no lock file left for the unknown key", locks, err)
 	}
 }
 

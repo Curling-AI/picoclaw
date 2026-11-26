@@ -60,7 +60,7 @@ func TestNativeArchiveRequiresContentProofIndependentlyOfReadableBodiesAndOrder(
 			if missing == "order_witness" {
 				err = os.Remove(store.historyOrderWitnessPath(key))
 			} else if missing == "content_witness" {
-				err = store.writeContentCheckpointAvailability(key, meta, true)
+				err = writeContentCheckpointAvailabilityLocked(t, store, key, meta, true)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -128,9 +128,9 @@ func TestNativeArchiveReleasesOnlyVerifiedPublicCoverageAndRecoversTheSamePendin
 				if readErr != nil {
 					t.Fatal(readErr)
 				}
-				err = store.writePublicChange(key, change)
+				err = writePublicChangeLocked(t, store, key, change)
 				if err == nil {
-					err = store.writeMeta(key, meta)
+					err = writeMetaLocked(t, store, key, meta)
 				}
 			}
 			if err != nil {
@@ -252,10 +252,10 @@ func TestNativeArchiveKeepsItsSuffixBudgetAndFencesNonLocalImports(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if writeErr := store.writePublicChange(key, change); writeErr != nil {
+			if writeErr := writePublicChangeLocked(t, store, key, change); writeErr != nil {
 				t.Fatal(writeErr)
 			}
-			if writeErr := store.writeMeta(key, meta); writeErr != nil {
+			if writeErr := writeMetaLocked(t, store, key, meta); writeErr != nil {
 				t.Fatal(writeErr)
 			}
 			restarted, err := NewJSONLStore(store.dir)

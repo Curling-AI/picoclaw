@@ -2250,6 +2250,45 @@ func TestShellTool_BulkDeleteOfPersistedDirsBlocked(t *testing.T) {
 	}
 }
 
+// TestShellTool_SessionLocksBlocked: sessions/.locks guarda os arquivos de lock
+// por sessão; o exec não toca nele, nem para ler escrita nem para apagar.
+func TestShellTool_SessionLocksBlocked(t *testing.T) {
+	workspace := t.TempDir()
+	tool, err := NewExecTool(workspace, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	blocked := []string{
+		"rm sessions/.locks/x.lock",
+		"echo > ./sessions/.locks/x.lock",
+		"mv sessions/.locks /tmp/x",
+		"cp y sessions/.locks/x.lock",
+		"cat " + workspace + "/sessions/.locks/x.lock",
+		`rm -rf "sessions/.locks"`,
+		"rm 'sessions/.locks/x.lock'",
+		`rm "$WS/sessions/.locks/x"`,
+	}
+	for _, cmd := range blocked {
+		if got := tool.guardCommand(cmd, workspace); got == "" {
+			t.Errorf("sessions/.locks devia ser bloqueado: %q", cmd)
+		}
+	}
+
+	allowed := []string{
+		"ls sessions",
+		"cat sessions/x.meta.json",
+		"grep -r foo sessions",
+		"ls sessions/.lockshelf",
+		"ls sessions/.locksmith",
+	}
+	for _, cmd := range allowed {
+		if got := tool.guardCommand(cmd, workspace); got != "" {
+			t.Errorf("trabalho normal foi bloqueado: %q\n  got: %s", cmd, got)
+		}
+	}
+}
+
 // TestShellTool_DeletingWholeWorkspaceBlocked: apagar a RAIZ do workspace é o
 // pior caso — no seucaranguejo ela é EFS e guarda histórico, memória e
 // entregáveis. `rm -rf .` e `rm -rf *` só são catastróficos por causa de onde

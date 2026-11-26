@@ -41,7 +41,7 @@ func TestPublicLifecycleLegacyArtifactDoesNotPreventAbort(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	s.SetPublicHistoryProjector(&lifecycleProjector{rejectArtifact: true})
@@ -93,7 +93,7 @@ func TestPublicLifecycleNeverPreparedSourceCannotReleaseAck(t *testing.T) {
 			}
 			meta.PublicHistoryVersion, meta.PublicHistoryRevision, meta.PublicHistoryBytes, meta.PublicHistoryCount = version, 0, 0, 0
 			meta.PublicHistoryGeneration, meta.PublicHistoryDigest, meta.PublicHistoryComplete = "", "", false
-			if err = s.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, s, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			if err = os.Remove(s.publicHistoryPath(key)); err != nil {
@@ -218,7 +218,7 @@ func TestPublicLifecycleColdColonRecoveryUsesJournalOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	offset := *meta.HistoryBytes
-	if err = s.beginHistoryWrite(
+	if err = beginHistoryWriteLocked(t, s,
 		t.Context(),
 		key,
 		historyWriteRecovery{Meta: meta, Next: meta, AppendOffset: &offset},

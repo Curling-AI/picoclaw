@@ -246,10 +246,7 @@ func TestPublicHistoryIndexPreparationBoundsSourceIOSeparatelyFromCommittedRows(
 
 func publicPageFiles(t *testing.T, directory string) map[string]string {
 	t.Helper()
-	names, operationErr11 := os.ReadDir(directory)
-	if operationErr11 != nil {
-		t.Fatal(operationErr11)
-	}
+	names := sessionDirEntries(t, directory)
 	files := make(map[string]string, len(names))
 	for _, name := range names {
 		data, operationErr12 := os.ReadFile(filepath.Join(directory, name.Name()))

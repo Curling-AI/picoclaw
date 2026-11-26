@@ -74,6 +74,9 @@ func (s *JSONLStore) contentStorageForDeletion(
 
 func (s *JSONLStore) deleteContentStorage(files []contentArtifactDescriptor) error {
 	for _, file := range files {
+		if err := s.requireSessionLock(file.Key); err != nil {
+			return err
+		}
 		if err := s.removeOwnedContentArtifact(file.name()); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

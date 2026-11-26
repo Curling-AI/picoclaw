@@ -89,9 +89,11 @@ func (s *JSONLStore) WithReadOrderRecovery(
 	if applyErr := apply(proof); applyErr != nil {
 		return applyErr
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	return s.releaseReadOrderRecovery(key, attempt)
 }
 
@@ -117,9 +119,11 @@ func (s *JSONLStore) claimReadRecoveryCall(key string) (func(), error) {
 }
 
 func (s *JSONLStore) prepareReadOrderRecovery(ctx context.Context, key, attempt string) (ReadOrderRecovery, error) {
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return ReadOrderRecovery{}, lockErr
+	}
+	defer unlock()
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return ReadOrderRecovery{}, err
 	}
@@ -161,9 +165,11 @@ func (s *JSONLStore) ReleaseReadOrderRecovery(ctx context.Context, key, attempt 
 		return claimErr
 	}
 	defer releaseCall()
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -171,6 +177,9 @@ func (s *JSONLStore) ReleaseReadOrderRecovery(ctx context.Context, key, attempt 
 }
 
 func (s *JSONLStore) releaseReadOrderRecovery(key, attempt string) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(s.readRecoveryPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

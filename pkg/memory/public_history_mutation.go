@@ -277,6 +277,9 @@ func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (
 	if change.Recovery == nil {
 		return nil
 	}
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	path := s.publicHistoryPath(key)
 	if change.Recovery.Offset == nil {
 		if err := s.writeSessionFile(path, change.Data, 0o600); err != nil {
@@ -311,6 +314,9 @@ func (s *JSONLStore) writePublicChange(key string, change publicHistoryChange) (
 func (s *JSONLStore) restorePublicHistory(key string, recovery *publicHistoryRecovery) (resultErr error) {
 	if recovery == nil {
 		return nil
+	}
+	if err := s.requireSessionLock(key); err != nil {
+		return err
 	}
 	if err := s.restorePublicIndex(key, recovery.Index); err != nil {
 		return err

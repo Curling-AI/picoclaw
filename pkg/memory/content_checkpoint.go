@@ -140,6 +140,9 @@ func (s *JSONLStore) writeContentCheckpointAvailability(key string, meta Session
 }
 
 func (s *JSONLStore) writeContentDomainWitness(key string, witness contentDomainWitness) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	data, err := json.Marshal(witness)
 	if err != nil {
 		return err
@@ -262,6 +265,9 @@ func (s *JSONLStore) checkContentRecoveryCheckpoint(key string, before, next Ses
 // Only the authoritative OLD decision can restore its prior semantic fence.
 // The same journal restores both raw bytes and metadata before this call.
 func (s *JSONLStore) restoreContentCheckpoint(key string, before, next SessionMeta) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	if before.ContentIdentity != nil {
 		if before.ContentIdentity.Unavailable {
 			return nil

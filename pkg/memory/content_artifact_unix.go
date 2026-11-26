@@ -75,7 +75,7 @@ func removeContentArtifactIdentity(dir, name string, expected *contentFileIdenti
 	}
 	defer closeContentArtifact(file, parent)
 	// Recheck the path against the opened inode immediately before unlink.
-	// Source ownership excludes a second writer throughout this operation.
+	// The session's lock excludes a second writer throughout this operation.
 	var opened, current unix.Stat_t
 	if err = unix.Fstat(int(file.Fd()), &opened); err != nil {
 		return err

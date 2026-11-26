@@ -107,6 +107,17 @@ var (
 				`[^|;&]*(-delete\b|-exec\s+rm\b)`),
 	}
 
+	// sessionLocksDenyPatterns keep exec away from sessions/.locks, where the
+	// store keeps one flock file per session. (seucaranguejo fork)
+	// shortcut: catches the accident, not a determined agent (base64,
+	// sub-shell). Known gaps: `cd sessions && rm -rf .locks`,
+	// `sessions/./.locks`, `sessions//.locks`. Only .locks is blocked: the shell is NOT protected by the
+	// session lock, so ordinary shell writes to sessions/ stay a known,
+	// documented risk (pkg/memory doc.go).
+	sessionLocksDenyPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(^|[\s/'"=])\.?/?sessions/\.locks\b`),
+	}
+
 	// windowsDenyPatterns contains PowerShell-specific deny patterns that only
 	// apply on Windows, where commands are executed via powershell -Command.
 	windowsDenyPatterns = []*regexp.Regexp{
@@ -1555,6 +1566,14 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 				"workspace directory: sessions/, memory/, artifacts/, loops/, state/, " +
 				"cron/, uploads/ and scripts/ survive restarts and are the user's data. " +
 				"Delete specific files instead, or move them to tmp/.)"
+		}
+	}
+
+	// Scans the unstripped command: a quoted path is the common spelling.
+	for _, pattern := range sessionLocksDenyPatterns {
+		if pattern.MatchString(lower) {
+			return "Command blocked by safety guard (sessions/.locks holds the " +
+				"session lock files and is managed by the runtime, not by commands.)"
 		}
 	}
 
