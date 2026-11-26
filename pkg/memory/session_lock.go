@@ -395,7 +395,9 @@ func (s *JSONLStore) requireSessionNameLock(name string) error {
 //     OLD rollback);
 //   - the recovery latch's creation, which has no reset;
 //   - a prune's caller hook, and the removals of a deletion or a prune, once
-//     before they start.
+//     before they start;
+//   - the removal of a journal its failed create published
+//     (abortHistoryJournal).
 //
 // sessionlock's Release also checks before it unlinks a removed session's lock
 // file. After a lost NFS lease the lock's fd fails while writes through new
@@ -419,6 +421,7 @@ func (s *JSONLStore) requireSessionNameLock(name string) error {
 //     storage retirement;
 //   - a deletion's or prune's reads between its Check and its unlinks, and the
 //     unlinks themselves;
+//   - a failed journal create, between its Check and the journal's removal;
 //   - Release, between its Check and the lock path's unlink.
 //
 // Each window lasts as long as its step: a holder that stalls inside one for

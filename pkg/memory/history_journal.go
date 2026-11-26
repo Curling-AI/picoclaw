@@ -54,9 +54,17 @@ func (s *JSONLStore) redoWriteAfterForeignJournal(key string, write func() error
 
 // abortHistoryJournal handles a journal that could not be created. Another
 // writer's journal at its name is recovered here, under the lock, and the
-// caller redoes its write; a journal this call published, even in part, is
-// removed, so nothing of the write remains.
-func (s *JSONLStore) abortHistoryJournal(key string, published bool, err error) error {
+// caller redoes its write; the journal this call published, even in part
+// (published, nil when none), is removed, so nothing of the write remains.
+// The removal proves the lock first: a holder that lost its lease leaves the
+// journal to the next holder, which may have recovered it and published its
+// own at the name. Only the file this call published goes: another writer's
+// journal at the name is the one its recovery needs.
+//
+// shortcut: the Check and the identity check prove the lock and the file only
+// at their instant; a stall between them and the removal can still remove a
+// journal another holder published after taking the lock.
+func (s *JSONLStore) abortHistoryJournal(key string, published os.FileInfo, err error) error {
 	if errors.Is(err, errForeignHistoryJournal) {
 		s.markHistoryPending(key)
 		if recoveryErr := s.recoverHistoryWrite(key); recoveryErr != nil {
@@ -64,10 +72,19 @@ func (s *JSONLStore) abortHistoryJournal(key string, published bool, err error) 
 		}
 		return err
 	}
-	if !published {
+	if published == nil {
 		return err
 	}
-	if removeErr := os.Remove(s.historyRecoveryPath(key)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+	if lockErr := s.checkSessionLock(key); lockErr != nil {
+		s.markHistoryPending(key)
+		return errors.Join(err, lockErr)
+	}
+	path := s.historyRecoveryPath(key)
+	// Gone, or another writer's journal: not this call's to remove.
+	if current, _ := os.Lstat(path); !os.SameFile(published, current) {
+		return err
+	}
+	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		s.markHistoryPending(key)
 		return errors.Join(err, removeErr)
 	}
@@ -77,8 +94,9 @@ func (s *JSONLStore) abortHistoryJournal(key string, published bool, err error) 
 // createHistoryJournal publishes data at path only if no file is there: a
 // complete temporary file, synced, is linked to the name. Where the filesystem
 // refuses hard links (EPERM, ENOTSUP), the journal is created with O_EXCL
-// instead, which refuses the same way. published reports that path holds what
-// this call wrote, complete or not.
+// instead, which refuses the same way. published identifies the file this call
+// wrote at path, complete or not: nil when it wrote nothing there, or when it
+// could not stat that file, which then stays for the next holder's recovery.
 //
 // A crash between the link and the temporary file's removal leaves a journal
 // with two links. Recovery opens some journals as artifacts, which refuses a
@@ -89,21 +107,25 @@ func (s *JSONLStore) abortHistoryJournal(key string, published bool, err error) 
 // torn journal, which recovery fails to decode: the session fails closed until
 // it is repaired by hand. EFS support for link(2) is not verified: where EFS
 // refuses it, every journal takes the O_EXCL fallback and this gap applies.
-func (s *JSONLStore) createHistoryJournal(path string, data []byte) (published bool, err error) {
+func (s *JSONLStore) createHistoryJournal(path string, data []byte) (published os.FileInfo, err error) {
 	if err = s.requireSessionFileLock(path); err != nil {
-		return false, err
+		return nil, err
 	}
 	if s.writeFile != nil {
 		// Test seam for journal faults: it writes in place of the link, after
 		// the same check that no journal is there.
 		if _, statErr := os.Lstat(path); statErr == nil {
-			return false, fmt.Errorf("%w: %s", errForeignHistoryJournal, path)
+			return nil, fmt.Errorf("%w: %s", errForeignHistoryJournal, path)
 		}
-		return true, s.writeFile(path, data, 0o600)
+		err = s.writeFile(path, data, 0o600)
+		info, _ := os.Lstat(path)
+		return info, err
 	}
-	tmp, err := writeHistoryJournalTemp(s.dir, data)
+	// The temporary file is the journal once linked: its identity is the
+	// journal's.
+	tmp, published, err := writeHistoryJournalTemp(s.dir, data)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	link := os.Link
 	if s.linkHistoryJournal != nil {
@@ -119,62 +141,66 @@ func (s *JSONLStore) createHistoryJournal(path string, data []byte) (published b
 		// The journal would keep a second name, and recovery refuses a journal
 		// with more than one link (openContentArtifact): fail, and the caller
 		// removes it.
-		return true, fmt.Errorf("memory: remove history journal temporary file: %w", removeErr)
+		return published, fmt.Errorf("memory: remove history journal temporary file: %w", removeErr)
 	case linkErr == nil:
 		syncDirBestEffort(s.dir)
-		return true, nil
+		return published, nil
 	case removeErr != nil:
 		log.Printf("memory: remove history journal temporary file: %v", removeErr)
 	}
 	switch {
 	case errors.Is(linkErr, fs.ErrExist):
-		return false, fmt.Errorf("%w: %s", errForeignHistoryJournal, path)
+		return nil, fmt.Errorf("%w: %s", errForeignHistoryJournal, path)
 	case errors.Is(linkErr, errors.ErrUnsupported) || errors.Is(linkErr, fs.ErrPermission):
 		return createHistoryJournalExclusive(path, data)
 	}
-	return false, fmt.Errorf("memory: link history journal: %w", linkErr)
+	return nil, fmt.Errorf("memory: link history journal: %w", linkErr)
 }
 
-// writeHistoryJournalTemp writes data to a new synced file in dir.
-func writeHistoryJournalTemp(dir string, data []byte) (string, error) {
+// writeHistoryJournalTemp writes data to a new synced file in dir, and returns
+// its name and identity.
+func writeHistoryJournalTemp(dir string, data []byte) (string, os.FileInfo, error) {
 	file, err := os.CreateTemp(dir, historyJournalTempPrefix+"*")
 	if err != nil {
-		return "", fmt.Errorf("memory: create history journal: %w", err)
+		return "", nil, fmt.Errorf("memory: create history journal: %w", err)
 	}
 	_, err = file.Write(data)
 	if err == nil {
 		err = file.Sync()
 	}
+	info, _ := file.Stat()
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		return "", errors.Join(fmt.Errorf("memory: write history journal: %w", err), os.Remove(file.Name()))
+		return "", nil, errors.Join(fmt.Errorf("memory: write history journal: %w", err), os.Remove(file.Name()))
 	}
-	return file.Name(), nil
+	return file.Name(), info, nil
 }
 
-// createHistoryJournalExclusive is the journal's create without link(2).
-func createHistoryJournalExclusive(path string, data []byte) (bool, error) {
+// createHistoryJournalExclusive is the journal's create without link(2). It
+// returns the identity of the file it created, also when the write failed.
+func createHistoryJournalExclusive(path string, data []byte) (os.FileInfo, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
-		return false, fmt.Errorf("%w: %s", errForeignHistoryJournal, path)
+		return nil, fmt.Errorf("%w: %s", errForeignHistoryJournal, path)
 	}
 	if err != nil {
-		return false, fmt.Errorf("memory: create history journal: %w", err)
+		return nil, fmt.Errorf("memory: create history journal: %w", err)
 	}
 	_, err = file.Write(data)
 	if err == nil {
 		err = file.Sync()
 	}
+	info, _ := file.Stat()
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		return true, fmt.Errorf("memory: write history journal: %w", err)
+		return info, fmt.Errorf("memory: write history journal: %w", err)
 	}
 	syncDirBestEffort(filepath.Dir(path))
-	return true, nil
+	return info, nil
 }
 
 // syncDirBestEffort makes the new journal's name durable where the filesystem
