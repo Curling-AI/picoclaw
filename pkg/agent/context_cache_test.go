@@ -976,3 +976,48 @@ func TestStopSavesSkillCatalog(t *testing.T) {
 		t.Errorf("stopping the loop should save the skill catalog: %v", err)
 	}
 }
+
+// On the pods' network volume a skill root's mtime, as the client reports it,
+// keeps its old value after a skill is added or removed, while the root's
+// listing changes at once: the next turn's prompt must follow the listing.
+func TestSkillAddedOrRemovedWhileTheRootMtimeStays(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"skills/old/SKILL.md": "---\nname: old\ndescription: old-skill\n---\n# Old",
+	})
+	defer os.RemoveAll(tmpDir)
+	root := filepath.Join(tmpDir, "skills")
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepRootMtime := func() {
+		if err := os.Chtimes(root, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cb := NewContextBuilder(tmpDir)
+	if sp := cb.BuildSystemPromptWithCache(); !strings.Contains(sp, "old-skill") || strings.Contains(sp, "new-skill") {
+		t.Fatal("expected the initial prompt to list only the old skill")
+	}
+
+	newPath := filepath.Join(root, "new", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("---\nname: new\ndescription: new-skill\n---\n# New"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keepRootMtime()
+	if !strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
+		t.Error("a skill added while the root's mtime stayed should be in the next turn's prompt")
+	}
+
+	if err := os.RemoveAll(filepath.Dir(newPath)); err != nil {
+		t.Fatal(err)
+	}
+	keepRootMtime()
+	if strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
+		t.Error("a skill removed while the root's mtime stayed should be out of the next turn's prompt")
+	}
+}

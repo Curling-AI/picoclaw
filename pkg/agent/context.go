@@ -62,6 +62,11 @@ type ContextBuilder struct {
 	// removing a skill changes it, whatever the newest file elsewhere says.
 	skillRootsAtCache map[string]time.Time
 
+	// skillEntriesAtCache holds each existing skill root's entry names. On the
+	// pods' network volume the root's mtime, as the client reports it, keeps
+	// its old value after a skill is added or removed; the listing does not.
+	skillEntriesAtCache map[string][]string
+
 	// cacheGeneration counts InvalidateCache calls, so a refresh built outside
 	// the lock never stores a prompt from before an explicit invalidation.
 	cacheGeneration uint64
@@ -620,6 +625,7 @@ func (cb *ContextBuilder) storeCacheLocked(baseline cacheBaseline, prompt string
 	cb.existedAtCache = baseline.existed
 	cb.skillFilesAtCache = baseline.skillFiles
 	cb.skillRootsAtCache = baseline.skillRoots
+	cb.skillEntriesAtCache = baseline.skillEntries
 
 	logger.DebugCF("agent", "System prompt cached",
 		map[string]any{
@@ -872,6 +878,7 @@ func (cb *ContextBuilder) InvalidateCache() {
 	cb.existedAtCache = nil
 	cb.skillFilesAtCache = nil
 	cb.skillRootsAtCache = nil
+	cb.skillEntriesAtCache = nil
 	cb.cacheGeneration++
 
 	logger.DebugCF("agent", "System prompt cache invalidated", nil)
@@ -930,10 +937,11 @@ func (cb *ContextBuilder) loaderForLoop(scope LoopScope) *skills.SkillsLoader {
 // cacheBaseline holds the file existence snapshot and the latest observed
 // mtime across all tracked paths. Used as the cache reference point.
 type cacheBaseline struct {
-	existed    map[string]bool
-	skillFiles map[string]time.Time
-	skillRoots map[string]time.Time
-	maxMtime   time.Time
+	existed      map[string]bool
+	skillFiles   map[string]time.Time
+	skillRoots   map[string]time.Time
+	skillEntries map[string][]string
+	maxMtime     time.Time
 }
 
 // buildCacheBaseline records which tracked paths currently exist and computes
@@ -979,9 +987,13 @@ func (cb *ContextBuilder) statBaseline(skillRoots []string) cacheBaseline {
 		}
 	}
 	rootMtimes := make(map[string]time.Time, len(skillRoots))
+	rootEntries := make(map[string][]string, len(skillRoots))
 	for _, root := range skillRoots {
 		if info, err := os.Stat(root); err == nil {
 			rootMtimes[root] = info.ModTime()
+		}
+		if names, ok := entryNames(root); ok {
+			rootEntries[root] = names
 		}
 	}
 
@@ -995,7 +1007,7 @@ func (cb *ContextBuilder) statBaseline(skillRoots []string) cacheBaseline {
 		maxMtime = time.Unix(1, 0)
 	}
 
-	return cacheBaseline{existed: existed, skillRoots: rootMtimes, maxMtime: maxMtime}
+	return cacheBaseline{existed: existed, skillRoots: rootMtimes, skillEntries: rootEntries, maxMtime: maxMtime}
 }
 
 // sourceFilesChangedLocked checks whether any workspace source file has been
@@ -1016,9 +1028,39 @@ func (cb *ContextBuilder) sourceFilesChangedLocked() bool {
 	}
 
 	// Skill roots (workspace/global/builtin): a skill added or removed changes
-	// the root's mtime. Edits inside a skill are left to RefreshSystemPromptCache,
-	// which walks the trees after the turn.
-	return skillRootsChangedSince(cb.skillRoots(), cb.skillRootsAtCache)
+	// the root's mtime and its listing, and on a network volume only the
+	// listing is sure to show it. Edits inside a skill are left to
+	// RefreshSystemPromptCache, which walks the trees after the turn.
+	roots := cb.skillRoots()
+	return skillRootsChangedSince(roots, cb.skillRootsAtCache) ||
+		skillEntriesChangedSince(roots, cb.skillEntriesAtCache)
+}
+
+// skillEntriesChangedSince compares each root's entry names with the ones at
+// cache time, one listing per root; a root that appeared or disappeared also
+// counts.
+func skillEntriesChangedSince(roots []string, entriesAtCache map[string][]string) bool {
+	for _, root := range roots {
+		names, exists := entryNames(root)
+		cached, existed := entriesAtCache[root]
+		if exists != existed || exists && !slices.Equal(names, cached) {
+			return true
+		}
+	}
+	return false
+}
+
+// entryNames lists a directory's entry names, sorted; false when it cannot be read.
+func entryNames(dir string) ([]string, bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false
+	}
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name()
+	}
+	return names, true
 }
 
 // skillRootsChangedSince compares each root with its own mtime at cache time;
