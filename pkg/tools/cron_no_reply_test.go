@@ -148,9 +148,9 @@ func TestAutomationRunNoteAsksForTheTokenAndKeepsItsEnds(t *testing.T) {
 	prompt := executor.request.Content
 	for _, want := range []string{
 		"(System note: this is a routine scheduled run.\n",
-		"• Delivery: your final answer is delivered to the user as this run's result.",
+		"- Delivery: your final answer is delivered to the user as this run's result.",
 		"your final answer must be exactly NO_REPLY and nothing else",
-		"never mention NO_REPLY.\n• Notes: do NOT record routine runs in the daily notes.",
+		"never mention NO_REPLY.\n- Notes: do NOT record routine runs in the daily notes.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt lacks %q:\n%s", want, prompt)
