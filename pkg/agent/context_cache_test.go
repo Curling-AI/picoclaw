@@ -932,6 +932,12 @@ func TestRestartIgnoresBadSavedCatalog(t *testing.T) {
 			data, _ := json.Marshal(catalog)
 			return data
 		},
+		// A catalog saved before the listings were kept says nothing of them.
+		"without the root listings": func(_ []byte, catalog skillCatalog) []byte {
+			catalog.SkillEntries = nil
+			data, _ := json.Marshal(catalog)
+			return data
+		},
 	}
 	for name, corrupt := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1019,5 +1025,52 @@ func TestSkillAddedOrRemovedWhileTheRootMtimeStays(t *testing.T) {
 	keepRootMtime()
 	if strings.Contains(cb.BuildSystemPromptWithCache(), "new-skill") {
 		t.Error("a skill removed while the root's mtime stayed should be out of the next turn's prompt")
+	}
+}
+
+// A restart takes the saved catalog only while the skill roots list what they
+// listed when it was saved: on the network volume a skill added or removed
+// while the process was stopped can leave the root's mtime as it was.
+func TestRestartSeesSkillsAddedOrRemovedWhileTheRootMtimeStayed(t *testing.T) {
+	cases := map[string]struct {
+		change      func(t *testing.T, skillsDir string)
+		want, avoid string
+	}{
+		"added": {func(t *testing.T, skillsDir string) {
+			path := filepath.Join(skillsDir, "added", "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			content := []byte("---\nname: added\ndescription: added-skill\n---\n# Added")
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "added-skill", ""},
+		"removed": {func(t *testing.T, skillsDir string) {
+			if err := os.RemoveAll(filepath.Join(skillsDir, "kept")); err != nil {
+				t.Fatal(err)
+			}
+		}, "", "kept-v1"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpDir, _ := savedCatalogWorkspace(t)
+			skillsDir := filepath.Join(tmpDir, "skills")
+			info, err := os.Stat(skillsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(t, skillsDir)
+			if err := os.Chtimes(skillsDir, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			prompt := NewContextBuilder(tmpDir).BuildSystemPromptWithCache()
+			if tc.want != "" && !strings.Contains(prompt, tc.want) {
+				t.Errorf("the first turn after a restart should list the skill %s while stopped", name)
+			}
+			if tc.avoid != "" && strings.Contains(prompt, tc.avoid) {
+				t.Errorf("the first turn after a restart should not list the skill %s while stopped", name)
+			}
+		})
 	}
 }

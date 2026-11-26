@@ -86,16 +86,17 @@ type ContextBuilder struct {
 
 // skillCatalogVersion changes when skillCatalog changes shape; a saved catalog
 // of another version is ignored.
-const skillCatalogVersion = 1
+const skillCatalogVersion = 2
 
 // skillCatalog is what reading the skill trees produced: the skill list and the
 // walk it was read after. Saved in the workspace, it spares a restarted process
 // that read on its first turn. (seucaranguejo fork)
 type skillCatalog struct {
-	Version    int                  `json:"version"`
-	Skills     []skills.SkillInfo   `json:"skills"`
-	SkillFiles map[string]time.Time `json:"skill_files"`
-	SkillRoots map[string]time.Time `json:"skill_roots"`
+	Version      int                  `json:"version"`
+	Skills       []skills.SkillInfo   `json:"skills"`
+	SkillFiles   map[string]time.Time `json:"skill_files"`
+	SkillRoots   map[string]time.Time `json:"skill_roots"`
+	SkillEntries map[string][]string  `json:"skill_entries"`
 }
 
 func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuilder {
@@ -549,10 +550,11 @@ func (cb *ContextBuilder) listSkills() []skills.SkillInfo {
 
 func newSkillCatalog(baseline cacheBaseline, skillList []skills.SkillInfo) *skillCatalog {
 	return &skillCatalog{
-		Version:    skillCatalogVersion,
-		Skills:     skillList,
-		SkillFiles: baseline.skillFiles,
-		SkillRoots: baseline.skillRoots,
+		Version:      skillCatalogVersion,
+		Skills:       skillList,
+		SkillFiles:   baseline.skillFiles,
+		SkillRoots:   baseline.skillRoots,
+		SkillEntries: baseline.skillEntries,
 	}
 }
 
@@ -561,7 +563,9 @@ func (cb *ContextBuilder) skillCatalogPath() string {
 }
 
 // savedCatalogBaselineLocked offers the first build of a process the catalog an
-// earlier process saved, if no skill root changed since: the build then reads
+// earlier process saved, if no skill root changed its mtime or its listing
+// since (on the network volume a skill added or removed can leave the mtime as
+// it was): the build then reads
 // no skill tree, seconds on a network volume. Bootstrap and memory are still
 // read, so their edits show in this turn; an edit inside a skill shows after
 // the next refresh, as it does within a process. The caller holds the write lock.
@@ -576,7 +580,8 @@ func (cb *ContextBuilder) savedCatalogBaselineLocked() (cacheBaseline, []skills.
 		return cacheBaseline{}, nil, false
 	}
 	baseline := cb.statBaseline(cb.skillRoots())
-	if !maps.EqualFunc(baseline.skillRoots, catalog.SkillRoots, time.Time.Equal) {
+	if !maps.EqualFunc(baseline.skillRoots, catalog.SkillRoots, time.Time.Equal) ||
+		!maps.EqualFunc(baseline.skillEntries, catalog.SkillEntries, slices.Equal[[]string]) {
 		return cacheBaseline{}, nil, false
 	}
 	baseline.skillFiles = catalog.SkillFiles
