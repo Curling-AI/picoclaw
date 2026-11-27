@@ -13,13 +13,14 @@ func skillDraftPromptInstructions() []string {
 		"The Markdown body is loaded only after the skill triggers, so focus on concise usage guidance and the execution steps needed to complete the task.",
 		"Give the shortest path the tasks proved to the final answer: where the inputs are, the exact command or script that produced it (reuse a script or file the tasks created, by its path and the way they ran it), and how to present the result. Leave out the steps the tasks took only to find or inspect the inputs, re-check a result or save notes, unless the person asked for them or the step prevented a failure seen in the tasks. The skill says what the inputs look like, so it needs no step to list the files or check their headers.",
 		"Keep every rule the person set or corrected in the tasks (what counts, rates, format) in the step that applies it.",
+		"Say how to present the result in words; do not send the assistant to read another skill for it.",
 		"When creating a combined shortcut skill, summarize the functional purpose and result of the provided SKILL.md inputs; do not copy or directly include other skills' instructions.",
 		"Extract only the necessary operations from source skills and evidence, such as formulas, ordered transformations, commands, inputs, outputs, and boundary conditions.",
 		"The operational part of the generated skill must be directly usable by a future agent without reading the original task records or source skills.",
 		"Write the procedure from the tool_steps that worked in the source tasks: the same tools, commands, file layouts and column names, in their order, generalized only where the tasks differ (a file name, a month). A step that failed before one that worked is something to avoid, not a step to repeat.",
 		"Keep the skill to what the tasks delivered: no output format, chart, card, extra column or extra step that their final outputs do not show.",
 		"Write the name, the description and the body in the language of the person's requests in the source tasks, even though these instructions are in English; the name stays lowercase and hyphenated, without accents.",
-		"In the description, say what result the skill produces (for example, which value it sums or counts), so that a request for something else about the same files does not match it.",
+		"In the description, say what result the skill produces (for example, which value it sums or counts) and, in one short clause, what it is not for when a request about the same inputs could look alike (for example, counting items instead of summing their value), so that such a request does not match it.",
 	}
 }
 

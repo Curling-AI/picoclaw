@@ -199,6 +199,8 @@ func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) 
 		"reuse a script or file the tasks created",
 		"so it needs no step to list the files or check their headers",
 		"Keep every rule the person set or corrected in the tasks",
+		"do not send the assistant to read another skill for it",
+		"in one short clause, what it is not for when a request about the same inputs could look alike",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
