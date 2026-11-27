@@ -2,7 +2,6 @@ package evolution_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -11,10 +10,8 @@ import (
 
 func TestLLMDraftGenerator_FallbackDraftDoesNotCopyTheSourceAnswer(t *testing.T) {
 	answer := "Seu saldo hoje é R$ 2.345,67 na conta final 0042."
-	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-		defaultModel: "test-model",
-		err:          errors.New("upstream timeout"),
-	}, "", evolution.NewDefaultDraftGenerator(t.TempDir()))
+	// Without a model the heuristic draft is the only one.
+	generator := evolution.NewLLMDraftGenerator(nil, "", evolution.NewDefaultDraftGenerator(t.TempDir()))
 
 	draft, err := generator.GenerateDraftWithEvidence(context.Background(), evolution.LearningRecord{
 		ID:            "pattern-saldo",

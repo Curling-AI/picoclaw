@@ -28,7 +28,9 @@ import (
 const (
 	defaultTaskSuccessJudgeTimeout = 15 * time.Second
 	defaultPatternClusterTimeout   = 180 * time.Second
-	defaultDraftGenerationTimeout  = 60 * time.Second
+	// A whole skill draft is the longest answer of the cold path: at 60 s most
+	// of them timed out, and a timeout leaves the pattern for a later run.
+	defaultDraftGenerationTimeout = 180 * time.Second
 
 	envTaskSuccessJudgeTimeout = "PICOCLAW_EVOLUTION_JUDGE_TIMEOUT_SECONDS"
 	envPatternClusterTimeout   = "PICOCLAW_EVOLUTION_CLUSTER_TIMEOUT_SECONDS"

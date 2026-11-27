@@ -268,101 +268,59 @@ func TestLLMDraftGenerator_GenerateDraft_PrefersExplicitModelIDOverProviderDefau
 	}
 }
 
-func TestLLMDraftGenerator_GenerateDraft_FallsBackOnProviderError(t *testing.T) {
-	fallback := &recordingDraftGenerator{
-		draft: evolution.SkillDraft{
-			TargetSkillName: "weather-fallback",
-			DraftType:       evolution.DraftTypeWorkflow,
-			ChangeKind:      evolution.ChangeKindCreate,
-			HumanSummary:    "fallback summary",
-			BodyOrPatch:     "fallback body",
-		},
+// When the model gives no usable draft (it fails, answers nothing, or answers
+// something that is not a valid draft) there is no skill this run: the
+// heuristic draft only points at the skills the tasks used, and applying it
+// made the next task slower.
+func TestLLMDraftGenerator_GenerateDraft_GivesNoDraftWhenTheModelGivesNone(t *testing.T) {
+	cases := map[string]*llmDraftTestProvider{
+		"provider error": {defaultModel: "test-model", err: errors.New("provider unavailable")},
+		"call timeout":   {defaultModel: "test-model", err: context.DeadlineExceeded},
+		"invalid json":   {defaultModel: "test-model", response: &providers.LLMResponse{Content: `not-json`}},
+		"empty answer":   {defaultModel: "test-model", response: &providers.LLMResponse{Content: ``}},
+		"numeric-only name": {defaultModel: "test-model", response: &providers.LLMResponse{
+			Content: `{"target_skill_name":"100","draft_type":"shortcut","change_kind":"create","human_summary":"Calculate 100","body_or_patch":"## Start Here\nCalculate 100."}`,
+		}},
 	}
-	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-		defaultModel: "test-model",
-		err:          errors.New("provider unavailable"),
-	}, "", fallback)
-
-	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
-	if err != nil {
-		t.Fatalf("GenerateDraft: %v", err)
-	}
-
-	if fallback.calls != 1 {
-		t.Fatalf("fallback.calls = %d, want 1", fallback.calls)
-	}
-	if draft.TargetSkillName != "weather-fallback" {
-		t.Fatalf("TargetSkillName = %q, want weather-fallback", draft.TargetSkillName)
-	}
-}
-
-func TestLLMDraftGenerator_GenerateDraft_FallsBackOnInvalidOrEmptyContent(t *testing.T) {
-	testCases := []struct {
-		name    string
-		content string
-	}{
-		{name: "invalid json", content: `not-json`},
-		{name: "empty content", content: ``},
-	}
-
-	for _, tt := range testCases {
-		t.Run(tt.name, func(t *testing.T) {
-			fallback := &recordingDraftGenerator{
-				draft: evolution.SkillDraft{
-					TargetSkillName: "weather-fallback",
-					DraftType:       evolution.DraftTypeWorkflow,
-					ChangeKind:      evolution.ChangeKindCreate,
-					HumanSummary:    "fallback summary",
-					BodyOrPatch:     "fallback body",
-				},
-			}
-			generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-				defaultModel: "test-model",
-				response:     &providers.LLMResponse{Content: tt.content},
-			}, "", fallback)
+	for name, provider := range cases {
+		t.Run(name, func(t *testing.T) {
+			fallback := &recordingDraftGenerator{draft: evolution.SkillDraft{
+				TargetSkillName: "weather-fallback",
+				DraftType:       evolution.DraftTypeWorkflow,
+				ChangeKind:      evolution.ChangeKindCreate,
+				HumanSummary:    "fallback summary",
+				BodyOrPatch:     "fallback body",
+			}}
+			generator := evolution.NewLLMDraftGenerator(provider, "", fallback)
 
 			draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
-			if err != nil {
-				t.Fatalf("GenerateDraft: %v", err)
+			if !errors.Is(err, evolution.ErrDraftUnavailable) {
+				t.Fatalf("err = %v, want ErrDraftUnavailable", err)
 			}
-
-			if fallback.calls != 1 {
-				t.Fatalf("fallback.calls = %d, want 1", fallback.calls)
-			}
-			if draft.TargetSkillName != "weather-fallback" {
-				t.Fatalf("TargetSkillName = %q, want weather-fallback", draft.TargetSkillName)
+			if fallback.calls != 0 || draft.TargetSkillName != "" {
+				t.Fatalf("fallback.calls = %d, draft = %q: want no draft", fallback.calls, draft.TargetSkillName)
 			}
 		})
 	}
 }
 
-func TestLLMDraftGenerator_GenerateDraft_FallsBackOnNumericOnlyTargetSkillName(t *testing.T) {
-	fallback := &recordingDraftGenerator{
-		draft: evolution.SkillDraft{
-			TargetSkillName: "learned-100",
-			DraftType:       evolution.DraftTypeWorkflow,
-			ChangeKind:      evolution.ChangeKindCreate,
-			HumanSummary:    "fallback summary",
-			BodyOrPatch:     "fallback body",
-		},
-	}
+// A model sometimes answers a one-item list as plain text; the draft is still
+// the model's, not lost to a parse error.
+func TestLLMDraftGenerator_GenerateDraft_TakesAListGivenAsText(t *testing.T) {
 	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
 		defaultModel: "test-model",
-		response: &providers.LLMResponse{
-			Content: `{"target_skill_name":"100","draft_type":"shortcut","change_kind":"create","human_summary":"Calculate 100","body_or_patch":"## Start Here\nCalculate 100."}`,
-		},
-	}, "", fallback)
+		response: &providers.LLMResponse{Content: `{"target_skill_name":"ranking-vendas","draft_type":"workflow",` +
+			`"change_kind":"create","human_summary":"ranking","body_or_patch":"## Passos\nSomar por categoria.",` +
+			`"intended_use_cases":["ranking mensal"],"preferred_entry_path":"exec","avoid_patterns":null}`},
+	}, "", &recordingDraftGenerator{})
 
 	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
 	if err != nil {
 		t.Fatalf("GenerateDraft: %v", err)
 	}
-
-	if fallback.calls != 1 {
-		t.Fatalf("fallback.calls = %d, want 1", fallback.calls)
-	}
-	if draft.TargetSkillName != "learned-100" {
-		t.Fatalf("TargetSkillName = %q, want learned-100", draft.TargetSkillName)
+	if draft.TargetSkillName != "ranking-vendas" || len(draft.PreferredEntryPath) != 1 ||
+		draft.PreferredEntryPath[0] != "exec" {
+		t.Fatalf("draft = %+v, want the model's draft with preferred_entry_path [exec]", draft)
 	}
 }
 

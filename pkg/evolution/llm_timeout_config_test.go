@@ -41,7 +41,15 @@ func TestTimeouts_SaoIndependentes(t *testing.T) {
 	if got := llmTaskSuccessJudgeTimeout(); got != 15*time.Second {
 		t.Errorf("judge = %v, want 15s", got)
 	}
-	if got := llmDraftGenerationTimeout(); got != 60*time.Second {
-		t.Errorf("draft = %v, want 60s", got)
+	if got := llmDraftGenerationTimeout(); got != 180*time.Second {
+		t.Errorf("draft = %v, want 180s", got)
+	}
+}
+
+// A whole skill draft took the flash model 42 to 86 s, 6 of 10 over 60 s: a
+// default that short left most patterns without their skill.
+func TestDraftGenerationTimeout_DefaultFitsAWholeDraft(t *testing.T) {
+	if got := llmDraftGenerationTimeout(); got < 120*time.Second {
+		t.Errorf("default = %v, shorter than a whole draft takes", got)
 	}
 }

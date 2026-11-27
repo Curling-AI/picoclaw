@@ -185,8 +185,8 @@ func TestLLMSteps_CanceledRunIsReportedButACallTimeoutStillFallsBack(t *testing.
 		wantCanceled bool
 	}{
 		{"run canceled", canceled, context.Canceled, true},
-		// A per-call timeout is the step's own deadline, not the run's: keep the
-		// fallback it always had.
+		// A per-call timeout is the step's own deadline, not the run's: the judge
+		// and the clusterer keep their fallbacks, the draft waits for a later run.
 		{"call timed out", context.Background(), context.DeadlineExceeded, false},
 	}
 	for _, c := range cases {
@@ -213,12 +213,14 @@ func TestLLMSteps_CanceledRunIsReportedButACallTimeoutStillFallsBack(t *testing.
 				}
 				return
 			}
-			if judgeErr != nil || clusterErr != nil || draftErr != nil {
-				t.Errorf("errs judge=%v cluster=%v draft=%v, want the heuristic fallbacks",
-					judgeErr, clusterErr, draftErr)
+			if judgeErr != nil || clusterErr != nil {
+				t.Errorf("errs judge=%v cluster=%v, want the heuristic fallbacks", judgeErr, clusterErr)
 			}
-			if len(patterns) != 1 || !strings.EqualFold(draft.TargetSkillName, "weather") {
-				t.Errorf("fallbacks produced patterns=%d draft=%q", len(patterns), draft.TargetSkillName)
+			if !errors.Is(draftErr, evolution.ErrDraftUnavailable) || draft.TargetSkillName != "" {
+				t.Errorf("draft err = %v, draft = %q: want no draft until a later run", draftErr, draft.TargetSkillName)
+			}
+			if len(patterns) != 1 {
+				t.Errorf("fallback produced patterns=%d", len(patterns))
 			}
 		})
 	}

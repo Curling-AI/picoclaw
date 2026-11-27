@@ -493,6 +493,15 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			noCredit = err
 			break
 		}
+		if errors.Is(err, ErrDraftUnavailable) {
+			logger.WarnCF("evolution", "Left the pattern for a later run: no usable draft", map[string]any{
+				"workspace":  workspace,
+				"pattern_id": rule.ID,
+				"error":      err.Error(),
+				"run_id":     runID,
+			})
+			continue
+		}
 		if err != nil {
 			return fail(err)
 		}

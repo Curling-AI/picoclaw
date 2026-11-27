@@ -3,6 +3,7 @@ package evolution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,15 +17,41 @@ type LLMDraftGenerator struct {
 	fallback DraftGenerator
 }
 
+// ErrDraftUnavailable says the model gave no usable draft: the pattern stays
+// ready for a later run. The heuristic draft is not a stand-in for the model's,
+// because it only points at the skills the tasks used.
+var ErrDraftUnavailable = errors.New("evolution: the model gave no usable skill draft")
+
 type llmDraftResponse struct {
-	TargetSkillName    string   `json:"target_skill_name"`
-	DraftType          string   `json:"draft_type"`
-	ChangeKind         string   `json:"change_kind"`
-	HumanSummary       string   `json:"human_summary"`
-	IntendedUseCases   []string `json:"intended_use_cases"`
-	PreferredEntryPath []string `json:"preferred_entry_path"`
-	AvoidPatterns      []string `json:"avoid_patterns"`
-	BodyOrPatch        string   `json:"body_or_patch"`
+	TargetSkillName    string     `json:"target_skill_name"`
+	DraftType          string     `json:"draft_type"`
+	ChangeKind         string     `json:"change_kind"`
+	HumanSummary       string     `json:"human_summary"`
+	IntendedUseCases   stringList `json:"intended_use_cases"`
+	PreferredEntryPath stringList `json:"preferred_entry_path"`
+	AvoidPatterns      stringList `json:"avoid_patterns"`
+	BodyOrPatch        string     `json:"body_or_patch"`
+}
+
+// stringList takes a JSON array of strings or, as models sometimes answer for
+// a one-item list, a single string.
+type stringList []string
+
+func (l *stringList) UnmarshalJSON(data []byte) error {
+	var many []string
+	if err := json.Unmarshal(data, &many); err == nil {
+		*l = many
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(data, &one); err != nil {
+		return err
+	}
+	*l = nil
+	if strings.TrimSpace(one) != "" {
+		*l = []string{one}
+	}
+	return nil
 }
 
 func NewLLMDraftGenerator(provider providers.LLMProvider, model string, fallback DraftGenerator) *LLMDraftGenerator {
@@ -83,18 +110,19 @@ func (g *LLMDraftGenerator) GenerateDraftWithEvidence(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return SkillDraft{}, ctxErr
 	}
-	if err != nil || resp == nil {
-		return g.generateFallback(ctx, rule, matches, evidence)
+	if err != nil {
+		return SkillDraft{}, fmt.Errorf("%w: %w", ErrDraftUnavailable, err)
+	}
+	if resp == nil || strings.TrimSpace(resp.Content) == "" {
+		return SkillDraft{}, fmt.Errorf("%w: empty answer", ErrDraftUnavailable)
 	}
 
-	content := strings.TrimSpace(resp.Content)
-	if content == "" {
-		return g.generateFallback(ctx, rule, matches, evidence)
+	draft, ok := parseLLMDraft(strings.TrimSpace(resp.Content))
+	if !ok {
+		return SkillDraft{}, fmt.Errorf("%w: the answer is not a draft object", ErrDraftUnavailable)
 	}
-
-	draft, ok := parseLLMDraft(content)
-	if !ok || len(ValidateDraft(draft)) > 0 {
-		return g.generateFallback(ctx, rule, matches, evidence)
+	if findings := ValidateDraft(draft); len(findings) > 0 {
+		return SkillDraft{}, fmt.Errorf("%w: %s", ErrDraftUnavailable, strings.Join(findings, "; "))
 	}
 
 	return draft, nil
