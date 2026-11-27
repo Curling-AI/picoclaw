@@ -15,8 +15,10 @@ const contentArchiveDeadline = 45 * time.Second
 
 // This caps only the one pending operation's identity metadata. Summaries
 // remain payload, under the existing adapter's content budget; they do not
-// steal capacity from a valid legacy content window.
-const maxContentTransitionMetadata = 1 << 20
+// steal capacity from a valid legacy content window. Each row costs ~250 bytes
+// before and after, so 32 MiB fits a compaction of ~60k messages; 1 MiB
+// stopped every session above ~2k messages from ever compacting.
+const maxContentTransitionMetadata = 32 << 20
 
 // Only the proof's exact leaf may turn optional physical GC into a no-op.
 // errors.Is alone also matches joins that contain an actual I/O or recovery

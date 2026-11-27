@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -105,8 +106,13 @@ func TestContentLineageExplicitEditAndEditBackNeverReuseRevision(t *testing.T) {
 }
 
 func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
-	for _, count := range []int{1000, 3000} {
-		t.Run(string(rune('0'+count/1000))+"000refs", func(t *testing.T) {
+	// 10k is a real long conversation that the old 1 MiB cap could never compact.
+	const longConversation, overBudget = 10000, 120000
+	for _, count := range []int{1000, longConversation, overBudget} {
+		t.Run(strconv.Itoa(count)+"refs", func(t *testing.T) {
+			if count == overBudget && testing.Short() {
+				t.Skip("writes 120k messages")
+			}
 			s, err := NewJSONLStore(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
@@ -134,7 +140,7 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				Summary:       "same content budget",
 			}
 			transition, err := s.CommitHistoryCompaction(t.Context(), key, plan)
-			if count == 3000 {
+			if count == overBudget {
 				if !errors.Is(err, ErrContentLineageCapacity) {
 					t.Fatal("operation metadata exceeded its bound without explicit failure", err)
 				}
@@ -144,8 +150,11 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || len(transition.Retained) != 500 {
-				t.Fatal("new refs reduced a valid legacy 4-8MiB window", err)
+			if err != nil || len(transition.Retained) != count/2 {
+				t.Fatal("new refs reduced a valid legacy window", err)
+			}
+			if count == longConversation {
+				return
 			}
 			pre, err := s.ReadHistoryCompactionFrame(t.Context(), key, transition.MutationID, ContentBefore)
 			if err != nil || len(pre.Entries) != count || len(pre.Entries[999].Message.Content) != 7*1024 {
