@@ -189,17 +189,25 @@ func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) 
 	) {
 		t.Fatalf("prompt missing deployable body scope instruction:\n%s", prompt)
 	}
-	if !strings.Contains(
-		prompt,
-		"provide detailed step-by-step instructions for the exact operation or execution process",
-	) {
-		t.Fatalf("prompt missing step-by-step instruction:\n%s", prompt)
+	// The body is the skill as the assistant will read it, the shortest path the
+	// tasks proved: review notes and past results leaked into the applied skill,
+	// and steps to find or inspect the inputs again made the next task slower.
+	for _, want := range []string{
+		"body_or_patch is the skill the assistant reads when it uses it",
+		"No notes for reviewers, no provenance, no results of past runs",
+		"Give the shortest path the tasks proved to the final answer",
+		"reuse a script or file the tasks created",
+		"so it needs no step to list the files or check their headers",
+		"Keep every rule the person set or corrected in the tasks",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
 	}
-	if !strings.Contains(prompt, "body_or_patch is an internal draft and review artifact") {
-		t.Fatalf("prompt missing internal draft instruction:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "the final deployed SKILL.md will be rendered without learning traces") {
-		t.Fatalf("prompt missing deploy-clean instruction:\n%s", prompt)
+	for _, gone := range []string{"internal draft and review artifact", "detailed step-by-step instructions"} {
+		if strings.Contains(prompt, gone) {
+			t.Fatalf("prompt still asks for %q:\n%s", gone, prompt)
+		}
 	}
 	if !strings.Contains(prompt, "do not copy or directly include other skills' instructions") {
 		t.Fatalf("prompt missing no-copy instruction:\n%s", prompt)
