@@ -100,6 +100,10 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// History pages refuse a larger summary, so committing one would break reading the session.
+	if summary, err := json.Marshal(plan.Summary); err != nil || len(summary) > HistoryMessageBytes {
+		return ContentTransition{}, ErrContentLineageCapacity
+	}
 	lock := s.sessionLock(key)
 	lock.Lock()
 	defer lock.Unlock()

@@ -113,7 +113,8 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 			if count == overBudget && testing.Short() {
 				t.Skip("writes 120k messages")
 			}
-			s, err := NewJSONLStore(t.TempDir())
+			dir := t.TempDir()
+			s, err := NewJSONLStore(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -154,6 +155,16 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				t.Fatal("new refs reduced a valid legacy window", err)
 			}
 			if count == longConversation {
+				reopened, openErr := NewJSONLStore(dir)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				pre, readErr := reopened.ReadHistoryCompactionFrame(
+					t.Context(), key, transition.MutationID, ContentBefore,
+				)
+				if readErr != nil || len(pre.Entries) != count {
+					t.Fatal("long conversation preimage did not survive reopening", readErr)
+				}
 				return
 			}
 			pre, err := s.ReadHistoryCompactionFrame(t.Context(), key, transition.MutationID, ContentBefore)
@@ -165,6 +176,39 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				t.Fatal("large frame fixture did not exercise its promised envelope", len(encoded), err)
 			}
 		})
+	}
+}
+
+func TestContentLineageCompactionRefusesSummaryHistoryPagesCannotRead(t *testing.T) {
+	s, err := NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "sk_v1_content_oversized_summary"
+	messages := coverageFixtureMessages()
+	if err = s.SetHistory(t.Context(), key, messages); err != nil {
+		t.Fatal(err)
+	}
+	frame := initializedContent(t, s, key)
+	refs := frameRefs(frame)
+	plan := ContentCompactionPlan{
+		MutationID:    uuid.NewString(),
+		DomainID:      frame.DomainID,
+		BeforeState:   frame.StateToken,
+		SummaryInputs: refs[:2],
+		Retained:      refs[2:],
+		Summary:       strings.Repeat("x", HistoryMessageBytes),
+	}
+	if _, err = s.CommitHistoryCompaction(t.Context(), key, plan); !errors.Is(err, ErrContentLineageCapacity) {
+		t.Fatal("oversized summary was committed", err)
+	}
+	current, err := s.ReadHistoryContentFrame(t.Context(), key)
+	if err != nil || current.StateToken != frame.StateToken || len(current.Entries) != len(messages) {
+		t.Fatal("refused summary changed durable content", err)
+	}
+	plan.Summary = "fits"
+	if _, err = s.CommitHistoryCompaction(t.Context(), key, plan); err != nil {
+		t.Fatal("a readable summary was refused", err)
 	}
 }
 

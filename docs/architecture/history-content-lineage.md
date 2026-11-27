@@ -85,8 +85,10 @@ committed postimage. The two immutable sides are obtained separately through
 The active window may accept further appends while the transition is pending.
 Those appends advance its token and receive their own refs; they do not alter
 the retained transition. Another dependent compaction is rejected before a
-write. The pending operation's refs, locators and tokens have a 1 MiB metadata
-budget, separate from its summary/content payload. The existing ordinary decoder
+write. The pending operation's refs, locators and tokens have a 32 MiB metadata
+budget (~60k messages), separate from its summary/content payload. The summary
+itself must fit one history page (`HistoryMessageBytes`), or readers of the
+session would fail. The existing ordinary decoder
 and bounded-page limits remain unchanged. The adapter must preserve its existing
 1000-message/8 MiB window, per-message budget and production transport envelope.
 
@@ -225,7 +227,7 @@ consumer follow-up must qualify their alignment before claiming shared use.
 Sender provenance is classified before stripping the sender
 prefix: a tagged person's literal `[System]` message remains public. Internal
 steering and unsupported roles receive separate exclusion reasons without
-copying their bodies to coverage metadata or a new content store. The 1 MiB
+copying their bodies to coverage metadata or a new content store. The 32 MiB
 metadata budget applies to physical ref coverage; the consumer's 1000-message,
 8 MiB and per-message budgets still govern its complete public payload. Private
 refs do not impose an artificial 1000-ref limit or justify partial confirmation.
