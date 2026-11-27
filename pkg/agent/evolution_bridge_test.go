@@ -503,6 +503,26 @@ func TestEvolutionBridge_ObserveDoesNotCreateDraftFile(t *testing.T) {
 	assertNotExists(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"))
 }
 
+// draftingMockProvider answers the skill-draft request with a valid draft, as a
+// model does, and every other request with response.
+type draftingMockProvider struct{ simpleMockProvider }
+
+func (m *draftingMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	if len(messages) > 0 && strings.Contains(messages[0].Content, "JSON object for a skill draft") {
+		return &providers.LLMResponse{Content: `{"target_skill_name":"weather-native-name-path","draft_type":"workflow",` +
+			`"change_kind":"create","human_summary":"weather by native name","body_or_patch":"---\nname: ` +
+			`weather-native-name-path\ndescription: Weather by the city's native name.\n---\n# Weather\n` +
+			`Query the city by its native name first."}`}, nil
+	}
+	return m.simpleMockProvider.Chat(ctx, messages, tools, model, opts)
+}
+
 func TestEvolutionBridge_DraftModeAutomaticallyRunsColdPathAndCreatesDraftFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	seedReadyRule(t, tmpDir)
@@ -510,7 +530,7 @@ func TestEvolutionBridge_DraftModeAutomaticallyRunsColdPathAndCreatesDraftFile(t
 	al := newEvolutionTestLoop(t, tmpDir, config.EvolutionConfig{
 		Enabled: true,
 		Mode:    "draft",
-	}, &simpleMockProvider{response: "ok"})
+	}, &draftingMockProvider{simpleMockProvider{response: "ok"}})
 	defer al.Close()
 
 	resp, err := al.ProcessDirectWithChannel(context.Background(), "hello", "session-auto-cold-path", "cli", "direct")
