@@ -94,13 +94,49 @@ var exampleEmailDomains = regexp.MustCompile(`(?i)@(example\.(com|org|net)|test\
 // redactedMark takes the place of what redactSensitive removes.
 const redactedMark = "[redacted]"
 
+// stepSecretPatterns are the shell forms of a credential that draftScanPatterns
+// miss, each with what takes its place. The PEM one takes the whole key block,
+// before the scan pattern would take only its opening line.
+var stepSecretPatterns = []struct {
+	re   *regexp.Regexp
+	with string
+}{
+	{
+		regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)`),
+		redactedMark,
+	},
+	{
+		regexp.MustCompile(
+			`(?i)((?:^|\s)(?:-u|--user|--proxy-user|--password|--passwd|--pass|--token|--api-key|--apikey|--secret|--http-user|--http-password)(?:\s+|=))(?:"[^"]*"|'[^']*'|\S+)`,
+		),
+		"${1}" + redactedMark,
+	},
+	{
+		regexp.MustCompile(
+			`(?i)(\b(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|cookie)\s*:\s*)[^'"\n]+`,
+		),
+		"${1}" + redactedMark,
+	},
+	{
+		regexp.MustCompile(
+			`(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CREDENTIALS?)[A-Z0-9_]*\s*=\s*)(?:"[^"]*"|'[^']*'|\S+)`,
+		),
+		"${1}" + redactedMark,
+	},
+	{regexp.MustCompile(`(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@`), "${1}" + redactedMark + "@"},
+	{regexp.MustCompile(`(?i)(\b(?:sshpass|mysql|mysqldump|mysqladmin)\b[^\n]*?\s-p)\S+`), "${1}" + redactedMark},
+}
+
 // redactSensitive replaces what the draft scan flags: a tool step's argument
 // reaches the task record and the draft prompt without the secret or the
 // person's data it carried, and so cannot put the draft in quarantine.
 func redactSensitive(text string) string {
+	for _, pattern := range stepSecretPatterns {
+		text = pattern.re.ReplaceAllString(text, pattern.with)
+	}
 	for _, pattern := range draftScanPatterns {
 		text = pattern.re.ReplaceAllStringFunc(text, func(match string) string {
-			if exampleEmailDomains.MatchString(match) {
+			if exampleEmailDomains.MatchString(match) || strings.Contains(match, redactedMark) {
 				return match
 			}
 			return redactedMark
