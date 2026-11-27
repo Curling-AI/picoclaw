@@ -345,6 +345,7 @@ toolLoop:
 						ErrorSummary: toolErrorSummary(hookResult),
 						SkillNames:   inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 						Argument:     toolStepArgument(toolName, toolArgs),
+						Background:   toolStepInBackground(toolName, toolArgs),
 					})
 
 					messages = append(messages, toolResultMsg)
@@ -774,6 +775,7 @@ toolLoop:
 			ErrorSummary: toolErrorSummary(toolResult),
 			SkillNames:   inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 			Argument:     toolStepArgument(toolName, toolArgs),
+			Background:   toolStepInBackground(toolName, toolArgs),
 		})
 		if !toolResult.IsError || outcomeUnknown {
 			ts.repeats.recordRun(effect, repeatKey)

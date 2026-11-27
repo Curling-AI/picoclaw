@@ -3,6 +3,7 @@ package evolution_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -379,6 +380,42 @@ func TestLLMDraftGenerator_BuildPromptShowsTheTaskSteps(t *testing.T) {
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// The prompt shows the most recent source tasks, the ones with their steps
+// recorded, and says a background step's success is not the command's.
+func TestLLMDraftGenerator_BuildPromptShowsRecentTasksAndBackgroundSteps(t *testing.T) {
+	tasks := make([]evolution.LearningRecord, 0, 7)
+	for i := 1; i <= 7; i++ {
+		task := evolution.LearningRecord{ID: fmt.Sprintf("task-%d", i), Summary: "ranking de vendas"}
+		if i > 2 {
+			task.ToolExecutions = []evolution.ToolExecutionRecord{
+				{Name: "exec", Success: true, Background: true, Argument: "python3 import.py"},
+				{Name: "exec", Success: true, Argument: "python3 ranking.py"},
+			}
+		}
+		tasks = append(tasks, task)
+	}
+	provider := &llmDraftTestProvider{defaultModel: "test-model", response: &providers.LLMResponse{Content: `not-json`}}
+	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	_, _ = generator.GenerateDraftWithEvidence(
+		context.Background(),
+		testLearningRule(),
+		nil,
+		evolution.DraftEvidence{TaskRecords: tasks},
+	)
+
+	prompt := provider.lastMessages[len(provider.lastMessages)-1].Content
+	for _, want := range []string{"task-3", "task-7", "python3 import.py -> ran in the background, its result is not in the record", "python3 ranking.py -> ok"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, old := range []string{"id: task-1\n", "id: task-2\n"} {
+		if strings.Contains(prompt, old) {
+			t.Fatalf("prompt kept an old task %q over a recent one:\n%s", old, prompt)
 		}
 	}
 }

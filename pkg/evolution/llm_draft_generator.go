@@ -176,15 +176,17 @@ func (g *LLMDraftGenerator) buildPrompt(
 	}, "\n")
 }
 
+// draftEvidenceTasks bounds the source tasks the draft prompt shows: the most
+// recent ones, which are the ones with their steps recorded.
+const draftEvidenceTasks = 5
+
 func summarizeDraftTaskEvidence(evidence DraftEvidence) string {
 	if len(evidence.TaskRecords) == 0 {
 		return "none"
 	}
-	lines := make([]string, 0, minInt(len(evidence.TaskRecords), 5))
-	for i, task := range evidence.TaskRecords {
-		if i >= 5 {
-			break
-		}
+	tasks := evidence.TaskRecords[max(0, len(evidence.TaskRecords)-draftEvidenceTasks):]
+	lines := make([]string, 0, len(tasks))
+	for _, task := range tasks {
 		parts := []string{
 			"- id: " + fallbackString(task.ID, "unknown"),
 			"  summary: " + fallbackString(task.Summary, "none"),
@@ -214,9 +216,12 @@ func summarizeTaskSteps(steps []ToolExecutionRecord) string {
 		if step.Argument != "" {
 			line += ": " + step.Argument
 		}
-		if step.Success {
+		switch {
+		case step.Background && step.Success:
+			line += " -> ran in the background, its result is not in the record"
+		case step.Success:
 			line += " -> ok"
-		} else {
+		default:
 			line += " -> failed"
 			if step.ErrorSummary != "" {
 				line += ": " + summarizeText(step.ErrorSummary, 160)

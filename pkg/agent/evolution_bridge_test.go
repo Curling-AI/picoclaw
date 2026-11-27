@@ -515,10 +515,12 @@ func (m *draftingMockProvider) Chat(
 	opts map[string]any,
 ) (*providers.LLMResponse, error) {
 	if len(messages) > 0 && strings.Contains(messages[0].Content, "JSON object for a skill draft") {
-		return &providers.LLMResponse{Content: `{"target_skill_name":"weather-native-name-path","draft_type":"workflow",` +
-			`"change_kind":"create","human_summary":"weather by native name","body_or_patch":"---\nname: ` +
-			`weather-native-name-path\ndescription: Weather by the city's native name.\n---\n# Weather\n` +
-			`Query the city by its native name first."}`}, nil
+		return &providers.LLMResponse{
+			Content: `{"target_skill_name":"weather-native-name-path","draft_type":"workflow",` +
+				`"change_kind":"create","human_summary":"weather by native name","body_or_patch":"---\nname: ` +
+				`weather-native-name-path\ndescription: Weather by the city's native name.\n---\n# Weather\n` +
+				`Query the city by its native name first."}`,
+		}, nil
 	}
 	return m.simpleMockProvider.Chat(ctx, messages, tools, model, opts)
 }

@@ -70,6 +70,9 @@ type ToolExecutionRecord struct {
 	// Argument is what the step did (the command run, the file read, the
 	// query), with what looks like a secret or personal data redacted.
 	Argument string `json:"argument,omitempty"`
+	// Background marks a step that only started a command in the background
+	// or queried one: its success says nothing about the command's.
+	Background bool `json:"background,omitempty"`
 }
 
 type LearningRecord struct {

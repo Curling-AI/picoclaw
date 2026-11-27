@@ -39,11 +39,12 @@ func TestEvolutionGetsEachStepWithItsArgument(t *testing.T) {
 				SkillNames:   []string{"ranking"},
 				Argument:     "python3 ranking.py",
 			},
+			{Name: "exec", Success: true, Argument: "python3 import.py", Background: true},
 		},
 	)
-	if len(got) != 1 || got[0].Name != "exec" || got[0].Success || got[0].ErrorSummary != "exit 1" ||
-		got[0].Argument != "python3 ranking.py" ||
-		len(got[0].SkillNames) != 1 {
+	if len(got) != 2 || got[0].Name != "exec" || got[0].Success || got[0].ErrorSummary != "exit 1" ||
+		got[0].Argument != "python3 ranking.py" || got[0].Background ||
+		len(got[0].SkillNames) != 1 || !got[1].Background {
 		t.Errorf("crossed as %+v", got)
 	}
 }
@@ -64,5 +65,47 @@ func TestTheTurnSnapshotKeepsEachStepsArgument(t *testing.T) {
 	got[0].SkillNames[0] = "changed"
 	if again := ts.toolExecutionsSnapshot(); again[0].SkillNames[0] != "ranking" {
 		t.Error("the snapshot shares the turn's skill names")
+	}
+}
+
+// A relative command keeps the directory it ran in, and a step that only
+// launched or queried a background command is marked so: its success is not
+// the command's.
+func TestToolStepKeepsTheDirectoryAndMarksBackgroundSteps(t *testing.T) {
+	cases := map[string]struct {
+		args       map[string]any
+		argument   string
+		background bool
+	}{
+		"run with cwd": {
+			map[string]any{"command": "python3 ranking.py", "cwd": "scripts"},
+			"python3 ranking.py (cwd: scripts)",
+			false,
+		},
+		"run in workspace": {
+			map[string]any{"command": "python3 scripts/ranking.py", "cwd": "."},
+			"python3 scripts/ranking.py",
+			false,
+		},
+		"background launch": {
+			map[string]any{"command": "python3 import.py", "background": true},
+			"python3 import.py",
+			true,
+		},
+		"poll of a session": {map[string]any{"action": "poll", "sessionId": "s-1"}, "(poll)", true},
+		"explicit run":      {map[string]any{"action": "run", "command": "ls artifacts"}, "ls artifacts", false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := toolStepArgument("exec", c.args); got != c.argument {
+				t.Errorf("toolStepArgument = %q, want %q", got, c.argument)
+			}
+			if got := toolStepInBackground("exec", c.args); got != c.background {
+				t.Errorf("toolStepInBackground = %v, want %v", got, c.background)
+			}
+		})
+	}
+	if toolStepInBackground("read_file", map[string]any{"path": "a", "background": true}) {
+		t.Error("a read_file step is never a background command")
 	}
 }

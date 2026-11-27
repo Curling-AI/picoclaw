@@ -43,6 +43,9 @@ type ToolExecutionRecord struct {
 	// Argument is what the step did (the command run, the file read, the
 	// query), see toolStepArgument; empty for the other tools.
 	Argument string `json:"argument,omitempty"`
+	// Background marks a step whose success is not the command's, see
+	// toolStepInBackground.
+	Background bool `json:"background,omitempty"`
 }
 
 // TurnEndPayload describes the completion of a turn.
