@@ -15,8 +15,10 @@ const contentArchiveDeadline = 45 * time.Second
 
 // This caps only the one pending operation's identity metadata. Summaries
 // remain payload, under the existing adapter's content budget; they do not
-// steal capacity from a valid legacy content window.
-const maxContentTransitionMetadata = 1 << 20
+// steal capacity from a valid legacy content window. With its before/after rows
+// and dropped/retained refs, a message costs ~410-540 bytes, so 32 MiB fits a
+// compaction of ~60k messages; 1 MiB stopped every session above ~2k messages.
+const maxContentTransitionMetadata = 32 << 20
 
 // Only the proof's exact leaf may turn optional physical GC into a no-op.
 // errors.Is alone also matches joins that contain an actual I/O or recovery
@@ -97,6 +99,10 @@ func (s *JSONLStore) CommitHistoryCompaction(
 ) (ContentTransition, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// History pages refuse a larger summary, so committing one would break reading the session.
+	if summary, err := json.Marshal(plan.Summary); err != nil || len(summary) > HistoryMessageBytes {
+		return ContentTransition{}, ErrContentLineageCapacity
 	}
 	lock := s.sessionLock(key)
 	lock.Lock()

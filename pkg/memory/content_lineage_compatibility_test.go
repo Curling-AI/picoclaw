@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -105,9 +106,15 @@ func TestContentLineageExplicitEditAndEditBackNeverReuseRevision(t *testing.T) {
 }
 
 func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
-	for _, count := range []int{1000, 3000} {
-		t.Run(string(rune('0'+count/1000))+"000refs", func(t *testing.T) {
-			s, err := NewJSONLStore(t.TempDir())
+	// 10k is a real long conversation that the old 1 MiB cap could never compact.
+	const longConversation, overBudget = 10000, 70000
+	for _, count := range []int{1000, longConversation, overBudget} {
+		t.Run(strconv.Itoa(count)+"refs", func(t *testing.T) {
+			if count == overBudget && testing.Short() {
+				t.Skip("writes 70k messages")
+			}
+			dir := t.TempDir()
+			s, err := NewJSONLStore(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,7 +141,7 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				Summary:       "same content budget",
 			}
 			transition, err := s.CommitHistoryCompaction(t.Context(), key, plan)
-			if count == 3000 {
+			if count == overBudget {
 				if !errors.Is(err, ErrContentLineageCapacity) {
 					t.Fatal("operation metadata exceeded its bound without explicit failure", err)
 				}
@@ -144,8 +151,21 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || len(transition.Retained) != 500 {
-				t.Fatal("new refs reduced a valid legacy 4-8MiB window", err)
+			if err != nil || len(transition.Retained) != count/2 {
+				t.Fatal("new refs reduced a valid legacy window", err)
+			}
+			if count == longConversation {
+				reopened, openErr := NewJSONLStore(dir)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				pre, readErr := reopened.ReadHistoryCompactionFrame(
+					t.Context(), key, transition.MutationID, ContentBefore,
+				)
+				if readErr != nil || len(pre.Entries) != count {
+					t.Fatal("long conversation preimage did not survive reopening", readErr)
+				}
+				return
 			}
 			pre, err := s.ReadHistoryCompactionFrame(t.Context(), key, transition.MutationID, ContentBefore)
 			if err != nil || len(pre.Entries) != count || len(pre.Entries[999].Message.Content) != 7*1024 {
@@ -156,6 +176,39 @@ func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 				t.Fatal("large frame fixture did not exercise its promised envelope", len(encoded), err)
 			}
 		})
+	}
+}
+
+func TestContentLineageCompactionRefusesSummaryHistoryPagesCannotRead(t *testing.T) {
+	s, err := NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "sk_v1_content_oversized_summary"
+	messages := coverageFixtureMessages()
+	if err = s.SetHistory(t.Context(), key, messages); err != nil {
+		t.Fatal(err)
+	}
+	frame := initializedContent(t, s, key)
+	refs := frameRefs(frame)
+	plan := ContentCompactionPlan{
+		MutationID:    uuid.NewString(),
+		DomainID:      frame.DomainID,
+		BeforeState:   frame.StateToken,
+		SummaryInputs: refs[:2],
+		Retained:      refs[2:],
+		Summary:       strings.Repeat("x", HistoryMessageBytes),
+	}
+	if _, err = s.CommitHistoryCompaction(t.Context(), key, plan); !errors.Is(err, ErrContentLineageCapacity) {
+		t.Fatal("oversized summary was committed", err)
+	}
+	current, err := s.ReadHistoryContentFrame(t.Context(), key)
+	if err != nil || current.StateToken != frame.StateToken || len(current.Entries) != len(messages) {
+		t.Fatal("refused summary changed durable content", err)
+	}
+	plan.Summary = "fits"
+	if _, err = s.CommitHistoryCompaction(t.Context(), key, plan); err != nil {
+		t.Fatal("a readable summary was refused", err)
 	}
 }
 

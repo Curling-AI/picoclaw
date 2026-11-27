@@ -359,7 +359,11 @@ func TestContentLineageCoverageMetadataCapacityFailsWithoutPartialConfirmation(t
 		t.Fatal(err)
 	}
 	ref := ack.Archived[0]
-	ack.Archived = make([]ContentRef, 8192)
+	refJSON, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ack.Archived = make([]ContentRef, maxContentTransitionMetadata/len(refJSON)+1)
 	for i := range ack.Archived {
 		ack.Archived[i] = ref
 	}
