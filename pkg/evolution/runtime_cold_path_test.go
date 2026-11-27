@@ -3,6 +3,7 @@ package evolution_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1084,16 +1085,12 @@ func TestRuntime_RunColdPathOnce_UsesGeneratorFactoryWorkspaceForFallback(t *tes
 		t.Fatalf("AppendLearningRecords: %v", err)
 	}
 
-	provider := &llmDraftRuntimeProvider{
-		response:     &providers.LLMResponse{Content: `not-json`},
-		defaultModel: "runtime-test-model",
-	}
-
+	// Without a model the heuristic draft is the one, read from the factory's workspace.
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: config.EvolutionConfig{Enabled: true, Mode: "draft"},
 		Store:  store,
 		GeneratorFactory: func(workspace string) evolution.DraftGenerator {
-			return evolution.NewDraftGeneratorForWorkspace(workspace, provider, "runtime-explicit-model")
+			return evolution.NewDraftGeneratorForWorkspace(workspace, nil, "runtime-explicit-model")
 		},
 	})
 	if err != nil {
@@ -1345,5 +1342,70 @@ func TestRuntime_RunColdPathOnce_JudgesEachRecordOnce(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("task-solo missing from store")
+	}
+}
+
+// flakyDraftGenerator gives no usable draft for its first failures calls.
+type flakyDraftGenerator struct {
+	failures int
+	calls    int
+	draft    evolution.SkillDraft
+}
+
+func (g *flakyDraftGenerator) GenerateDraft(
+	context.Context,
+	evolution.LearningRecord,
+	[]skills.SkillInfo,
+) (evolution.SkillDraft, error) {
+	g.calls++
+	if g.calls <= g.failures {
+		return evolution.SkillDraft{}, fmt.Errorf("%w: call timed out", evolution.ErrDraftUnavailable)
+	}
+	return g.draft, nil
+}
+
+// A pattern the model gave no usable draft for gets no skill in that run, and
+// the next run drafts it again.
+func TestRuntime_RunColdPathOnce_DraftsAgainAPatternTheModelLeftWithoutDraft(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	if err := store.AppendLearningRecords([]evolution.LearningRecord{readyRule("rule-1", root)}); err != nil {
+		t.Fatalf("AppendLearningRecords: %v", err)
+	}
+	generator := &flakyDraftGenerator{failures: 1, draft: evolution.SkillDraft{
+		ID:              "draft-1",
+		WorkspaceID:     root,
+		SourceRecordID:  "rule-1",
+		TargetSkillName: "weather",
+		DraftType:       evolution.DraftTypeShortcut,
+		ChangeKind:      evolution.ChangeKindAppend,
+		HumanSummary:    "prefer native-name path first",
+		BodyOrPatch:     "## Start Here\nUse native-name query first.",
+	}}
+	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
+		Config:         config.EvolutionConfig{Enabled: true, Mode: "draft"},
+		Now:            func() time.Time { return time.Unix(1700001000, 0).UTC() },
+		DraftGenerator: generator,
+		Store:          store,
+		SkillsRecaller: evolution.NewSkillsRecaller(root),
+	})
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+
+	for run, want := range []int{0, 1} {
+		if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+			t.Fatalf("run %d: RunColdPathOnce: %v", run+1, runErr)
+		}
+		drafts, loadErr := store.LoadDrafts()
+		if loadErr != nil {
+			t.Fatalf("LoadDrafts: %v", loadErr)
+		}
+		if len(drafts) != want {
+			t.Fatalf("after run %d: %d drafts, want %d", run+1, len(drafts), want)
+		}
+	}
+	if generator.calls != 2 {
+		t.Errorf("generator called %d times, want 2", generator.calls)
 	}
 }

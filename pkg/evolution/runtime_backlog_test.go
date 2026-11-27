@@ -409,8 +409,8 @@ func TestLLMPatternClusterer_NoCreditIsReportedInsteadOfFallingBack(t *testing.T
 	}
 }
 
-// In apply mode a heuristic draft written only because the account ran dry
-// would land in the workspace as a skill.
+// In apply mode a heuristic draft written only because the account ran dry, or
+// the gateway was down, would land in the workspace as a skill.
 func TestLLMDraftGenerator_NoCreditIsReportedInsteadOfAHeuristicDraft(t *testing.T) {
 	rule := evolution.LearningRecord{
 		ID:          "rule-1",
@@ -433,8 +433,8 @@ func TestLLMDraftGenerator_NoCreditIsReportedInsteadOfAHeuristicDraft(t *testing
 
 	generator = evolution.NewLLMDraftGenerator(&erroringProvider{err: errGatewayDown}, "m", fallback)
 	draft, err = generator.GenerateDraft(context.Background(), rule, nil)
-	if err != nil || draft.TargetSkillName != "weather-report" {
-		t.Errorf("draft = %+v err = %v, want the fallback draft", draft, err)
+	if !errors.Is(err, evolution.ErrDraftUnavailable) || draft.TargetSkillName != "" {
+		t.Errorf("draft = %+v err = %v, want no draft until a later run", draft, err)
 	}
 }
 

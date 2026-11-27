@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -589,6 +591,41 @@ func TestSkillDiscovery_DefersCatalogToHint(t *testing.T) {
 	// knows the skill exists and can search for it by name.
 	if !strings.Contains(sys, "pdf-extract") {
 		t.Fatalf("discovery on should list the skill name: %q", sys)
+	}
+}
+
+// With every listed skill in the workspace its file is known, so the hint sends
+// the model straight to skills/<name>/SKILL.md: the search step cost one call
+// per use. A skill from another root keeps the search, which finds its path.
+func TestSkillDiscovery_ReadsAWorkspaceSkillWithoutSearchingFirst(t *testing.T) {
+	builtin := t.TempDir()
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", builtin)
+	ws := t.TempDir()
+	writeTurnProfileSkill(t, ws, "ranking-vendas",
+		"---\nname: ranking-vendas\ndescription: Ranking mensal de vendas por categoria\n---\n# ranking")
+
+	sys := NewContextBuilder(ws).WithSkillDiscovery(true).
+		BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})[0].Content
+	if !strings.Contains(sys, "`skills/<name>/SKILL.md`") ||
+		!strings.Contains(sys, "your immediate next action MUST be a real read_file of that file") {
+		t.Fatalf("workspace-only catalog should send the model to the skill file: %q", sys)
+	}
+	if strings.Contains(sys, "MUST be a real find_installed_skills call") {
+		t.Fatalf("workspace-only catalog still requires a search first: %q", sys)
+	}
+
+	writeTurnProfileSkill(t, builtin, "pdf-extract",
+		"---\nname: pdf-extract\ndescription: Extract text from PDF files\n---\n# pdf")
+	if err := os.Rename(
+		filepath.Join(builtin, "skills", "pdf-extract"),
+		filepath.Join(builtin, "pdf-extract"),
+	); err != nil {
+		t.Fatalf("move builtin skill: %v", err)
+	}
+	sys = NewContextBuilder(ws).WithSkillDiscovery(true).
+		BuildMessagesFromPrompt(PromptBuildRequest{CurrentMessage: "hi"})[0].Content
+	if !strings.Contains(sys, "pdf-extract") || !strings.Contains(sys, "MUST be a real find_installed_skills call") {
+		t.Fatalf("a skill outside the workspace should keep the search first: %q", sys)
 	}
 }
 

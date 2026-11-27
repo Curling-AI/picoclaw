@@ -683,22 +683,19 @@ func (ts *turnState) toolKindsSnapshot() []string {
 	return append([]string(nil), ts.toolKinds...)
 }
 
-func (ts *turnState) recordToolExecution(tool string, success bool, errorSummary string, skillNames []string) {
-	tool = strings.TrimSpace(tool)
-	if tool == "" {
+func (ts *turnState) recordToolExecution(record ToolExecutionRecord) {
+	record.Name = strings.TrimSpace(record.Name)
+	if record.Name == "" {
 		return
 	}
 
-	ts.recordToolKind(tool)
+	ts.recordToolKind(record.Name)
 
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.toolExecutions = append(ts.toolExecutions, ToolExecutionRecord{
-		Name:         tool,
-		Success:      success,
-		ErrorSummary: strings.TrimSpace(errorSummary),
-		SkillNames:   append([]string(nil), skillNames...),
-	})
+	record.ErrorSummary = strings.TrimSpace(record.ErrorSummary)
+	record.SkillNames = append([]string(nil), record.SkillNames...)
+	ts.toolExecutions = append(ts.toolExecutions, record)
 }
 
 func (ts *turnState) toolExecutionsSnapshot() []ToolExecutionRecord {
@@ -710,12 +707,8 @@ func (ts *turnState) toolExecutionsSnapshot() []ToolExecutionRecord {
 
 	out := make([]ToolExecutionRecord, 0, len(ts.toolExecutions))
 	for _, exec := range ts.toolExecutions {
-		out = append(out, ToolExecutionRecord{
-			Name:         exec.Name,
-			Success:      exec.Success,
-			ErrorSummary: exec.ErrorSummary,
-			SkillNames:   append([]string(nil), exec.SkillNames...),
-		})
+		exec.SkillNames = append([]string(nil), exec.SkillNames...)
+		out = append(out, exec)
 	}
 	return out
 }

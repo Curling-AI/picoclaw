@@ -339,12 +339,14 @@ toolLoop:
 							Async:      hookResult.Async,
 						},
 					)
-					ts.recordToolExecution(
-						toolName,
-						!hookResult.IsError,
-						toolErrorSummary(hookResult),
-						inferSkillNamesFromToolCall(ts, toolName, toolArgs),
-					)
+					ts.recordToolExecution(ToolExecutionRecord{
+						Name:         toolName,
+						Success:      !hookResult.IsError,
+						ErrorSummary: toolErrorSummary(hookResult),
+						SkillNames:   inferSkillNamesFromToolCall(ts, toolName, toolArgs),
+						Argument:     toolStepArgument(toolName, toolArgs),
+						Background:   toolStepInBackground(toolName, toolArgs),
+					})
 
 					messages = append(messages, toolResultMsg)
 					if !ts.opts.NoHistory {
@@ -767,12 +769,14 @@ toolLoop:
 				Async:      toolResult.Async,
 			},
 		)
-		ts.recordToolExecution(
-			toolName,
-			!toolResult.IsError,
-			toolErrorSummary(toolResult),
-			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
-		)
+		ts.recordToolExecution(ToolExecutionRecord{
+			Name:         toolName,
+			Success:      !toolResult.IsError,
+			ErrorSummary: toolErrorSummary(toolResult),
+			SkillNames:   inferSkillNamesFromToolCall(ts, toolName, toolArgs),
+			Argument:     toolStepArgument(toolName, toolArgs),
+			Background:   toolStepInBackground(toolName, toolArgs),
+		})
 		if !toolResult.IsError || outcomeUnknown {
 			ts.repeats.recordRun(effect, repeatKey)
 		}

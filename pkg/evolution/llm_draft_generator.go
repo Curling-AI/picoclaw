@@ -3,6 +3,7 @@ package evolution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,15 +17,41 @@ type LLMDraftGenerator struct {
 	fallback DraftGenerator
 }
 
+// ErrDraftUnavailable says the model gave no usable draft: the pattern stays
+// ready for a later run. The heuristic draft is not a stand-in for the model's,
+// because it only points at the skills the tasks used.
+var ErrDraftUnavailable = errors.New("evolution: the model gave no usable skill draft")
+
 type llmDraftResponse struct {
-	TargetSkillName    string   `json:"target_skill_name"`
-	DraftType          string   `json:"draft_type"`
-	ChangeKind         string   `json:"change_kind"`
-	HumanSummary       string   `json:"human_summary"`
-	IntendedUseCases   []string `json:"intended_use_cases"`
-	PreferredEntryPath []string `json:"preferred_entry_path"`
-	AvoidPatterns      []string `json:"avoid_patterns"`
-	BodyOrPatch        string   `json:"body_or_patch"`
+	TargetSkillName    string     `json:"target_skill_name"`
+	DraftType          string     `json:"draft_type"`
+	ChangeKind         string     `json:"change_kind"`
+	HumanSummary       string     `json:"human_summary"`
+	IntendedUseCases   stringList `json:"intended_use_cases"`
+	PreferredEntryPath stringList `json:"preferred_entry_path"`
+	AvoidPatterns      stringList `json:"avoid_patterns"`
+	BodyOrPatch        string     `json:"body_or_patch"`
+}
+
+// stringList takes a JSON array of strings or, as models sometimes answer for
+// a one-item list, a single string.
+type stringList []string
+
+func (l *stringList) UnmarshalJSON(data []byte) error {
+	var many []string
+	if err := json.Unmarshal(data, &many); err == nil {
+		*l = many
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(data, &one); err != nil {
+		return err
+	}
+	*l = nil
+	if strings.TrimSpace(one) != "" {
+		*l = []string{one}
+	}
+	return nil
 }
 
 func NewLLMDraftGenerator(provider providers.LLMProvider, model string, fallback DraftGenerator) *LLMDraftGenerator {
@@ -83,18 +110,19 @@ func (g *LLMDraftGenerator) GenerateDraftWithEvidence(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return SkillDraft{}, ctxErr
 	}
-	if err != nil || resp == nil {
-		return g.generateFallback(ctx, rule, matches, evidence)
+	if err != nil {
+		return SkillDraft{}, fmt.Errorf("%w: %w", ErrDraftUnavailable, err)
+	}
+	if resp == nil || strings.TrimSpace(resp.Content) == "" {
+		return SkillDraft{}, fmt.Errorf("%w: empty answer", ErrDraftUnavailable)
 	}
 
-	content := strings.TrimSpace(resp.Content)
-	if content == "" {
-		return g.generateFallback(ctx, rule, matches, evidence)
+	draft, ok := parseLLMDraft(strings.TrimSpace(resp.Content))
+	if !ok {
+		return SkillDraft{}, fmt.Errorf("%w: the answer is not a draft object", ErrDraftUnavailable)
 	}
-
-	draft, ok := parseLLMDraft(content)
-	if !ok || len(ValidateDraft(draft)) > 0 {
-		return g.generateFallback(ctx, rule, matches, evidence)
+	if findings := ValidateDraft(draft); len(findings) > 0 {
+		return SkillDraft{}, fmt.Errorf("%w: %s", ErrDraftUnavailable, strings.Join(findings, "; "))
 	}
 
 	return draft, nil
@@ -148,24 +176,60 @@ func (g *LLMDraftGenerator) buildPrompt(
 	}, "\n")
 }
 
+// draftEvidenceTasks bounds the source tasks the draft prompt shows: the most
+// recent ones, which are the ones with their steps recorded.
+const draftEvidenceTasks = 5
+
 func summarizeDraftTaskEvidence(evidence DraftEvidence) string {
 	if len(evidence.TaskRecords) == 0 {
 		return "none"
 	}
-	lines := make([]string, 0, minInt(len(evidence.TaskRecords), 5))
-	for i, task := range evidence.TaskRecords {
-		if i >= 5 {
-			break
-		}
+	tasks := evidence.TaskRecords[max(0, len(evidence.TaskRecords)-draftEvidenceTasks):]
+	lines := make([]string, 0, len(tasks))
+	for _, task := range tasks {
 		parts := []string{
 			"- id: " + fallbackString(task.ID, "unknown"),
 			"  summary: " + fallbackString(task.Summary, "none"),
 			"  final_output_excerpt: " + fallbackString(summarizeText(task.FinalOutput, 700), "none"),
 			"  used_skill_names: " + joinOrFallback(task.UsedSkillNames, "none"),
+			"  tool_steps:" + summarizeTaskSteps(task.ToolExecutions),
 		}
 		lines = append(lines, strings.Join(parts, "\n"))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// draftStepsPerTask bounds the tool steps the draft prompt shows per task.
+const draftStepsPerTask = 16
+
+// summarizeTaskSteps lists a task's tool steps in order, each with what it
+// did and whether it worked: the way the task got done, which the skill's
+// procedure follows.
+func summarizeTaskSteps(steps []ToolExecutionRecord) string {
+	if len(steps) == 0 {
+		return " none"
+	}
+	steps = steps[max(0, len(steps)-draftStepsPerTask):]
+	lines := make([]string, 0, len(steps))
+	for i, step := range steps {
+		line := fmt.Sprintf("    %d. %s", i+1, step.Name)
+		if step.Argument != "" {
+			line += ": " + step.Argument
+		}
+		switch {
+		case step.Background && step.Success:
+			line += " -> ran in the background, its result is not in the record"
+		case step.Success:
+			line += " -> ok"
+		default:
+			line += " -> failed"
+			if step.ErrorSummary != "" {
+				line += ": " + summarizeText(step.ErrorSummary, 160)
+			}
+		}
+		lines = append(lines, line)
+	}
+	return "\n" + strings.Join(lines, "\n")
 }
 
 func combinedSkillGuidance(rule LearningRecord) string {
