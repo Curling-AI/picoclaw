@@ -2,7 +2,6 @@ package tools
 
 import (
 	"io"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,10 +12,22 @@ import (
 // remoteURLPattern finds the URLs a command reaches.
 var remoteURLPattern = regexp.MustCompile(`(?i)\b(?:https?|ftps?|sftp|wss?)://[^\s'"<>()]+`)
 
+// networkClientPattern finds a program that reaches another host without a
+// URL scheme (`curl host/api`, `scp f user@host:`, `> /dev/tcp/h/p`): in
+// command position, quoted as in a script's argument list, or bash's socket.
+var networkClientPattern = regexp.MustCompile(
+	`(?i)(?:(?:^|[;&|(\x60\n]|\$\()\s*(?:(?:sudo|env|exec|nohup|time|xargs)\s+(?:-\S+\s+)*)?` +
+		`(?:curl|wget|nc|ncat|netcat|socat|scp|sftp|rsync|ssh|telnet|ftp)(?:\.exe)?(?:\s|$)` +
+		`|['"](?:curl|wget|nc|ncat|netcat|socat|scp|sftp|rsync|ssh)['"]|/dev/(?:tcp|udp)/)`)
+
 // personalFilePattern finds the person's profile and memory: what the assistant
 // knows about them, never a deliverable of a task.
 var personalFilePattern = regexp.MustCompile(
-	`(?i)(?:^|[\s'"=@/(,:])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)/)`)
+	`(?i)(?:^|[\s'"=@/\\(,:])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)[/\\])`)
+
+// downloadTargetPattern finds where a command writes what it downloads: a
+// personal file there is written, not sent.
+var downloadTargetPattern = regexp.MustCompile(`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+))\s*\S+`)
 
 // scriptPathPattern finds the script files a command hands to an interpreter.
 var scriptPathPattern = regexp.MustCompile(`[^\s'"<>|;&()]+\.(?:py|sh|bash|js|mjs|cjs|ts|rb|pl|php)\b`)
@@ -26,42 +37,43 @@ const (
 	maxScannedScriptBytes = 64 << 10
 )
 
-// personalFilesSentTo returns the remote host a command, or a script it runs,
-// would hand the person's profile or memory files to, or "". A skill or a file
-// that asks for it is not the person asking, and some models follow a skill
-// step by step.
+// personalFilesSentTo returns where a command, or a script it runs, would
+// hand the person's profile or memory files, or "". A skill or a file that
+// asks for it is not the person asking, and some models follow a skill step
+// by step.
 // shortcut: it reads the command and the scripts it names, so code that builds the path or the address
 // at run time, or a script reached after a cd, passes; upgrade to a network policy for skill scripts then.
-func personalFilesSentTo(command, cwd string) string {
-	text := withScripts(command, cwd)
-	host := ""
-	for _, raw := range remoteURLPattern.FindAllString(text, -1) {
-		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Hostname() == "" {
-			host = raw
-			break
+func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
+	text := command + t.scriptsRun(command, cwd)
+	destination := ""
+	if raw := remoteURLPattern.FindString(text); raw != "" {
+		destination = raw
+		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
+			destination = parsed.Hostname()
 		}
-		if !isLoopbackHost(parsed.Hostname()) {
-			host = parsed.Hostname()
-			break
-		}
+	} else if networkClientPattern.MatchString(text) {
+		destination = "another host"
 	}
-	if host == "" || !personalFilePattern.MatchString(remoteURLPattern.ReplaceAllString(text, " ")) {
+	sent := downloadTargetPattern.ReplaceAllString(remoteURLPattern.ReplaceAllString(text, " "), " ")
+	if destination == "" || !personalFilePattern.MatchString(sent) {
 		return ""
 	}
-	return host
+	return destination
 }
 
-// withScripts is the command followed by the text of the regular files it
-// names as scripts, so a script that names the files and the address itself
-// is read like the command.
-func withScripts(command, cwd string) string {
+// scriptsRun is the text of the regular files a command names as scripts, so
+// a script that names the files and the address itself is read like the
+// command. Under a workspace restriction it reads only scripts inside it: the
+// refusal names a host, and one from a file the agent cannot read must not leak.
+func (t *ExecTool) scriptsRun(command, cwd string) string {
 	var text strings.Builder
-	text.WriteString(command)
 	for _, name := range scriptPathPattern.FindAllString(command, maxScannedScripts) {
 		path := name
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
+		}
+		if t.restrictToWorkspace && t.workingDir != "" && !insideWorkspace(path, t.workingDir) {
+			continue
 		}
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			continue
@@ -78,10 +90,15 @@ func withScripts(command, cwd string) string {
 	return text.String()
 }
 
-func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
+func insideWorkspace(path, workspace string) bool {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	root, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(root, resolved)
+	return err == nil && filepath.IsLocal(rel)
 }
