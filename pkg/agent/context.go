@@ -741,6 +741,7 @@ func (cb *ContextBuilder) buildSystemPromptForRequest(
 func skillDiscoveryHint(skillList []skills.SkillInfo, allowed []string) string {
 	allowedSet := cleanAllowedSet(allowed)
 	var names []string
+	allInWorkspace := true
 	for _, s := range skillList {
 		if s.Disabled {
 			continue
@@ -751,6 +752,8 @@ func skillDiscoveryHint(skillList []skills.SkillInfo, allowed []string) string {
 			}
 		}
 		names = append(names, s.Name)
+		allInWorkspace = allInWorkspace && s.Source == "workspace" &&
+			filepath.ToSlash(s.Path) != "" && strings.HasSuffix(filepath.ToSlash(s.Path), "/skills/"+s.Name+"/SKILL.md")
 	}
 	total := len(names)
 	if total == 0 {
@@ -764,6 +767,21 @@ func skillDiscoveryHint(skillList []skills.SkillInfo, allowed []string) string {
 	if len(names) > maxDeferredToolNamesInPrompt {
 		suffix = fmt.Sprintf(" … and %d more (searchable)", len(names)-maxDeferredToolNamesInPrompt)
 		names = names[:maxDeferredToolNamesInPrompt]
+	}
+	if allInWorkspace {
+		// The path is known, so the search step only costs a call per use.
+		return fmt.Sprintf(
+			"# Skills\n\nYou have %d installed skill(s) that extend your capabilities. "+
+				"Their names: `%s`%s. IMPORTANT: only the names are listed here — the skills' "+
+				"instructions are NOT loaded, so you cannot follow one from its name alone. Each "+
+				"skill's instructions are in `skills/<name>/SKILL.md`: to use a skill, your immediate "+
+				"next action MUST be a real read_file of that file. Call find_installed_skills (with a "+
+				"natural-language description of the task) only when no listed name clearly fits. "+
+				"Never reply with only a sentence saying you will use a skill.",
+			total,
+			strings.Join(names, "`, `"),
+			suffix,
+		)
 	}
 	return fmt.Sprintf(
 		"# Skills\n\nYou have %d installed skill(s) that extend your capabilities. "+
