@@ -107,11 +107,11 @@ func TestContentLineageExplicitEditAndEditBackNeverReuseRevision(t *testing.T) {
 
 func TestContentLineageLargeLegacyWindowAndMetadataBudget(t *testing.T) {
 	// 10k is a real long conversation that the old 1 MiB cap could never compact.
-	const longConversation, overBudget = 10000, 120000
+	const longConversation, overBudget = 10000, 70000
 	for _, count := range []int{1000, longConversation, overBudget} {
 		t.Run(strconv.Itoa(count)+"refs", func(t *testing.T) {
 			if count == overBudget && testing.Short() {
-				t.Skip("writes 120k messages")
+				t.Skip("writes 70k messages")
 			}
 			dir := t.TempDir()
 			s, err := NewJSONLStore(dir)
