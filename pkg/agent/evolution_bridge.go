@@ -538,7 +538,58 @@ func toEvolutionToolExecutions(input []ToolExecutionRecord) []evolution.ToolExec
 			Success:      record.Success,
 			ErrorSummary: record.ErrorSummary,
 			SkillNames:   append([]string(nil), record.SkillNames...),
+			Argument:     record.Argument,
+			Background:   record.Background,
 		})
 	}
 	return out
+}
+
+// toolStepKeys names, per tool, the argument that says what a step did: the
+// command run, the file read or written, the query. What a step wrote or sent
+// stays out: the evolution learns the way the task was done, not the
+// person's content. (seucaranguejo fork)
+var toolStepKeys = map[string]string{
+	"exec": "command", "read_file": "path", "write_file": "path", "edit_file": "path",
+	"append_file": "path", "list_dir": "path", "web_search": "query", "web_fetch": "url",
+}
+
+// toolStepMaxRunes bounds a step's argument, enough for a one-line command.
+const toolStepMaxRunes = 400
+
+// toolStepArgument is the argument toolStepKeys names for the tool, clipped;
+// empty for any other tool. A command keeps its working directory: a relative
+// command means nothing without it.
+func toolStepArgument(toolName string, args map[string]any) string {
+	key, ok := toolStepKeys[toolName]
+	if !ok {
+		return ""
+	}
+	value, _ := args[key].(string)
+	value = strings.TrimSpace(value)
+	if toolName == "exec" {
+		if action, _ := args["action"].(string); value == "" && action != "" && action != "run" {
+			value = "(" + action + ")"
+		}
+		if cwd, _ := args["cwd"].(string); strings.TrimSpace(cwd) != "" && strings.TrimSpace(cwd) != "." {
+			value += " (cwd: " + strings.TrimSpace(cwd) + ")"
+		}
+	}
+	if runes := []rune(value); len(runes) > toolStepMaxRunes {
+		value = string(runes[:toolStepMaxRunes]) + "…"
+	}
+	return value
+}
+
+// toolStepInBackground says the step's success is not the command's: a
+// background launch only started it, and a poll, read or kill only reached it.
+func toolStepInBackground(toolName string, args map[string]any) bool {
+	if toolName != "exec" {
+		return false
+	}
+	if action, _ := args["action"].(string); action != "" && action != "run" {
+		return true
+	}
+	background, _ := args["background"].(bool)
+	return background
 }

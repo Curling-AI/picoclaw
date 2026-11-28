@@ -3,6 +3,7 @@ package evolution_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,17 +190,27 @@ func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) 
 	) {
 		t.Fatalf("prompt missing deployable body scope instruction:\n%s", prompt)
 	}
-	if !strings.Contains(
-		prompt,
-		"provide detailed step-by-step instructions for the exact operation or execution process",
-	) {
-		t.Fatalf("prompt missing step-by-step instruction:\n%s", prompt)
+	// The body is the skill as the assistant will read it, the shortest path the
+	// tasks proved: review notes and past results leaked into the applied skill,
+	// and steps to find or inspect the inputs again made the next task slower.
+	for _, want := range []string{
+		"body_or_patch is the skill the assistant reads when it uses it",
+		"No notes for reviewers, no provenance, no results of past runs",
+		"Give the shortest path the tasks proved to the final answer",
+		"reuse a script or file the tasks created",
+		"so it needs no step to list the files or check their headers",
+		"Keep every rule the person set or corrected in the tasks",
+		"do not send the assistant to read another skill for it",
+		"in one short clause, what it is not for when a request about the same inputs could look alike",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
 	}
-	if !strings.Contains(prompt, "body_or_patch is an internal draft and review artifact") {
-		t.Fatalf("prompt missing internal draft instruction:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "the final deployed SKILL.md will be rendered without learning traces") {
-		t.Fatalf("prompt missing deploy-clean instruction:\n%s", prompt)
+	for _, gone := range []string{"internal draft and review artifact", "detailed step-by-step instructions"} {
+		if strings.Contains(prompt, gone) {
+			t.Fatalf("prompt still asks for %q:\n%s", gone, prompt)
+		}
 	}
 	if !strings.Contains(prompt, "do not copy or directly include other skills' instructions") {
 		t.Fatalf("prompt missing no-copy instruction:\n%s", prompt)
@@ -268,100 +279,143 @@ func TestLLMDraftGenerator_GenerateDraft_PrefersExplicitModelIDOverProviderDefau
 	}
 }
 
-func TestLLMDraftGenerator_GenerateDraft_FallsBackOnProviderError(t *testing.T) {
-	fallback := &recordingDraftGenerator{
-		draft: evolution.SkillDraft{
-			TargetSkillName: "weather-fallback",
-			DraftType:       evolution.DraftTypeWorkflow,
-			ChangeKind:      evolution.ChangeKindCreate,
-			HumanSummary:    "fallback summary",
-			BodyOrPatch:     "fallback body",
-		},
+// When the model gives no usable draft (it fails, answers nothing, or answers
+// something that is not a valid draft) there is no skill this run: the
+// heuristic draft only points at the skills the tasks used, and applying it
+// made the next task slower.
+func TestLLMDraftGenerator_GenerateDraft_GivesNoDraftWhenTheModelGivesNone(t *testing.T) {
+	cases := map[string]*llmDraftTestProvider{
+		"provider error": {defaultModel: "test-model", err: errors.New("provider unavailable")},
+		"call timeout":   {defaultModel: "test-model", err: context.DeadlineExceeded},
+		"invalid json":   {defaultModel: "test-model", response: &providers.LLMResponse{Content: `not-json`}},
+		"empty answer":   {defaultModel: "test-model", response: &providers.LLMResponse{Content: ``}},
+		"numeric-only name": {defaultModel: "test-model", response: &providers.LLMResponse{
+			Content: `{"target_skill_name":"100","draft_type":"shortcut","change_kind":"create","human_summary":"Calculate 100","body_or_patch":"## Start Here\nCalculate 100."}`,
+		}},
 	}
-	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-		defaultModel: "test-model",
-		err:          errors.New("provider unavailable"),
-	}, "", fallback)
-
-	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
-	if err != nil {
-		t.Fatalf("GenerateDraft: %v", err)
-	}
-
-	if fallback.calls != 1 {
-		t.Fatalf("fallback.calls = %d, want 1", fallback.calls)
-	}
-	if draft.TargetSkillName != "weather-fallback" {
-		t.Fatalf("TargetSkillName = %q, want weather-fallback", draft.TargetSkillName)
-	}
-}
-
-func TestLLMDraftGenerator_GenerateDraft_FallsBackOnInvalidOrEmptyContent(t *testing.T) {
-	testCases := []struct {
-		name    string
-		content string
-	}{
-		{name: "invalid json", content: `not-json`},
-		{name: "empty content", content: ``},
-	}
-
-	for _, tt := range testCases {
-		t.Run(tt.name, func(t *testing.T) {
-			fallback := &recordingDraftGenerator{
-				draft: evolution.SkillDraft{
-					TargetSkillName: "weather-fallback",
-					DraftType:       evolution.DraftTypeWorkflow,
-					ChangeKind:      evolution.ChangeKindCreate,
-					HumanSummary:    "fallback summary",
-					BodyOrPatch:     "fallback body",
-				},
-			}
-			generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-				defaultModel: "test-model",
-				response:     &providers.LLMResponse{Content: tt.content},
-			}, "", fallback)
+	for name, provider := range cases {
+		t.Run(name, func(t *testing.T) {
+			fallback := &recordingDraftGenerator{draft: evolution.SkillDraft{
+				TargetSkillName: "weather-fallback",
+				DraftType:       evolution.DraftTypeWorkflow,
+				ChangeKind:      evolution.ChangeKindCreate,
+				HumanSummary:    "fallback summary",
+				BodyOrPatch:     "fallback body",
+			}}
+			generator := evolution.NewLLMDraftGenerator(provider, "", fallback)
 
 			draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
-			if err != nil {
-				t.Fatalf("GenerateDraft: %v", err)
+			if !errors.Is(err, evolution.ErrDraftUnavailable) {
+				t.Fatalf("err = %v, want ErrDraftUnavailable", err)
 			}
-
-			if fallback.calls != 1 {
-				t.Fatalf("fallback.calls = %d, want 1", fallback.calls)
-			}
-			if draft.TargetSkillName != "weather-fallback" {
-				t.Fatalf("TargetSkillName = %q, want weather-fallback", draft.TargetSkillName)
+			if fallback.calls != 0 || draft.TargetSkillName != "" {
+				t.Fatalf("fallback.calls = %d, draft = %q: want no draft", fallback.calls, draft.TargetSkillName)
 			}
 		})
 	}
 }
 
-func TestLLMDraftGenerator_GenerateDraft_FallsBackOnNumericOnlyTargetSkillName(t *testing.T) {
-	fallback := &recordingDraftGenerator{
-		draft: evolution.SkillDraft{
-			TargetSkillName: "learned-100",
-			DraftType:       evolution.DraftTypeWorkflow,
-			ChangeKind:      evolution.ChangeKindCreate,
-			HumanSummary:    "fallback summary",
-			BodyOrPatch:     "fallback body",
-		},
-	}
+// A model sometimes answers a one-item list as plain text; the draft is still
+// the model's, not lost to a parse error.
+func TestLLMDraftGenerator_GenerateDraft_TakesAListGivenAsText(t *testing.T) {
 	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
 		defaultModel: "test-model",
-		response: &providers.LLMResponse{
-			Content: `{"target_skill_name":"100","draft_type":"shortcut","change_kind":"create","human_summary":"Calculate 100","body_or_patch":"## Start Here\nCalculate 100."}`,
-		},
-	}, "", fallback)
+		response: &providers.LLMResponse{Content: `{"target_skill_name":"ranking-vendas","draft_type":"workflow",` +
+			`"change_kind":"create","human_summary":"ranking","body_or_patch":"## Passos\nSomar por categoria.",` +
+			`"intended_use_cases":["ranking mensal"],"preferred_entry_path":"exec","avoid_patterns":null}`},
+	}, "", &recordingDraftGenerator{})
 
 	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
 	if err != nil {
 		t.Fatalf("GenerateDraft: %v", err)
 	}
-
-	if fallback.calls != 1 {
-		t.Fatalf("fallback.calls = %d, want 1", fallback.calls)
+	if draft.TargetSkillName != "ranking-vendas" || len(draft.PreferredEntryPath) != 1 ||
+		draft.PreferredEntryPath[0] != "exec" {
+		t.Fatalf("draft = %+v, want the model's draft with preferred_entry_path [exec]", draft)
 	}
-	if draft.TargetSkillName != "learned-100" {
-		t.Fatalf("TargetSkillName = %q, want learned-100", draft.TargetSkillName)
+}
+
+// The draft sees how each task got done: its tool steps in order, what each
+// did, the failure before the step that worked, and the instruction to write
+// the procedure from them, in the person's language, without extras.
+func TestLLMDraftGenerator_BuildPromptShowsTheTaskSteps(t *testing.T) {
+	provider := &llmDraftTestProvider{
+		defaultModel: "test-model",
+		response: &providers.LLMResponse{
+			Content: `{"target_skill_name":"ranking-vendas-categoria","draft_type":"workflow","change_kind":"create","human_summary":"Ranking","body_or_patch":"---\nname: ranking-vendas-categoria\ndescription: Ranking.\n---\n# Ranking\n\n## Passos\n1. Ler o CSV."}`,
+		},
+	}
+	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	_, err := generator.GenerateDraftWithEvidence(context.Background(), evolution.LearningRecord{
+		ID: "rule-1", Label: "ranking-vendas-categoria", Summary: "ranking de vendas por categoria",
+	}, nil, evolution.DraftEvidence{
+		TaskRecords: []evolution.LearningRecord{{
+			ID:      "main-turn-3",
+			Summary: "faz o ranking de vendas por categoria de agosto",
+			ToolExecutions: []evolution.ToolExecutionRecord{
+				{Name: "read_file", Argument: "artifacts/vendas-agosto.csv", Success: true},
+				{
+					Name:         "exec",
+					Argument:     "python3 -c 'import pandas'",
+					Success:      false,
+					ErrorSummary: "No module named pandas",
+				},
+				{Name: "exec", Argument: "python3 ranking.py artifacts/vendas-agosto.csv", Success: true},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("GenerateDraftWithEvidence: %v", err)
+	}
+	prompt := provider.lastMessages[1].Content
+	for _, want := range []string{
+		"tool_steps:",
+		"1. read_file: artifacts/vendas-agosto.csv -> ok",
+		"2. exec: python3 -c 'import pandas' -> failed: No module named pandas",
+		"3. exec: python3 ranking.py artifacts/vendas-agosto.csv -> ok",
+		"Write the procedure from the tool_steps that worked",
+		"no output format, chart, card, extra column or extra step",
+		"in the language of the person's requests in the source tasks",
+		"say what result the skill produces",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// The prompt shows the most recent source tasks, the ones with their steps
+// recorded, and says a background step's success is not the command's.
+func TestLLMDraftGenerator_BuildPromptShowsRecentTasksAndBackgroundSteps(t *testing.T) {
+	tasks := make([]evolution.LearningRecord, 0, 7)
+	for i := 1; i <= 7; i++ {
+		task := evolution.LearningRecord{ID: fmt.Sprintf("task-%d", i), Summary: "ranking de vendas"}
+		if i > 2 {
+			task.ToolExecutions = []evolution.ToolExecutionRecord{
+				{Name: "exec", Success: true, Background: true, Argument: "python3 import.py"},
+				{Name: "exec", Success: true, Argument: "python3 ranking.py"},
+			}
+		}
+		tasks = append(tasks, task)
+	}
+	provider := &llmDraftTestProvider{defaultModel: "test-model", response: &providers.LLMResponse{Content: `not-json`}}
+	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	_, _ = generator.GenerateDraftWithEvidence(
+		context.Background(),
+		testLearningRule(),
+		nil,
+		evolution.DraftEvidence{TaskRecords: tasks},
+	)
+
+	prompt := provider.lastMessages[len(provider.lastMessages)-1].Content
+	for _, want := range []string{"task-3", "task-7", "python3 import.py -> ran in the background, its result is not in the record", "python3 ranking.py -> ok"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, old := range []string{"id: task-1\n", "id: task-2\n"} {
+		if strings.Contains(prompt, old) {
+			t.Fatalf("prompt kept an old task %q over a recent one:\n%s", old, prompt)
+		}
 	}
 }
