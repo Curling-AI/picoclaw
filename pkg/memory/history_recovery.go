@@ -82,8 +82,9 @@ func (s *JSONLStore) historyRecoveryMarkerState(key string) (bool, error) {
 	return s.rememberHistoryRecoveryMarker(key, marked), nil
 }
 
-// Only the owning writer creates the latch. Cache both the cold absence and
-// durable presence; a pending journal may evict metadata but not this state.
+// Only the holder of the session's lock creates the latch. Cache both the cold
+// absence and durable presence; a pending journal may evict metadata but not
+// this state, and taking the lock drops a cached absence.
 func (s *JSONLStore) rememberHistoryRecoveryMarker(key string, marked bool) bool {
 	return s.cacheHistoryRecoveryMarker(key, marked, false)
 }
@@ -111,6 +112,9 @@ func (s *JSONLStore) cacheHistoryRecoveryMarker(key string, marked, synced bool)
 // fields while rewriting metadata or rows; a separate durable marker survives
 // those rewrites. Its existence is sufficient, even if its contents are torn.
 func (s *JSONLStore) markHistoryRecoveryRequired(key string, meta *SessionMeta) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	exists, err := s.historyRecoveryMarkerState(key)
 	if err != nil {
 		return err
@@ -123,6 +127,11 @@ func (s *JSONLStore) markHistoryRecoveryRequired(key string, meta *SessionMeta) 
 		return nil
 	}
 	if !exists {
+		// The latch has no reset: a holder that lost its lease must not set it
+		// on a session another holder writes now.
+		if err := s.checkSessionLock(key); err != nil {
+			return err
+		}
 		if err := s.writeSessionFile(
 			s.historyRecoveryRequiredPath(key), []byte("{\"history_recovery_required\":true}\n"), 0o600,
 		); err != nil {
@@ -198,6 +207,8 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 		return err
 	}
 	seen := make(map[string]bool)
+	skipped := 0
+	defer func() { logSkippedSessions(skipped) }()
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -210,11 +221,16 @@ func (s *JSONLStore) recoverPendingHistoryWrites() error {
 			continue
 		}
 		seen[key] = true
-		lock := s.sessionLock(key)
-		lock.Lock()
-		s.markHistoryPending(key)
-		recoveryErr := s.recoverHistoryWrite(key)
-		lock.Unlock()
+		// Taking the lock recovers the session's journal (adoptSessionLock).
+		unlock, locked, recoveryErr := s.trySessionLock(key)
+		if recoveryErr == nil && !locked {
+			// The other process is writing it; its next writer recovers it under the lock.
+			skipped++
+			continue
+		}
+		if recoveryErr == nil {
+			unlock()
+		}
 		if recoveryErr != nil &&
 			!errors.Is(recoveryErr, errPublicHistoryCleanupUnavailable) {
 			log.Printf("memory: pending history recovery failed for %s: %v", entry.Name(), recoveryErr)
@@ -241,15 +257,14 @@ func (s *JSONLStore) beginHistoryWrite(ctx context.Context, key string, recovery
 	if err != nil {
 		return err
 	}
-	if operationErr := s.writeSessionFile(s.historyRecoveryPath(key), data, 0o600); operationErr != nil {
-		if removeErr := os.Remove(
-			s.historyRecoveryPath(key),
-		); removeErr != nil &&
-			!errors.Is(removeErr, os.ErrNotExist) {
-			s.markHistoryPending(key)
-			return errors.Join(operationErr, removeErr)
-		}
-		return operationErr
+	// A journal published after the lease was lost records an OLD the next
+	// holder may have replaced since: recovery would match it to neither OLD
+	// nor NEW, and fail every later holder.
+	if err = s.checkSessionLock(key); err != nil {
+		return err
+	}
+	if published, operationErr := s.createHistoryJournal(s.historyRecoveryPath(key), data); operationErr != nil {
+		return s.abortHistoryJournal(key, published, operationErr)
 	}
 	s.markHistoryPending(key)
 	if witnessErr := s.ensureDurableHistoryOrderWitness(key, recovery); witnessErr != nil {
@@ -259,10 +274,17 @@ func (s *JSONLStore) beginHistoryWrite(ctx context.Context, key string, recovery
 			// phase. Only fully recovered OLD permits a content-only retry.
 			return errors.Join(ErrHistoryReceiptUnavailable, witnessErr)
 		}
+		if errors.Is(recoveryErr, ErrSessionLockLost) {
+			return recoveryErr
+		}
 		return fmt.Errorf("%w: witness activation outcome unconfirmed: %v",
 			ErrHistoryOrderUnavailable, errors.Join(witnessErr, recoveryErr))
 	}
-	return nil
+	// Every caller's next step changes the session's files: the append's
+	// truncate, the rewrite's replace, a public or empty source publish. A
+	// holder that lost its lease would cut rows the next holder wrote after
+	// taking the lock, so it stops here and leaves its journal to that holder.
+	return s.checkSessionLock(key)
 }
 
 func (s *JSONLStore) markHistoryPending(key string) {
@@ -274,6 +296,9 @@ func (s *JSONLStore) markHistoryPending(key string) {
 }
 
 func (s *JSONLStore) finishHistoryWrite(key string, cleanup ...string) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	for _, path := range append([]string{s.historyRecoveryPath(key)}, cleanup...) {
 		if operationErr := os.Remove(path); operationErr != nil && !errors.Is(operationErr, os.ErrNotExist) {
 			s.markHistoryPending(key)
@@ -307,6 +332,11 @@ func (s *JSONLStore) recoverHistoryWriteFor(
 	key string,
 	mode historyRecoveryMode,
 ) (historyWriteDecision, error) {
+	// Recovery records a decision, rolls the transcript back, rewrites the
+	// meta and removes files: a holder that lost its lease runs none of it.
+	if err := s.checkSessionLock(key); err != nil {
+		return historyWriteUnknown, err
+	}
 	data, readErr := os.ReadFile(s.historyRecoveryPath(key))
 	if errors.Is(readErr, os.ErrNotExist) {
 		if operationErr := s.finishHistoryWrite(key, s.historyDecisionPath(key)); operationErr != nil {
@@ -378,6 +408,11 @@ func (s *JSONLStore) recoverHistoryWriteFor(
 		}
 	}
 	if err = s.checkContentRecoveryCheckpoint(key, recovery.Meta, recovery.Next); err != nil {
+		return decision, err
+	}
+	// Proven again after the reads and the decision's write: the OLD rollback
+	// truncates or replaces the transcript.
+	if err = s.checkSessionLock(key); err != nil {
 		return decision, err
 	}
 	if decision == historyWriteNew {

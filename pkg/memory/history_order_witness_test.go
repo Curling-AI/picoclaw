@@ -33,7 +33,7 @@ func TestHistoryOrderWitnessPrecedesFirstProofAndKeepsLegacyBootstrap(t *testing
 	if err := os.WriteFile(s.jsonlPath(key), legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Key: key, Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	created := false

@@ -40,7 +40,7 @@ func TestPublicLifecycleSuffixCutPreservesRawSkippedPrefixAndPreparation(t *test
 				if state == "unavailable" {
 					original.PublicHistoryVersion = -1
 				}
-				if err = s.writeMeta(key, original); err != nil {
+				if err = writeMetaLocked(t, s, key, original); err != nil {
 					t.Fatal(err)
 				}
 				before, err := os.ReadFile(s.jsonlPath(key))
@@ -457,7 +457,7 @@ func TestPublicLifecycleUnavailableReplacementCrashPreservesRawPrefix(t *testing
 				t.Fatal(err)
 			}
 			meta.PublicHistoryVersion = -1
-			if err = s.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, s, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(s.jsonlPath(key))
@@ -616,7 +616,7 @@ func TestPublicLifecycleRetainedRestoreSeparatesCommittedRowsFromTail(t *testing
 				t.Fatal(err)
 			}
 			meta.PublicHistoryVersion = -1
-			if err = s.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, s, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(s.jsonlPath(key))

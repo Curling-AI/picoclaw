@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
+	"github.com/sipeed/picoclaw/pkg/memory/sessionlock"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
 )
@@ -118,21 +119,41 @@ type JSONLStore struct {
 	// Private boundary for immutable storage/index durability fault controls.
 	contentStorageFailure func(string, string) error
 
-	// metaCache holds the decoded .meta.json per sanitized session key.
-	// This process is the only writer of the session directory, so a
-	// write-through cache is sound — and necessary: on network filesystems
-	// (EFS) every meta read is a ~10-25ms round trip, and listing sessions
-	// reads every meta. With ~100 sessions that made each listing cost
-	// seconds; with the cache it costs one ReadDir.
+	// metaCache holds the decoded .meta.json per sanitized session key, for
+	// reads only: on network filesystems (EFS) every meta read is a ~10-25ms
+	// round trip, and listing sessions reads every meta. With ~100 sessions
+	// that made each listing cost seconds; with the cache it costs one
+	// ReadDir. Another process may write the session past it, so a write, a
+	// latch and a recovery never start from it: taking the session's lock
+	// drops the entry and they read the disk (session_cache.go).
 	metaMu    sync.RWMutex
 	metaCache map[string]SessionMeta
-	// Marker state belongs to this single writer and survives metadata-cache
-	// eviction while a journal is pending. A positive latch is never cleared.
+	// Marker state is this process's, and survives metadata-cache eviction
+	// while a journal is pending. Its absence is checked again on every
+	// acquisition of the session's lock; a positive latch is never cleared.
 	historyMarkers   map[string]historyMarkerState
 	historyWitnesses map[string]historyOrderWitnessState
 	// A failed rollback can outlive cache eviction. Fence every cache read
 	// until the pending journal has published either the OLD or NEW state.
 	historyPending map[string]bool
+
+	// fileLocks are the session file locks this process holds, by session file
+	// name (session_lock.go); busyUntil is each session's backoff after a wait
+	// for another process's lock timed out.
+	fileLocksMu sync.Mutex
+	fileLocks   map[string]*heldSessionLock
+	busyUntil   map[string]time.Time
+	// Private test seams: take only the shard mutex, as a method that forgot
+	// the file lock would; and observe each file lock about to be taken and taken.
+	skipFileLockForTest bool
+	sessionFlockForTest func(name string, held bool)
+	// Private test seams of adoptSessionLock and createHistoryJournal: run
+	// after sessions/ is revalidated, and link a journal in place of os.Link.
+	sessionsRevalidatedForTest func() error
+	linkHistoryJournal         func(oldname, newname string) error
+	// Private test seam of checkSessionLock: runs in place of the lock's Check,
+	// since a lost NFS lease cannot be made on a local disk.
+	checkLockForTest func(*sessionlock.Lock) error
 }
 
 // NewJSONLStore creates a new JSONL-backed store rooted at dir.
@@ -228,21 +249,23 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	pending := s.historyPending[sanitized]
 	s.metaMu.RUnlock()
 	if pending {
+		if !s.holdsSessionLock(key) {
+			return SessionMeta{}, errSessionLockRequired
+		}
 		if err := s.recoverHistoryWrite(key); err != nil {
 			return SessionMeta{}, err
 		}
 	}
-	// Resolve our own OLD/NEW journal first. Only this process writes the
-	// directory, so warm metadata and its write-through latch need no I/O.
+	// The session's file-lock holder resolves any journal on disk first; this
+	// process's own OLD/NEW journal is resolved above. Warm metadata and its
+	// write-through latch then need no I/O: taking the lock dropped them, and
+	// outside the lock they serve plain reads only (session_cache.go).
 	marked, err := s.historyRecoveryMarkerState(key)
 	if err != nil {
 		return SessionMeta{}, err
 	}
 	if meta, ok := s.cachedMeta(sanitized); ok {
-		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
-			return SessionMeta{}, operationErr
-		}
-		if operationErr := s.applyHistoryOrderWitness(key, &meta); operationErr != nil {
+		if operationErr := s.applyReadRecovery(key, &meta, marked); operationErr != nil {
 			return SessionMeta{}, operationErr
 		}
 		return meta, nil
@@ -250,10 +273,7 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	data, err := os.ReadFile(s.metaPath(key))
 	if os.IsNotExist(err) {
 		meta := SessionMeta{Key: key}
-		if operationErr := s.applyHistoryRecoveryMarker(key, &meta, marked); operationErr != nil {
-			return SessionMeta{}, operationErr
-		}
-		if operationErr := s.applyHistoryOrderWitness(key, &meta); operationErr != nil {
+		if operationErr := s.applyReadRecovery(key, &meta, marked); operationErr != nil {
 			return SessionMeta{}, operationErr
 		}
 		s.storeCachedMeta(sanitized, meta)
@@ -273,11 +293,8 @@ func (s *JSONLStore) readMeta(key string) (SessionMeta, error) {
 	if errors.Is(historyRecordRecoveryRequired(data), ErrHistoryRecoveryRequired) {
 		meta.HistoryRecoveryRequired = true
 	}
-	if err := s.applyHistoryRecoveryMarker(key, &meta, marked); err != nil {
+	if err := s.applyReadRecovery(key, &meta, marked); err != nil {
 		return SessionMeta{}, err
-	}
-	if operationErr := s.applyHistoryOrderWitness(key, &meta); operationErr != nil {
-		return SessionMeta{}, operationErr
 	}
 	s.storeCachedMeta(sanitized, meta)
 	return meta, nil
@@ -308,6 +325,11 @@ func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 	if err != nil {
 		return fmt.Errorf("memory: encode meta: %w", err)
 	}
+	// The meta is what makes a write visible: publish it only while the lock
+	// is still provably held.
+	if err := s.checkSessionLock(key); err != nil {
+		return err
+	}
 	if err := s.writeSessionFile(s.metaPath(key), data, 0o644); err != nil {
 		return err
 	}
@@ -324,6 +346,9 @@ func (s *JSONLStore) writeMeta(key string, meta SessionMeta) error {
 }
 
 func (s *JSONLStore) writeSessionFile(path string, data []byte, mode os.FileMode) error {
+	if err := s.requireSessionFileLock(path); err != nil {
+		return err
+	}
 	if s.writeFile != nil {
 		return s.writeFile(path, data, mode)
 	}
@@ -376,11 +401,9 @@ func (s *JSONLStore) sessionExists(key string) bool {
 
 // GetSessionMeta returns the current metadata snapshot for sessionKey.
 func (s *JSONLStore) GetSessionMeta(_ context.Context, sessionKey string) (SessionMeta, error) {
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
-
-	meta, err := s.readMeta(sessionKey)
+	meta, err := readSessionLocked(s, sessionKey, func() (SessionMeta, error) {
+		return s.readMeta(sessionKey)
+	})
 	if err != nil {
 		return SessionMeta{}, err
 	}
@@ -399,9 +422,11 @@ func (s *JSONLStore) UpsertSessionMeta(
 	scope json.RawMessage,
 	aliases []string,
 ) error {
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
+	unlock, err := s.lockSession(sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	meta, err := s.sessionMetaForUpsert(sessionKey)
 	if err != nil {
@@ -480,7 +505,10 @@ func (s *JSONLStore) PromoteAliasHistory(
 		if isMainSessionAlias(alias) {
 			continue
 		}
-		unlock := s.lockSessionPair(sessionKey, alias)
+		unlock, err := s.lockSessionPairFiles(sessionKey, alias)
+		if err != nil {
+			return false, err
+		}
 		promoted, err := s.promoteAliasHistoryLocked(sessionKey, alias, scope, aliases)
 		unlock()
 		if err != nil || promoted {
@@ -722,6 +750,9 @@ func (s *JSONLStore) readRawJSONL(sessionKey string) ([]byte, bool, error) {
 }
 
 func (s *JSONLStore) restoreRawJSONL(sessionKey string, data []byte, existed bool) error {
+	if err := s.requireSessionLock(sessionKey); err != nil {
+		return err
+	}
 	path := s.jsonlPath(sessionKey)
 	if !existed {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -896,55 +927,49 @@ func (s *JSONLStore) addMsg(ctx context.Context, sessionKey string, msg provider
 		return nil
 	}
 
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
+	unlock, err := s.lockSession(sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	now := time.Now()
 
 	message := newDeliveryOccurrence(prepareHistoryMessage(msg, now, providers.HistoryRun(ctx)))
-	meta, err := s.readMeta(sessionKey)
-	if err != nil {
-		return err
-	}
-	ensureHistoryGeneration(&meta, sessionKey)
+	return s.redoWriteAfterForeignJournal(sessionKey, func() error {
+		meta, err := s.readMeta(sessionKey)
+		if err != nil {
+			return err
+		}
+		ensureHistoryGeneration(&meta, sessionKey)
 
-	if meta.Count == 0 && meta.CreatedAt.IsZero() {
-		meta.CreatedAt = now
-	}
-	meta.UpdatedAt = now
-	return s.appendHistoryMessages(sessionKey, []providers.Message{message}, meta)
+		if meta.Count == 0 && meta.CreatedAt.IsZero() {
+			meta.CreatedAt = now
+		}
+		meta.UpdatedAt = now
+		return s.appendHistoryMessages(sessionKey, []providers.Message{message}, meta)
+	})
 }
 
 func (s *JSONLStore) GetHistory(
 	_ context.Context, sessionKey string,
 ) ([]providers.Message, error) {
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
-
-	meta, err := s.readMeta(sessionKey)
-	if err != nil {
-		return nil, err
-	}
-
-	// Keep the active window while validating delivery identity across the source.
-	msgs, err := readProviderMessages(s.jsonlPath(sessionKey), meta.Skip)
-	if err != nil {
-		return nil, err
-	}
-
-	return msgs, nil
+	return readSessionLocked(s, sessionKey, func() ([]providers.Message, error) {
+		meta, err := s.readMeta(sessionKey)
+		if err != nil {
+			return nil, err
+		}
+		// Keep the active window while validating delivery identity across the source.
+		return readProviderMessages(s.jsonlPath(sessionKey), meta.Skip)
+	})
 }
 
 func (s *JSONLStore) GetSummary(
 	_ context.Context, sessionKey string,
 ) (string, error) {
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
-
-	meta, err := s.readMeta(sessionKey)
+	meta, err := readSessionLocked(s, sessionKey, func() (SessionMeta, error) {
+		return s.readMeta(sessionKey)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -954,27 +979,31 @@ func (s *JSONLStore) GetSummary(
 func (s *JSONLStore) SetSummary(
 	ctx context.Context, sessionKey, summary string,
 ) error {
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
-
-	meta, err := s.readMeta(sessionKey)
+	unlock, err := s.lockSession(sessionKey)
 	if err != nil {
 		return err
 	}
-	if meta.ContentIdentity != nil && len(meta.ContentIdentity.opaque) != 0 {
-		return ErrContentIdentityUnavailable
-	}
-	before := copyMeta(meta)
-	now := time.Now()
-	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = now
-	}
-	meta.Summary = summary
-	s.contentSummaryChanged(&meta)
-	meta.UpdatedAt = now
+	defer unlock()
 
-	return s.commitLogicalContentMetadata(ctx, sessionKey, before, meta)
+	return s.redoWriteAfterForeignJournal(sessionKey, func() error {
+		meta, err := s.readMeta(sessionKey)
+		if err != nil {
+			return err
+		}
+		if meta.ContentIdentity != nil && len(meta.ContentIdentity.opaque) != 0 {
+			return ErrContentIdentityUnavailable
+		}
+		before := copyMeta(meta)
+		now := time.Now()
+		if meta.CreatedAt.IsZero() {
+			meta.CreatedAt = now
+		}
+		meta.Summary = summary
+		s.contentSummaryChanged(&meta)
+		meta.UpdatedAt = now
+
+		return s.commitLogicalContentMetadata(ctx, sessionKey, before, meta)
+	})
 }
 
 func (s *JSONLStore) TruncateHistory(
@@ -983,10 +1012,17 @@ func (s *JSONLStore) TruncateHistory(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
+	unlock, err := s.lockSession(sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.redoWriteAfterForeignJournal(sessionKey, func() error {
+		return s.truncateHistoryLocked(ctx, sessionKey, keepLast)
+	})
+}
 
+func (s *JSONLStore) truncateHistoryLocked(ctx context.Context, sessionKey string, keepLast int) error {
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
@@ -1063,9 +1099,17 @@ func (s *JSONLStore) SetHistory(ctx context.Context, sessionKey string, history 
 		ctx = context.Background()
 	}
 	filtered := messageutil.FilterInvalidHistoryMessages(history)
-	lock := s.sessionLock(sessionKey)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockSession(sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.redoWriteAfterForeignJournal(sessionKey, func() error {
+		return s.setHistoryLocked(ctx, sessionKey, filtered)
+	})
+}
+
+func (s *JSONLStore) setHistoryLocked(ctx context.Context, sessionKey string, filtered []providers.Message) error {
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
@@ -1124,10 +1168,17 @@ func (s *JSONLStore) compact(ctx context.Context, sessionKey string, proofOption
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	l := s.sessionLock(sessionKey)
-	l.Lock()
-	defer l.Unlock()
+	unlock, err := s.lockSession(sessionKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.redoWriteAfterForeignJournal(sessionKey, func() error {
+		return s.compactLocked(ctx, sessionKey, proofOptional)
+	})
+}
 
+func (s *JSONLStore) compactLocked(ctx context.Context, sessionKey string, proofOptional bool) error {
 	meta, err := s.readMeta(sessionKey)
 	if err != nil {
 		return err
@@ -1283,26 +1334,32 @@ func (s *JSONLStore) ListSessions() []string {
 // The directory listing stays authoritative for WHICH sessions exist, but
 // each meta's content is served from the write-through cache when present —
 // on EFS the per-file reads, not the ReadDir, are what made every listing
-// cost seconds.
+// cost seconds. A cached meta may be older than another process's last write
+// to the session (session_cache.go). Like a sweep, the listing never waits for
+// a session's lock: a session it must recover first while another process
+// holds the lock, or a write of this process holds its shard, is left out and
+// counted in one log line. Its plain meta read still takes the shard mutex, as
+// every plain read does, so it can wait behind a write of this process.
 func (s *JSONLStore) ListSessionMetas() []SessionMeta {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil
 	}
 	var metas []SessionMeta
+	skipped := 0
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
 			continue
 		}
-		sanitized := strings.TrimSuffix(entry.Name(), ".meta.json")
-		lock := s.sessionLock(sanitized)
-		lock.Lock()
-		meta, readErr := s.readMeta(sanitized)
-		lock.Unlock()
+		meta, busy, readErr := s.readListedMeta(strings.TrimSuffix(entry.Name(), ".meta.json"))
+		if busy {
+			skipped++
+		}
 		if readErr == nil && meta.Key != "" {
 			metas = append(metas, meta)
 		}
 	}
+	logSkippedSessions(skipped)
 	return metas
 }
 

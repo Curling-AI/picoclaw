@@ -227,6 +227,9 @@ func (al *AgentLoop) SteerSession(sessionKey, content string, media []string) er
 		Role:    "user",
 		Content: content,
 		Media:   append([]string(nil), media...),
+		// The turn that reads it transcribes its audio (transcribeJoinedAudio).
+		// (seucaranguejo fork, MST-553)
+		TranscribeAudio: len(media) > 0,
 	})
 }
 

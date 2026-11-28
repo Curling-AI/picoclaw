@@ -458,9 +458,11 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 		startedAt:                time.Now(),
 	}
 
-	// Bind session store and capture initial history length for rollback logic
+	// Bind session store and capture initial history length for rollback logic.
+	// The turn starts here: its first read of the session is the one below.
 	if agent != nil && agent.Sessions != nil {
 		ts.session = agent.Sessions
+		refreshTurnSession(agent.Sessions, ts.sessionKey)
 		ts.refreshRestorePointFromSession(agent)
 		ts.initialHistoryLength = len(ts.restorePointHistory)
 	}

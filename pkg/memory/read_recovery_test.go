@@ -19,7 +19,7 @@ func TestReadRecoveryIncludesSkippedProofAndSurvivesInterruptedCallback(t *testi
 		t.Fatal(metaErr)
 	}
 	meta.Skip = 2
-	if err := s.writeMeta(key, meta); err != nil {
+	if err := writeMetaLocked(t, s, key, meta); err != nil {
 		t.Fatal(err)
 	}
 	attempt := uuid.NewString()
@@ -165,7 +165,7 @@ func TestReadRecoveryRefusesIncompleteOrUnreconciledSource(t *testing.T) {
 					}
 					size := info.Size()
 					meta.HistoryBytes = &size
-					if err := s.writeMeta(key, meta); err != nil {
+					if err := writeMetaLocked(t, s, key, meta); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -226,7 +226,7 @@ func TestReadRecoveryDoesNotPromoteAnUnprovenLegacyPrefix(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := source.writeMeta(key, SessionMeta{Key: key, Count: 1}); err != nil {
+	if err := writeMetaLocked(t, source, key, SessionMeta{Key: key, Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := source.AppendHistoryReceipt(

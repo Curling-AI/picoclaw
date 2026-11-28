@@ -97,7 +97,7 @@ func TestHistoryPagesBoundIOAndResumeAfterRestart(t *testing.T) {
 
 func TestHistoryPageIdentitySurvivesLegacyCompactionAndEdits(t *testing.T) {
 	s, key := pagedStore(t, 0)
-	if operationErr := s.writeMeta(key, SessionMeta{Count: 2}); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, SessionMeta{Count: 2}); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	line := []byte("{\"role\":\"user\",\"content\":\"identical legacy occurrence\"}\n")
@@ -161,7 +161,7 @@ func TestHistoryPageRejectsUncommittedRewriteLineage(t *testing.T) {
 	// Reproduce a crash after metadata commits but before the JSONL rename.
 	meta.HistoryFileGeneration = newHistoryID()
 	meta.HistoryFileEpoch++
-	if operationErr := s.writeMeta(key, meta); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, key, meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	s, err = NewJSONLStore(s.dir)
@@ -264,7 +264,7 @@ func TestHistoryPageSkipsLegacyInvalidAndThoughtLines(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Count: 4}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Count: 4}); err != nil {
 		t.Fatal(err)
 	}
 	page, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})
@@ -318,7 +318,7 @@ func TestHistoryCursorRejectsAnotherKeyEvenWithIdenticalLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operationErr := s.writeMeta("other", meta); operationErr != nil {
+	if operationErr := writeMetaLocked(t, s, "other", meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	data, err := os.ReadFile(s.jsonlPath(key))

@@ -60,7 +60,7 @@ func TestPublicDisplayKeepsIndependentProofFailuresUnavailable(t *testing.T) {
 				meta, err = store.readMeta(key)
 				if err == nil {
 					meta.HistoryRecoveryRequired = true
-					err = store.writeMeta(key, meta)
+					err = writeMetaLocked(t, store, key, meta)
 				}
 				orderValid = false
 			}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -378,6 +379,27 @@ func (s *JSONLStore) checkHistoryOwner(requested, physical, canonical string) er
 	return validateCanonicalHistoryKey(requested, canonical, meta)
 }
 
+// historyOrderSource reads one physical session's ownership; when key selects
+// it, the owner is rechecked with a full metadata read.
+func (s *JSONLStore) historyOrderSource(key, physical string) (historyOwnership, error) {
+	owner, readErr := s.readHistoryOwnership(physical)
+	if readErr != nil {
+		if physical == sanitizeKey(key) {
+			return historyOwnership{}, fmt.Errorf("memory: canonical metadata: %w", readErr)
+		}
+		// Its identity may hide an alias owner. Fail before any write,
+		// allowing content-only callers to retain their legacy contract.
+		return historyOwnership{}, fmt.Errorf("%w: alias identity: %w", ErrHistoryOwnershipUnavailable, readErr)
+	}
+	switch {
+	case owner.Key == key || slices.Contains(owner.Aliases, key):
+		readErr = s.checkHistoryOwner(key, physical, owner.Key)
+	case owner.pending:
+		readErr = fmt.Errorf("%w: unsettled alias identity", ErrHistoryOwnershipUnavailable)
+	}
+	return owner, readErr
+}
+
 func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -402,31 +424,13 @@ func (s *JSONLStore) canonicalHistoryOrderKey(key string) (string, error) {
 			continue
 		}
 		physical := strings.TrimSuffix(entry.Name(), ".meta.json")
-		lock := s.sessionLock(physical)
-		lock.Lock()
-		owner, readErr := s.readHistoryOwnership(physical)
-		if readErr != nil {
-			lock.Unlock()
-			if physical == sanitizeKey(key) {
-				return "", fmt.Errorf("memory: canonical metadata: %w", readErr)
-			}
-			// Its identity may hide an alias owner. Fail before any write,
-			// allowing content-only callers to retain their legacy contract.
-			return "", fmt.Errorf("%w: alias identity: %w", ErrHistoryOwnershipUnavailable, readErr)
-		}
-		selected := owner.Key == key
-		for _, alias := range owner.Aliases {
-			selected = selected || alias == key
-		}
-		if selected {
-			readErr = s.checkHistoryOwner(key, physical, owner.Key)
-		} else if owner.pending {
-			readErr = fmt.Errorf("%w: unsettled alias identity", ErrHistoryOwnershipUnavailable)
-		}
-		lock.Unlock()
+		owner, readErr := readSessionLocked(s, physical, func() (historyOwnership, error) {
+			return s.historyOrderSource(key, physical)
+		})
 		if readErr != nil {
 			return "", readErr
 		}
+		selected := owner.Key == key || slices.Contains(owner.Aliases, key)
 		if !selected || owner.Key == key {
 			continue
 		}
@@ -455,9 +459,21 @@ func (s *JSONLStore) AppendHistoryReceipt(
 	if err != nil {
 		return CommittedHistoryMessage{}, err
 	}
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(canonical)
+	if lockErr != nil {
+		return CommittedHistoryMessage{}, lockErr
+	}
+	defer unlock()
+	return redoAfterForeignJournal(s, canonical, func() (CommittedHistoryMessage, error) {
+		return s.appendHistoryReceiptLocked(ctx, key, canonical, input)
+	})
+}
+
+func (s *JSONLStore) appendHistoryReceiptLocked(
+	ctx context.Context,
+	key, canonical string,
+	input providers.Message,
+) (CommittedHistoryMessage, error) {
 	if ctx != nil && ctx.Err() != nil {
 		return CommittedHistoryMessage{}, ctx.Err()
 	}
@@ -512,9 +528,11 @@ func (s *JSONLStore) ReadHistoryWithReceipts(ctx context.Context, key string) ([
 	if err != nil {
 		return nil, err
 	}
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockSession(canonical)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if ctx != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

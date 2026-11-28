@@ -95,7 +95,7 @@ func TestContentMutationCheckpointRejectsLinksWithoutChangingTheirTarget(t *test
 			if _, err = s.CommitHistoryContentMutation(t.Context(), key, typedPrefixPlan(frame, 2)); err == nil {
 				t.Fatal("typed mutation trusted an unsafe checkpoint target")
 			}
-			if err = s.writeContentCheckpoint(key, meta); !errors.Is(err, ErrContentIdentityUnavailable) {
+			if err = writeContentCheckpointLocked(t, s, key, meta); !errors.Is(err, ErrContentIdentityUnavailable) {
 				t.Fatal("checkpoint publication replaced an unowned link", err)
 			}
 			got, err := os.ReadFile(other)

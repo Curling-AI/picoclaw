@@ -40,3 +40,12 @@ type SessionStore interface {
 type CheckedAppender interface {
 	AppendMessage(sessionKey string, msg providers.Message) error
 }
+
+// SessionRefresher is a SessionStore whose reads may serve session metadata it
+// cached before another process last wrote the session: two pods of one
+// assistant share sessions/ during a rollout. RefreshSession drops what the
+// store cached of the session and rereads it from storage. The agent calls it
+// once when a turn starts, before the turn reads the session.
+type SessionRefresher interface {
+	RefreshSession(sessionKey string) error
+}

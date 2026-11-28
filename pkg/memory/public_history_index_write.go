@@ -101,6 +101,9 @@ func (s *JSONLStore) writePublicIndex(key string, change *publicIndexChange) err
 	if change == nil {
 		return nil
 	}
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	if change.Offset == nil {
 		data := append(append([]byte(nil), change.Header...), change.Records...)
 		return s.writeSessionFile(s.publicIndexPath(key), data, 0o600)
@@ -125,6 +128,9 @@ func (s *JSONLStore) writePublicIndex(key string, change *publicIndexChange) err
 func (s *JSONLStore) restorePublicIndex(key string, recovery *publicIndexRecovery) error {
 	if recovery == nil {
 		return nil
+	}
+	if err := s.requireSessionLock(key); err != nil {
+		return err
 	}
 	if recovery.Offset == nil {
 		if recovery.Existed {

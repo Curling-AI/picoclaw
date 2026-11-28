@@ -616,17 +616,16 @@ func (s *JSONLStore) ReadHistoryContentFrame(ctx context.Context, key string) (C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
-	image, err := s.readContentImage(ctx, key)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	return s.frameForContentImage(ctx, key, image)
+	return readSessionLocked(s, key, func() (ContentFrame, error) {
+		if err := s.canonicalContentKey(ctx, key); err != nil {
+			return ContentFrame{}, err
+		}
+		image, err := s.readContentImage(ctx, key)
+		if err != nil {
+			return ContentFrame{}, err
+		}
+		return s.frameForContentImage(ctx, key, image)
+	})
 }
 
 func (s *JSONLStore) InitializeHistoryContentIdentity(
@@ -636,9 +635,11 @@ func (s *JSONLStore) InitializeHistoryContentIdentity(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return ContentFrame{}, lockErr
+	}
+	defer unlock()
 	return s.initializeContentIdentityLocked(ctx, key, observation, "")
 }
 

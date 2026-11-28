@@ -42,7 +42,7 @@ func TestPublicLifecycleTypedMutationCannotRetireUncoveredSkippedPrefix(t *testi
 			case "ready-artifact-unavailable":
 				s.SetPublicHistoryProjector(&lifecycleProjector{verify: ErrPublicHistoryCoverage})
 			}
-			if err = s.writeMeta(key, meta); err != nil {
+			if err = writeMetaLocked(t, s, key, meta); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(s.jsonlPath(key))
@@ -127,15 +127,15 @@ func TestPublicLifecycleTypedAckRechecksSkippedPrefixCoverageBeforeRetiringPreim
 				if readErr != nil {
 					t.Fatal(readErr)
 				}
-				if readErr = s.writePublicChange(key, change); readErr != nil {
+				if readErr = writePublicChangeLocked(t, s, key, change); readErr != nil {
 					t.Fatal(readErr)
 				}
-				if readErr = s.writeMeta(key, changed); readErr != nil {
+				if readErr = writeMetaLocked(t, s, key, changed); readErr != nil {
 					t.Fatal(readErr)
 				}
 			case "negative":
 				meta.PublicHistoryVersion = -1
-				if err = s.writeMeta(key, meta); err != nil {
+				if err = writeMetaLocked(t, s, key, meta); err != nil {
 					t.Fatal(err)
 				}
 			case "artifact":
@@ -161,12 +161,12 @@ func TestPublicLifecycleTypedAckRechecksSkippedPrefixCoverageBeforeRetiringPreim
 				if err = os.WriteFile(s.publicHistoryPath(key), public, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err = s.writeMeta(key, meta); err != nil {
+				if err = writeMetaLocked(t, s, key, meta); err != nil {
 					t.Fatal(err)
 				}
 			case "negative":
 				current.PublicHistoryVersion = PublicHistoryVersion
-				if err = s.writeMeta(key, current); err != nil {
+				if err = writeMetaLocked(t, s, key, current); err != nil {
 					t.Fatal(err)
 				}
 			case "artifact":

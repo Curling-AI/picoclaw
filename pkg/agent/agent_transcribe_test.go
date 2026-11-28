@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -295,6 +297,69 @@ func TestTranscribeAudioInMessage_SilenceBecomesTheNoSpeechNote(t *testing.T) {
 
 	if msg.Content != noSpeechAudioNote {
 		t.Fatalf("got content %q, want the no-speech note", msg.Content)
+	}
+}
+
+type errorTranscriber struct{ err error }
+
+func (errorTranscriber) Name() string { return "error" }
+
+func (e errorTranscriber) Transcribe(context.Context, string) (*asr.TranscriptionResponse, error) {
+	return nil, e.err
+}
+
+// A turn that ends (a stop, or its deadline) before its audio is transcribed
+// did not see a failure: the model and the history must not read one. The
+// turn's context decides, not the error: an HTTP client's own timeout also
+// matches context.DeadlineExceeded, and that one is a failure. A transcription
+// that finished before the turn ended keeps its text. (MST-553)
+func TestPrepareInboundMessage_TurnEndedBeforeTheTranscriptionIsNotAFailure(t *testing.T) {
+	stopped, stop := context.WithCancel(t.Context())
+	stop()
+	expired, expire := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer expire()
+	blocking := func() asr.Transcriber {
+		return &blockingTranscriber{started: make(chan struct{}), err: make(chan error, 1)}
+	}
+	cases := map[string]struct {
+		ctx         context.Context
+		transcriber asr.Transcriber
+		content     string
+		keepsAudio  bool
+	}{
+		"the turn is stopped":        {stopped, blocking(), interruptedTranscriptionAudioNote, true},
+		"the turn's deadline passed": {expired, blocking(), interruptedTranscriptionAudioNote, true},
+		"the transcriber fails":      {t.Context(), failingTranscriber{}, failedTranscriptionAudioNote, true},
+		"the service times out": {
+			t.Context(),
+			errorTranscriber{fmt.Errorf("post: %w", context.DeadlineExceeded)},
+			failedTranscriptionAudioNote, true,
+		},
+		"transcribed before the stop": {stopped, &fixedTranscriber{text: "olá"}, "[voice: olá]", false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := media.NewFileMediaStore()
+			ref := storeAudio(t, store, "voice.ogg", "audio/ogg")
+			al := &AgentLoop{cfg: &config.Config{}, mediaStore: store, transcriber: tc.transcriber}
+
+			msg := al.prepareInboundMessageForAgent(tc.ctx, bus.InboundMessage{
+				Context: bus.InboundContext{Channel: "grpc", ChatID: "run-a", ChatType: "direct", SenderID: "u"},
+				Content: "[voice]",
+				Media:   []string{ref},
+			})
+
+			if msg.Content != tc.content {
+				t.Fatalf("content = %q, want %q", msg.Content, tc.content)
+			}
+			if tc.keepsAudio && (audioPlaceholderRegex.MatchString(msg.Content) ||
+				audioAnnotationRe.MatchString(msg.Content)) {
+				t.Fatal("note matches an audio regex and would be overwritten by a later pass")
+			}
+			if kept := len(msg.Media) == 1 && msg.Media[0] == ref; kept != tc.keepsAudio {
+				t.Fatalf("media = %v, keeps audio = %v, want %v", msg.Media, kept, tc.keepsAudio)
+			}
+		})
 	}
 }
 

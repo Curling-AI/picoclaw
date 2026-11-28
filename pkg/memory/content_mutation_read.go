@@ -64,40 +64,39 @@ func (s *JSONLStore) readHistoryContentMutation(
 	key, mutationID, intentDigest string,
 	onlyPending, latest bool,
 ) (ContentMutationResult, error) {
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentMutationResult{}, err
-	}
-	meta, err := s.readContentMutationMeta(key)
-	if err != nil {
-		return ContentMutationResult{}, err
-	}
-	state := meta.ContentIdentity
-	if state.Pending != nil {
-		pending := state.Pending.Mutation
-		if pending == nil {
-			return ContentMutationResult{}, ErrContentMutationPendingKind
+	return readSessionLocked(s, key, func() (ContentMutationResult, error) {
+		if err := s.canonicalContentKey(ctx, key); err != nil {
+			return ContentMutationResult{}, err
 		}
-		if !onlyPending && !latest && pending.Transition.MutationID != mutationID {
-			return ContentMutationResult{}, contentPendingError(state.Pending)
+		meta, err := s.readContentMutationMeta(key)
+		if err != nil {
+			return ContentMutationResult{}, err
 		}
-		if !onlyPending && !latest && pending.Transition.IntentDigest != intentDigest {
-			return ContentMutationResult{}, ErrContentStateChanged
-		}
-		return pendingContentMutationResult(pending), ctx.Err()
-	}
-	if !onlyPending && state.Last != nil && state.Last.Mutation != nil {
-		last := state.Last.Mutation
-		if latest || last.Transition.MutationID == mutationID {
-			if !latest && last.Transition.IntentDigest != intentDigest {
+		state := meta.ContentIdentity
+		if state.Pending != nil {
+			pending := state.Pending.Mutation
+			if pending == nil {
+				return ContentMutationResult{}, ErrContentMutationPendingKind
+			}
+			if !onlyPending && !latest && pending.Transition.MutationID != mutationID {
+				return ContentMutationResult{}, contentPendingError(state.Pending)
+			}
+			if !onlyPending && !latest && pending.Transition.IntentDigest != intentDigest {
 				return ContentMutationResult{}, ErrContentStateChanged
 			}
-			return appliedContentMutationResult(last), ctx.Err()
+			return pendingContentMutationResult(pending), ctx.Err()
 		}
-	}
-	return ContentMutationResult{}, ctx.Err()
+		if !onlyPending && state.Last != nil && state.Last.Mutation != nil {
+			last := state.Last.Mutation
+			if latest || last.Transition.MutationID == mutationID {
+				if !latest && last.Transition.IntentDigest != intentDigest {
+					return ContentMutationResult{}, ErrContentStateChanged
+				}
+				return appliedContentMutationResult(last), ctx.Err()
+			}
+		}
+		return ContentMutationResult{}, ctx.Err()
+	})
 }
 
 func (s *JSONLStore) ReadHistoryContentMutationFrame(
@@ -108,58 +107,57 @@ func (s *JSONLStore) ReadHistoryContentMutationFrame(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
-	meta, err := s.readContentMutationMeta(key)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	if meta.ContentIdentity.Pending == nil {
-		return ContentFrame{}, ErrContentMutationNotRetained
-	}
-	pending := meta.ContentIdentity.Pending.Mutation
-	if pending == nil {
-		return ContentFrame{}, ErrContentMutationPendingKind
-	}
-	if pending.Transition.MutationID != mutationID {
-		return ContentFrame{}, contentPendingError(meta.ContentIdentity.Pending)
-	}
-	// Validate the current physical prefix as well as the selected frozen
-	// image; neither a current append nor a metadata replay proves its bytes.
-	image, err := s.readContentImage(ctx, key)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	current, err := s.frameForContentImage(ctx, key, image)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	if current.IdentityStatus != ContentIdentityKnown {
-		return ContentFrame{}, ErrContentIdentityUnavailable
-	}
-	var snapshot contentSnapshot
-	frozenImage := image
-	switch side {
-	case ContentBefore:
-		snapshot = pending.Before
-		data, readErr := s.readContentPreimage(ctx, key, pending.Transition.DomainID, mutationID, snapshot.Image)
-		if readErr != nil {
-			return ContentFrame{}, readErr
+	return readSessionLocked(s, key, func() (ContentFrame, error) {
+		if err := s.canonicalContentKey(ctx, key); err != nil {
+			return ContentFrame{}, err
 		}
-		frozenImage, err = contentImageFromPreimage(ctx, data)
+		meta, err := s.readContentMutationMeta(key)
 		if err != nil {
 			return ContentFrame{}, err
 		}
-	case ContentAfter:
-		snapshot = pending.After
-	default:
-		return ContentFrame{}, ErrContentStateChanged
-	}
-	return frozenContentMutationFrame(ctx, key, meta.ContentIdentity.DomainID, snapshot, frozenImage)
+		if meta.ContentIdentity.Pending == nil {
+			return ContentFrame{}, ErrContentMutationNotRetained
+		}
+		pending := meta.ContentIdentity.Pending.Mutation
+		if pending == nil {
+			return ContentFrame{}, ErrContentMutationPendingKind
+		}
+		if pending.Transition.MutationID != mutationID {
+			return ContentFrame{}, contentPendingError(meta.ContentIdentity.Pending)
+		}
+		// Validate the current physical prefix as well as the selected frozen
+		// image; neither a current append nor a metadata replay proves its bytes.
+		image, err := s.readContentImage(ctx, key)
+		if err != nil {
+			return ContentFrame{}, err
+		}
+		current, err := s.frameForContentImage(ctx, key, image)
+		if err != nil {
+			return ContentFrame{}, err
+		}
+		if current.IdentityStatus != ContentIdentityKnown {
+			return ContentFrame{}, ErrContentIdentityUnavailable
+		}
+		var snapshot contentSnapshot
+		frozenImage := image
+		switch side {
+		case ContentBefore:
+			snapshot = pending.Before
+			data, readErr := s.readContentPreimage(ctx, key, pending.Transition.DomainID, mutationID, snapshot.Image)
+			if readErr != nil {
+				return ContentFrame{}, readErr
+			}
+			frozenImage, err = contentImageFromPreimage(ctx, data)
+			if err != nil {
+				return ContentFrame{}, err
+			}
+		case ContentAfter:
+			snapshot = pending.After
+		default:
+			return ContentFrame{}, ErrContentStateChanged
+		}
+		return frozenContentMutationFrame(ctx, key, meta.ContentIdentity.DomainID, snapshot, frozenImage)
+	})
 }
 
 func frozenContentMutationFrame(

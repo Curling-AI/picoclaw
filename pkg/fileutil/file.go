@@ -50,15 +50,39 @@ import (
 //	// Public readable file
 //	err := utils.WriteFileAtomic("public.txt", data, 0o644)
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
-	if err := writeFileAtomicStrict(path, data, perm); err != nil {
-		// S3-backed filesystems (e.g. AWS S3 Mountpoint) do not support the
-		// temp-file + rename + chmod pattern and fail with EPERM/EINVAL/ENOSYS.
-		// Fall back to a direct write so mutable state stored on S3 (sessions,
-		// cron, agent state) keeps working. Normal filesystems keep the atomic
-		// guarantee from writeFileAtomicStrict above.
-		if directErr := writeFileDirect(path, data, perm); directErr != nil {
-			return err
+	return WriteFileAtomicChecked(path, data, perm, nil)
+}
+
+// WriteFileAtomicChecked is WriteFileAtomic that runs beforePublish right
+// before data becomes visible at path: before the rename, and again before the
+// direct write of the fallback below. An error from beforePublish stops the
+// write there, with path untouched and the temp file removed, and comes back
+// as is: a refused rename never falls back to the direct write. A nil
+// beforePublish checks nothing.
+func WriteFileAtomicChecked(path string, data []byte, perm os.FileMode, beforePublish func() error) error {
+	refused := false
+	check := func() error {
+		if beforePublish == nil {
+			return nil
 		}
+		err := beforePublish()
+		refused = err != nil
+		return err
+	}
+	err := writeFileAtomicStrict(path, data, perm, check)
+	if err == nil || refused {
+		return err
+	}
+	// S3-backed filesystems (e.g. AWS S3 Mountpoint) do not support the
+	// temp-file + rename + chmod pattern and fail with EPERM/EINVAL/ENOSYS.
+	// Fall back to a direct write so mutable state stored on S3 (sessions,
+	// cron, agent state) keeps working. Normal filesystems keep the atomic
+	// guarantee from writeFileAtomicStrict above.
+	if checkErr := check(); checkErr != nil {
+		return checkErr
+	}
+	if directErr := writeFileDirect(path, data, perm); directErr != nil {
+		return err
 	}
 	return nil
 }
@@ -74,8 +98,9 @@ func writeFileDirect(path string, data []byte, perm os.FileMode) error {
 }
 
 // writeFileAtomicStrict writes data using the temp-file + fsync + rename
-// pattern. Atomic on POSIX/Windows; fails on S3 Mountpoint (see WriteFileAtomic).
-func writeFileAtomicStrict(path string, data []byte, perm os.FileMode) error {
+// pattern, running beforeRename right before the rename. Atomic on
+// POSIX/Windows; fails on S3 Mountpoint (see WriteFileAtomic).
+func writeFileAtomicStrict(path string, data []byte, perm os.FileMode, beforeRename func() error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -123,6 +148,12 @@ func writeFileAtomicStrict(path string, data []byte, perm os.FileMode) error {
 	// Close file before rename (required on Windows)
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// The caller's last check before the new content shows (a held lock):
+	// refused, the temp file goes and path stays as it was.
+	if err := beforeRename(); err != nil {
+		return err
 	}
 
 	// Atomic rename: temp file becomes the target

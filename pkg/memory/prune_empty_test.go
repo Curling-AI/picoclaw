@@ -129,6 +129,9 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 		idle  time.Duration
 		// witnessFresh keeps the order witness's own, recent write time.
 		witnessFresh bool
+		// recoveryFails: taking the session's lock recovers its journal first,
+		// and that recovery fails; the sweep reports it and keeps the session.
+		recoveryFails bool
 	}{
 		{
 			name: "a message",
@@ -230,6 +233,7 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
+			recoveryFails: true,
 		},
 		{
 			name: "an order witness written a moment ago",
@@ -283,8 +287,8 @@ func TestPruneEmptySessions_NeverRemovesWhatMayHoldSomething(t *testing.T) {
 				t.Errorf("before-remove hook called for %q", meta.Key)
 				return nil
 			})
-			if err != nil {
-				t.Fatalf("PruneEmptySessions: %v", err)
+			if (err != nil) != tc.recoveryFails {
+				t.Fatalf("PruneEmptySessions: %v, want an error: %v", err, tc.recoveryFails)
 			}
 			if len(removed) != 0 {
 				t.Errorf("removed = %v, want nothing", removed)

@@ -87,7 +87,7 @@ func TestPublicHistoryIndexKeepsOlderDeletionIntentsRecoverable(t *testing.T) {
 					t.Fatal(operationErr4)
 				}
 			}
-			operationErr0 = store.recoverHistoryWrite(key)
+			operationErr0 = recoverHistoryWriteLocked(t, store, key)
 			if unexpected {
 				if !errors.Is(operationErr0, ErrContentIdentityUnavailable) {
 					t.Fatal("old intent authorized deletion of an unproven index", operationErr0)

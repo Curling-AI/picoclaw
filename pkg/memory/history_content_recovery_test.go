@@ -57,7 +57,7 @@ func TestContentRecoveryReplacementRetainsOnlyStoredMatchingProof(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markerErr := store.markHistoryRecoveryRequired(key, &meta); markerErr != nil {
+	if markerErr := markHistoryRecoveryRequiredLocked(t, store, key, &meta); markerErr != nil {
 		t.Fatal(markerErr)
 	}
 	old, err := store.GetHistory(t.Context(), key)
@@ -147,7 +147,7 @@ func TestContentRecoveryReplacementKeepsStoredProofAcrossRewrites(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if markerErr := store.markHistoryRecoveryRequired(key, &meta); markerErr != nil {
+	if markerErr := markHistoryRecoveryRequiredLocked(t, store, key, &meta); markerErr != nil {
 		t.Fatal(markerErr)
 	}
 	history, err := store.GetHistory(t.Context(), key)

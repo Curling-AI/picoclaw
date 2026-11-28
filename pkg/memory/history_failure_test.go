@@ -20,7 +20,7 @@ func TestHistoryPageRejectsExpandedFirstEntry(t *testing.T) {
 	if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.writeMeta(key, SessionMeta{Count: 1}); err != nil {
+	if err := writeMetaLocked(t, s, key, SessionMeta{Count: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key}); !errors.Is(err, ErrHistoryCapacity) {
@@ -332,7 +332,7 @@ func TestHistoryRewritesWithFilteredRowsRetireMovedPositions(t *testing.T) {
 			if err := os.WriteFile(s.jsonlPath(key), raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.writeMeta(key, SessionMeta{Count: 6}); err != nil {
+			if err := writeMetaLocked(t, s, key, SessionMeta{Count: 6}); err != nil {
 				t.Fatal(err)
 			}
 			before, err := s.ReadHistoryPage(t.Context(), HistoryPageRequest{Key: key})

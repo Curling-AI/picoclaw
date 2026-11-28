@@ -839,7 +839,7 @@ func TestTruncateHistory_IgnoresTransientThoughtForKeepLast(t *testing.T) {
 	if err := os.WriteFile(store.jsonlPath(sessionKey), []byte(rawJSONL), 0o644); err != nil {
 		t.Fatalf("WriteFile(jsonl): %v", err)
 	}
-	if err := store.writeMeta(sessionKey, SessionMeta{
+	if err := writeMetaLocked(t, store, sessionKey, SessionMeta{
 		Key:       sessionKey,
 		Count:     5,
 		Skip:      0,
@@ -1531,4 +1531,35 @@ func TestLockSessionPair_SameShardLocksOnce(t *testing.T) {
 		t.Fatal("shard still locked after unlock")
 	}
 	store.locks[7].Unlock()
+}
+
+// A try that finds the higher shard in use holds nothing: the lower shard it
+// took first is free again.
+func TestTryLockSessionPair_BusyShardHoldsNothing(t *testing.T) {
+	store := newTestStore(t)
+	const lowShard, highShard = 3, 40
+	key, alias := keyInShard(t, "a", highShard), keyInShard(t, "b", lowShard)
+
+	store.locks[highShard].Lock()
+	if unlock := store.tryLockSessionPair(key, alias); unlock != nil {
+		unlock()
+		t.Fatal("tryLockSessionPair took the pair while a shard was in use")
+	}
+	store.locks[highShard].Unlock()
+	if !store.locks[lowShard].TryLock() {
+		t.Fatal("the lower shard stayed locked after the busy try")
+	}
+	store.locks[lowShard].Unlock()
+
+	unlock := store.tryLockSessionPair(key, alias)
+	if unlock == nil {
+		t.Fatal("tryLockSessionPair failed with both shards free")
+	}
+	unlock()
+	for _, shard := range []int{lowShard, highShard} {
+		if !store.locks[shard].TryLock() {
+			t.Fatalf("shard %d still locked after unlock", shard)
+		}
+		store.locks[shard].Unlock()
+	}
 }

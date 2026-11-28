@@ -104,9 +104,11 @@ func (s *JSONLStore) CommitHistoryCompaction(
 	if summary, err := json.Marshal(plan.Summary); err != nil || len(summary) > HistoryMessageBytes {
 		return ContentTransition{}, ErrContentLineageCapacity
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return ContentTransition{}, lockErr
+	}
+	defer unlock()
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return ContentTransition{}, err
 	}
@@ -234,34 +236,33 @@ func (s *JSONLStore) ReadPendingHistoryCompaction(ctx context.Context, key strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentTransition{}, err
-	}
-	image, err := s.readContentImage(ctx, key)
-	if err != nil {
-		return ContentTransition{}, err
-	}
-	frame, err := s.frameForContentImage(ctx, key, image)
-	if err != nil {
-		return ContentTransition{}, err
-	}
-	if frame.IdentityStatus != ContentIdentityKnown {
-		return ContentTransition{}, ErrContentIdentityUnavailable
-	}
-	if image.Meta.ContentIdentity.Pending == nil {
-		return ContentTransition{}, nil
-	}
-	if image.Meta.ContentIdentity.Pending.Mutation != nil {
-		return ContentTransition{}, ErrContentMutationPendingKind
-	}
-	transition := image.Meta.ContentIdentity.Pending.Transition
-	if time.Now().After(transition.ExpiresAt) {
-		return transition, ErrContentLineageExpired
-	}
-	return transition, nil
+	return readSessionLocked(s, key, func() (ContentTransition, error) {
+		if err := s.canonicalContentKey(ctx, key); err != nil {
+			return ContentTransition{}, err
+		}
+		image, err := s.readContentImage(ctx, key)
+		if err != nil {
+			return ContentTransition{}, err
+		}
+		frame, err := s.frameForContentImage(ctx, key, image)
+		if err != nil {
+			return ContentTransition{}, err
+		}
+		if frame.IdentityStatus != ContentIdentityKnown {
+			return ContentTransition{}, ErrContentIdentityUnavailable
+		}
+		if image.Meta.ContentIdentity.Pending == nil {
+			return ContentTransition{}, nil
+		}
+		if image.Meta.ContentIdentity.Pending.Mutation != nil {
+			return ContentTransition{}, ErrContentMutationPendingKind
+		}
+		transition := image.Meta.ContentIdentity.Pending.Transition
+		if time.Now().After(transition.ExpiresAt) {
+			return transition, ErrContentLineageExpired
+		}
+		return transition, nil
+	})
 }
 
 func (s *JSONLStore) ReadHistoryCompactionFrame(
@@ -272,32 +273,31 @@ func (s *JSONLStore) ReadHistoryCompactionFrame(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return ContentFrame{}, err
-	}
-	image, err := s.readContentImage(ctx, key)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	frame, err := s.frameForContentImage(ctx, key, image)
-	if err != nil {
-		return ContentFrame{}, err
-	}
-	if frame.IdentityStatus != ContentIdentityKnown {
-		return ContentFrame{}, ErrContentIdentityUnavailable
-	}
-	state := image.Meta.ContentIdentity
-	pending := state.Pending
-	if pending != nil && pending.Mutation != nil {
-		return ContentFrame{}, ErrContentMutationPendingKind
-	}
-	if pending == nil || pending.Transition.MutationID != mutation {
-		return ContentFrame{}, ErrContentArchiveAck
-	}
-	return s.contentCompactionSnapshot(ctx, key, image, pending, side)
+	return readSessionLocked(s, key, func() (ContentFrame, error) {
+		if err := s.canonicalContentKey(ctx, key); err != nil {
+			return ContentFrame{}, err
+		}
+		image, err := s.readContentImage(ctx, key)
+		if err != nil {
+			return ContentFrame{}, err
+		}
+		frame, err := s.frameForContentImage(ctx, key, image)
+		if err != nil {
+			return ContentFrame{}, err
+		}
+		if frame.IdentityStatus != ContentIdentityKnown {
+			return ContentFrame{}, ErrContentIdentityUnavailable
+		}
+		state := image.Meta.ContentIdentity
+		pending := state.Pending
+		if pending != nil && pending.Mutation != nil {
+			return ContentFrame{}, ErrContentMutationPendingKind
+		}
+		if pending == nil || pending.Transition.MutationID != mutation {
+			return ContentFrame{}, ErrContentArchiveAck
+		}
+		return s.contentCompactionSnapshot(ctx, key, image, pending, side)
+	})
 }
 
 func (s *JSONLStore) contentCompactionSnapshot(
@@ -363,9 +363,11 @@ func (s *JSONLStore) AcknowledgeHistoryCompaction(ctx context.Context, key strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lock := s.sessionLock(key)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(key)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
 	if err := s.canonicalContentKey(ctx, key); err != nil {
 		return err
 	}

@@ -1150,7 +1150,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 	overwrite, _ := args["overwrite"].(bool)
 
 	replaced, created := false, false
-	err := t.fs.withWriteLock(path, func() error {
+	err := t.fs.withWriteLock(path, func(beforePublish func() error) error {
 		existing, openErr := t.fs.Open(path)
 		created = errors.Is(openErr, os.ErrNotExist)
 		if openErr != nil && !created && !overwrite {
@@ -1173,7 +1173,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]any) *ToolR
 				)
 			}
 		}
-		if err := t.fs.WriteFile(path, []byte(content)); err != nil {
+		if err := t.fs.WriteFile(path, []byte(content), beforePublish); err != nil {
 			return err
 		}
 		// Under the lock, so a concurrent write is never recorded as this one.
@@ -1258,17 +1258,24 @@ func formatDirEntries(entries []os.DirEntry) *ToolResult {
 // unrestricted (host filesystem) and sandbox (os.Root) implementations to share the same polymorphic interface.
 type fileSystem interface {
 	ReadFile(path string) ([]byte, error)
-	WriteFile(path string, data []byte) error
+	// WriteFile replaces path with data through a temp file. A non-nil
+	// beforePublish runs right before data becomes visible at path; its error
+	// stops the write there, with path untouched and the temp file removed.
+	WriteFile(path string, data []byte, beforePublish func() error) error
 	ReadDir(path string) ([]os.DirEntry, error)
 	Open(path string) (fs.File, error)
-	withWriteLock(path string, write func() error) error
+	// withWriteLock runs write under path's write locks, handing it the check
+	// its WriteFile runs before publishing (nil where no lock needs one).
+	withWriteLock(path string, write func(beforePublish func() error) error) error
 }
 
 // hostFs is an unrestricted fileReadWriter that operates directly on the host filesystem.
-type hostFs struct{}
+type hostFs struct{ workspace string }
 
-func (h *hostFs) withWriteLock(path string, write func() error) error {
-	return fileutil.WithFileLock(path, write)
+func (h *hostFs) withWriteLock(path string, write func(beforePublish func() error) error) error {
+	return withSessionWriteLock(h.workspace, path, func(beforePublish func() error) error {
+		return fileutil.WithFileLock(path, func() error { return write(beforePublish) })
+	})
 }
 
 func (h *hostFs) ReadFile(path string) ([]byte, error) {
@@ -1289,10 +1296,10 @@ func (h *hostFs) ReadDir(path string) ([]os.DirEntry, error) {
 	return os.ReadDir(path)
 }
 
-func (h *hostFs) WriteFile(path string, data []byte) error {
+func (h *hostFs) WriteFile(path string, data []byte, beforePublish func() error) error {
 	// Use unified atomic write utility with explicit sync for flash storage reliability.
 	// Using 0o600 (owner read/write only) for secure default permissions.
-	return fileutil.WriteFileAtomic(path, data, 0o600)
+	return fileutil.WriteFileAtomicChecked(path, data, 0o600, beforePublish)
 }
 
 func (h *hostFs) Open(path string) (fs.File, error) {
@@ -1314,12 +1321,15 @@ type sandboxFs struct {
 	workspace string
 }
 
-func (r *sandboxFs) withWriteLock(path string, write func() error) error {
+func (r *sandboxFs) withWriteLock(path string, write func(beforePublish func() error) error) error {
 	relative, err := getSafeRelPath(r.workspace, path)
 	if err != nil {
 		return err
 	}
-	return fileutil.WithFileLock(filepath.Join(r.workspace, relative), write)
+	target := filepath.Join(r.workspace, relative)
+	return withSessionWriteLock(r.workspace, target, func(beforePublish func() error) error {
+		return fileutil.WithFileLock(target, func() error { return write(beforePublish) })
+	})
 }
 
 func (r *sandboxFs) execute(path string, fn func(root *os.Root, relPath string) error) error {
@@ -1365,7 +1375,7 @@ func (r *sandboxFs) ReadFile(path string) ([]byte, error) {
 	return content, err
 }
 
-func (r *sandboxFs) WriteFile(path string, data []byte) error {
+func (r *sandboxFs) WriteFile(path string, data []byte, beforePublish func() error) error {
 	return r.execute(path, func(root *os.Root, relPath string) error {
 		dir := filepath.Dir(relPath)
 		if dir != "." && dir != "/" {
@@ -1407,6 +1417,13 @@ func (r *sandboxFs) WriteFile(path string, data []byte) error {
 		if err := tmpFile.Close(); err != nil {
 			root.Remove(tmpRelPath)
 			return fmt.Errorf("failed to close temp file: %w", err)
+		}
+
+		if beforePublish != nil {
+			if err := beforePublish(); err != nil {
+				root.Remove(tmpRelPath)
+				return err
+			}
 		}
 
 		if err := root.Rename(tmpRelPath, relPath); err != nil {
@@ -1473,7 +1490,7 @@ func (w *whitelistFs) matches(path string) bool {
 	return isAllowedPath(path, w.patterns)
 }
 
-func (w *whitelistFs) withWriteLock(path string, write func() error) error {
+func (w *whitelistFs) withWriteLock(path string, write func(beforePublish func() error) error) error {
 	if w.matches(path) {
 		return w.host.withWriteLock(path, write)
 	}
@@ -1487,11 +1504,11 @@ func (w *whitelistFs) ReadFile(path string) ([]byte, error) {
 	return w.sandbox.ReadFile(path)
 }
 
-func (w *whitelistFs) WriteFile(path string, data []byte) error {
+func (w *whitelistFs) WriteFile(path string, data []byte, beforePublish func() error) error {
 	if w.matches(path) {
-		return w.host.WriteFile(path, data)
+		return w.host.WriteFile(path, data, beforePublish)
 	}
-	return w.sandbox.WriteFile(path, data)
+	return w.sandbox.WriteFile(path, data, beforePublish)
 }
 
 func (w *whitelistFs) ReadDir(path string) ([]os.DirEntry, error) {
@@ -1512,11 +1529,11 @@ func (w *whitelistFs) Open(path string) (fs.File, error) {
 // settings and optional path whitelist patterns.
 func buildFs(workspace string, restrict bool, patterns []*regexp.Regexp) fileSystem {
 	if !restrict {
-		return &hostFs{}
+		return &hostFs{workspace: workspace}
 	}
 	sandbox := &sandboxFs{workspace: workspace}
 	if len(patterns) > 0 {
-		return &whitelistFs{sandbox: sandbox, patterns: patterns}
+		return &whitelistFs{sandbox: sandbox, host: hostFs{workspace: workspace}, patterns: patterns}
 	}
 	return sandbox
 }

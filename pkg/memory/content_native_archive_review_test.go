@@ -91,7 +91,7 @@ func TestNativeArchiveImportCannotReattestMissingContentWitness(t *testing.T) {
 			case "unreadable":
 				err = os.WriteFile(store.contentDomainPath(key), []byte("invalid"), 0o600)
 			case "unavailable":
-				err = store.writeContentCheckpointAvailability(key, meta, true)
+				err = writeContentCheckpointAvailabilityLocked(t, store, key, meta, true)
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -173,10 +173,10 @@ func TestNativeArchiveRecoveryUsesItsCommittedPublicFrontier(t *testing.T) {
 		t.Fatal(err)
 	}
 	meta.PublicHistoryNonLocalImports = true
-	if operationErr := store.writeMeta(key, meta); operationErr != nil {
+	if operationErr := writeMetaLocked(t, store, key, meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if operationErr := store.writeContentCheckpoint(key, meta); operationErr != nil {
+	if operationErr := writeContentCheckpointLocked(t, store, key, meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	transition := ContentTransition{Dropped: frameRefs(frame)[:2]}
@@ -201,10 +201,10 @@ func TestNativeArchiveRecoveryUsesItsCommittedPublicFrontier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = store.writePublicChange(key, change); err != nil {
+	if err = writePublicChangeLocked(t, store, key, change); err != nil {
 		t.Fatal(err)
 	}
-	if err = store.writeMeta(key, meta); err != nil {
+	if err = writeMetaLocked(t, store, key, meta); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.verifyNativeArchiveAt(t.Context(), key, meta, frame, transition, &proof.Frontier); err != nil {
@@ -330,10 +330,10 @@ func TestNativeArchivePendingFrontierSurvivesRestartAndLaterAppends(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if operationErr := store.writePublicChange(key, change); operationErr != nil {
+	if operationErr := writePublicChangeLocked(t, store, key, change); operationErr != nil {
 		t.Fatal(operationErr)
 	}
-	if operationErr := store.writeMeta(key, meta); operationErr != nil {
+	if operationErr := writeMetaLocked(t, store, key, meta); operationErr != nil {
 		t.Fatal(operationErr)
 	}
 	restarted, err := NewJSONLStore(store.dir)

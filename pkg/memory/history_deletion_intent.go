@@ -58,6 +58,9 @@ func (s *JSONLStore) beginHistoryDeletion(
 	ctx context.Context, key, purpose string,
 	images []*contentPreimage, artifacts []contentArtifactDescriptor,
 ) error {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	parent, err := os.Open(s.dir)
 	if err != nil {
 		return err
@@ -137,6 +140,12 @@ func (s *JSONLStore) beginHistoryDeletion(
 		return ErrContentIdentityUnavailable
 	}
 	if err = s.failContentStorage(filepath.Base(s.historyRecoveryPath(key)), "delete-intent-create"); err != nil {
+		return err
+	}
+	// An intent created after the lease was lost binds file identities the
+	// next holder may have changed since: its recovery would fail every later
+	// holder.
+	if err = s.checkSessionLock(key); err != nil {
 		return err
 	}
 	file, dir, err := openContentArtifact(s.dir, filepath.Base(s.historyRecoveryPath(key)), true)
@@ -420,6 +429,10 @@ func (s *JSONLStore) recoverHistoryDeletion(ctx context.Context, key string, dat
 	if intent.PublicMediaCleanup && !s.requiresPublicHistoryCleanup() {
 		return errPublicHistoryCleanupUnavailable
 	}
+	// Proven after the validation, which reads every file: the unlinks follow.
+	if err = s.checkSessionLock(key); err != nil {
+		return err
+	}
 	for _, file := range intent.Files {
 		if file.Absent {
 			continue
@@ -475,6 +488,7 @@ func (s *JSONLStore) recoverHistoryDeletion(ctx context.Context, key string, dat
 		return err
 	}
 	s.forgetDeletedHistory(key, false)
+	s.removeSessionLockFile(key)
 	return nil
 }
 
@@ -494,7 +508,11 @@ func (s *JSONLStore) forgetDeletedHistory(key string, pending bool) {
 
 // Automatic pruners can retry their previously authorized deletion without
 // rerunning a GC proof that intentionally removed one of its own artifacts.
+// Taking the lock may already have finished it (adoptedDeletion).
 func (s *JSONLStore) resumeHistoryDeletion(key string) (bool, error) {
+	if s.adoptedDeletion(key) {
+		return true, nil
+	}
 	data, err := os.ReadFile(s.historyRecoveryPath(key))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

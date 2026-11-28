@@ -122,7 +122,7 @@ func TestHistoryRewriteReportsAppliedNEWWithoutIssuingOrderProof(t *testing.T) {
 				return
 			}
 			if stage == "decision write" {
-				decision, decisionErr := s.recoverHistoryWriteDecision(key)
+				decision, decisionErr := recoverHistoryWriteDecisionLocked(t, s, key)
 				if decision != historyWriteUnknown || !errors.Is(decisionErr, syscall.EIO) {
 					t.Fatal("content NEW was mislabeled as a durable recovery decision", decision, decisionErr)
 				}

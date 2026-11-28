@@ -91,6 +91,9 @@ func (s *JSONLStore) publicPreparationResult(
 	index, err := s.openPublicIndex(key, meta)
 	if errors.Is(err, ErrPublicHistoryCoverage) {
 		// Only the derived index is discarded; bounded preparation verifies the source digest.
+		if lockErr := s.requireSessionLock(key); lockErr != nil {
+			return PublicHistoryPreparationResult{}, lockErr
+		}
 		if removeErr := os.Remove(s.publicIndexPath(key)); removeErr != nil {
 			return PublicHistoryPreparationResult{}, removeErr
 		}
@@ -109,6 +112,9 @@ func (s *JSONLStore) publicPreparationResult(
 // Preparation runs only while no index exists. Each call advances at most one
 // bounded batch and reports pending, including the call that publishes it.
 func (s *JSONLStore) preparePublicIndexLocked(ctx context.Context, key string, meta SessionMeta) (resultErr error) {
+	if err := s.requireSessionLock(key); err != nil {
+		return err
+	}
 	state, operationErr4 := s.readPublicIndexPreparation(key, meta)
 	if operationErr4 != nil {
 		return operationErr4

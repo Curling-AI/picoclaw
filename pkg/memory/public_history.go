@@ -191,33 +191,32 @@ func publicHistoryResult(meta SessionMeta, entries []PublicHistoryEntry) PublicH
 
 func (s *JSONLStore) ReadPublicHistory(ctx context.Context, key string) (PublicHistory, error) {
 	canonical := key
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
-	if err := s.canonicalContentKey(ctx, key); err != nil {
-		return PublicHistory{}, err
-	}
-	if operationErr := ctx.Err(); operationErr != nil {
-		return PublicHistory{}, operationErr
-	}
-	if _, operationErr1 := os.Stat(s.metaPath(canonical)); operationErr1 != nil {
-		return PublicHistory{}, operationErr1
-	}
-	meta, _, canonicalErr := s.readContentMeta(canonical)
-	if canonicalErr != nil {
-		return PublicHistory{}, canonicalErr
-	}
-	if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
-		return PublicHistory{}, err
-	}
-	if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); err != nil {
-		return PublicHistory{}, err
-	}
-	entries, canonicalErr := s.readPublicEntries(canonical, meta)
-	if canonicalErr != nil {
-		return PublicHistory{}, canonicalErr
-	}
-	return publicHistoryResult(meta, entries), nil
+	return readSessionLocked(s, canonical, func() (PublicHistory, error) {
+		if err := s.canonicalContentKey(ctx, key); err != nil {
+			return PublicHistory{}, err
+		}
+		if operationErr := ctx.Err(); operationErr != nil {
+			return PublicHistory{}, operationErr
+		}
+		if _, operationErr1 := os.Stat(s.metaPath(canonical)); operationErr1 != nil {
+			return PublicHistory{}, operationErr1
+		}
+		meta, _, canonicalErr := s.readContentMeta(canonical)
+		if canonicalErr != nil {
+			return PublicHistory{}, canonicalErr
+		}
+		if err := validateCanonicalHistoryKey(key, canonical, meta); err != nil {
+			return PublicHistory{}, err
+		}
+		if err := checkPublicReadFiles(ctx, os.DirFS(s.dir), sanitizeKey(canonical), &meta); err != nil {
+			return PublicHistory{}, err
+		}
+		entries, canonicalErr := s.readPublicEntries(canonical, meta)
+		if canonicalErr != nil {
+			return PublicHistory{}, canonicalErr
+		}
+		return publicHistoryResult(meta, entries), nil
+	})
 }
 
 func encodePublicEntries(entries []PublicHistoryEntry) ([]byte, error) {
@@ -304,9 +303,11 @@ func (s *JSONLStore) importPublicHistory(
 		}
 	}
 	canonical := request.Key
-	lock := s.sessionLock(canonical)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, lockErr := s.lockSession(canonical)
+	if lockErr != nil {
+		return PublicHistory{}, lockErr
+	}
+	defer unlock()
 	if operationErr5 := ctx.Err(); operationErr5 != nil {
 		return PublicHistory{}, operationErr5
 	}
