@@ -23,7 +23,7 @@ var networkClientPattern = regexp.MustCompile(
 // personalFilePattern finds the person's profile and memory: what the assistant
 // knows about them, never a deliverable of a task.
 var personalFilePattern = regexp.MustCompile(
-	`(?i)(?:^|[\s'"=@/\\(,:])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)[/\\])`)
+	`(?i)(?:^|[\s'"=@/\\(,:<])(?:(?:user|soul|memory)\.md\b|(?:memory|sessions)[/\\])`)
 
 // writtenFilePattern finds where a command writes what it fetches: a personal
 // file there is written, not sent. `tee` counts only as a pipeline stage, with
